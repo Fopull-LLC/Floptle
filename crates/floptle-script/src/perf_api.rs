@@ -326,8 +326,14 @@ mod tests {
         lua.load("perf.enable(true)").exec().unwrap();
         {
             let mut prof = p.borrow_mut();
+            // A pass records the bucket; the hooks inside it record themselves.
+            // Two calls since 0.84.2 — `Scripts` is the whole pass and the rows
+            // are the part of it that was inside a hook, so 8.0 is deliberately
+            // more than the 5.25 the rows come to.
+            prof.record(Bucket::Scripts, 8.0);
             prof.record_script("vessel_controller", 5.0);
             prof.record_script("pulsate", 0.25);
+            prof.record(Bucket::Mirror, 1.5);
             prof.record(Bucket::Render, 3.0);
             prof.set_counts(Counts { nodes: 5500, culled: 2700, props: 117_000, ..Default::default() });
             prof.end_frame();
@@ -339,8 +345,13 @@ mod tests {
         );
         assert!(lua.load("return perf.scriptWorstMs('vessel_controller')").eval::<f64>().unwrap() > 4.0);
         assert!(lua.load("return perf.worstMs('render')").eval::<f64>().unwrap() > 2.0);
-        // The scripts bucket is the rows added up.
-        assert!(lua.load("return perf.worstMs('scripts')").eval::<f64>().unwrap() > 5.0);
+        // The scripts bucket is the WHOLE pass — more than the rows under it,
+        // which are hook time. A reader that saw 5.25 here would be reading the
+        // rows added up, which is what this stopped being.
+        let scripts = lua.load("return perf.worstMs('scripts')").eval::<f64>().unwrap();
+        assert!((scripts - 8.0).abs() < 1e-3, "scripts bucket reads {scripts}, not the pass");
+        // …and the mirror is its own line, reachable by name like any other.
+        assert!((lua.load("return perf.worstMs('mirror')").eval::<f64>().unwrap() - 1.5).abs() < 1e-3);
         // Rows are most-expensive-first, which is the order the question is asked.
         assert_eq!(
             lua.load("return perf.scripts()[1].name").eval::<String>().unwrap(),

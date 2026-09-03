@@ -361,6 +361,14 @@ impl CollisionShape for ChunkTerrain {
 }
 
 /// Grid cell index containing `p` (one cell = `cell` units on a side).
+/// Squared distance from `p` to the axis-aligned box of one grid cell. Zero when
+/// `p` is inside it.
+fn cell_min_dist2(p: Vec3, c: (i32, i32, i32), cell: f32) -> f32 {
+    let lo = Vec3::new(c.0 as f32, c.1 as f32, c.2 as f32) * cell;
+    let d = (lo - p).max(p - (lo + Vec3::splat(cell))).max(Vec3::ZERO);
+    d.length_squared()
+}
+
 fn cell_coord(p: Vec3, cell: f32) -> (i32, i32, i32) {
     ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32)
 }
@@ -427,6 +435,11 @@ pub struct TriMeshCollider {
     /// nowhere near the body. Computed once here; a query outside the sphere
     /// cannot be in contact with anything inside it, so the narrowing is pure.
     bound: (Vec3, f32),
+    /// The inclusive cell range the grid actually holds, so a query block can be
+    /// clamped to it instead of asking the hash about empty space. `(1, 0)`-style
+    /// inverted ranges are exactly what an empty mesh wants: the loops run zero
+    /// times.
+    cells: ((i32, i32, i32), (i32, i32, i32)),
     /// Per-triangle index into `labels`, parallel to `tris`. **Empty** when this
     /// mesh has no per-face labels, which is the ordinary case — an imported
     /// model is one surface as far as this crate is concerned.
@@ -516,19 +529,59 @@ impl TriMeshCollider {
             let r = tris.iter().flatten().map(|v| (*v - centre).length()).fold(0.0, f32::max);
             (centre, r)
         };
-        Self { tris, tri_label: kept_label, labels, cell, grid, bound }
+        let cells = grid.keys().fold(
+            ((i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN)),
+            |(lo, hi), k| {
+                ((lo.0.min(k.0), lo.1.min(k.1), lo.2.min(k.2)),
+                 (hi.0.max(k.0), hi.1.max(k.1), hi.2.max(k.2)))
+            },
+        );
+        Self { tris, tri_label: kept_label, labels, cell, grid, bound, cells }
     }
 
     /// Closest point on the mesh to `p` (its squared distance, and which triangle
     /// it is on), searching the ±`SEARCH` cell block around `p`. `None` if no
     /// triangle is within that block.
+    ///
+    /// **The block is 125 cells and this is the cost of a mesh.** A body
+    /// standing on a mesh floor asks `distance()` of it at every sample centre,
+    /// on every depenetration pass, on every tick — one shipped game was making
+    /// ~1,080 of these a step and they were essentially the whole physics tick
+    /// (`floptle/0143` item 2). Two exact narrowings, neither of which can
+    /// change the answer:
+    ///
+    /// * Cells outside this mesh's own extent hold nothing, so they are clamped
+    ///   away before the hash is asked. A 40 m floor queried at its middle used
+    ///   to pay 125 lookups to find triangles in a handful of them.
+    /// * A cell EVERY point of which is farther than the best found so far can
+    ///   contain no closest point that beats it — and, because the test is
+    ///   strictly farther, cannot tie it either. So skipping it leaves `best`
+    ///   bit-identical to the full scan, triangle index included, which is what
+    ///   a rollback re-simulation needs (see the depenetration loop's own note
+    ///   about ascending order in `world.rs`).
+    ///
+    /// A triangle is registered in every cell its bounding box touches, so the
+    /// cell containing its closest point always holds it too: a triangle within
+    /// reach is still found even when the cell it was skipped in was farther.
     fn nearest_tri(&self, p: Vec3) -> Option<(Vec3, f32, u32)> {
         let c = cell_coord(p, self.cell);
         let s = Self::SEARCH;
         let mut best: Option<(Vec3, f32, u32)> = None;
-        for cz in (c.2 - s)..=(c.2 + s) {
-            for cy in (c.1 - s)..=(c.1 + s) {
-                for cx in (c.0 - s)..=(c.0 + s) {
+        // A bound to skip against, established BEFORE the ordered walk starts —
+        // otherwise the walk begins at the far corner of the block and has to
+        // work its way inward before it knows anything, which is the worst case
+        // for skipping and the common case for a body standing on a surface.
+        // The query point's own cell almost always holds the answer, so ask it
+        // first and keep the DISTANCE only; the triangle is still picked by the
+        // ordered walk below, so an exact tie resolves exactly as it always did.
+        let mut bound = self.cell_best_d2(p, c, f32::INFINITY);
+        let (lo, hi) = self.cells;
+        for cz in (c.2 - s).max(lo.2)..=(c.2 + s).min(hi.2) {
+            for cy in (c.1 - s).max(lo.1)..=(c.1 + s).min(hi.1) {
+                for cx in (c.0 - s).max(lo.0)..=(c.0 + s).min(hi.0) {
+                    if cell_min_dist2(p, (cx, cy, cz), self.cell) > bound {
+                        continue;
+                    }
                     let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
                     for &ti in list {
                         let t = self.tris[ti as usize];
@@ -537,12 +590,24 @@ impl TriMeshCollider {
                         // Skip non-finite results defensively (degenerate input).
                         if d2.is_finite() && best.is_none_or(|(_, bd, _)| d2 < bd) {
                             best = Some((q, d2, ti));
+                            bound = bound.min(d2);
                         }
                     }
                 }
             }
         }
         best
+    }
+
+    /// The smallest squared distance from `p` to any triangle registered in one
+    /// cell, or `seed` if the cell holds none. Distance only — see `nearest_tri`.
+    fn cell_best_d2(&self, p: Vec3, c: (i32, i32, i32), seed: f32) -> f32 {
+        let Some(list) = self.grid.get(&c) else { return seed };
+        list.iter().fold(seed, |acc, &ti| {
+            let t = self.tris[ti as usize];
+            let d2 = (p - closest_point_on_triangle(p, t[0], t[1], t[2])).length_squared();
+            if d2.is_finite() && d2 < acc { d2 } else { acc }
+        })
     }
 
     /// Closest point on the mesh to `p`, and its squared distance.

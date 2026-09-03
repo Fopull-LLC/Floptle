@@ -4983,7 +4983,19 @@ impl ScriptHost {
     }
 
     /// Rebuild the scene-graph mirror the Lua handles read/write, from the live ECS.
+    /// Timed into [`Bucket::Mirror`]. Three of these a frame were 1.2 ms each on
+    /// a 376-node scene and had no bucket at all until 0.84.2; `enabled()` gates
+    /// the `Span` the way `record_script` does, so it costs nothing while the
+    /// profiler is off.
     fn sync_scene(&self, world: &World) {
+        let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+        self.sync_scene_inner(world);
+        if let Some(span) = span {
+            self.profile.borrow_mut().record(floptle_core::profile::Bucket::Mirror, span.ms());
+        }
+    }
+
+    fn sync_scene_inner(&self, world: &World) {
         let mut s = self.scene.borrow_mut();
         // The mirror is rebuilt three times a frame — before the frame, tick
         // and late passes — and between two of those, in the ordinary case,
@@ -5975,12 +5987,15 @@ impl ScriptHost {
         // was a hundred and eighty tables a frame that were, almost always,
         // the table already there.
         if rebuild_params {
-            env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
+            env.raw_set("params", params_table(&self.lua, env, params, refs, strs)?)?;
             #[cfg(test)]
             PARAMS_REBUILDS.with(|c| c.set(c.get() + 1));
         }
-        env.set("time", time as f64)?;
-        env.set("dt", dt as f64)?;
+        // Raw: the env's metatable is `__index` only (`build_env`), so this is
+        // the same write — and an mlua `set` through a metatable allocates on
+        // Luau, twice per pass per scripted node. See `apply_node`.
+        env.raw_set("time", time as f64)?;
+        env.raw_set("dt", dt as f64)?;
 
         let node = self.refresh_node(eid, tr, body, slot)?;
 
@@ -6046,14 +6061,21 @@ impl ScriptHost {
         // an earlier script's writes with the stale seed (e.g. a weapon
         // script silently canceling the movement controller every frame).
         if let Some(b) = body {
-            let vx: f64 = node.get("vx").unwrap_or(0.0);
-            let vy: f64 = node.get("vy").unwrap_or(0.0);
-            let vz: f64 = node.get("vz").unwrap_or(0.0);
+            // Raw, like `apply_node` and for the same reason — `stamp_node_table`
+            // wrote every one of these directly, and only a body node reaches
+            // here at all. A field the script nil'd falls back to the value it
+            // was seeded with, which reads as "unchanged".
+            let num = |k: &str, unchanged: f64| -> f64 {
+                node.raw_get::<Option<f64>>(k).ok().flatten().unwrap_or(unchanged)
+            };
+            let vx = num("vx", b.vel[0] as f64);
+            let vy = num("vy", b.vel[1] as f64);
+            let vz = num("vz", b.vel[2] as f64);
             let vel = [vx as f32, vy as f32, vz as f32];
             if vel != b.vel {
                 self.body_changes.borrow_mut().insert(eid, vel);
             }
-            let h: f64 = node.get("height").unwrap_or(b.height as f64);
+            let h: f64 = num("height", b.height as f64);
             if h as f32 != b.height {
                 self.body_height_changes.borrow_mut().insert(eid, h as f32);
             }
@@ -6061,11 +6083,7 @@ impl ScriptHost {
             // exactly like cross-node handle writes do — without this, the
             // physics writeback reverts the transform next frame and
             // `node.x = spawn_x` (respawns!) silently does nothing.
-            let (x, y, z) = (
-                node.get::<f64>("x").unwrap_or(pre.x),
-                node.get::<f64>("y").unwrap_or(pre.y),
-                node.get::<f64>("z").unwrap_or(pre.z),
-            );
+            let (x, y, z) = (num("x", pre.x), num("y", pre.y), num("z", pre.z));
             if x != pre.x || y != pre.y || z != pre.z {
                 self.body_pos_changes.borrow_mut().insert(eid, [x, y, z]);
             }
@@ -6074,11 +6092,8 @@ impl ScriptHost {
             // (`docs/multiplayer.md` §3). It is read back AFTER the
             // transform write above, so a script that sets both gets the one it
             // meant: the deterministic one.
-            let tick = [
-                node.get::<f64>("tickX").unwrap_or(b.pos[0]),
-                node.get::<f64>("tickY").unwrap_or(b.pos[1]),
-                node.get::<f64>("tickZ").unwrap_or(b.pos[2]),
-            ];
+            let tick =
+                [num("tickX", b.pos[0]), num("tickY", b.pos[1]), num("tickZ", b.pos[2])];
             if tick != b.pos {
                 self.body_pos_changes.borrow_mut().insert(eid, tick);
             }

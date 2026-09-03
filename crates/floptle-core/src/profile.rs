@@ -46,9 +46,16 @@ use std::collections::HashMap;
 /// cannot disagree about what exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Bucket {
-    /// Lua: every pass (`update`, `fixedUpdate`, `lateUpdate`) plus the ECS sync
-    /// around them. Broken down per script by [`FrameProfile::scripts`].
+    /// Lua: the WHOLE of every pass (`update`, `fixedUpdate`, `lateUpdate`) —
+    /// the per-instance setup and the hook calls alike, net of the scene mirror,
+    /// which has its own bucket. [`FrameProfile::scripts`] breaks the hook time
+    /// down per script; that breakdown is a PART of this, not all of it, and
+    /// the difference is what the engine spends getting to a hook.
     Scripts,
+    /// The scene mirror: the ECS → Lua sync every script pass runs before it
+    /// calls anything. Nested inside a script pass, and subtracted from
+    /// [`Bucket::Scripts`] so the two do not count it twice.
+    Mirror,
     /// The rigid-body sim, including collision and the character controllers.
     Physics,
     /// Terrain residency, field generation and surface-net meshing.
@@ -71,8 +78,9 @@ pub enum Bucket {
 impl Bucket {
     /// Every bucket, in the order a readout should list them — roughly the order
     /// of a frame.
-    pub const ALL: [Bucket; 9] = [
+    pub const ALL: [Bucket; 10] = [
         Bucket::Scripts,
+        Bucket::Mirror,
         Bucket::Physics,
         Bucket::Terrain,
         Bucket::Scatter,
@@ -90,6 +98,7 @@ impl Bucket {
     pub fn name(self) -> &'static str {
         match self {
             Bucket::Scripts => "scripts",
+            Bucket::Mirror => "mirror",
             Bucket::Physics => "physics",
             Bucket::Terrain => "terrain",
             Bucket::Scatter => "scatter",
@@ -264,17 +273,21 @@ impl FrameProfile {
         *self.frame.entry(bucket).or_default() += ms;
     }
 
-    /// Add `ms` to one script kind's total, and to the `Scripts` bucket.
+    /// Add `ms` to one script kind's total.
     ///
-    /// Both, from one call, because the per-script figures summing to something
-    /// other than the bucket is the kind of discrepancy that makes a reader
-    /// distrust the whole readout.
+    /// **Not to `Bucket::Scripts`.** It used to add to both, so that the
+    /// per-script figures summed exactly to the bucket — which was tidy and
+    /// wrong: the bucket was then hook time only, and everything the engine
+    /// did to reach a hook was invisible. A 0.84 profile of a real game
+    /// accounted 5.3 of 12.9 ms and hid a whole optimisation pass for a
+    /// release. `Bucket::Scripts` is now the wall clock of the whole pass,
+    /// recorded once per pass by the caller that runs it, and these figures are
+    /// a breakdown of the part of it that was inside a hook.
     pub fn record_script(&mut self, kind: &str, ms: f32) {
         if !self.on {
             return;
         }
         *self.script_frame.entry(kind.to_owned()).or_default() += ms;
-        *self.frame.entry(Bucket::Scripts).or_default() += ms;
     }
 
     /// Publish this frame's counts.
@@ -309,9 +322,9 @@ impl FrameProfile {
             // A script seen for the FIRST time is back-filled with the frames it
             // was not running for. Without this its mean starts from its own first
             // sample while every bucket's started from frame one, and the two are
-            // then not comparable — the per-script rows would not add up to the
-            // `scripts` bucket, which is exactly the discrepancy that makes a
-            // reader stop trusting a readout. It cost nothing in those frames, so
+            // then not comparable with the rows beside it, and a script that
+            // spawned a moment ago would read as the most expensive thing in the
+            // scene for being the newest. It cost nothing in those frames, so
             // zero is the true value, not a filler.
             let series = self.scripts.entry(name).or_insert_with(|| {
                 let mut s = Series::default();
@@ -376,6 +389,14 @@ impl FrameProfile {
     /// all outside every bucket. Presented as "accounted for" rather than
     /// "total" for exactly that reason — a readout claiming to add up to the
     /// frame time and not doing so is worse than one that never claimed it.
+    /// A bucket's total for the frame IN PROGRESS — before `end_frame` folds it
+    /// into the history. Read it either side of a call to record that call net
+    /// of a bucket nested inside it (`Scripts` around `Mirror`), so the buckets
+    /// still sum to the frame rather than counting the inner one twice.
+    pub fn frame_total(&self, bucket: Bucket) -> f32 {
+        self.frame.get(&bucket).copied().unwrap_or(0.0)
+    }
+
     pub fn accounted_ms(&self) -> Option<f32> {
         if !self.on {
             return None;
@@ -463,12 +484,20 @@ mod tests {
         assert!((c.worst_ms - 6.0).abs() < 1e-3, "three ticks of one frame: {}", c.worst_ms);
     }
 
-    /// Per-script times are attributed BY NAME and add up to the scripts bucket.
+    /// Per-script times are attributed BY NAME, and they do **not** write the
+    /// `Scripts` bucket.
     ///
-    /// The bucket total disagreeing with the rows under it is the discrepancy
-    /// that makes a reader stop trusting a readout, so one call does both.
+    /// They used to do both from one call, so that the rows always summed to the
+    /// bucket — which was tidy and wrong: it made the bucket hook time only, and
+    /// everything the engine did to reach a hook had nowhere to be. `Scripts` is
+    /// the whole pass now, recorded once by whoever ran it, and these rows are a
+    /// breakdown of the part of it that was inside a hook. This test is the old
+    /// one turned around: if `record_script` ever writes the bucket again, the
+    /// pass is counted twice.
+    ///
+    /// Watched failing by putting the bucket write back: 8.5 against the 0 here.
     #[test]
-    fn scripts_are_attributed_by_name_and_sum_to_their_bucket() {
+    fn scripts_are_attributed_by_name_and_do_not_write_the_bucket() {
         let mut p = FrameProfile::default();
         p.enable(true);
         p.record_script("planet_walker", 3.0);
@@ -476,7 +505,10 @@ mod tests {
         p.record_script("pulsate", 0.5);
         p.end_frame();
         let bucket = p.bucket(Bucket::Scripts).expect("enabled");
-        assert!((bucket.worst_ms - 8.5).abs() < 1e-3, "the rows must sum to the bucket: {bucket:?}");
+        assert!(
+            bucket.worst_ms.abs() < 1e-3,
+            "per-script rows wrote the Scripts bucket, so the pass is counted twice: {bucket:?}"
+        );
         // Most expensive first: that is the order the question is asked in.
         let rows = p.scripts();
         assert_eq!(rows[0].0, "vessel_controller");
@@ -545,34 +577,43 @@ mod tests {
         assert_eq!(Bucket::from_name("Scripts"), None);
     }
 
-    /// The per-script rows add up to the `scripts` bucket **even for a script
-    /// that started running late**.
+    /// A script that starts running late is comparable with one that has been
+    /// running all along.
     ///
     /// The means are exponentially smoothed, so two series that began on
     /// different frames are not comparable — a script discovered on frame 30
-    /// would report its full cost while the bucket that has been averaging since
-    /// frame 1 reported a fraction of it, and the rows would visibly not add up to
-    /// the total above them. That discrepancy is what makes a reader stop trusting
-    /// a readout, so a new script is back-filled with the frames it was idle for.
+    /// would report its full cost beside scripts averaged since frame 1, and read
+    /// as the most expensive thing in the scene for being the newest. So a new
+    /// script is back-filled with the frames it was idle for.
+    ///
+    /// `shadow` is the control: the same 0-then-4 pattern, known from frame one,
+    /// which is what a correctly back-filled `latecomer` has to equal. (The
+    /// original form asserted the rows summed to the `Scripts` bucket; the bucket
+    /// is the whole pass now, so the property is restated against another row
+    /// rather than dropped.)
+    ///
+    /// Watched failing with the back-fill removed: 4 against the control's 3.83.
     #[test]
-    fn a_script_that_appears_late_still_sums_into_its_bucket() {
+    fn a_script_that_appears_late_is_comparable_with_one_that_did_not() {
         let mut p = FrameProfile::default();
         p.enable(true);
         for _ in 0..30 {
             p.record_script("always", 1.0);
+            p.record_script("shadow", 0.0);
             p.end_frame();
         }
         // A script spawned thirty frames in — a prefab, a scene load, a pickup.
         for _ in 0..30 {
             p.record_script("always", 1.0);
+            p.record_script("shadow", 4.0);
             p.record_script("latecomer", 4.0);
             p.end_frame();
         }
-        let bucket = p.bucket(Bucket::Scripts).expect("on").ms;
-        let rows: f32 = p.scripts().iter().map(|(_, c)| c.ms).sum();
+        let late = p.script("latecomer").expect("on").ms;
+        let shadow = p.script("shadow").expect("on").ms;
         assert!(
-            (bucket - rows).abs() < bucket * 0.02,
-            "the rows must add up to the bucket: bucket {bucket}, rows {rows}"
+            (late - shadow).abs() < shadow.max(1e-6) * 0.02,
+            "a latecomer reads {late} where the same cost known all along reads {shadow}"
         );
     }
 

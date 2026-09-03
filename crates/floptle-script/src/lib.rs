@@ -4404,15 +4404,21 @@ end
         assert!(rows.len() >= 2, "both scripts should be listed: {rows:?}");
         assert_eq!(rows[0].0, "busy", "most expensive first: {rows:?}");
         assert!(rows[0].1.ms > 0.0, "the busy script measured as free: {rows:?}");
-        // The bucket is the rows added up, so the readout cannot disagree with
-        // itself — that discrepancy is what makes a reader stop trusting one.
-        let bucket = prof.bucket(floptle_core::profile::Bucket::Scripts).expect("on");
-        let sum: f32 = rows.iter().map(|(_, c)| c.ms).sum();
+        // **The host does not write `Bucket::Scripts`.** Since 0.84.2 that bucket
+        // is the whole pass, wall-clocked by whoever RUNS the pass — the editor,
+        // around `run`/`run_fixed`/`run_late` — and these rows are the hook time
+        // inside it. A host that wrote the bucket too would have the editor's
+        // span and its own hook times both in there, counting the pass twice.
+        let scripts = prof.bucket(floptle_core::profile::Bucket::Scripts).expect("on");
         assert!(
-            (bucket.ms - sum).abs() < sum.max(0.001) * 0.05,
-            "bucket {} vs rows {sum}",
-            bucket.ms
+            scripts.ms.abs() < 1e-6,
+            "the host wrote the Scripts bucket ({}), so a real frame counts the pass twice",
+            scripts.ms
         );
+        // What the host DOES own is the mirror: `sync_scene` runs three times a
+        // frame and had no bucket at all before 0.84.2.
+        let mirror = prof.bucket(floptle_core::profile::Bucket::Mirror).expect("on");
+        assert!(mirror.ms > 0.0, "the scene mirror reported nothing: {mirror:?}");
         drop(prof);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9673,6 +9679,75 @@ end
         // Off means off: nothing accrues, and the readout is empty again.
         host.run(&mut world, &dir, 1.0 / 60.0, 1.0);
         assert!(host.alloc_by_script().is_empty(), "tracking kept accruing after being turned off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    /// **A hook that does nothing allocates almost nothing.** The 0.84 pass
+    /// measured Forgery at ~478 KB of Lua heap a frame and read it as the
+    /// game's own tables; most of it was the engine's. The own-node table is
+    /// written with `raw_set` and was read back with `Table::get`, and on Luau
+    /// an mlua `get` against a table that HAS a metatable — every node table
+    /// does — takes the protected path and allocates ~96 bytes per key whether
+    /// or not `__index` is consulted. Ten keys, twice a pass, plus the env
+    /// writes and the hook lookup, on every scripted node, three passes a
+    /// frame.
+    ///
+    /// The MARGINAL cost of one more scripted node, so the per-pass work that
+    /// is not per-instance (the scene mirror) cannot mask it. Bytes rather than
+    /// milliseconds: an allocation count is deterministic for a given VM, so
+    /// this is a ceiling and not the growth ratio a *timing* guard would need.
+    ///
+    /// Watched failing at 2402.9 B (empty `update`) and 1149.3 B (hook-less)
+    /// against the 300 below; both read 185.1 after the fix, which is the scene
+    /// mirror's per-node share and not the hook path.
+    #[test]
+    fn a_hook_that_does_nothing_allocates_almost_nothing() {
+        let dir = std::env::temp_dir().join(format!("floptle_idle_alloc_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // An empty `update` takes the FULL per-pass path; a script with no
+        // lifecycle hook at all takes the fast one, which still has to keep the
+        // node table live for a handle stashed in `start`.
+        write_script(&dir, "bare", "function update(node, dt) end\n");
+        write_script(&dir, "nohooks", "local x = 1\n");
+        let per_pass = |kind: &str, instances: usize| -> f64 {
+            let mut world = World::default();
+            for _ in 0..instances {
+                let e = world.spawn();
+                world.insert(e, Transform::IDENTITY);
+                world.insert(
+                    e,
+                    Scripts(vec![floptle_core::ScriptInst {
+                        kind: kind.into(),
+                        enabled: true,
+                        params: vec![],
+                        refs: Vec::new(),
+                        strs: Vec::new(),
+                    }]),
+                );
+            }
+            let mut host = ScriptHost::new();
+            // Warm: the first passes build each env, node table and registry
+            // key, which are one-offs and not what this measures.
+            for i in 0..5 {
+                host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+            }
+            assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+            host.gc_collect();
+            host.gc_stop();
+            let before = host.lua_used_memory();
+            let passes = 2000;
+            for i in 0..passes {
+                host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+            }
+            let grew = host.lua_used_memory() - before;
+            host.gc_restart();
+            grew as f64 / passes as f64
+        };
+        let marginal = |kind: &str| (per_pass(kind, 9) - per_pass(kind, 1)) / 8.0;
+        let (bare, nohooks) = (marginal("bare"), marginal("nohooks"));
+        assert!(bare < 300.0, "one more empty `update` costs {bare:.1} B of Lua heap per pass");
+        assert!(nohooks < 300.0, "one more hook-less script costs {nohooks:.1} B per pass");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

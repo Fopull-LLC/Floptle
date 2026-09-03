@@ -41,7 +41,18 @@ pub(crate) fn build_env(lua: &Lua, src: &str, name: &str) -> mlua::Result<Table>
 }
 
 /// The first of `names` that's a function in `env` (lets a hook have aliases).
+///
+/// Raw first. A script's own `update` is a direct field of its env — running the
+/// chunk put it there — and on Luau an mlua `get` against a table that HAS a
+/// metatable takes the protected path and allocates whether or not `__index` is
+/// ever consulted. The second loop keeps the old answer for a hook that is not
+/// the script's own: `__index` falls through to the real globals.
 pub(crate) fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<Function>> {
+    for n in names {
+        if let Value::Function(f) = env.raw_get::<Value>(*n)? {
+            return Ok(Some(f));
+        }
+    }
     for n in names {
         if let Value::Function(f) = env.get::<Value>(*n)? {
             return Ok(Some(f));
@@ -352,29 +363,45 @@ pub(crate) fn node_pre(tr: &Transform) -> NodePre {
 
 /// Read the `node` table back into the Transform, writing only the fields the
 /// script actually changed. `node.scale` (uniform) wins over per-axis if touched.
+///
+/// **Raw reads, and this is a hot path.** [`stamp_node_table`] writes these ten
+/// as direct fields before every hook, so the node metatable's `__index` can
+/// never be reached for them — but on Luau an mlua `get` against a table that
+/// merely HAS a metatable takes the protected path and allocates about 96 bytes
+/// per key regardless. Ten keys, twice a pass, three passes a frame, on every
+/// scripted node: that alone was ~4.5 KB of Lua heap per scripted node per
+/// frame before a script did anything at all, and most of what a 0.84 profile
+/// read as a game's own garbage. A key the script has explicitly nil'd reads as
+/// its pre-hook value — which is what "the script did not change it" already
+/// meant, and what `__index` answered anyway.
 pub(crate) fn apply_node(t: &Table, tr: &mut Transform, pre: &NodePre) -> mlua::Result<()> {
-    let x: f64 = t.get("x")?;
-    let y: f64 = t.get("y")?;
-    let z: f64 = t.get("z")?;
+    // `Option` rather than a bare fallback so a field the script set to a
+    // non-number still raises, exactly as the metatable read did.
+    let num = |k: &str, unchanged: f64| -> mlua::Result<f64> {
+        Ok(t.raw_get::<Option<f64>>(k)?.unwrap_or(unchanged))
+    };
+    let x = num("x", pre.x)?;
+    let y = num("y", pre.y)?;
+    let z = num("z", pre.z)?;
     if x != pre.x || y != pre.y || z != pre.z {
         tr.translation = DVec3::new(x, y, z);
     }
 
-    let scale: f64 = t.get("scale")?;
+    let scale = num("scale", pre.scale)?;
     if scale != pre.scale {
         tr.scale = Vec3::splat(scale as f32);
     } else {
-        let sx: f64 = t.get("scale_x")?;
-        let sy: f64 = t.get("scale_y")?;
-        let sz: f64 = t.get("scale_z")?;
+        let sx = num("scale_x", pre.sx)?;
+        let sy = num("scale_y", pre.sy)?;
+        let sz = num("scale_z", pre.sz)?;
         if sx != pre.sx || sy != pre.sy || sz != pre.sz {
             tr.scale = Vec3::new(sx as f32, sy as f32, sz as f32);
         }
     }
 
-    let yaw: f64 = t.get("yaw")?;
-    let pitch: f64 = t.get("pitch")?;
-    let roll: f64 = t.get("roll")?;
+    let yaw = num("yaw", pre.yaw)?;
+    let pitch = num("pitch", pre.pitch)?;
+    let roll = num("roll", pre.roll)?;
     if yaw != pre.yaw || pitch != pre.pitch || roll != pre.roll {
         tr.rotation = Quat::from_euler(EulerRot::YXZ, yaw as f32, pitch as f32, roll as f32);
     }

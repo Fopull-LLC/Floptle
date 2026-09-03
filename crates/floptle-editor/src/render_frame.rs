@@ -6899,6 +6899,30 @@ impl Editor {
     /// scripts, apply their writes (models, mouse lock, velocities, heights),
     /// advance the animators, then step the sim. Clears stale script errors
     /// when not playing.
+    /// Run a script pass with a wall clock around it, into `Bucket::Scripts`.
+    ///
+    /// **The whole pass**, not the hooks in it: the per-instance setup, the ref
+    /// resolution, the write flush. The bucket used to be the sum of the
+    /// per-script hook figures, which accounted 5.3 of a real game's 12.9 ms
+    /// step and hid a whole optimisation pass for a release.
+    ///
+    /// Net of `Bucket::Mirror`, which the host records from inside `sync_scene`
+    /// — nested in this span, so it is subtracted here and the buckets still
+    /// sum to the frame instead of counting the mirror twice.
+    fn timed_script_pass(&mut self, run: impl FnOnce(&mut Self)) {
+        use floptle_core::profile::{Bucket, Span};
+        if !self.script_host.profile().borrow().enabled() {
+            run(self);
+            return;
+        }
+        let mirror_before = self.script_host.profile().borrow().frame_total(Bucket::Mirror);
+        let span = Span::new();
+        run(self);
+        let ms = span.ms();
+        let mut p = self.script_host.profile().borrow_mut();
+        let mirror = p.frame_total(Bucket::Mirror) - mirror_before;
+        p.record(Bucket::Scripts, (ms - mirror).max(0.0));
+    }
     pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
         // **`app.*` is driven from inside the step, not around it.** There are
         // two hosts that run gameplay — the windowed frame and `floptle run`'s
@@ -7063,7 +7087,7 @@ impl Editor {
             self.script_host.set_audio_info(self.audio.script_info());
             // Feed each assembly's live compound state (`assembly.info`).
             self.feed_assembly_info();
-            self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
+            self.timed_script_pass(|s| s.script_host.run(&mut s.world, &dir, sdt, s.play_t));
             // UI hook events (clicked / hoverStart / …) fire against the run's
             // fresh scene mirror, with their own write flush.
             let ui_events = std::mem::take(&mut self.ui_events);
@@ -7394,18 +7418,21 @@ impl Editor {
                             let Some(s) = self.net_server.as_mut() else { break };
                             let inp = s.input_for(owner, self.game_tick_no);
                             crate::input_actions::apply_net_input_to(&self.script_host, &inp);
-                            self.script_host.run_frame_for(
-                                &mut self.world,
-                                e.index(),
-                                self.game_tick.step,
-                                tick_time,
-                            );
-                            self.script_host.run_fixed_for(
-                                &mut self.world,
-                                e.index(),
-                                self.game_tick.step,
-                                tick_time,
-                            );
+                            let eix = e.index();
+                            self.timed_script_pass(|s| {
+                                s.script_host.run_frame_for(
+                                    &mut s.world,
+                                    eix,
+                                    s.game_tick.step,
+                                    tick_time,
+                                );
+                                s.script_host.run_fixed_for(
+                                    &mut s.world,
+                                    eix,
+                                    s.game_tick.step,
+                                    tick_time,
+                                );
+                            });
                         }
                         self.script_host.set_input(self.last_tick_input.clone());
                     }
@@ -7414,15 +7441,14 @@ impl Editor {
                     // same controller identically — see net.rs.
                     if let Some((pe, _)) = &self.net_predictor {
                         let pe = pe.index();
-                        self.script_host.run_frame_for(
-                            &mut self.world,
-                            pe,
-                            self.game_tick.step,
-                            tick_time,
-                        );
+                        self.timed_script_pass(|s| {
+                            s.script_host.run_frame_for(&mut s.world, pe, s.game_tick.step, tick_time)
+                        });
                     }
                     self.feed_assembly_info();
-                    self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
+                    self.timed_script_pass(|s| {
+                        s.script_host.run_fixed(&mut s.world, s.game_tick.step, tick_time)
+                    });
                     if let Some(sim) = self.sim.as_mut() {
                         sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                         // Apply the tick's writes, then step physics exactly one tick.
@@ -7567,7 +7593,7 @@ impl Editor {
             if let Some(sim) = self.sim.as_ref() {
                 self.script_host.set_hulls(sim.body_hulls(&self.world));
             }
-            self.script_host.run_late(&mut self.world, sdt, self.play_t);
+            self.timed_script_pass(|s| s.script_host.run_late(&mut s.world, sdt, s.play_t));
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                 // A velocity write from lateUpdate still lands (applied next
@@ -10950,6 +10976,91 @@ mod readout_tests {
         );
     }
 
+    /// **The buckets account for most of the step.** `perf.buckets()`'s
+    /// `Scripts` used to be the sum of the per-script hook times and nothing
+    /// else — no per-instance setup, no scene mirror, no write flush — so a
+    /// real game's readout said 5.3 ms of a 12.9 ms step and the whole of the
+    /// 0.84 optimisation pass was invisible in the tool built to find it.
+    ///
+    /// A ratio and not a duration, like every other perf guard here: a slower machine
+    /// moves both sides. The subject is sixty scripted nodes stepped headlessly,
+    /// which is a script-dominated frame on purpose — that is the shape the
+    /// bucket was lying about.
+    ///
+    /// Watched failing: 0.260 ms accounted of a 0.759 ms step — 0.34, against
+    /// the 0.70 here.
+    #[test]
+    fn the_buckets_account_for_most_of_a_scripted_step() {
+        use floptle_core::profile::{Bucket, Span};
+        use floptle_core::{Name, ScriptInst, Scripts};
+        use floptle_core::transform::Transform;
+
+        let dir = std::env::temp_dir()
+            .join(format!("floptle-perf-accounted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(crate::new_project(&dir, "0.0.0-test", "empty"), 0, "scaffold failed");
+
+        let mut ed = crate::Editor { show_gizmos: false, ..Default::default() };
+        ed.open_project(dir.clone());
+        // Sixty nodes on a seeded script that moves its own node every frame —
+        // enough that the per-instance work is the frame, which is the case the
+        // bucket was mis-reporting.
+        for i in 0..60 {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(format!("Floater{i}")));
+            ed.world.insert(
+                e,
+                Transform { translation: [i as f64, 0.0, 0.0].into(), ..Transform::IDENTITY },
+            );
+            ed.world.insert(
+                e,
+                Scripts(vec![ScriptInst {
+                    kind: "float".into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+        }
+        ed.toggle_play();
+        assert!(ed.playing, "the session must actually start");
+        ed.script_host.profile().borrow_mut().enable(true);
+
+        const DT: f32 = 1.0 / 60.0;
+        // The profiler's own smoothing (`profile::SMOOTH`), applied to the step
+        // wall clock, so the two sides of the ratio are the same average.
+        let mut step_ms = 0.0f32;
+        for _ in 0..400 {
+            ed.pump_world_streaming();
+            let span = Span::new();
+            ed.play_step(DT, true);
+            let ms = span.ms();
+            step_ms = if step_ms > 0.0 { step_ms * 0.9 + ms * 0.1 } else { ms };
+            ed.script_host.profile().borrow_mut().end_frame();
+        }
+        let p = ed.script_host.profile().borrow();
+        let accounted = p.accounted_ms().expect("collection is on");
+        let scripts = p.bucket(Bucket::Scripts).unwrap_or_default().ms;
+        let mirror = p.bucket(Bucket::Mirror).unwrap_or_default().ms;
+        let hooks: f32 = p.scripts().iter().map(|(_, c)| c.ms).sum();
+        let ratio = accounted / step_ms;
+        assert!(
+            ratio >= 0.70,
+            "the buckets account for {accounted:.3} ms of a {step_ms:.3} ms step ({ratio:.2}) \
+             — scripts {scripts:.3}, mirror {mirror:.3}, hooks {hooks:.3}"
+        );
+        // …and the per-script hook figures are a PART of the Scripts bucket now,
+        // not the whole of it. If they ever sum to more, the pass is being timed
+        // twice.
+        assert!(
+            hooks <= scripts + 0.001,
+            "hook time {hooks:.3} ms exceeds the Scripts bucket {scripts:.3} ms — double counted"
+        );
+        drop(p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The 1% low has to SEE the slow frames. A mean cannot, which is the whole
     /// reason it is reported beside one.
     #[test]
@@ -11280,6 +11391,10 @@ fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
     // every bucket, and a readout claiming to add up to the frame time without
     // doing so is worse than one that never claimed it.
     ui.small("accounted = these buckets added up. Not the frame time — vsync, the OS and the GPU finishing are outside all of them.");
+    // Since 0.84.2 `scripts` is the whole pass, so the per-script rows below no
+    // longer add up to it. Say so here rather than leaving a reader to notice
+    // the gap and distrust both numbers.
+    ui.small("scripts = the whole pass; the per-script rows below are the hook time inside it, and the difference is what the engine spent reaching them.");
 
     ui.add_space(6.0);
     ui.separator();

@@ -109,6 +109,7 @@
     "README.md": "the docs index — becomes the site's navigation, not a page in it",
     "news.md": "reaches the site through the releases manifest's `news`, not as a docs page",
     "releases/": "every version's notes already reach the site through the releases manifest, which carries them in full; re-publishing them as docs pages would be the same text at a second URL",
+    "adr/": "the two architecture decision records the shipped code cites by name, published so `// ADR-0028` in a source file resolves to something. Not on the site: two of the twenty-eight decisions on record would read as an incomplete set, and a docs site is a finished surface",
     "subsystems/README.md": "folder index — the section heading covers it",
     "tutorials/README.md": "folder index — the section heading covers it"
   }

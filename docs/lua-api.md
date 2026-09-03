@@ -2651,7 +2651,7 @@ perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' 
 
 ### `perf.buckets`
 
-perf.buckets() → the bucket names, in frame order: scripts, physics, terrain, scatter, particles, audio, animation, ui, render. Iterate this rather than keeping your own list, which could go stale.
+perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, ui, render. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice.
 
 ### `perf.counts`
 
@@ -2671,7 +2671,7 @@ perf.ms("scripts") — that bucket's rolling average, in milliseconds. An unknow
 
 ### `perf.scriptMs`
 
-perf.scriptMs("planet_walker") — one script's own average cost, by file name. 0 for a script that has not run, which is different from an error.
+perf.scriptMs("planet_walker") — one script's own average cost, by file name. 0 for a script that has not run, which is different from an error. This is HOOK time: the per-script figures are a breakdown of part of perf.ms("scripts"), not all of it, and the difference is what the engine spends reaching a hook.
 
 ### `perf.scriptWorstMs`
 

@@ -3713,9 +3713,16 @@ function update(node, dt)
 end
 ```
 
-The buckets, in frame order: `scripts` `physics` `terrain` `scatter` `particles`
-`animation` `ui` `render`. `perf.buckets()` returns exactly that list, so a loop
-over it can never name one that does not exist.
+The buckets, in frame order: `scripts` `mirror` `physics` `terrain` `scatter`
+`particles` `audio` `animation` `ui` `render`. `perf.buckets()` returns exactly
+that list, so a loop over it can never name one that does not exist.
+
+`scripts` is the **whole** of every script pass — the per-instance setup, the
+reference params, the write flush, and the hooks themselves. `mirror` is the
+ECS → Lua sync each pass runs before it calls anything, which is nested inside
+a pass and subtracted out of `scripts` so the two do not count it twice. Until
+0.84.2 `scripts` was the hook time alone, which on one shipped game accounted
+5.3 ms of a 12.9 ms step and hid an optimisation pass for a release.
 
 ### Per script, by name
 
@@ -3738,6 +3745,11 @@ including things that were not your script. A garbage collection, or the
 operating system taking the core away for a moment, lands on whichever script
 happened to be running, and shows up as a large `worstMs` for a script that did
 nothing unusual.
+
+These are a **breakdown of part of** `perf.ms("scripts")`, not all of it: the
+bucket is the whole pass and these are the time inside a hook. The difference is
+what the engine spends reaching your hooks, and if it is large the thing to look
+at is how many scripted nodes the scene has rather than any one script.
 
 Two consequences worth knowing before you go optimising:
 

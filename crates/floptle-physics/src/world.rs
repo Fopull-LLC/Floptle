@@ -1675,6 +1675,94 @@ mod step_body_tests {
         assert_eq!(sf, ss, "the two paths must fall asleep on the exact same tick");
     }
 
+    /// **A body standing on a mesh floor costs about what a body standing on a
+    /// box floor costs.** `floptle/0143` item 2: after 0.84.0's broadphase work,
+    /// a handful of awake bodies against a level's mesh colliders was still
+    /// ~1.4 ms a step, and the term had never been named. It is
+    /// `TriMeshCollider::nearest_tri`: the query searches a fixed ±2-cell block
+    /// — 125 spatial-hash lookups — for every `distance()`, whatever the answer
+    /// turns out to be, and a depenetration pass asks that of every candidate
+    /// collider at every sample centre. On one shipped game that was ~1,080 mesh
+    /// distance queries a step and essentially the whole physics tick.
+    ///
+    /// A ratio against the same scene built out of a box (`perf-brief.md` §3):
+    /// the two sides move together on a slow machine, and what is being asserted
+    /// is that meshes are not in a different complexity class from boxes for the
+    /// commonest thing a game does with them — stand on one.
+    ///
+    /// Watched failing at 26.1x (0.0111 s against the box floor's 0.0004 s);
+    /// 4.4-4.7x after the fix, against the 8x bound here.
+    #[test]
+    fn resting_on_a_mesh_floor_is_not_far_dearer_than_resting_on_a_box() {
+        const BODIES: usize = 20;
+        const HALF: f32 = 20.0; // a 40×40 floor either way
+        // Bodies in the same places over either floor, awake throughout: the
+        // window is shorter than SLEEP_SETTLE_TIME, so nobody sleeps through
+        // the measurement and the query cost is what is being timed.
+        let place = |w: &mut PhysicsWorld| {
+            for i in 0..BODIES {
+                let a = i as f32 * 0.618_034;
+                let x = (a.fract() - 0.5) * HALF;
+                let z = ((a * 1.37).fract() - 0.5) * HALF;
+                w.add_body(Body::sphere(Vec3::new(x, 0.5, z), 0.5));
+            }
+        };
+        let mut boxed = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        boxed.add_collider(Box::new(crate::shapes::BoxShape::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(HALF, 0.5, HALF),
+            Quat::IDENTITY,
+        )));
+        place(&mut boxed);
+
+        // The same floor as a triangle mesh: 1 m tiles, two triangles each.
+        let mut verts = Vec::new();
+        let mut idx: Vec<u32> = Vec::new();
+        let n = (HALF * 2.0) as i32;
+        for xi in 0..n {
+            for zi in 0..n {
+                let (x, z) = (xi as f32 - HALF, zi as f32 - HALF);
+                let base = verts.len() as u32;
+                verts.push(Vec3::new(x, 0.0, z));
+                verts.push(Vec3::new(x + 1.0, 0.0, z));
+                verts.push(Vec3::new(x + 1.0, 0.0, z + 1.0));
+                verts.push(Vec3::new(x, 0.0, z + 1.0));
+                idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        let mut meshed = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        meshed.add_collider(Box::new(crate::shapes::TriMeshCollider::new(&verts, &idx)));
+        place(&mut meshed);
+
+        let dt = 1.0 / 120.0;
+        let time_n = |w: &mut PhysicsWorld, n: usize| {
+            let t0 = std::time::Instant::now();
+            for _ in 0..n {
+                w.step(dt);
+            }
+            t0.elapsed().as_secs_f64()
+        };
+        // Warm both (the first step builds each index), then measure.
+        let _ = (time_n(&mut boxed, 4), time_n(&mut meshed, 4));
+        assert!(
+            meshed.bodies.iter().all(|b| !b.asleep) && boxed.bodies.iter().all(|b| !b.asleep),
+            "the fixture is wrong, not the property: a body slept through the window"
+        );
+        let (mut b_ms, mut m_ms) = (0.0, 0.0);
+        // Interleaved, so a thermal wobble lands on both.
+        for _ in 0..8 {
+            b_ms += time_n(&mut boxed, 5);
+            m_ms += time_n(&mut meshed, 5);
+        }
+        let ratio = m_ms / b_ms.max(1e-12);
+        assert!(
+            ratio < 8.0,
+            "a body on a mesh floor costs {ratio:.1}x one on a box floor \
+             ({m_ms:.4}s vs {b_ms:.4}s) — nearest_tri is scanning cells it does not need"
+        );
+    }
+
+
     /// Criterion 4, as a `spawn_scaling.rs`-style ratio guard: a room of
     /// resting Dynamic props costs approximately what the SAME props cost
     /// once they have settled and gone to sleep — the property this whole
