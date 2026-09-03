@@ -93,21 +93,23 @@ Luau came out ahead in every single pair, on a build with its code generator
 switched off — so that is the floor, not the ceiling. The tight-numeric-loop
 case where LuaJIT wins is real, and it did not show up in either game.
 
-### Nothing you have written needs rewriting
+### Nothing you have written needed rewriting
 
-That is a commitment, not a hope, and it is how the work is sequenced:
+That was a commitment rather than a hope, and it is how the work was sequenced.
+All three of these are **done, in v0.84.0** — the rest of this page marks which
+parts have shipped and which are still plan:
 
-1. The engine swaps to Luau with **vectors exactly as they are today** — same
-   type, same precision, still writable field by field. Your scripts do not
-   change. You get the 2.2× on their own.
-2. Before that swap ships, a harness runs the entire scripting test suite, every
-   shipped game script, and every tutorial project **on both engines at once**
-   and compares the results. A difference is a bug to fix, not a note to add to
-   the release.
-3. Anything Luau genuinely lacks that a real script used gets a replacement or a
+1. The engine swapped to Luau with **vectors exactly as they were** — same type,
+   same precision, still writable field by field. No script changed. The 2.2×
+   arrived on its own.
+2. Before that swap shipped, a harness ran the entire scripting test suite,
+   every shipped game script and every tutorial project **on both engines** and
+   compared the results. A difference was a bug to fix, not a note to add to the
+   release.
+3. Anything Luau genuinely lacked that a real script used got a replacement or a
    loud warning naming the line. Never a silent difference.
 
-### Then, per project: `exact` or `fast`
+### Then, per project: `exact` or `fast` — shipped in v0.84.0
 
 The third-column number above — 65 ms, and no garbage collected at all — comes
 from Luau's native vector type, which is three 32-bit floats living inside the
@@ -116,7 +118,8 @@ Floptle positions are 64-bit on purpose: a solar-system-scale game needs the
 precision, and a 32-bit float has lost centimetre accuracy by ~131 km from the
 origin.
 
-So it becomes a project setting, and both answers stay supported:
+So it is a project setting — **Project Settings ▸ Scripting ▸ Script vec3** —
+and both answers stay supported:
 
 - **`exact`** — vectors as they are today. 64-bit, writable, correct at any
   distance from the origin.
@@ -173,12 +176,17 @@ reported honestly when it is measured, including if it is missed.
 
 ## How it lands
 
-In order, and each step is useful on its own:
+In order, and each step is useful on its own. **Steps 1–3 have shipped; steps
+4–7 are the plan** — that line is where this page stops describing the engine
+you have and starts describing where it is going.
 
-1. **The Luau engine**, at full parity with today, behind a build switch.
-2. **Luau becomes the default.** LuaJIT stays buildable for one release as an
-   escape hatch, then goes.
-3. **`exact` / `fast` vectors**, the lint, and the immutable helpers.
+1. ~~**The Luau engine**, at full parity, behind a build switch.~~ **Shipped in
+   v0.84.0.**
+2. ~~**Luau becomes the default.**~~ **Shipped in v0.84.0.** LuaJIT stays
+   buildable for one release as an escape hatch, then goes.
+3. ~~**`exact` / `fast` vectors**, the lint, and the immutable helpers.~~
+   **Shipped in v0.84.0**, and the rough edges around the setting were fixed in
+   v0.84.1.
 4. **The engine running in a browser** — a skinned, vertex-painted character
    through the real render graph, at retro resolution, with a frame-time
    readout. This is the go/no-go moment for the web half, and it is a
@@ -189,9 +197,10 @@ In order, and each step is useful on its own:
 7. **Verification and release**: a browser screenshot probe in CI, then a
    version like any other.
 
-**Steps 1–3 shipped in v0.84.0.** They were worth doing whether or not the
-browser half ever ships. Step 4 is where the honest uncertainty is concentrated,
-and it is deliberately early enough to change the answer cheaply.
+Steps 1–3 were worth doing whether or not the browser half ever ships, and the
+engine has already been faster for them. Step 4 is where the honest uncertainty
+is concentrated, and it is deliberately early enough to change the answer
+cheaply. It does not have a date.
 
 ---
 
