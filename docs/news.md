@@ -1,5 +1,17 @@
 ## Just shipped
 
+**v0.84.1** — **the clean-up behind the new Lua.** `floptle run --alloc` now
+lists which scripts a frame's allocation comes from, largest first, with what
+falls outside any hook as its own line — because a shipped game that switched
+its vector to `fast` moved its allocation by 2%, and nothing could say where the
+rest was. `floptle run --seed N` pins `math.random` and `rng()` so two runs of a
+game that re-randomises itself are the same run and can be compared. A script
+with only `fixedUpdate` is warned about a stale param again, `net.*` refuses a
+`vec3` by name and says what to send instead, **Script vec3** has moved into a
+new **Scripting** section of ⚙ Project Settings, and `floptle lint --vec3` no
+longer skips a binding that shares its line with a comparison or flags a node
+field named like a local. Nothing to do on upgrade.
+
 **v0.84.0 "Half The Time"** — **the performance release.** A game reported at
 10–15 fps on a 2017 laptop was not waiting on its graphics card: the picture
 cost under two milliseconds, and the rest of the frame was the engine getting
