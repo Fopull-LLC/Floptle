@@ -340,6 +340,13 @@ impl EditorTabViewer<'_> {
 fn mirror_line(line: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");
+    // The page's transcript first (`window.floptleLog`, which also echoes to
+    // the browser console): that is what `tools/web/shot.py` collects, and a
+    // spawn that failed or a shader a browser refused has to be READABLE from
+    // a headless run — 2026-09-05, two bugs sat behind an empty transcript.
+    // A page without the hook still gets the browser console.
     #[cfg(target_arch = "wasm32")]
-    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(line));
+    if !crate::player::web::log(line) {
+        web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(line));
+    }
 }
