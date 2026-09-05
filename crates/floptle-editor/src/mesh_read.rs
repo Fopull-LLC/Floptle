@@ -228,6 +228,15 @@ mod tests {
         }
     }
 
+    /// The refusal is the point: a node with no triangles must SAY so, not
+    /// hand back an empty mesh a tool would treat as the truth.
+    ///
+    /// What it can say depends on the build. Naming the kind reads it off the
+    /// editor's scene mirror, which a player build does not compile, so there
+    /// the refusal is the plain one. Asserting the named form unconditionally
+    /// passed every run that had the editor half and failed the one gate that
+    /// does not — `scripts/vm.sh luajit test`, which turns default features
+    /// off. Both forms are checked here so neither config can regress.
     #[test]
     fn a_node_with_no_geometry_says_so_rather_than_answering_nothing() {
         let mut w = World::new();
@@ -237,7 +246,11 @@ mod tests {
                                         shadows: Default::default(), shape: Default::default(),
                                         spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
         let err = read_node(&w, e, std::path::Path::new("."), &Default::default()).unwrap_err();
-        assert!(err.contains("pointLight"), "{err}");
+        if cfg!(feature = "editor-ui") {
+            assert!(err.contains("pointLight"), "the kind is named: {err}");
+        } else {
+            assert!(err.contains("no geometry"), "a player build still refuses: {err}");
+        }
     }
 
     #[test]
