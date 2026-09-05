@@ -1,5 +1,34 @@
 ## Just shipped
 
+**v0.85.0-rc1 "Web World"** (beta channel) — **your game runs in a browser
+now, and players can talk to each other.** File ⏵ Export Game… has a Web (browser) target: it stamps
+a folder you serve, with a loading bar, a Play button and your project packed
+into one file the page downloads. Same scenes, same scripts, same renderer —
+saves go to the browser's storage, sound starts on the click browsers require,
+and WebGPU is the requirement (a browser without it says so rather than showing
+a black canvas). Voice chat arrived alongside it, and a speaking player is an
+ordinary voice in your mixer, so proximity, falloff, buses and effects all work
+on it for free — `voice.source(peer):setTrack("Voice Monster")` is the whole of
+turning the killer into a monster. Replication learned to send a whole rig
+rather than a lone node, a server can now decide who is told what
+(`net.setRelevant`, line-of-sight occlusion) and who may join at all
+(`net.kick`, `net.identity`). Underneath all of it, an exported build is finally
+a player rather than the editor in disguise: **51.2 MB down to 29.9**, and
+builds stopped shipping the 45 MB of `.fbx`, `.blend` and `.uasset` files
+nothing could ever open. Large projects should read the note on download size
+before planning a web release. The first playtest already paid for itself:
+models referenced by their full authoring path drew on the machine that made
+them and nowhere else, and both the export and the player now put such a
+reference back on the project's own copy; and every scripted `spawn()` in a
+browser build silently did nothing, because a bundled file has no modification
+time and the prefab cache read that as no file. Browser audio fluttered, and
+once it started it never recovered, because the queue of sound waiting to be
+heard could fall behind the clock and never catch up; the browser build
+schedules its own audio now and a stall costs one gap rather than every gap
+after it. This one is on the **beta** channel
+while the browser half gets played properly — switch to it in Hub ⏵ Settings ⏵
+Channel.
+
 **v0.84.2** — **a performance patch, and a large one.** Every scripted node was
 costing the engine about 4.5 KB of memory a frame before your script did
 anything at all: the `node` table each hook is handed was being read back the
