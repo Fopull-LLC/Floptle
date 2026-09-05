@@ -16,6 +16,14 @@
 //! about what reaches the process's stdout, and nothing that stays inside the
 //! process can observe that.
 
+// Every test here drives the `floptle` binary, and that binary requires the
+// authoring half (`required-features = ["editor-ui"]` in Cargo.toml). Under
+// `scripts/vm.sh luajit test`, which turns default features off, cargo skips
+// the binary but still compiles this file, and `CARGO_BIN_EXE_floptle` then
+// names a path with nothing at it. Locally a binary left over from an
+// ordinary build sat at that path and hid it; a clean checkout does not.
+#![cfg(feature = "editor-ui")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
