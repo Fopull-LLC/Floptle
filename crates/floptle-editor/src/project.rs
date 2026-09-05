@@ -2016,6 +2016,16 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
 /// anywhere but the project's parent dir — the Hub launches with an absolute root
 /// and the project dir as CWD, which broke every legacy ref ("everything
 /// dereferenced", 2026-07-20). Missing files fall back to the canonical join.
+///
+/// An ABSOLUTE ref that names nothing gets the STRANDED-ROOT RESCUE: the path is
+/// walked from its tail (`…/Forgery/models/door.glb` → `models/door.glb`) and the
+/// longest tail that exists under the project root wins. That is a ref written
+/// where the project USED to live — another folder, another machine, or the
+/// disk a browser build was exported from — and the file itself came along in
+/// the project. Without it a moved project's doors and NPCs simply don't draw,
+/// and nothing says why (the 2026-09-05 browser playtest). Windows spellings
+/// (`C:\…`) walk the same way, since on any other platform they are not
+/// even absolute. Only the miss path pays for it.
 pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
     // `pkg://<id>/<rest>` — a package's own file, addressed by the package's
     // IDENTITY rather than by where its folder happens to be. That is the whole
@@ -2026,8 +2036,11 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
         return p;
     }
     let p = PathBuf::from(path);
-    if p.is_absolute() || floptle_vfs::exists(&p) {
+    if floptle_vfs::exists(&p) {
         return p;
+    }
+    if looks_absolute(path) {
+        return rescue_stranded_root(project_root, path).unwrap_or(p);
     }
     let joined = project_root.join(&p);
     if floptle_vfs::exists(&joined) {
@@ -2043,6 +2056,34 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
         }
     }
     joined
+}
+
+/// An absolute path on SOME platform: a leading separator, or a drive letter.
+/// `Path::is_absolute` answers for the platform running, and a project exported
+/// on Windows carries `C:\…` refs into a Linux server and a browser alike.
+pub(crate) fn looks_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.first().is_some_and(|c| matches!(c, b'/' | b'\\'))
+        || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\'))
+}
+
+/// The longest tail of an absolute `path` that exists under `project_root`,
+/// joined onto it — or `None` when no tail does. See [`resolve_asset_path`].
+///
+/// Longest first, so `…/old/Forgery/models/items/key.glb` prefers
+/// `models/items/key.glb` over a stray `items/key.glb` or `key.glb` at the root.
+/// Segments split on both separators so a Windows ref walks on Linux.
+pub(crate) fn rescue_stranded_root(project_root: &Path, path: &str) -> Option<PathBuf> {
+    let segs: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    // From 1: the whole path is what already missed.
+    for start in 1..segs.len() {
+        let mut candidate = project_root.to_path_buf();
+        candidate.extend(&segs[start..]);
+        if floptle_vfs::exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Resolve a `pkg://<id>/<rest>` reference, or `None` if it is not one.
@@ -2408,6 +2449,38 @@ mod path_tests {
             resolve_asset_path(&root, "assets/textures/missing.png"),
             root.join("assets/textures/missing.png"),
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 2026-09-05 browser playtest: doors, NPCs and the player's arms were
+    /// missing while medkits and pills drew. The difference was the spelling of
+    /// the ref — `/home/…/Forgery/models/door.glb` against `models/items/pills.glb`
+    /// — and an absolute path resolved AS-IS with no rescue, so in a bundle
+    /// (or on any machine but the one that wrote it) it named nothing. The tail
+    /// of such a path is the project-relative ref it should have been.
+    #[test]
+    fn an_absolute_ref_from_where_the_project_used_to_live_rescues_under_the_root() {
+        let dir = std::env::temp_dir().join(format!("floptle-stranded-{}", std::process::id()));
+        let root = dir.join("Forgery");
+        floptle_vfs::create_dir_all(root.join("models/items")).unwrap();
+        floptle_vfs::write(root.join("models/items/key.glb"), b"glb").unwrap();
+        // A decoy at the root with the same file name: the LONGEST tail wins.
+        floptle_vfs::write(root.join("key.glb"), b"decoy").unwrap();
+
+        let want = root.join("models/items/key.glb");
+        // Where the project used to be, on this platform's spelling…
+        assert_eq!(resolve_asset_path(&root, "/old/disk/Forgery/models/items/key.glb"), want);
+        // …and on Windows', which is not even absolute here.
+        assert_eq!(resolve_asset_path(&root, "C:\\Users\\ty\\Forgery\\models\\items\\key.glb"), want);
+        // An absolute path that EXISTS is still taken as written.
+        assert_eq!(resolve_asset_path(&root, want.to_str().unwrap()), want);
+        // No tail of it in the project: as written, so the miss is reported by name.
+        assert_eq!(
+            resolve_asset_path(&root, "/old/disk/Forgery/models/items/missing.glb"),
+            PathBuf::from("/old/disk/Forgery/models/items/missing.glb"),
+        );
+        assert!(looks_absolute("/x/y.glb") && looks_absolute("C:/x/y.glb") && looks_absolute("D:\\y.glb"));
+        assert!(!looks_absolute("models/y.glb") && !looks_absolute("y.glb") && !looks_absolute(""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

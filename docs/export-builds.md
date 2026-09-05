@@ -116,12 +116,21 @@ The export owns the `assets/` copy, and deliberately leaves things out:
 
 Only at the project root: a nested folder named `save/` is content and ships.
 
-**Absolute asset paths are rewritten.** An absolute path resolves as-is with no
-rescue, so a build carrying one is broken on every machine except the one that
-exported it — silently, because a missing model simply doesn't appear. Paths
-that point *into* the project are made relative automatically (the export
-reports how many). Paths pointing *outside* the project can't be repaired — the
-file isn't in the build at all — so they're listed as a warning.
+**Absolute asset paths are rewritten.** An absolute path is taken as written
+when it exists, so a build carrying one is broken on every machine except the
+one that exported it — silently, because a missing model simply doesn't
+appear. Paths that point *into* the project are made relative automatically
+(the export reports how many). A path that points *outside* the project but
+names a file the build carries — a reference written where the project used to
+live, on another disk or another operating system — is redirected to the
+build's own copy, and the report lists each one. A path with no such file in
+the build can't be repaired, so it's listed as a warning.
+
+The player applies the same rescue at load time: an absolute reference that
+names nothing is walked from its tail (`…/MyGame/models/door.glb` →
+`models/door.glb`) and the longest tail that exists in the project wins. That
+is what keeps a project drawing after it moves folders, disks or machines, but
+the export's rewrite is what makes a build say so up front.
 
 The **entry scene** is resolved the way `scene.load` resolves names: a path
 (`scenes/menu.ron`) or a bare scene name (`menu`) both work. If it resolves to
