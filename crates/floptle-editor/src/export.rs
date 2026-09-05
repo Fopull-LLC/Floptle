@@ -613,6 +613,10 @@ fn is_texty(p: &Path) -> bool {
 pub(crate) struct Portability {
     /// Files rewritten from an absolute path into the project to a relative one.
     pub(crate) rewritten: usize,
+    /// Absolute paths that point outside the project but whose tail names a
+    /// file the build carries — a ref written where the project USED to live —
+    /// rewritten to that copy, as `(from, to)`.
+    pub(crate) redirected: Vec<(String, String)>,
     /// Absolute paths that point OUTSIDE the project — unfixable here, because
     /// the file they name isn't in the build at all.
     pub(crate) foreign: Vec<String>,
@@ -620,14 +624,20 @@ pub(crate) struct Portability {
 
 /// Make a copied project portable.
 ///
-/// An absolute asset path resolves as-is with no rescue (see
-/// `project::resolve_asset_path`), so a build carrying one is broken on every
-/// machine except the one that exported it — silently, since a missing model
-/// just doesn't appear. Rewriting the project root's own prefix is safe by
-/// construction: that string can only ever be a path INTO the project.
+/// An absolute asset path is taken as written when it exists, so a build
+/// carrying one is broken on every machine except the one that exported it —
+/// silently, since a missing model just doesn't appear. Rewriting the project
+/// root's own prefix is safe by construction: that string can only ever be a
+/// path INTO the project.
 ///
-/// Paths outside the project can't be repaired — the file isn't in the build —
-/// so they're reported instead.
+/// A path outside the project whose TAIL is a file the build carries is a ref
+/// written where the project used to live (2026-09-05: a browser build staged
+/// from a copy shipped 17 files of `/home/…/Forgery/models/…` refs, and every
+/// door and NPC was missing in the tab). The player would rescue it the same
+/// way (`project::rescue_stranded_root`), but a build should not lean on a
+/// rescue for what it can say plainly, so it is rewritten here and reported.
+/// A path with no such tail can't be repaired — the file isn't in the build —
+/// so it's reported instead.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn make_portable(shipped: &Path, project_root: &Path) -> Portability {
     let mut out = Portability::default();
@@ -645,22 +655,49 @@ pub(crate) fn make_portable(shipped: &Path, project_root: &Path) -> Portability 
             if !is_texty(&p) {
                 continue;
             }
-            let Ok(text) = floptle_vfs::read_to_string(&p) else { continue };
+            let Ok(mut text) = floptle_vfs::read_to_string(&p) else { continue };
+            let mut changed = false;
             if text.contains(&prefix) {
-                let fixed = text.replace(&prefix, "");
-                if floptle_vfs::write(&p, fixed).is_ok() {
-                    out.rewritten += 1;
+                text = text.replace(&prefix, "");
+                changed = true;
+                out.rewritten += 1;
+            }
+            for abs in absolute_refs(&text) {
+                match stranded_tail(shipped, &abs) {
+                    Some(rel) => {
+                        text = text.replace(&format!("\"{abs}\""), &format!("\"{rel}\""));
+                        changed = true;
+                        if !out.redirected.iter().any(|(from, _)| *from == abs) {
+                            out.redirected.push((abs, rel));
+                        }
+                    }
+                    None => {
+                        if !out.foreign.contains(&abs) {
+                            out.foreign.push(abs);
+                        }
+                    }
                 }
             }
-            for abs in absolute_refs(&floptle_vfs::read_to_string(&p).unwrap_or_default()) {
-                if !out.foreign.contains(&abs) {
-                    out.foreign.push(abs);
-                }
+            if changed && floptle_vfs::write(&p, text).is_err() {
+                // Counted as rewritten above; an unwritable staging copy is the
+                // export's own failure, and the pack that follows reports it.
+                out.rewritten = out.rewritten.saturating_sub(1);
             }
         }
     }
+    out.redirected.sort();
     out.foreign.sort();
     out
+}
+
+/// The project-relative tail of an absolute ref that names a file the shipped
+/// copy carries — `/old/place/Forgery/models/door.glb` → `models/door.glb` —
+/// or `None`. Forward slashes, as a ref is written.
+#[cfg(feature = "editor-ui")]
+fn stranded_tail(shipped: &Path, abs: &str) -> Option<String> {
+    let found = crate::project::rescue_stranded_root(shipped, abs)?;
+    let rel = found.strip_prefix(shipped).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// Quoted absolute-looking paths in a text file (`"/x/y"`, `"C:\x"`).
@@ -777,6 +814,14 @@ impl Staged {
             msg.push_str(&format!(
                 " — made {} file(s) portable (absolute paths into the project)",
                 self.port.rewritten
+            ));
+        }
+        if !self.port.redirected.is_empty() {
+            msg.push_str(&format!(
+                " — redirected {} reference(s) written where the project used to live to the \
+                 build's own copy: {}",
+                self.port.redirected.len(),
+                self.port.redirected.iter().map(|(a, b)| format!("{a} → {b}")).collect::<Vec<_>>().join(", ")
             ));
         }
         if !self.port.foreign.is_empty() {
@@ -1755,6 +1800,14 @@ mod tests {
              endpoint: \"/api/login\", version: \"/api/v1.2/session\")",
         )
         .unwrap();
+        // A ref written where the project USED to live (a copy on another disk,
+        // a Windows machine): outside this root, but its tail is in the build.
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(
+            proj.join("scenes/hall.ron"),
+            "(a: \"/old/disk/proj-abs/models/hero.glb\", b: \"C:\\\\Users\\\\ty\\\\proj-abs\\\\models\\\\hero.glb\")",
+        )
+        .unwrap();
         let out = temp("out-abs");
 
         let me = std::env::current_exe().unwrap();
@@ -1767,6 +1820,14 @@ mod tests {
 
         assert!(msg.contains("OUTSIDE the project"), "foreign refs are reported: {msg}");
         assert!(msg.contains("/elsewhere/on/disk/tree.glb"), "and named: {msg}");
+        let hall = floptle_vfs::read_to_string(out.join("assets/scenes/hall.ron")).unwrap();
+        assert_eq!(
+            hall, "(a: \"models/hero.glb\", b: \"models/hero.glb\")",
+            "a stranded-root ref is redirected to the build's copy, Windows spelling included"
+        );
+        assert!(msg.contains("redirected 2 reference(s)"), "and the report says so: {msg}");
+        let (_, outside) = msg.split_once("OUTSIDE the project").expect("the foreign list");
+        assert!(!outside.contains("proj-abs"), "a redirected ref is not ALSO foreign: {msg}");
         assert!(!msg.contains("https://example.com"), "a URL is not an asset path: {msg}");
         // An HTTP endpoint path looks like an absolute Unix path and is not one:
         // nothing on this machine is at `/api/login`, and it names no file.
