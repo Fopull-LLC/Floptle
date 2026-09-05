@@ -39,6 +39,13 @@ pub mod chat;
 pub mod decode;
 #[cfg(feature = "backend")]
 pub mod engine;
+/// The browser's output scheduling. Its cursor rule is a plain function with
+/// plain tests, so it is compiled (and tested) everywhere; only the Web Audio
+/// glue is gated to wasm — which is also why the rule reads as dead code on
+/// every other target.
+#[cfg(feature = "backend")]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod web_out;
 
 pub use clip::{Clip, ClipRef};
 pub use effects::{EffectDesc, EqBand, EqBandKind};
