@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.85.0-rc1 "Web World"** (beta channel) — **your game runs in a browser
+**v0.85.0-rc2 "Web World"** (beta channel) — **your game runs in a browser
 now, and players can talk to each other.** File ⏵ Export Game… has a Web (browser) target: it stamps
 a folder you serve, with a loading bar, a Play button and your project packed
 into one file the page downloads. Same scenes, same scripts, same renderer —
