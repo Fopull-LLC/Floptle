@@ -44,6 +44,15 @@ opus-pure = { version = "0.2", optional = true }
 # no capture device, and `capture.rs` reports that rather than opening one.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 cpal = { version = "0.18", optional = true, features = ["wasm-bindgen"] }
+# The page's audio output is scheduled by `web_out`, not by cpal's WebAudio
+# backend — that backend's queue cannot recover once a main-thread stall has
+# drained it, which a playtest heard as a permanent flutter. cpal stays for
+# its types and for the capture side's refusals.
+wasm-bindgen = "0.2.126"
+web-sys = { version = "0.3", features = [
+    "AudioBuffer", "AudioBufferSourceNode", "AudioContext", "AudioDestinationNode",
+    "AudioNode", "Window",
+] }
 
 [dev-dependencies]
 ron.workspace = true

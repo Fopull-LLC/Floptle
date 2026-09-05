@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use glam::DVec3;
 
@@ -57,10 +58,18 @@ struct Status {
     active: AtomicUsize,
 }
 
+/// The thing that owns the output. On a desktop that is a cpal stream on its
+/// own audio thread; in a browser it is our own Web Audio scheduler, for the
+/// reasons `web_out` gives.
+#[cfg(not(target_arch = "wasm32"))]
+type OutStream = cpal::Stream;
+#[cfg(target_arch = "wasm32")]
+type OutStream = crate::web_out::WebStream;
+
 /// Control-side handle to the running audio stack. Owns the output stream —
 /// drop it and the sound stops.
 pub struct AudioEngine {
-    _stream: cpal::Stream,
+    _stream: OutStream,
     tx: Sender<Cmd>,
     status: Arc<Status>,
     next_id: VoiceId,
@@ -68,9 +77,53 @@ pub struct AudioEngine {
     pub sample_rate: u32,
 }
 
+/// The mix itself: interleave `channels` of [`AudioCore`] into whatever
+/// buffer the output hands over. Shared by both backends so the desktop and
+/// the browser can never drift into rendering differently.
+fn renderer(
+    rx: Receiver<Cmd>,
+    status_cb: Arc<Status>,
+    sample_rate: u32,
+    channels: usize,
+) -> impl FnMut(&mut [f32]) {
+    let mut core = AudioCore::new(sample_rate as f32, BLOCK);
+    let mut plan_l = vec![0.0f32; BLOCK];
+    let mut plan_r = vec![0.0f32; BLOCK];
+    let mut finished_scratch: Vec<VoiceId> = Vec::new();
+    let mut meters_scratch: Vec<(String, f32)> = Vec::new();
+    move |data: &mut [f32]| {
+        drain_commands(&rx, &mut core);
+        // Render planar in BLOCK chunks, interleave into `data`.
+        let frames = data.len() / channels.max(1);
+        let mut at = 0;
+        while at < frames {
+            let n = (frames - at).min(BLOCK);
+            plan_l[..n].fill(0.0);
+            plan_r[..n].fill(0.0);
+            core.render(&mut plan_l[..n], &mut plan_r[..n]);
+            for i in 0..n {
+                let frame = &mut data[(at + i) * channels..(at + i + 1) * channels];
+                match channels {
+                    1 => frame[0] = (plan_l[i] + plan_r[i]) * 0.5,
+                    _ => {
+                        frame[0] = plan_l[i];
+                        frame[1] = plan_r[i];
+                        for s in frame.iter_mut().skip(2) {
+                            *s = 0.0;
+                        }
+                    }
+                }
+            }
+            at += n;
+        }
+        publish_status(&status_cb, &mut core, &mut finished_scratch, &mut meters_scratch);
+    }
+}
+
 impl AudioEngine {
     /// Open the default output device. Fails cleanly on headless machines —
     /// callers treat audio as optional.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
         let device =
@@ -90,55 +143,40 @@ impl AudioEngine {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         let status = Arc::new(Status::default());
         let status_cb = Arc::clone(&status);
-
-        let mut core = AudioCore::new(sample_rate as f32, BLOCK);
-        let mut plan_l = vec![0.0f32; BLOCK];
-        let mut plan_r = vec![0.0f32; BLOCK];
-        let mut finished_scratch: Vec<VoiceId> = Vec::new();
-        let mut meters_scratch: Vec<(String, f32)> = Vec::new();
+        let mut render = renderer(rx, status_cb, sample_rate, channels);
 
         let stream = device
             .build_output_stream(
                 config,
-                move |data: &mut [f32], _| {
-                    drain_commands(&rx, &mut core);
-                    // Render planar in BLOCK chunks, interleave into `data`.
-                    let frames = data.len() / channels.max(1);
-                    let mut at = 0;
-                    while at < frames {
-                        let n = (frames - at).min(BLOCK);
-                        plan_l[..n].fill(0.0);
-                        plan_r[..n].fill(0.0);
-                        core.render(&mut plan_l[..n], &mut plan_r[..n]);
-                        for i in 0..n {
-                            let frame = &mut data[(at + i) * channels..(at + i + 1) * channels];
-                            match channels {
-                                1 => frame[0] = (plan_l[i] + plan_r[i]) * 0.5,
-                                _ => {
-                                    frame[0] = plan_l[i];
-                                    frame[1] = plan_r[i];
-                                    for s in frame.iter_mut().skip(2) {
-                                        *s = 0.0;
-                                    }
-                                }
-                            }
-                        }
-                        at += n;
-                    }
-                    publish_status(
-                        &status_cb,
-                        &mut core,
-                        &mut finished_scratch,
-                        &mut meters_scratch,
-                    );
-                },
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| render(data),
                 |e| log::warn!("audio stream error: {e}"),
                 None,
             )
             .map_err(|e| format!("failed to open audio stream: {e}"))?;
         stream.play().map_err(|e| format!("failed to start audio stream: {e}"))?;
 
-        log::info!("audio: {} Hz, {channels} ch, block {BLOCK}", sample_rate);
+        log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
+        Ok(Self { _stream: stream, tx, status, next_id: 1, sample_rate })
+    }
+
+    /// Open the page's audio output. Stereo, at whatever rate the browser's
+    /// own context runs at — see [`crate::web_out`] for why the scheduling is
+    /// ours rather than cpal's.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new() -> Result<Self, String> {
+        let channels = 2usize;
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        let status = Arc::new(Status::default());
+        let status_cb = Arc::clone(&status);
+
+        // The renderer is built inside, because only the context knows the
+        // rate the mixer has to be built for.
+        let stream = crate::web_out::start(channels, move |sample_rate| {
+            renderer(rx, status_cb, sample_rate, channels)
+        })?;
+        let sample_rate = stream.sample_rate();
+
+        log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
         Ok(Self { _stream: stream, tx, status, next_id: 1, sample_rate })
     }
 

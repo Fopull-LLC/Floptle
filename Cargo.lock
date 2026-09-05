@@ -1453,6 +1453,8 @@ dependencies = [
  "ron",
  "serde",
  "symphonia",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
