@@ -37,7 +37,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use floptle_core::time::Instant;
 
 use mlua::{Lua, RegistryKey, Table};
 

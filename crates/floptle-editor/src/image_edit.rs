@@ -20,7 +20,7 @@
 //! a document clone, which costs one `Arc` bump per resident tile.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use floptle_core::time::SystemTime;
 
 use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke as EStroke, Vec2};
 use floptle_image::brush::{Brush, BrushMode, DabCtx, GradientKind, StrokeState};
@@ -432,7 +432,7 @@ pub(crate) struct ImageEditState {
     /// a 2048² document costs a full composite per layer, so this must never
     /// ride the brush.
     thumbs: Vec<Option<egui::TextureHandle>>,
-    thumbs_at: Option<std::time::Instant>,
+    thumbs_at: Option<floptle_core::time::Instant>,
     thumbs_dirty: bool,
     /// Canvas region needing a recomposite before the next paint.
     pending: Option<Rect>,
@@ -468,7 +468,7 @@ pub(crate) struct ImageEditState {
     /// up with the brush. This is the whole pitch of an in-engine editor, and
     /// it costs one PNG write per quiet moment (never mid-stroke).
     pub(crate) live: bool,
-    pub(crate) last_live: Option<std::time::Instant>,
+    pub(crate) last_live: Option<floptle_core::time::Instant>,
 }
 
 impl Default for ImageEditState {
@@ -2929,7 +2929,7 @@ impl ImageEditState {
         if !self.thumbs_dirty || self.busy() || self.drag.is_some() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = floptle_core::time::Instant::now();
         if self.thumbs_at.is_some_and(|t| now.duration_since(t) < THUMB_EVERY) {
             return;
         }

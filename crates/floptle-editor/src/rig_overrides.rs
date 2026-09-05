@@ -39,7 +39,7 @@ impl RigOverrides {
     /// → empty (the model imports with its authored hierarchy).
     pub fn load(model_abs: &Path) -> Self {
         let p = Self::sidecar_path(model_abs);
-        std::fs::read_to_string(&p)
+        floptle_vfs::read_to_string(&p)
             .ok()
             .and_then(|s| ron::from_str(&s).ok())
             .unwrap_or_default()
@@ -50,11 +50,11 @@ impl RigOverrides {
     pub fn save(&self, model_abs: &Path) -> std::io::Result<()> {
         let p = Self::sidecar_path(model_abs);
         if self.reparent.is_empty() && self.pivot.is_empty() && self.texture_filter.is_none() {
-            let _ = std::fs::remove_file(&p);
+            let _ = floptle_vfs::remove_file(&p);
             return Ok(());
         }
         let s = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(std::io::Error::other)?;
-        std::fs::write(&p, s)
+        floptle_vfs::write(&p, s)
     }
 }

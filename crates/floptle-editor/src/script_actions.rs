@@ -95,9 +95,9 @@ impl Editor {
         self.planet_gen_pending.extend(gens.iter().map(|(id, _)| *id));
         let (tx, rx) = std::sync::mpsc::channel();
         self.planet_gen_job = Some(rx);
-        std::thread::spawn(move || {
+        crate::worker::spawn("planet-gen", move || {
             for (id, fill) in gens {
-                let t0 = std::time::Instant::now();
+                let t0 = floptle_core::time::Instant::now();
                 let field = floptle_field::procgen::generate_planet(&fill);
                 if tx.send((id, field, t0.elapsed().as_millis() as u64)).is_err() {
                     return;

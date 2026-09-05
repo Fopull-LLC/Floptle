@@ -738,6 +738,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "windows",
  "windows-core",
@@ -1404,12 +1406,17 @@ version = "0.84.2"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "js-sys",
  "keyring",
  "log",
  "serde",
  "serde_json",
  "sha2",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -1423,9 +1430,11 @@ dependencies = [
 name = "floptle-assets"
 version = "0.84.2"
 dependencies = [
+ "base64 0.22.1",
  "floptle-anim",
  "floptle-core",
  "floptle-render",
+ "floptle-vfs",
  "gltf",
  "image",
  "serde_json",
@@ -1437,8 +1446,10 @@ version = "0.84.2"
 dependencies = [
  "cpal",
  "env_logger",
+ "floptle-vfs",
  "glam",
  "log",
+ "opus-pure",
  "ron",
  "serde",
  "symphonia",
@@ -1462,6 +1473,7 @@ name = "floptle-core"
 version = "0.84.2"
 dependencies = [
  "glam",
+ "web-time",
 ]
 
 [[package]]
@@ -1518,6 +1530,7 @@ dependencies = [
  "floptle-steam",
  "floptle-tiles",
  "floptle-ui",
+ "floptle-vfs",
  "floptle-vfx",
  "getrandom 0.2.17",
  "image",
@@ -1536,6 +1549,9 @@ dependencies = [
  "tar",
  "tokio",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
  "winit",
 ]
@@ -1581,6 +1597,7 @@ dependencies = [
 name = "floptle-image"
 version = "0.84.2"
 dependencies = [
+ "floptle-vfs",
  "image",
  "ron",
  "serde",
@@ -1592,6 +1609,7 @@ version = "0.84.2"
 dependencies = [
  "env_logger",
  "floptle-core",
+ "floptle-vfs",
  "gilrs",
  "log",
  "ron",
@@ -1629,6 +1647,7 @@ name = "floptle-net"
 version = "0.84.2"
 dependencies = [
  "bytes",
+ "floptle-audio",
  "floptle-core",
  "floptle-scene",
  "postcard",
@@ -1644,6 +1663,7 @@ dependencies = [
 name = "floptle-package"
 version = "0.84.2"
 dependencies = [
+ "floptle-vfs",
  "ron",
  "serde",
  "serde_json",
@@ -1656,6 +1676,13 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-rules",
+]
+
+[[package]]
+name = "floptle-player"
+version = "0.84.2"
+dependencies = [
+ "floptle-editor",
 ]
 
 [[package]]
@@ -1744,6 +1771,7 @@ dependencies = [
  "floptle-core",
  "floptle-map",
  "floptle-ui",
+ "floptle-vfs",
  "ron",
  "serde",
 ]
@@ -1763,12 +1791,14 @@ dependencies = [
  "floptle-services",
  "floptle-tiles",
  "floptle-ui",
+ "floptle-vfs",
  "glam",
  "mlua",
  "ron",
  "serde",
  "serde_json",
  "ureq",
+ "web-sys",
 ]
 
 [[package]]
@@ -1808,6 +1838,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "floptle-vfs"
+version = "0.84.2"
+dependencies = [
+ "floptle-core",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "floptle-vfx"
 version = "0.84.2"
 dependencies = [
@@ -1815,6 +1854,25 @@ dependencies = [
  "floptle-render",
  "png",
  "wgpu",
+]
+
+[[package]]
+name = "floptle-web"
+version = "0.84.2"
+dependencies = [
+ "floptle-editor",
+ "floptle-render",
+ "floptle-shader",
+ "floptle-vfs",
+ "glam",
+ "js-sys",
+ "log",
+ "mlua",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -3482,6 +3540,12 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "opus-pure"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6a3cef053e1fdea38a5e50edb0789590a31184c5a59f6cd5e462fe844793e7"
 
 [[package]]
 name = "orbclient"

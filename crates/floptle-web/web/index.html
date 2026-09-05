@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  /* The page is the game's. Nothing here is the engine's look: a black ground,
+     the canvas filling it, and one panel that exists until the game starts. */
+  html, body { margin: 0; height: 100%; background: #000; color: #d8d8e0; font: 14px/1.5 system-ui, sans-serif; overflow: hidden; }
+  #game { display: block; width: 100vw; height: 100vh; outline: none; background: #000; }
+  #panel { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #000; }
+  #panel[hidden] { display: none; }
+  #title { font-size: 22px; letter-spacing: 0.02em; color: #fff; }
+  #bar { width: min(420px, 80vw); height: 6px; background: #1c1c24; border-radius: 3px; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #d8d8e0; transition: width 120ms linear; }
+  #status { color: #8a8a96; min-height: 1.5em; text-align: center; max-width: 80vw; white-space: pre-wrap; }
+  #play { display: none; font: inherit; font-size: 16px; padding: 10px 28px; border: 1px solid #d8d8e0; border-radius: 4px; background: transparent; color: #fff; cursor: pointer; }
+  #play:hover { background: #d8d8e0; color: #000; }
+  #play.ready { display: inline-block; }
+  a { color: #d8d8e0; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0"></canvas>
+<div id="panel">
+  <div id="title">{{TITLE}}</div>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="status">loading…</div>
+  <button id="play">▶ Play</button>
+</div>
+<script type="module">
+  const $ = id => document.getElementById(id);
+  const status = s => { $('status').textContent = s; };
+  const fill = f => { $('fill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; };
+  const fail = why => {
+    status(why);
+    $('bar').style.visibility = 'hidden';
+    console.error(why);
+  };
+
+  // The engine's own console, and the page's way to tell the player it stopped.
+  // Under tools/web/shot.py --game, both are also POSTed to the harness; outside
+  // it the POSTs fail silently and the page is just a page.
+  const post = (path, body) => fetch(path, { method: 'POST', body }).catch(() => {});
+  window.floptleLog = s => { console.log(s); post('/report', s); };
+  window.floptleFatal = s => { fail('The game stopped:\n' + s); post('/report', 'FATAL ' + s); };
+  // `?shot=N`: photograph frame N and hand it to the harness — the browser's
+  // form of the player's `--shot`, and how a web build is verified by eye.
+  // The picture comes from the engine's own render target, not the canvas: a
+  // WebGPU canvas hands `toDataURL` a blank image outside the task that drew it.
+  // wgpu reports a rejected buffer map as one fixed sentence and drops the
+  // browser's own reason, which is the only diagnostic there is. Keep it.
+  if (window.GPUBuffer) {
+    const mapAsync = GPUBuffer.prototype.mapAsync;
+    GPUBuffer.prototype.mapAsync = function (...args) {
+      const p = mapAsync.apply(this, args);
+      p.catch(e => window.floptleLog(`mapAsync rejected: ${e.name}: ${e.message} (usage=${this.usage} size=${this.size})`));
+      return p;
+    };
+  }
+  const shotAt = Number(new URLSearchParams(location.search).get('shot')) || 0;
+  window.floptleShotAt = () => shotAt;
+  if (shotAt > 0) {
+    // Under the harness, say whether this window is one the browser animates
+    // at all: a compositor that hides a new window starves it of frames, and
+    // a game that never gets a frame looks like a game that never booted.
+    let raf = 0;
+    const tick = () => { raf++; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+    setInterval(() => post('/report', `page: ${document.visibilityState}, ${raf} animation frames so far`), 5000);
+  }
+  window.floptleCapture = async (rgba, w, h) => {
+    if (!w || !h) {
+      // The readback did not complete — a headless browser aborts the map.
+      await post('/report', 'CAPTURE FAILED — the frame could not be read back');
+      return;
+    }
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+    await post('/shot', c.toDataURL('image/png'));
+    await post('/report', 'SHOT SENT');
+  };
+
+  // Two things a browser must have, checked up front and named when missing,
+  // rather than a blank canvas: WebGPU (the renderer's only backend on the
+  // web), and WebAssembly exception handling (the scripting engine's C++
+  // throws through it).
+  if (!navigator.gpu) {
+    fail('This browser has no WebGPU. The game needs a current Chrome, Edge or Safari; in Firefox, WebGPU is still rolling out.');
+  } else if (!('WebAssembly' in window)) {
+    fail('This browser has no WebAssembly.');
+  } else {
+    run().catch(e => fail(String((e && e.stack) || e)));
+  }
+
+  async function run() {
+    // The module first, so its own failure to load is reported as itself.
+    const { default: init, play } = await import('./pkg/floptle_web.js');
+    await init();
+    // Then the game: one fetch, with a bar driven by the bytes that have
+    // arrived. A host that compresses on the fly may not say how many are
+    // coming; the bar then shows activity rather than a fraction.
+    status('downloading the game…');
+    const res = await fetch('game.flpk');
+    if (!res.ok) throw new Error(`game.flpk: HTTP ${res.status}`);
+    const total = Number(res.headers.get('Content-Length')) || 0;
+    const reader = res.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      got += value.length;
+      if (total) {
+        fill(got / total);
+        status(`downloading the game… ${(got / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
+      } else {
+        fill((got % 5242880) / 5242880);
+        status(`downloading the game… ${(got / 1048576).toFixed(1)} MB`);
+      }
+    }
+    const bytes = new Uint8Array(got);
+    let at = 0;
+    for (const c of chunks) { bytes.set(c, at); at += c.length; }
+    fill(1);
+    // A click before the game starts, on purpose: browsers allow sound only
+    // after the player has interacted with the page, and a game that starts
+    // silent and stays silent is a bug report. The harness has no hand to
+    // click with, so a `?shot` run starts on its own (and stays silent).
+    status('');
+    const start = () => {
+      status('starting…');
+      try {
+        play(bytes);
+      } catch (e) {
+        fail('The game could not start:\n' + ((e && e.stack) || e));
+        return;
+      }
+      $('panel').hidden = true;
+      $('game').focus();
+    };
+    if (shotAt > 0) {
+      start();
+      return;
+    }
+    const btn = $('play');
+    btn.classList.add('ready');
+    btn.addEventListener('click', () => { btn.classList.remove('ready'); start(); }, { once: true });
+  }
+</script>
+</body>
+</html>

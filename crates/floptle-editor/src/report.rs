@@ -66,8 +66,8 @@ pub(crate) fn install_panic_hook() {
         let trace = std::backtrace::Backtrace::force_capture();
         let note = format!("{}\npanic: {payload}\nat {where_}\n\n{trace}\n", environment());
         if let Some(path) = crash_file() {
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-            let _ = std::fs::write(&path, &note);
+            let _ = floptle_vfs::create_dir_all(path.parent().unwrap_or(&path));
+            let _ = floptle_vfs::write(&path, &note);
             eprintln!("\nFloptle wrote a crash report to {}", path.display());
             eprintln!("Please report it: {ISSUES_URL}");
         }
@@ -78,8 +78,8 @@ pub(crate) fn install_panic_hook() {
 /// one crash asks once — a banner that came back every launch would be its own bug.
 pub(crate) fn take_last_crash() -> Option<String> {
     let path = crash_file()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
+    let text = floptle_vfs::read_to_string(&path).ok()?;
+    let _ = floptle_vfs::remove_file(&path);
     (!text.trim().is_empty()).then_some(text)
 }
 

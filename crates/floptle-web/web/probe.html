@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>floptle web probe</title>
+<style>
+  body { margin: 0; background: #0b0b10; color: #d8d8e0; font: 13px/1.4 monospace; }
+  canvas { display: block; width: 640px; height: 360px; image-rendering: pixelated; background: #000; }
+  #fps { padding: 4px 8px; color: #9fd; }
+  #log { margin: 0; padding: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="fps">…</div>
+<pre id="log"></pre>
+<script type="module">
+  // The reporter: every log line the engine writes is POSTed to the local
+  // harness (tools/web/shot.py), and once rung 4 passes the canvas is captured
+  // and sent as a PNG. Outside the harness the POSTs fail silently and the
+  // page is just a page.
+  Error.stackTraceLimit = 60;
+  const log = document.getElementById('log');
+  // The engine logs through these two rather than touching the DOM itself:
+  // one import each, no global-object lookup on the wasm side.
+  window.floptleLog = s => { console.log(s); log.textContent += (log.textContent ? '\n' : '') + s; };
+  window.floptleReadout = s => { document.getElementById('fps').textContent = s; };
+  // The player page's "the game stopped" hook; here it is one more line.
+  window.floptleFatal = s => { log.textContent += '\nFATAL ' + s; };
+  let sent = 0, shot = false;
+  const post = (path, body) => fetch(path, { method: 'POST', body }).catch(() => {});
+  const flush = () => {
+    const lines = log.textContent.split('\n');
+    for (; sent < lines.length; sent++) post('/report', lines[sent]);
+  };
+  // Called by the engine with a frame it read back from its own render
+  // target. Not `canvas.toDataURL()`: a WebGPU canvas hands that a fully
+  // transparent image outside the exact task that drew it, and even inside
+  // it the answer was blank in a headless tab — so the picture comes from
+  // the GPU the same way the desktop probes take theirs.
+  window.floptleCapture = async (rgba, w, h) => {
+    if (shot) return;
+    shot = true;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+    await post('/report', 'READOUT ' + document.getElementById('fps').textContent);
+    await post('/shot', c.toDataURL('image/png'));
+    await post('/report', 'SHOT SENT');
+  };
+  // wgpu reports a rejected buffer map as one fixed sentence and drops the
+  // browser's reason. Keep the reason: it is the only diagnostic there is.
+  if (window.GPUBuffer) {
+    const mapAsync = GPUBuffer.prototype.mapAsync;
+    GPUBuffer.prototype.mapAsync = function (...args) {
+      const p = mapAsync.apply(this, args);
+      p.catch(e => window.floptleLog(`mapAsync rejected: ${e.name}: ${e.message} (usage=${this.usage} size=${this.size} args=${args})`));
+      return p;
+    };
+  }
+  new MutationObserver(flush).observe(log, { childList: true, characterData: true, subtree: true });
+  const fatal = e => { log.textContent += '\nFATAL ' + ((e && e.stack) ? e.stack : e); };
+  window.addEventListener('error', e => fatal(e.error || e.message));
+  window.addEventListener('unhandledrejection', e => fatal(e.reason));
+  // The module's start runs the C++ constructors and installs the panic hook;
+  // the ladder itself is `probe()`, so the same module can be a game's player
+  // (index.html) without running the probe first.
+  const { default: init, probe } = await import('./pkg/floptle_web.js');
+  init().then(() => probe()).catch(fatal);
+</script>
+</body>
+</html>

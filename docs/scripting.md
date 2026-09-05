@@ -2387,11 +2387,80 @@ end
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
 | `net.rpc(name, args, {to=peer, withInput=true})` | remote call — server→clients, or client→server; `withInput` stamps the tick you were seeing (for `net.rewind`) |
-| `net.on(event, fn)` | `"playerJoined"/"playerLeft"` (peer id), `"connected"`, `"disconnected"` |
-| `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene's first node, replicated everywhere |
-| `net.despawn(node)` | SERVER: remove it everywhere |
+| `net.on(event, fn)` | `"playerJoined"/"playerLeft"` (peer id — `playerLeft` also gets the kick reason, when there was one), `"connected"`, `"disconnected"`, `"kicked"` (why the server removed you) |
+| `net.identity(peer)` | `{ id, name, tier, verified }` — who that peer is. **Check `verified`**: it is `false` for everyone today (see below) |
+| `net.kick(peer, reason)` | SERVER: remove a player, with words that reach them |
+| `net.host{ requireIdentity = true, allow = {ids}, deny = {ids} }` | who this server will admit, consulted **before** a join is accepted |
+| `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene or prefab's first root **and everything under it**, replicated everywhere |
+| `net.despawn(node)` | SERVER: remove it — and its subtree — everywhere |
+| `net.setOwner(node, peer)` | SERVER: hand a replicated node to `peer`, or `nil` to release it. What gives a reconnecting player their slot back |
+| `net.host{ interestOcclusion = "Level" }` | also require **line of sight**, tested against that collision layer. On top of `interest`, never instead of it |
+| `net.setRelevant(node, peer, bool)` | SERVER: decide per client whether that client is told about that node at all (`nil` = let the radius and the sight test decide). The hidden-role hook |
 | `net.rewind(peer, fn)` | SERVER: run `fn` against the world as `peer` perceived it (lag compensation) |
 | `net.isMine(node)` | is this node under MY control here? (cameras/HUDs pick the local player; pair with `findScripts`) |
+
+**Who a peer is, and getting rid of one.** A session peer used to be a
+transport id plus whatever name the game's own handshake carried, and there was
+no `kick` at all. Now a signed-in client presents its account claim when it
+joins, the server records it, and `net.identity(peer)` reports it:
+
+```lua
+net.on("playerJoined", function(peer)
+  local who = net.identity(peer)
+  if who.verified and bans[who.id] then
+    net.kick(peer, "you are banned from this server")
+  end
+end)
+
+net.on("kicked", function(_, reason)         -- on the removed player's machine
+  ui.show("You were removed: " .. reason)
+end)
+```
+
+> **`verified` is `false` for everyone right now, and that is not a bug.** The
+> engine carries what a client *says* about itself; turning that into an
+> identity needs a credential the server can check with fopull.com, scoped so
+> that presenting it does not also hand that server your account. No such
+> credential exists yet (it is filed as engine task `0184`). So an allow/deny
+> list and `requireIdentity` work, and they keep out the careless rather than
+> the determined — and `net.identity` says so rather than reporting a
+> confidence it does not have. Do not key a ban list or a statistic on an
+> unverified `id` and call it settled.
+
+Anonymous play is untouched: a LAN or friends game with nobody signed in joins
+exactly as it always did, and `verified = false` with no `id` is a normal state.
+`net.host{ requireIdentity = true }` refuses an anonymous join with a reason the
+client can show.
+
+**A radius is not a security boundary.** Interest management exists to save
+bandwidth, and for an open-world game that is the whole feature. In a
+hidden-role or competitive game, seeing another player through a wall *is* the
+game — and a client that has been told where everyone within the radius is
+standing knows where they are, whatever it chooses to draw. Nothing you do on
+the client side fixes that: hiding, attenuating or not rendering something the
+client already received is a setting a modified client turns back off.
+
+Two server-side answers, and they compose:
+
+```lua
+-- Line of sight, on top of the radius. Nothing on the "Level" layer between
+-- you and it, or you are not told about it. Off unless you ask.
+net.host{ interest = 25, interestOcclusion = "Level" }
+
+-- Your own rule, per (client, node) — whatever the geometry says.
+net.setRelevant(killerNode, survivorPeer, false)   -- withhold
+net.setRelevant(objective, peer, true)             -- pin, at any distance
+net.setRelevant(killerNode, survivorPeer, nil)     -- let the tests decide again
+```
+
+Losing sight is damped by a few snapshots so a body behind a door frame does not
+flicker; regaining it is immediate, because a player stepping out of cover has
+to be there on the frame they step out. A client is **always** told about its
+own avatar and about anything flagged *always relevant* — a filter cannot hide
+either, since the first is what prediction reconciles against. Losing relevance
+never despawns a scene-authored node; it stops being updated and is sent in full
+on re-entry. The 🌐 panel shows, per client, how many nodes are being withheld
+and by which rule.
 
 For a **fighting game** — where the whole game is reading your opponent's exact
 state this frame — the mode above is the wrong shape. See
@@ -2441,11 +2510,37 @@ function start(node)
 end
 ```
 
-`scenes/player.ron` is a one-node scene: a capsule with a RigidBody, your
-controller scripts, and a Networked component set to *Predicted* (see the
-stock `player.ron`). The scene's own Predicted node (if any) stays the host's
-avatar. Current limits: a spawned scene contributes its FIRST node only (no
-child hierarchies yet), and spawns are dynamic bodies — not static geometry.
+`scenes/player.ron` can be a whole rig: a capsule with a RigidBody, your
+controller scripts, a Networked component set to *Predicted*, and whatever
+hangs off it — a camera child, a first-person arms mesh, a point light, a
+bone-attached item socket. The first root and its entire subtree spawn on the
+server and on every client, parent links, bone attachments and scripts intact.
+The scene's own Predicted node (if any) stays the host's avatar.
+
+**Only the root replicates.** Its children are ordinary local nodes that follow
+it, and their scripts run on every peer — the same deal an authored child of a
+networked node has always had. Give a child its own Networked component and it
+replicates in its own right, under the same owner (a creature's model child
+syncing its animator, say). Spawns are dynamic bodies, not static geometry.
+
+**Ownership is not fixed at spawn.** `net.setOwner(node, peer)` hands a
+replicated node to a player after it exists, and `net.setOwner(node, nil)`
+releases it — which is how a player who dropped gets their own slot back on
+reconnect rather than a fresh one:
+
+```lua
+net.on("playerLeft", function(peer)
+  local slot = mySlots[peer]
+  if slot then net.setOwner(slot, nil) end   -- free it, keep the body
+end)
+```
+
+**On a dedicated server**, authored `Predicted` slots are handed out from #1 in
+node order as players join, and freed when they leave. That differs from a
+hosted session on purpose: there, slot #1 belongs to the host, because somebody
+is sitting at that keyboard. A dedicated server has nobody, so reserving #1
+would leave an avatar in the world that no client predicts and no input drives.
+A slot your own script assigns is never reassigned behind your back.
 
 ### Lobby codes: play without port-forwarding
 
@@ -2674,6 +2769,99 @@ a fifth of a second. Stepping back and forward again lands on exactly the state
 that was there — it's a scrubber, not an undo.
 
 ---
+
+## 16c. Voice: proximity chat
+
+A remote player's voice is an **ordinary spatial sound**. It is attenuated by
+distance, panned by direction, and routed through a mixer track like every other
+sound in the game — which is what makes the rest of this short.
+
+| Call | What it does |
+|---|---|
+| `voice.devices()` / `voice.device()` | input device names · the one that's open. Empty list = no microphone, which is normal |
+| `voice.setDevice(name)` | open it (`nil` = the system default) |
+| `voice.setTransmit(on)` | open/close the mic — **push-to-talk is your call**, this is where it lands |
+| `voice.level()` | mic level 0..1 for a settings meter. Live whether or not you're transmitting |
+| `voice.sidetone(on)` | hear yourself. Off by default |
+| `voice.attach(peer, node, opts)` | that player's voice comes out of that node and follows it |
+| `voice.source(peer)` | a handle like `audio.play` returns — `:setTrack`, `:setVolume`, `:setPosition(node)`… |
+| `voice.speaking(peer)` / `voice.mute(peer, on)` | HUD indicator · a **local** mute |
+| `voice.setForward(peer, {peers})` | **SERVER**: who may hear that speaker (`nil` = everyone) |
+
+### The whole thing, in a game
+
+```lua
+function start(node)
+  voice.setDevice(nil)                       -- the system default mic
+
+  net.on("playerJoined", function(peer)
+    voice.attach(peer, avatarFor(peer), {
+      mode = "Spatial", falloff = "Inverse",
+      minDistance = 2, maxDistance = 22,
+      track = "Voice",
+    })
+  end)
+end
+
+function update(node)
+  voice.setTransmit(input.action("Talk"))    -- push-to-talk
+end
+```
+
+### Making a monster out of a voice
+
+There is no per-effect voice API, and there does not need to be one. Author the
+tracks in `project.ron` — `Voice` (clean), `Voice Monster` (PitchShift −6 st,
+Distortion, Chorus, a low shelf, Reverb), `Voice Dead` — and move a speaker
+between them:
+
+```lua
+voice.source(peer):setTrack(isMonster and "Voice Monster" or "Voice")
+```
+
+### Who can hear you is the server's decision
+
+This is the part worth reading twice.
+
+```lua
+-- on the server, every tick or so
+for _, speaker in ipairs(net.peers()) do
+  voice.setForward(speaker, whoIsWithinEarshotOf(speaker))
+end
+
+voice.setForward(deadPeer, deadPeers)   -- the dead talk to the dead
+```
+
+A peer that is not on that list **is never sent the audio at all**. That matters
+more than it sounds: turning a stream down on the receiving client is a volume
+slider a modified client turns back up, and in a game where hearing someone is
+knowing where they are, that is the difference between a mode that can ship
+competitively and one that cannot. Range gating belongs on the server, and
+`voice.setForward` is where it goes.
+
+### What it does when things go wrong
+
+- **No microphone.** `voice.devices()` is empty, every other call is a no-op,
+  and the game runs. Most machines are this machine.
+- **A lost packet** is a gap Opus conceals — never a stall, and never the end of
+  the stream. A voice that ended could not resume, and the player would go
+  silent mid-sentence for the rest of the match.
+- **A late packet** widens the jitter buffer, up to 60 ms; a link that settles
+  earns the latency back. The 🌐 panel shows the cushion per speaker.
+- **`scene.load`** does not cut anyone off. The capture and the streams live
+  with the *session*, not the scene — re-attach in the new scene and the stream
+  never restarted.
+- **A dedicated server** captures nothing and plays nothing. It forwards, which
+  is all it should do with no audio device and no listener.
+
+### Trying it without a second machine
+
+Voice normally needs two machines, two people and a microphone to test at all,
+which is what makes it the feature most likely to ship broken. The 🌐 panel has
+**🎤 test voice from a WAV…**: it plays an audio file in as though a remote
+player were speaking it, through the real forwarding rules, the real jitter
+buffer and the real spatial voice. If it comes out of the right avatar at the
+right volume, the routing is right.
 
 ## 17. Scenes: `scene.load` & the entry scene
 
@@ -3190,9 +3378,9 @@ animators/particles/audio wire themselves. Everything is undo-free play-state
 — Stop discards it like any other play change.
 
 **Multiplayer**: `spawn()`/`destroy()` are LOCAL. For replicated objects, the
-server calls `net.spawn("bullet", {x=…, y=…, z=…})` — it accepts prefab names
-now (single-node prefabs; replication is per-node) — and `net.despawn(node)`,
-which broadcast to every client. `destroy()` on the server also routes
+server calls `net.spawn("bullet", {x=…, y=…, z=…})` — it accepts prefab names,
+and spawns the whole subtree, so a player rig or a creature goes over the wire
+as one thing — and `net.despawn(node)`, which broadcast to every client. `destroy()` on the server also routes
 replicated nodes through the session automatically; on a client it refuses
 (server authority).
 

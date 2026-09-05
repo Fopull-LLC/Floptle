@@ -177,15 +177,15 @@ mod tests {
     /// A project on disk with a script that changes a video setting and quits.
     fn settings_project(dir: &std::path::Path, body: &str) {
         let _ = std::fs::remove_dir_all(dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
-        std::fs::create_dir_all(dir.join("scripts")).unwrap();
-        std::fs::write(
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
             dir.join("project.ron"),
             "(title: Some(\"Test Game\"), vsync: Adaptive, retro_height: 240)",
         )
         .unwrap();
-        std::fs::write(dir.join("scripts/menu.lua"), body).unwrap();
-        std::fs::write(
+        floptle_vfs::write(dir.join("scripts/menu.lua"), body).unwrap();
+        floptle_vfs::write(
             dir.join("scenes/first.ron"),
             "(name: \"first\", lighting: (), nodes: [(name: \"Menu\", transform: (translation: \
              (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: \
@@ -313,9 +313,9 @@ mod tests {
     fn a_project_file_that_will_not_parse_says_so() {
         let dir = std::env::temp_dir().join(format!("floptle-app-badcfg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
         // `entry_scene` is an Option; a bare string is the typo somebody makes.
-        std::fs::write(dir.join("project.ron"), "(entry_scene: \"scenes/first.ron\")").unwrap();
+        floptle_vfs::write(dir.join("project.ron"), "(entry_scene: \"scenes/first.ron\")").unwrap();
 
         let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
         let cfg = ed.read_project_config();
@@ -331,7 +331,7 @@ mod tests {
 
         // A project with NO project.ron is not a fault — that is a project with
         // default settings, and warning about it would cry wolf on every new one.
-        std::fs::remove_file(dir.join("project.ron")).unwrap();
+        floptle_vfs::remove_file(dir.join("project.ron")).unwrap();
         let mut fresh = crate::Editor { project_root: dir.clone(), ..Default::default() };
         let _ = fresh.read_project_config();
         assert!(fresh.console.entries.is_empty(), "a missing project.ron is not an error");

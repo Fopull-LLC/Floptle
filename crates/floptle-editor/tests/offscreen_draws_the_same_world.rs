@@ -230,10 +230,15 @@ fn every_field_a_scene_render_binds_is_set_up_in_one_place() {
         "only found {bound:?} in the scene draw's bind tuple, which is fewer than the six          it has always taken — this test has stopped reading what it thinks it is reading"
     );
 
+    // `src/lib.rs`, not `src/main.rs`: the crate root moved to the library
+    // half when the standalone player needed to drive the same engine, and
+    // `main.rs` became a shim. This test caught that move, which is what it is
+    // for — the assertion below is about a function, and a function can be
+    // moved out from under a path.
     let setup = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
     )
-    .expect("read main.rs");
+    .expect("read lib.rs");
     let start = setup.find("fn init_gpu_side").expect(
         "`init_gpu_side` is gone — it is the one place both the window and the headless          verbs set the device up, and without it they can drift again",
     );

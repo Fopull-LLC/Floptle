@@ -271,6 +271,15 @@ impl Transport for QuicServer {
             .unwrap_or(0.0);
         LinkStats { rtt_ms: rtt, loss: 0.0 }
     }
+
+    /// Close this peer's connection (a kick). The reason has already gone out
+    /// as a reliable `Kicked`, so the CONNECTION_CLOSE frame only has to carry
+    /// enough for a packet capture to make sense.
+    fn disconnect(&mut self, peer: PeerId) {
+        if let Some(h) = self.peers.lock().unwrap().remove(&peer) {
+            h.conn.close(0u32.into(), b"kicked");
+        }
+    }
 }
 
 impl Drop for QuicServer {

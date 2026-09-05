@@ -16,10 +16,18 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::auth::{
-    self, Entitlements, KeyringStore, Provider, RefreshError, Session, TokenStore,
-};
-use crate::cloud::{self, CloudReply};
+use crate::auth::{self, Provider, RefreshError, Session, TokenStore};
+// Only the device flow's `Provider` reads entitlements synchronously; the
+// browser fetches them in `web_auth::browser::identify`.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::auth::Entitlements;
+// The desktop's secret store and the desktop's transport. A browser build gets
+// `auth::WebStore` and `auth::OfflineProvider` instead — see `Account::new`.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::auth::KeyringStore;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cloud;
+use crate::cloud::CloudReply;
 
 /// Where a sign-in has got to. A caller draws this and nothing else.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,10 +80,36 @@ pub struct Account {
     refreshing: Arc<Mutex<()>>,
 }
 
+/// Run `f` off the caller's thread — or, in a browser, on it.
+///
+/// `wasm32-unknown-unknown` has no threads: `std::thread::spawn` **compiles**
+/// and then fails at runtime, which is the worst of the two possible answers.
+/// Everything routed through here is either a store read or a call whose very
+/// first statement the browser's `Provider` refuses (see
+/// [`auth::OfflineProvider`]), so running it inline there costs the page
+/// nothing and cannot spin.
+fn detach(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::Builder::new()
+            .name(name.into())
+            .spawn(f)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        f();
+        Ok(())
+    }
+}
+
 impl Account {
     /// The real thing: the OS keyring and an HTTP provider pointed at `base`.
     /// Restores a stored session in the background — a session shared with the
     /// Hub, so a player already signed in there is signed in here.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(base: impl Into<String>) -> Self {
         let me = Self::with(
             base,
@@ -83,6 +117,29 @@ impl Account {
             Arc::new(|base: &str| Box::new(auth::HttpProvider::new(base)) as Box<dyn Provider + Send>),
         );
         me.restore();
+        me
+    }
+
+    /// The browser's pair: `localStorage` for the session, and a provider that
+    /// refuses every network call with the reason (see
+    /// [`auth::OfflineProvider`]).
+    ///
+    /// The store is real and the restore still runs, deliberately: the shape a
+    /// signed-in session takes is settled here, so when fopull.com's side of
+    /// the contract lands there is nothing left to design on this side.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(base: impl Into<String>) -> Self {
+        let me = Self::with(
+            base,
+            Arc::new(auth::WebStore::default()),
+            Arc::new(|_base: &str| Box::new(auth::OfflineProvider) as Box<dyn Provider + Send>),
+        );
+        me.restore();
+        // Order matters: `restore` reads the stored session synchronously, and
+        // `web_restore` then either finishes a sign-in this load is returning
+        // from or refreshes what `restore` just found. The other way round, a
+        // completed sign-in would be overwritten by the stale stored session.
+        me.web_restore();
         me
     }
 
@@ -128,7 +185,7 @@ impl Account {
     /// session is the ordinary case, not a failure worth reporting.
     pub fn restore(&self) {
         let me = self.clone();
-        let _ = std::thread::Builder::new().name("floptle-account-restore".into()).spawn(move || {
+        let _ = detach("floptle-account-restore", move || {
             let Some(session) = me.store.load() else { return };
             // Minted by a provider we no longer point at — see `Session::issued_by`. It can
             // only 401, so it is forgotten rather than shown as a signed-in player whose
@@ -160,16 +217,103 @@ impl Account {
             }
             i.phase = Phase::Starting;
         }
+        // **In a browser the sign-in is a navigation, not a poll.** There is no
+        // user code to show and nothing to wait for here: the page leaves, and
+        // the flow finishes in `web_restore` when it comes back. See
+        // `web_auth` and contract §6.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let client = self.web_client();
+            if let Err(e) = crate::web_auth::browser::start(&client) {
+                self.set_phase(Phase::Failed(e));
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         self.cancel.store(false, Ordering::Relaxed);
         let me = self.clone();
-        if let Err(e) = std::thread::Builder::new()
-            .name("floptle-account-signin".into())
-            .spawn(move || me.run_sign_in())
-        {
+        if let Err(e) = detach("floptle-account-signin", move || me.run_sign_in()) {
             self.set_phase(Phase::Failed(format!("could not start the sign-in: {e}")));
+        }
         }
     }
 
+    /// The page this build redirects back to, and the URI that has to be
+    /// registered against the game (contract §6.4).
+    ///
+    /// Defaults to the game's own address with the query stripped, so a build
+    /// works with one registration and no configuration. That means signing in
+    /// reloads the game — acceptable at a menu, which is where it belongs, and
+    /// it is the shape that survives a sandboxed iframe where a popup would be
+    /// blocked outright.
+    #[cfg(target_arch = "wasm32")]
+    fn web_client(&self) -> crate::web_auth::WebClient {
+        let redirect = crate::web_auth::browser::current_page_url().unwrap_or_default();
+        crate::web_auth::WebClient::new(self.base.clone(), redirect)
+    }
+
+    /// Finish a sign-in the page is returning from, and refresh a stored session
+    /// that has aged out. Called once at boot, after `restore`.
+    ///
+    /// Both halves are async because `fetch` is; neither blocks the frame. An
+    /// ordinary page load — the overwhelming majority — does nothing at all here
+    /// and reports nothing, because every boot runs it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn web_restore(&self) {
+        let me = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let client = me.web_client();
+            match crate::web_auth::browser::complete(&client).await {
+                Ok(Some(tokens)) => match crate::web_auth::browser::identify(&client, tokens).await {
+                    Ok(session) => me.adopt(session),
+                    Err(e) => me.set_phase(Phase::Failed(e)),
+                },
+                Ok(None) => me.web_refresh_if_stale(&client).await,
+                Err(e) => me.set_phase(Phase::Failed(e)),
+            }
+        });
+    }
+
+    /// A stored session whose access token has expired is refreshed once, at
+    /// boot. The browser's access token is 900s (§6.5), so this is the ordinary
+    /// path on any return visit, not an edge case.
+    #[cfg(target_arch = "wasm32")]
+    async fn web_refresh_if_stale(&self, client: &crate::web_auth::WebClient) {
+        let now = unix_now();
+        let Some(session) = self.session().filter(|s| s.needs_refresh(now)) else { return };
+        match crate::web_auth::browser::refresh(client, &session).await {
+            // Persist BEFORE anything else can call: the old refresh token died
+            // the moment this succeeded, so a crash between here and the save
+            // costs the session.
+            Ok(fresh) => self.adopt(fresh),
+            // A refresh that fails is a sign-out, not a retry — the token is
+            // either rotated away or revoked, and both are terminal.
+            Err(e) => {
+                let _ = self.store.clear();
+                if let Ok(mut i) = self.inner.lock() {
+                    i.session = None;
+                    i.phase = Phase::Failed(e);
+                }
+            }
+        }
+    }
+
+    /// Take a session as the current one and persist it.
+    #[cfg(target_arch = "wasm32")]
+    fn adopt(&self, session: crate::auth::Session) {
+        if let Err(e) = self.store.save(&session) {
+            log::warn!("could not store the session: {e}");
+        }
+        if let Ok(mut i) = self.inner.lock() {
+            i.session = Some(session);
+            i.phase = Phase::SignedIn;
+        }
+    }
+
+    // The device flow's poll loop. A browser never runs it: §6.1 refuses
+    // `floptle-web` a device grant and §6.3 leaves `/oauth/device` off CORS on
+    // purpose, because a page can redirect.
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_sign_in(&self) {
         let provider = (self.make_provider)(&self.base);
         let pkce = auth::Pkce::generate();
@@ -249,7 +393,7 @@ impl Account {
             i.session.take()
         };
         let me = self.clone();
-        let _ = std::thread::Builder::new().name("floptle-account-signout".into()).spawn(move || {
+        let _ = detach("floptle-account-signout", move || {
             if let Err(e) = me.store.clear() {
                 log::warn!("could not clear the stored session: {e}");
             }
@@ -270,10 +414,7 @@ impl Account {
     /// sees one.
     fn access_token(&self) -> Result<String, String> {
         let session = self.session().ok_or("nobody is signed in")?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = unix_now();
         if !session.needs_refresh(now) {
             return Ok(session.access_token);
         }
@@ -335,21 +476,36 @@ impl Account {
         let me = self.clone();
         let method = method.to_string();
         let path = path.to_string();
-        std::thread::Builder::new()
-            .name("floptle-account-request".into())
-            .spawn(move || {
-                let reply = match me.access_token() {
-                    Ok(token) => {
-                        cloud::request(&me.base, &token, &method, &path, body, timeout)
-                    }
-                    Err(e) => CloudReply::failed(e),
-                };
-                // The receiver is gone only when the host itself has.
-                let _ = tx.send((id, reply));
-            })
-            .map(|_| ())
+        detach("floptle-account-request", move || {
+            let reply = match me.access_token() {
+                #[cfg(not(target_arch = "wasm32"))]
+                Ok(token) => cloud::request(&me.base, &token, &method, &path, body, timeout),
+                // A browser cannot reach the Cloud API, and the reason has
+                // nothing to do with having a token — see
+                // `auth::OfflineProvider`. Reply with it rather than leaving the
+                // script's callback pending forever.
+                #[cfg(target_arch = "wasm32")]
+                Ok(_token) => {
+                    let _ = (&me.base, &method, &path, body, timeout);
+                    CloudReply::failed(auth::NO_WEB_AUTH)
+                }
+                Err(e) => CloudReply::failed(e),
+            };
+            // The receiver is gone only when the host itself has.
+            let _ = tx.send((id, reply));
+        })
             .map_err(|e| format!("could not start a worker: {e}"))
     }
+}
+
+/// Seconds since the Unix epoch, from a clock that exists on every target —
+/// `std::time::SystemTime::now()` compiles for a page and panics there.
+fn unix_now() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use crate::Editor;
 /// Parse a prefab file: pretty RON of `Vec<NodeDoc>`, tolerant of the node
 /// clipboard's `//floptle-nodes-v1` tag line (a pasted clipboard IS a prefab).
 pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = floptle_vfs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let body = text.trim_start().strip_prefix("//floptle-nodes-v1").unwrap_or(&text);
     ron::from_str::<Vec<NodeDoc>>(body.trim_start())
         .map_err(|e| format!("{}: not a prefab ({e})", path.display()))
@@ -141,7 +141,7 @@ impl Editor {
         }
         match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default())
             .map_err(|e| e.to_string())
-            .and_then(|ron| std::fs::write(&path, ron).map_err(|e| e.to_string()))
+            .and_then(|ron| floptle_vfs::write(&path, ron).map_err(|e| e.to_string()))
         {
             Ok(()) => {
                 self.console.push(
@@ -185,11 +185,11 @@ impl Editor {
             .trim()
             .to_string();
         let stem = if stem.is_empty() { "prefab".to_string() } else { stem };
-        let _ = std::fs::create_dir_all(dir);
+        let _ = floptle_vfs::create_dir_all(dir);
         let path = unique_path(dir, &stem, Some("prefab.ron"));
         match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()) {
             Ok(ron) => {
-                if let Err(e) = std::fs::write(&path, ron) {
+                if let Err(e) = floptle_vfs::write(&path, ron) {
                     self.console.push(
                         floptle_script::LogLevel::Error,
                         format!("save prefab failed: {e}"),
@@ -295,13 +295,13 @@ impl Editor {
         [with_ext.clone(), format!("prefabs/{with_ext}")]
             .into_iter()
             .map(|c| self.project_root.join(c))
-            .find(|p| p.is_file())
+            .find(|p| floptle_vfs::is_file(p))
     }
 
     /// A prefab's parsed docs, cached by file mtime (spawning the same prefab
     /// every tick must not re-read + re-parse the file).
     fn cached_prefab_docs(&mut self, path: &Path) -> Option<Vec<NodeDoc>> {
-        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+        let mtime = floptle_vfs::modified(path)?;
         if let Some((t, docs)) = self.prefab_cache.get(path)
             && *t == mtime
         {
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn a_prefab_opens_on_its_own_and_saves_back_over_itself() {
         let dir = std::env::temp_dir().join(format!("floptle_0090_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join("prefabs"));
+        let _ = floptle_vfs::create_dir_all(dir.join("prefabs"));
         let path = dir.join("prefabs").join("Turret.prefab.ron");
 
         // Author a prefab the way the editor does: a root with one child.
@@ -932,7 +932,7 @@ mod tests {
         ed.world.insert(barrel, Matter::Empty);
         ed.world.insert(barrel, floptle_core::Parent(root));
         let docs = ed.subtree_docs(&[root]);
-        std::fs::write(
+        floptle_vfs::write(
             &path,
             ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap(),
         )
@@ -984,9 +984,9 @@ mod tests {
         assert!(ed.save_scene(), "saving a prefab must succeed");
 
         // In place: one file, and it is the one we opened.
-        let files: Vec<String> = std::fs::read_dir(dir.join("prefabs"))
+        let files: Vec<String> = floptle_vfs::read_dir(dir.join("prefabs"))
             .unwrap()
-            .flatten()
+            .iter()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(files, vec!["Turret.prefab.ron".to_string()], "a save must not make a SECOND prefab");
@@ -1009,8 +1009,8 @@ mod tests {
     #[test]
     fn opening_a_scene_leaves_prefab_editing() {
         let dir = std::env::temp_dir().join(format!("floptle_0090_exit_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join("prefabs"));
-        let _ = std::fs::create_dir_all(dir.join("scenes"));
+        let _ = floptle_vfs::create_dir_all(dir.join("prefabs"));
+        let _ = floptle_vfs::create_dir_all(dir.join("scenes"));
         let path = dir.join("prefabs").join("Crate.prefab.ron");
 
         let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
@@ -1019,7 +1019,7 @@ mod tests {
         ed.world.insert(root, Name("Crate".into()));
         ed.world.insert(root, Matter::Empty);
         let docs = ed.subtree_docs(&[root]);
-        std::fs::write(
+        floptle_vfs::write(
             &path,
             ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap(),
         )
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn an_emptied_prefab_is_not_written_over_itself() {
         let dir = std::env::temp_dir().join(format!("floptle_0090_empty_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join("prefabs"));
+        let _ = floptle_vfs::create_dir_all(dir.join("prefabs"));
         let path = dir.join("prefabs").join("Lamp.prefab.ron");
 
         let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
@@ -1051,12 +1051,12 @@ mod tests {
         let docs = ed.subtree_docs(&[root]);
         let authored =
             ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap();
-        std::fs::write(&path, &authored).unwrap();
+        floptle_vfs::write(&path, &authored).unwrap();
 
         ed.open_prefab_file(&path.to_string_lossy());
         ed.world = floptle_core::World::new(); // everything deleted
         assert!(!ed.save_scene(), "an empty prefab save must be refused");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), authored, "the file is untouched");
+        assert_eq!(floptle_vfs::read_to_string(&path).unwrap(), authored, "the file is untouched");
     }
 
     /// A HUD described with `ui.make`, over two Play sessions with a Stop in
@@ -1068,8 +1068,8 @@ mod tests {
     #[test]
     fn a_made_hud_comes_back_on_the_second_play() {
         let dir = std::env::temp_dir().join(format!("floptle_0061_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
+        let _ = floptle_vfs::create_dir_all(&dir);
+        floptle_vfs::write(
             dir.join("hud.lua"),
             "\
 function start(node)
@@ -1124,8 +1124,8 @@ end
     #[test]
     fn a_busy_hud_comes_back_too() {
         let dir = std::env::temp_dir().join(format!("floptle_0061_busy_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
+        let _ = floptle_vfs::create_dir_all(&dir);
+        floptle_vfs::write(
             dir.join("hud.lua"),
             "\
 local ticks = 0
@@ -1210,10 +1210,10 @@ end
     #[test]
     fn work_queued_on_the_last_frame_of_a_session_does_not_land_in_the_next_one() {
         let dir = std::env::temp_dir().join(format!("floptle_0061_q_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         // `parent` is the HUD layer's index in THIS session. Next session that
         // index belongs to whatever the fresh world hands it to.
-        std::fs::write(
+        floptle_vfs::write(
             dir.join("spawner.lua"),
             "function update(node, dt)\n  createNode('Tile', node, function(n) n.y = 3 end)\nend\n",
         )

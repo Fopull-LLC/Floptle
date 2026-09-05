@@ -9,7 +9,12 @@
 mod fetch;
 mod manifest;
 
-pub use fetch::{download, fetch_manifest, is_github_host, set_executable, unpack, verify_sha256};
+pub use fetch::{is_github_host, set_executable};
+// The two that reach the network and the two that read an archive off a disk.
+// A browser has no answer for any of them — and no use for one: a web export
+// is served, not downloaded and unpacked by a Hub.
+#[cfg(not(target_arch = "wasm32"))]
+pub use fetch::{download, fetch_manifest, unpack, verify_sha256};
 pub use manifest::{Artifact, Manifest, PreId, ReleaseInfo, version_key};
 
 /// The manifest that lists installable engine versions. Lives on the PUBLIC
@@ -25,6 +30,15 @@ pub const DEFAULT_MANIFEST_URL: &str =
 /// game can be exported for.
 pub const PLATFORMS: &[&str] =
     &["linux-x86_64", "windows-x86_64", "macos-aarch64", "macos-x86_64"];
+
+/// The artifact key of the browser build. Not in [`PLATFORMS`]: those are
+/// engines the Hub can install, and a browser build is a template an export
+/// ships, not a program this machine runs.
+pub const WEB_PLATFORM: &str = "web";
+
+/// The file whose presence means a web template is complete: the wasm module
+/// wasm-bindgen wrote, under `pkg/`, beside the `.js` glue and the page.
+pub const WEB_TEMPLATE_MARKER: &str = "pkg/floptle_web_bg.wasm";
 
 /// The platform target key ("linux-x86_64", "macos-aarch64", "windows-x86_64", …) — matches
 /// the artifact keys the release pipeline emits (docs/updating-the-hub.md §3.1). `cfg!` is a
@@ -55,6 +69,7 @@ pub fn label_for(platform: &str) -> &'static str {
         "windows-x86_64" => "Windows (x86_64)",
         "macos-aarch64" => "macOS (Apple Silicon)",
         "macos-x86_64" => "macOS (Intel)",
+        WEB_PLATFORM => "Web (browser)",
         _ => "unknown platform",
     }
 }
@@ -88,6 +103,36 @@ pub fn template_dir(data: &std::path::Path, version: &str, platform: &str) -> st
 /// The engine binary inside an unpacked template.
 pub fn template_binary(data: &std::path::Path, version: &str, platform: &str) -> std::path::PathBuf {
     template_dir(data, version, platform).join(editor_bin_name_for(platform))
+}
+
+/// The PLAYER binary's name inside a bundle, for `platform`.
+///
+/// A bundle carries two binaries: the editor, which the Hub runs, and the
+/// player, which **File ⏵ Export Game…** ships. They are separate programs —
+/// the player has no authoring half compiled into it at all — so an export
+/// cannot be served by renaming the editor.
+pub fn player_bin_name_for(platform: &str) -> String {
+    format!("floptle-player{}", exe_suffix_for(platform))
+}
+
+/// The file that proves an unpacked template for `platform` is whole — the
+/// player binary, or for the web the wasm module. An export refuses a template
+/// missing it by name rather than shipping half a build.
+pub fn template_marker(data: &std::path::Path, version: &str, platform: &str) -> std::path::PathBuf {
+    if platform == WEB_PLATFORM {
+        template_dir(data, version, platform).join(WEB_TEMPLATE_MARKER)
+    } else {
+        template_player_binary(data, version, platform)
+    }
+}
+
+/// The player binary inside an unpacked template — what an exported build ships.
+pub fn template_player_binary(
+    data: &std::path::Path,
+    version: &str,
+    platform: &str,
+) -> std::path::PathBuf {
+    template_dir(data, version, platform).join(player_bin_name_for(platform))
 }
 
 #[cfg(test)]

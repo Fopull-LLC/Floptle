@@ -106,7 +106,7 @@ impl ScriptMeta {
 /// mtime-keyed cache: the Inspector asks for this every frame, per selected node.
 #[derive(Default)]
 pub(crate) struct ScriptMetaCache {
-    entries: HashMap<PathBuf, (std::time::SystemTime, ScriptMeta)>,
+    entries: HashMap<PathBuf, (floptle_core::time::SystemTime, ScriptMeta)>,
 }
 
 impl ScriptMetaCache {
@@ -115,17 +115,17 @@ impl ScriptMetaCache {
     /// falls back to the plain, un-annotated rendering).
     pub(crate) fn get(&mut self, project_root: &Path, kind: &str) -> &ScriptMeta {
         let path = project_root.join("scripts").format_lua(kind);
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&path);
         let stale = match (self.entries.get(&path), mtime) {
             (Some((seen, _)), Some(now)) => *seen != now,
             (Some(_), None) => true,
             (None, _) => true,
         };
         if stale {
-            let src = std::fs::read_to_string(&path).unwrap_or_default();
+            let src = floptle_vfs::read_to_string(&path).unwrap_or_default();
             let meta = parse(&src);
             self.entries
-                .insert(path.clone(), (mtime.unwrap_or(std::time::UNIX_EPOCH), meta));
+                .insert(path.clone(), (mtime.unwrap_or(floptle_core::time::UNIX_EPOCH), meta));
         }
         &self.entries.get(&path).expect("just inserted").1
     }

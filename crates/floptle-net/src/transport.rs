@@ -75,6 +75,15 @@ pub trait Transport: Send {
     fn send(&mut self, peer: PeerId, channel: Channel, bytes: &[u8]);
     fn poll(&mut self) -> Vec<Incoming>;
     fn stats(&self, peer: PeerId) -> LinkStats;
+
+    /// Close a peer's link from this end (a kick — `floptle/0183`).
+    ///
+    /// Defaulted to nothing, because it is genuinely optional: the session
+    /// removes the peer from its own roster either way, so a transport that
+    /// cannot hang up leaves a socket open talking to nobody rather than a
+    /// player still in the game. Implement it where the transport can, so the
+    /// kicked client stops paying for a connection it is no longer part of.
+    fn disconnect(&mut self, _peer: PeerId) {}
 }
 
 /// A boxed transport is a transport — what lets a wrapper such as
@@ -88,6 +97,9 @@ impl Transport for Box<dyn Transport> {
     }
     fn stats(&self, peer: PeerId) -> LinkStats {
         (**self).stats(peer)
+    }
+    fn disconnect(&mut self, peer: PeerId) {
+        (**self).disconnect(peer);
     }
 }
 
@@ -281,6 +293,16 @@ impl Transport for MemoryTransport {
             rtt_ms: 2.0 * s.latency_ticks as f32 * 1000.0 / s.tick_hz,
             loss: s.loss,
         }
+    }
+
+    fn disconnect(&mut self, peer: PeerId) {
+        // The leave is queued; the peer's INBOX is left alone. A kick sends the
+        // reason and then hangs up, and wiping the mail on the way out would
+        // deliver the hangup and drop the explanation — which is the exact
+        // failure a kick with a reason exists to remove. (The harness's own
+        // leave button still clears it: a client discarding its OWN mail on the
+        // way out is a different act from a server hanging up on it.)
+        self.state.lock().unwrap().pending_leaves.push_back(peer);
     }
 }
 

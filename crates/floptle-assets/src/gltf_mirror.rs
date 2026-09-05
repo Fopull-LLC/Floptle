@@ -113,7 +113,7 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
 
     let bytes = write_glb(&out_nodes, &[], &textures);
     let output = model_path.with_extension("mirrored.glb");
-    std::fs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
+    floptle_vfs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
     report.output = output;
     Ok(report)
 }

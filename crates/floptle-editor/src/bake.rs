@@ -179,7 +179,7 @@ pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     // until the answer is in. A bake that never returns would be a worker that
     // panicked, and the job would be gone with it — which `nav_job` going
     // `None` without a mesh reports as the ordinary "nothing walkable" line.
-    let started = std::time::Instant::now();
+    let started = floptle_core::time::Instant::now();
     while ed.nav_job.is_some() {
         ed.poll_nav_bake();
         if started.elapsed() > std::time::Duration::from_secs(60 * 30) {

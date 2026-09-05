@@ -68,6 +68,49 @@ jobs:
       - name: test
         run: cargo test --workspace --all-targets
 
+      # **The configuration an export actually ships.** `floptle-player` builds
+      # the engine WITHOUT `editor-ui`, so egui, the dock, the Inspector, the
+      # file pickers and the command line are not compiled into a game at all.
+      # Nothing above this line covers it: the workspace build turns the feature
+      # ON, so a change that quietly reaches for the authoring half from the
+      # engine half passes every other gate here and fails at release time,
+      # which is the one place it costs a tag.
+      #
+      # `--all-targets`, so the tests are held to the same line as the code. The
+      # editor-only test modules carry `#[cfg(feature = "editor-ui")]` for
+      # exactly this reason.
+      - name: player build (no editor-ui)
+        run: |
+          cargo clippy -p floptle-editor -p floptle-player \
+            --no-default-features --features floptle-editor/vm-luau \
+            --all-targets -- -D warnings
+
+      # **The browser target.** The engine library builds for
+      # `wasm32-unknown-unknown` with every platform-specific dependency (QUIC,
+      # the OS keyring, blocking HTTP, the FBX importer, the dedicated server,
+      # the clipboard, the file manager) behind a target gate with a browser
+      # answer or a refusal that says why — and, since the web export shipped,
+      # with its files coming from `floptle-vfs`, its clock from
+      # `floptle_core::time`, and its background work through `worker::spawn`.
+      #
+      # A type-check cannot see any of that rot back: `std::fs::read` compiles
+      # for wasm and fails at runtime, `Instant::now()` compiles and panics,
+      # `thread::spawn` compiles and panics. So this is clippy under
+      # `tools/web/clippy.toml`, which makes each of those a lint ERROR on this
+      # target only. A `std::fs` call added anywhere in the engine half fails
+      # here, by name, rather than in a player's tab.
+      #
+      # The WASI SDK is what compiles Luau's C++ for the target (the build
+      # script runs under `clippy` as under `check`); `tools/web/env.sh`
+      # fetches and pins it.
+      - name: wasm32 lint (engine library only)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          . tools/web/env.sh
+          CLIPPY_CONF_DIR=tools/web cargo clippy -p floptle-editor --no-default-features \
+            --features vm-luau --target wasm32-unknown-unknown \
+            -- -D warnings -D clippy::disallowed-methods -D clippy::disallowed-types
+
       # `--all-targets` skips doc-tests entirely, which is easy to forget and
       # means a broken example in a doc comment ships.
       - name: doc tests
@@ -214,3 +257,35 @@ jobs:
         run: |
           bash scripts/vm.sh luajit test -p floptle-script --test vm_dialect
           cargo test -p floptle-script --test vm_dialect
+
+  web:
+    # The browser build compiles and LINKS on every push (docs/web-export.md
+    # step 4). Not run — there is no WebGPU on a runner — but a link is the
+    # step that fails when the C++ side drifts: Luau's exceptions through the
+    # WASI SDK's runtime, the WASI shims in `floptle-web/src/wasi.rs` naming
+    # exactly the imports libc reaches for, and `__wasm_call_ctors` referenced
+    # so the linker does not wrap every export in the constructors. The ladder
+    # itself runs on a machine with a browser: `tools/web/build.sh` then
+    # `tools/web/shot.py --display`.
+    #
+    # The SDK is 130 MB and downloaded per run; `tools/web/env.sh` does it and
+    # pins the version. wasm-bindgen is NOT installed here on purpose — the
+    # link is the gate, the JS glue is a formality it would add minutes for.
+    name: browser build (compile + link)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - name: build for wasm32-unknown-unknown
+        run: |
+          . tools/web/env.sh
+          cargo build -p floptle-web --profile web --target wasm32-unknown-unknown
+      - name: the module imports nothing from WASI
+        run: |
+          python3 tools/web/imports.py "$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/wasm32-unknown-unknown/web/floptle_web.wasm"

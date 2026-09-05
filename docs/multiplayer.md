@@ -391,6 +391,48 @@ Same `World`, same `Sim`, same scripts, no window and no GPU. It hosts
 design — a rollback match has every peer simulating every tick, so its "host" is
 a referee and a relay, and for a fighting game that is one of the players.
 
+**Player slots on a dedicated server.** In a hosted session, authored
+`Predicted` node #1 belongs to the host and #2 onward to joiners, because
+somebody is sitting at slot #1's keyboard. A dedicated server has nobody — so
+there it hands slots out **from #1**, in node order, as players join, and frees
+them when they leave. Reserving #1 would leave a body in the world that no
+client predicts and no input drives, and the first player to join would spectate
+their own avatar.
+
+Two rules keep that out of your way: a slot your own script assigns is never
+reassigned, and a peer that already owns something is never handed a second.
+Do it yourself with `net.setOwner(node, peer)` — which is also how a player who
+dropped gets their *own* slot back on reconnect rather than whichever one
+happened to be free:
+
+```lua
+net.on("playerJoined", function(peer)
+  local slot = slotFor(peer)                  -- your own reconnect bookkeeping
+  if slot then net.setOwner(slot, peer) end
+end)
+
+net.on("playerLeft", function(peer)
+  local slot = slotFor(peer)
+  if slot then net.setOwner(slot, nil) end    -- free the slot, keep the body
+end)
+```
+
+**Or skip authored slots entirely.** `net.spawn` sends the whole subtree, so a
+player rig — capsule, camera child, arms mesh, bone-attached item socket — goes
+over the wire as one thing:
+
+```lua
+net.on("playerJoined", function(peer)
+  net.spawn("mp/Survivor", { owner = peer, y = 2.5 })
+end)
+```
+
+That is the shape to prefer: authored slots cap the lobby at whatever the scene
+was built with, which for a ranked mode is a product limit set by a build step.
+Only the root replicates; children are local nodes that follow it, and their
+scripts run on every peer. `net.despawn(root)` takes the subtree away
+everywhere, and a peer leaving despawns what it owned.
+
 **Interest management** — the player-count feature. Off by default, because
 below a few dozen players broadcasting is cheaper and simpler:
 
@@ -407,6 +449,127 @@ means the budget is too small for the scene.
 For the few things every player must agree on from anywhere — the match clock,
 the objective, the boss — tick **always relevant** on that node's Networked
 component.
+
+### A radius is not a security boundary
+
+Interest management was built to save bandwidth, and for an open-world game that
+is all it needs to be. For a **hidden-role or competitive** game it is worth
+being blunt about what a radius does and does not buy: a client that has been
+told where everyone within 25 m is standing *knows* where they are. It does not
+have to draw them. Every mitigation on the client — hiding the node, muting the
+sound, not rendering the marker — is a setting a modified client turns back off,
+and in a game where knowing someone's position is the whole contest, that is the
+difference between a mode that can ship competitively and one that cannot.
+
+Tightening the radius bounds the leak; it does not remove one. Two server-side
+answers do, and they compose:
+
+**Line of sight.** Opt in per session, on top of the radius, naming the layer
+your walls are on:
+
+```lua
+net.host{ interest = 25, interestOcclusion = "Level" }
+```
+
+A node whose line to the client's avatar is blocked by that layer is not
+relevant to it. Only that layer blocks — a trigger volume, a water surface and
+another player's capsule are all "in the way" and none of them is a wall. Losing
+sight is damped by a few snapshots, so a body behind a door frame does not
+flicker; regaining it is **immediate**, because a player stepping out of cover
+has to be there on the frame they step out. It costs one ray per candidate per
+client per snapshot, which is why it is off by default.
+
+**Your own rule.** `net.setRelevant(node, peer, bool)` decides one (client, node)
+pair outright, and outranks both tests:
+
+```lua
+net.setRelevant(killer, survivorPeer, false)   -- withhold
+net.setRelevant(objective, peer, true)         -- pin, at any distance
+net.setRelevant(killer, survivorPeer, nil)     -- back to the tests
+```
+
+Two things it cannot do, on purpose: a client is always told about **its own
+avatar** (prediction reconciles against it, so hiding it would produce a player
+who cannot see themselves) and about anything flagged *always relevant*.
+
+Losing relevance behaves as it always has — a scene-authored node stops being
+updated and is sent in full on re-entry, never despawned. The 🌐 panel shows,
+per client, how many nodes are being withheld and by which rule, so "is my
+filter working" is a number rather than a hope.
+
+What this is not: encryption, obfuscation, or a client-integrity check. It is
+the narrow thing — the server decides who is told about what.
+
+---
+
+## 6b. Running a public server
+
+A server anyone can reach needs two things a friends-and-a-lobby-code session
+never did: to know **who** a peer is, and to be able to do something about it.
+
+### Kicking
+
+```lua
+net.kick(peer, "griefing the objective")
+```
+
+Server only. The reason goes out **before** the link closes, so the removed
+player's UI can say what happened rather than showing the generic "connection
+lost" that every unexplained drop produces. On their machine
+`net.on("kicked", fn)` fires with it; on everyone else's, `playerLeft` carries
+it as a second argument. The roster entry goes immediately, so a client that
+ignores the message is off the session regardless — its traffic is dropped, not
+merely discouraged.
+
+Kicking is not banning. Without a stable identity a kick lasts exactly until the
+offender reconnects.
+
+### Identity
+
+A signed-in client presents its account claim in the join handshake — subject
+id, display name, tier. The server records it and `net.identity(peer)` reports
+it:
+
+```lua
+local who = net.identity(peer)   -- { id, name, tier, verified }
+```
+
+`id` is the account's stable subject: the same across sessions and machines,
+which is what lets a returning player be recognised, a ban outlive a reconnect,
+and a statistic be attributed to somebody.
+
+**Anonymous play is a normal state.** A LAN or friends game with nobody signed
+in works exactly as it always has; such a peer has no `id` and `verified` is
+`false`. A server that wants an account says so:
+
+```lua
+net.host{ requireIdentity = true,
+          deny  = { "user_griefer" },     -- refused at the door
+          allow = { "user_a", "user_b" }} -- if non-empty, invite-only
+```
+
+All three are consulted **before** the join is accepted, which is the difference
+between a ban and a chore. Refusals carry a reason the client can show. Every
+refusal and kick is printed by `floptle serve`, because a dedicated server has
+nobody watching a Console and a moderation action nobody can audit is not a
+moderation tool.
+
+### What `verified` means, and why it is false
+
+> **Today `net.identity(peer).verified` is `false` for every peer.** The engine
+> carries what a client *says* about itself. Turning that into an identity means
+> checking it with the provider, and doing that needs a credential scoped to the
+> server you are joining — a full-scope access token would let any server you
+> join spend your Fobucks and read your mail, so the engine deliberately does
+> not send one. `contracts/identity-auth.md` has no such credential yet; it is
+> filed as engine task `0184`.
+
+So: allow lists, deny lists and `requireIdentity` all work, and what they buy
+today is keeping out the careless rather than the determined. The engine reports
+its own confidence honestly instead of dressing an assertion up as proof,
+because a server operator *acts* on that flag — and a moderation tool that lies
+about how sure it is, is worse than none. When the credential lands, the same
+code starts seeing `verified = true` and nothing else changes.
 
 ---
 
@@ -443,6 +606,8 @@ failures the field can't produce.
 |---|---|
 | [scripting.md §16](scripting.md) | `net.*`, `synced`, `onRpc`, `net.rewind` — the full API |
 | [scripting.md §16b](scripting.md) | `snapshot`/`restore`, `net.random`, the rollback rules |
+| §6b above | `net.kick`, `net.identity`, allow/deny — running a server anyone can reach |
+| [scripting.md §16c](scripting.md) | `voice.*` — proximity voice chat, and why range gating is the server's job |
 | ADR-0022 | why open netcode with a self-hostable relay |
 | ADR-0025 | why rollback, and what it costs |
 | [export-builds.md](export-builds.md) | shipping a build that hosts and joins |

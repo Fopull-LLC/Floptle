@@ -143,10 +143,10 @@ impl VfxSystem {
         let root = project_root.to_path_buf();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            for entry in rd.flatten() {
+            let Ok(rd) = floptle_vfs::read_dir(&dir) else { continue };
+            for entry in rd {
                 let p = entry.path();
-                if p.is_dir() {
+                if entry.is_dir() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
                     if !name.starts_with('.') && name != "target" {

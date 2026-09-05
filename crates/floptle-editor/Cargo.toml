@@ -8,9 +8,31 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# The engine as a library: the World, the script host, the sim, the renderer
+# and the play loop. The editor binary below and the standalone player
+# (`floptle-player`) are both thin shells over it — see `src/lib.rs`.
+[lib]
+name = "floptle_editor"
+path = "src/lib.rs"
+
 [[bin]]
 name = "floptle"
 path = "src/main.rs"
+# The authoring application cannot be built without its own half. Declaring it
+# here means `--no-default-features` skips this target rather than failing to
+# compile it, which is what lets the player build the library alone.
+required-features = ["editor-ui"]
+
+# `glyph_probe` renders through the editor's real font stack — that is the whole
+# point of it — so it needs the authoring half like the binary does. Declared
+# rather than left implicit: an example carries no feature gate of its own, so
+# `--all-targets` in the player configuration would try to build it and fail on
+# a missing `egui` with nothing to say why. The other three examples are engine
+# probes and build either way.
+[[example]]
+name = "glyph_probe"
+path = "examples/glyph_probe.rs"
+required-features = ["editor-ui"]
 
 [features]
 # The script VM, forwarded rather than chosen — exactly one. This crate embeds
@@ -18,7 +40,29 @@ path = "src/main.rs"
 # agree or mlua links two Luas. `default-features = false` on the forwarded
 # dependencies is what makes `--features vm-luajit` mean LuaJIT instead of
 # LuaJIT *and* Luau. See `floptle-script/src/vm.rs` and ADR-0028.
-default = ["vm-luau"]
+default = ["vm-luau", "editor-ui"]
+# **The authoring application.** Off, this crate is just the engine: the World,
+# the script host, the sim, the renderer and the play loop — everything a
+# shipped game runs and nothing it does not. `floptle-player` builds without
+# it, so egui, the dock, the Inspector, the asset browser, the OS file pickers
+# and the command line are not merely unreachable in a build, they are not
+# compiled into it.
+#
+# This is the seam that makes an export a real game binary rather than the
+# editor with its chrome hidden, and it is the same seam the browser build
+# needs — every dependency below is one a browser has no answer for.
+editor-ui = [
+    "dep:floptle-convert",
+    "dep:ureq",
+    "dep:egui",
+    "dep:egui-wgpu",
+    "dep:egui-winit",
+    "dep:egui_dock",
+    "dep:skrifa",
+    "dep:rfd",
+    "dep:tokio",
+    "dep:clap",
+]
 vm-luajit = ["floptle-script/vm-luajit", "floptle-runtime/vm-luajit", "mlua/luajit", "mlua/vendored"]
 vm-luau = ["floptle-script/vm-luau", "floptle-runtime/vm-luau", "mlua/luau"]
 # Luau's code generator on the architectures that have one (x64/aarch64, never
@@ -55,7 +99,15 @@ floptle-rules = { path = "../floptle-rules" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
-floptle-convert = { path = "../floptle-convert" } # FBX/OBJ/STL/PLY -> .glb, from the Assets browser
+# Files go through the engine's filesystem: std::fs on the desktop, the game's
+# bundle in a browser. The browser CI lint refuses `std::fs` in the engine half.
+floptle-vfs = { path = "../floptle-vfs" }
+# **Authoring, not runtime.** Importing an FBX is something you do to a project
+# in the editor; a shipped game loads the .glb that came out. Gating it behind
+# `editor-ui` keeps ufbx — a C library, built by `cc` — out of the player
+# altogether, and out of any build for a target with no C toolchain pointed at
+# it, which is what a browser build is.
+floptle-convert = { path = "../floptle-convert", optional = true } # FBX/OBJ/STL/PLY -> .glb, from the Assets browser
 floptle-image = { path = "../floptle-image" }   # image documents behind the 🖼 Image tab
 floptle-script = { path = "../floptle-script", default-features = false }
 getrandom = "0.2"
@@ -70,8 +122,11 @@ floptle-account = { path = "../floptle-account" }
 # crate's own — the Inspector converts scene values through serde.
 mlua = { version = "0.10", features = ["serialize"] }
 serde_json = { workspace = true } # the registry catalogue + an extension's json.*
-clap = { workspace = true }       # the command line — ADR-0027 (builder, not derive)
-ureq = { workspace = true }       # edit-time http.* for extensions that declared Network
+clap = { workspace = true, optional = true } # the command line — ADR-0027 (builder, not derive)
+# Edit-time `http.*` for extensions that declared Network, the package registry
+# and its thumbnails — all three of them authoring surfaces, so the dependency
+# follows the authoring half rather than the engine.
+ureq = { workspace = true, optional = true }
 # Decoding package thumbnails for the 📦 catalogue grid (crates/.../pkg_thumbs.rs).
 image = { workspace = true }
 
@@ -80,20 +135,20 @@ wgpu = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-egui = { workspace = true }
+egui = { workspace = true, optional = true }
 # Reading the bundled fonts' character maps directly — the only reliable answer
 # to "will this icon draw?" (see `icons.rs`), and what `gui.hasGlyph` answers
 # with. Same crate epaint resolves glyphs with, so it is already in the graph.
-skrifa = "0.42"
-egui-wgpu = { workspace = true }
-egui-winit = { workspace = true }
-egui_dock = { workspace = true }
+skrifa = { version = "0.42", optional = true }
+egui-wgpu = { workspace = true, optional = true }
+egui-winit = { workspace = true, optional = true }
+egui_dock = { workspace = true, optional = true }
 # The OS clipboard's IMAGE side. egui-winit already pulls this in for text, but
 # only exposes the text half — pasting a screenshot or a browser image into the
 # 🖼 tab needs `get_image`/`set_image`, so the editor names it directly. Same
 # version and the same feature set egui-winit asks for, so it is one build of
 # one crate either way.
-arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+
 ron = { workspace = true }
 serde = { workspace = true }
 floptle-net = { path = "../floptle-net" }
@@ -103,13 +158,32 @@ floptle-net = { path = "../floptle-net" }
 floptle-runtime = { path = "../floptle-runtime", default-features = false }
 # Native file picker for asset import — the XDG desktop portal backend works on
 # Wayland (where winit delivers no file drops) as well as X11/Windows/macOS.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
-tokio = { version = "1", features = ["rt", "net", "time"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
 
 # One call, for one reason: restoring the DEFAULT SIGPIPE disposition on the
 # command-line verbs. Rust ignores SIGPIPE, so `floptle inspect … | head` makes
 # `println!` fail, panic, and — because the editor files a crash report on panic
 # — tell somebody to open a GitHub issue about having used `head`. See `cli.rs`.
+# **The browser build's randomness.** `getrandom` 0.2 has no default source on
+# `wasm32-unknown-unknown` — there is no OS to ask — and says so as a build
+# error naming its own docs rather than this engine. Its `js` backend routes to
+# `crypto.getRandomValues`. Target-gated, so no desktop build grows a JS
+# dependency for it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The OS clipboard's IMAGE side for the editor, and a build's only clipboard.
+# Target-gated: a browser's clipboard is an async, permissioned API of its own,
+# which `arboard` does not speak and cannot be compiled against.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+# The browser player (`player::web`): the GPU device request is async in a
+# page, and the window is a canvas the page already holds.
+wasm-bindgen = "0.2.126"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "console"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

@@ -135,23 +135,23 @@ pub(crate) fn install_terrain_api(
                 )));
             }
             let dir = root.borrow().join(&path);
-            let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+            let Ok(entries) = floptle_vfs::read_dir(&dir) else { return Ok(0) };
             let mut removed = 0u32;
-            for entry in entries.flatten() {
+            for entry in entries {
                 let p = entry.path();
                 let terrain_file = p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
                     matches!(x, "cfield" | "tfield" | "meta")
                 });
-                if terrain_file && std::fs::remove_file(&p).is_ok() {
+                if terrain_file && floptle_vfs::remove_file(&p).is_ok() {
                     removed += 1;
                 }
             }
             // Tidy up: the dir if now empty, then ITS parent if that emptied too
             // (a game's saves/<slot>/terrain layout leaves saves/<slot> behind).
-            if std::fs::remove_dir(&dir).is_ok()
+            if floptle_vfs::remove_dir(&dir).is_ok()
                 && let Some(parent) = dir.parent()
             {
-                let _ = std::fs::remove_dir(parent);
+                let _ = floptle_vfs::remove_dir(parent);
             }
             Ok(removed)
         }) {

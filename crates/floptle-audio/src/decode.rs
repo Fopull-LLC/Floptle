@@ -2,7 +2,7 @@
 //! Decode happens once on the control side (load or first play); the audio
 //! thread only ever sees ready `Clip`s.
 
-use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
@@ -27,8 +27,10 @@ pub fn is_audio_path(path: &Path) -> bool {
 /// Decode an entire audio file into a clip. Sources with more than two
 /// channels keep their front left/right pair.
 pub fn load_clip(path: &Path) -> Result<Clip, String> {
-    let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    // The whole file, then decode from memory: a clip is read once and kept,
+    // and the bytes are what a browser build can hand over.
+    let bytes = floptle_vfs::read(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -97,6 +99,7 @@ pub fn load_clip(path: &Path) -> Result<Clip, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     /// Minimal 16-bit PCM WAV writer for the test fixture.

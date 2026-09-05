@@ -1,0 +1,46 @@
+[package]
+name = "floptle-web"
+version.workspace = true
+edition.workspace = true
+description = "The browser build of the engine: a wasm module that runs the scripting VM and the renderer on a canvas"
+publish = false
+
+[lib]
+# `cdylib` is what wasm-bindgen consumes; `rlib` keeps the pure parts (the
+# probe's rig, the WASI shims' arithmetic) testable on the desktop.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `default-features = false`: floptle-render's default is a script VM for its
+# own tests only (ADR-0028); carrying it here would put a second VM in the
+# graph of anything that selects the other one.
+floptle-render = { path = "../floptle-render", default-features = false }
+glam = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+
+# Everything below exists only in the browser. Cargo's resolver ignores a
+# target-specific dependency's features when that target is not being built,
+# so `mlua/luau` here cannot collide with the desktop's VM switch — and the
+# `vm-luajit` escape hatch (one release, then gone) still builds the workspace.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The engine, with the editor half compiled out — exactly what `floptle-player`
+# is on the desktop (see crates/floptle-player/Cargo.toml). `play()` below is
+# the browser's `run_player`.
+floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau"] }
+# The game's files: the bundle the page fetched, mounted before the engine
+# reads a byte.
+floptle-vfs = { path = "../floptle-vfs" }
+# The probe's shader census compiles the shipped `.flsl` examples the way a
+# game's own shader is compiled, and hands the result to the browser.
+floptle-shader = { path = "../floptle-shader" }
+log = { workspace = true }
+# The probe drives the VM directly. The version and feature match
+# floptle-script's `vm-luau` exactly, so this is the same Luau the game runs.
+mlua = { version = "0.10", features = ["luau"] }
+wasm-bindgen = "0.2.126"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Performance", "console",
+] }

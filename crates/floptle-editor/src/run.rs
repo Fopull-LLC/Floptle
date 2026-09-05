@@ -353,7 +353,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // The clock BEFORE the step, so the step can be asked afterwards whether
         // it was a frame of the game or a frame of the loading hold.
         let was = ed.play_t;
-        let began = std::time::Instant::now();
+        let began = floptle_core::time::Instant::now();
         // The streaming half of a frame, which this loop is otherwise missing.
         // Without it the Play-start terrain hold never lifts, and a held session
         // is a PAUSED one: no fixed tick, so no rails, no physics, and a `dt` of

@@ -614,7 +614,7 @@ use crate::SceneError;
 use std::path::Path;
 
 pub fn load_vfx_effect(path: &Path) -> Result<VfxEffectDoc, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
     let mut doc: VfxEffectDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
     for t in &mut doc.tracks {
         upgrade_rotation(&mut t.rotation); // legacy scalar spin → Vec3 Euler
@@ -625,11 +625,11 @@ pub fn load_vfx_effect(path: &Path) -> Result<VfxEffectDoc, SceneError> {
 
 pub fn save_vfx_effect(doc: &VfxEffectDoc, path: &Path) -> Result<(), SceneError> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = floptle_vfs::create_dir_all(dir);
     }
     let text = ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 #[cfg(test)]

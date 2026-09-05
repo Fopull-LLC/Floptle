@@ -85,7 +85,7 @@ pub struct SkinStream {
 /// and throw the identities away. Only a lone single-mesh prop (nothing to parent
 /// or animate independently) takes the cheaper flattening path.
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
-    let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
+    let (doc, buffers, images) = crate::gltf_import::read_gltf(path, true)?;
     // Keep the structure if the file is animated OR skinned (a rig authored
     // elsewhere, clips to be keyed IN-ENGINE — the astronaut_male case) OR it has
     // two or more mesh objects (the multi-part unrigged character — Sae). A single

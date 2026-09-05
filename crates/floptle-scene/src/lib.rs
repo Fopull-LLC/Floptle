@@ -2832,7 +2832,7 @@ impl std::error::Error for SceneError {}
 
 /// Parse a scene from a RON file.
 pub fn load(path: &Path) -> Result<SceneDoc, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
     from_ron(&text)
 }
 
@@ -2911,7 +2911,7 @@ mod migrate_tests {
 /// Serialize a scene to a pretty RON file.
 pub fn save(doc: &SceneDoc, path: &Path) -> Result<(), SceneError> {
     let text = to_ron(doc)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 /// Serialize a scene to pretty RON text.
@@ -3312,14 +3312,14 @@ impl MaterialDoc {
 /// Scan `dir` for `*.ron` materials, returning (name, material) sorted by name.
 pub fn load_materials(dir: &Path) -> Vec<(String, MaterialDoc)> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
-    for entry in rd.flatten() {
+    let Ok(rd) = floptle_vfs::read_dir(dir) else { return out };
+    for entry in rd {
         let p = entry.path();
         if p.extension().and_then(|e| e.to_str()) != Some("ron") {
             continue;
         }
         let Some(name) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
-        if let Ok(mat) = std::fs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose()
+        if let Ok(mat) = floptle_vfs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose()
             && let Some(mat) = mat {
                 out.push((name, mat));
             }
@@ -3330,10 +3330,10 @@ pub fn load_materials(dir: &Path) -> Vec<(String, MaterialDoc)> {
 
 /// Write a material to `dir/<name>.ron`.
 pub fn save_material(name: &str, mat: &MaterialDoc, dir: &Path) -> Result<(), SceneError> {
-    let _ = std::fs::create_dir_all(dir);
+    let _ = floptle_vfs::create_dir_all(dir);
     let text = ron::ser::to_string_pretty(mat, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(dir.join(format!("{name}.ron")), text).map_err(SceneError::Io)
+    floptle_vfs::write(dir.join(format!("{name}.ron")), text).map_err(SceneError::Io)
 }
 
 /// Load the project-wide render config, or the default if the file is missing.
@@ -3357,7 +3357,7 @@ pub fn load_project(path: &Path) -> ProjectConfigDoc {
 /// absent, `Ok(Some(cfg))` = present + parsed, `Err` = present but won't parse. Lets a
 /// migrate/upgrade step avoid clobbering a broken config or fabricating a missing one.
 pub fn try_load_project(path: &Path) -> Result<Option<ProjectConfigDoc>, SceneError> {
-    match std::fs::read_to_string(path) {
+    match floptle_vfs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(SceneError::Io(e)),
         Ok(text) => ron::from_str(&text).map(Some).map_err(SceneError::Ron),
@@ -3368,7 +3368,7 @@ pub fn try_load_project(path: &Path) -> Result<Option<ProjectConfigDoc>, SceneEr
 pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneError> {
     let text = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 /// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,
@@ -3390,6 +3390,60 @@ pub fn resolve_parent(
     by_id: &std::collections::HashMap<u32, usize>,
 ) -> Option<usize> {
     node.parent_id.and_then(|id| by_id.get(&id).copied()).or(node.parent)
+}
+
+/// One node and everything under it, lifted out of a document as a standalone
+/// subtree — root first, parent links renumbered against the returned vector,
+/// and the root detached from whatever it hung off.
+///
+/// This is what makes a *replicated* spawn a whole rig rather than one node
+/// (floptle/0181): the same vector goes to the server's world and down the wire,
+/// so both ends spawn the identical hierarchy in the identical order.
+///
+/// Both parent spellings are rewritten. `parent_id` still names a node and the
+/// subtree carries those ids with it, but a node whose only link is the
+/// positional `parent` would otherwise point at whatever now sits at that index
+/// in a shorter vector — a valid link to the wrong node, which is exactly the
+/// failure [`NodeDoc::parent_id`] exists to prevent.
+pub fn subtree_from(nodes: &[NodeDoc], root: usize) -> Vec<NodeDoc> {
+    if root >= nodes.len() {
+        return Vec::new();
+    }
+    let by_id = node_id_positions(nodes);
+    let parents: Vec<Option<usize>> =
+        nodes.iter().map(|n| resolve_parent(n, &by_id)).collect();
+    // Breadth-first so a parent is always written before its children, which is
+    // what lets the renumbered indices only ever point backwards.
+    let mut order = vec![root];
+    let mut i = 0;
+    while i < order.len() {
+        let at = order[i];
+        for (k, p) in parents.iter().enumerate() {
+            // `p == Some(k)` is a node parented to itself: skip it rather than
+            // loop forever on a hand-edited file.
+            if *p == Some(at) && k != at && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        i += 1;
+    }
+    let new_index: std::collections::HashMap<usize, usize> =
+        order.iter().enumerate().map(|(new, &old)| (old, new)).collect();
+    order
+        .iter()
+        .map(|&old| {
+            let mut doc = nodes[old].clone();
+            match parents[old].and_then(|p| new_index.get(&p).copied()) {
+                Some(p) if old != root => doc.parent = Some(p),
+                _ => {
+                    doc.parent = None;
+                    doc.parent_id = None;
+                    doc.attachment = None;
+                }
+            }
+            doc
+        })
+        .collect()
 }
 
 /// Everything wrong with a scene's parent wiring that can be seen from the file
@@ -3941,6 +3995,48 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
+    /// floptle/0181 — a subtree lifted out of a document must carry its own
+    /// wiring, not the document's.
+    ///
+    /// The positional `parent` is the trap: it names an INDEX, so a child of
+    /// node 4 that becomes node 1 of a three-node rig still points at 4 — which
+    /// in a shorter vector is either out of range or, worse, a different node
+    /// entirely. That link is always *valid*, which is why nothing catches it
+    /// downstream: the rig simply assembles wrong on every client.
+    #[test]
+    fn lifting_a_subtree_renumbers_its_positional_parents() {
+        let node = |name: &str, parent: Option<usize>| {
+            let mut d: super::NodeDoc = ron::from_str("()").unwrap();
+            d.name = name.into();
+            d.parent = parent;
+            d
+        };
+        // Two rigs in one file, the wanted one second — so every index shifts.
+        let doc = vec![
+            node("Decoy", None),
+            node("DecoyChild", Some(0)),
+            node("Player", None),
+            node("Camera", Some(2)),
+            node("Arms", Some(3)),
+        ];
+        let sub = super::subtree_from(&doc, 2);
+        let names: Vec<&str> = sub.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["Player", "Camera", "Arms"], "the root comes first, then its own");
+        assert_eq!(sub[0].parent, None, "the root is detached from what it hung off");
+        assert_eq!(sub[1].parent, Some(0), "Camera parents to Player at its NEW index");
+        assert_eq!(sub[2].parent, Some(1), "…and Arms to Camera, three deep");
+    }
+
+    /// A node parented to itself is a hand-edited file, not a reason to hang.
+    #[test]
+    fn a_self_parented_node_does_not_loop_forever() {
+        let mut d: super::NodeDoc = ron::from_str("()").unwrap();
+        d.name = "Loop".into();
+        d.parent = Some(0);
+        let sub = super::subtree_from(&[d], 0);
+        assert_eq!(sub.len(), 1);
+        assert_eq!(sub[0].parent, None);
+    }
 
     /// **A project that predates the setting keeps today's vector, and the
     /// answer gets WRITTEN DOWN.**
@@ -3953,10 +4049,10 @@ mod tests {
     #[test]
     fn an_existing_project_without_the_field_is_pinned_to_exact() {
         let dir = std::env::temp_dir().join(format!("floptle_vec3_pin_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let path = dir.join("project.ron");
         // A project.ron with no `script_vec3` — i.e. every project shipped so far.
-        std::fs::write(&path, "(retro: true, retro_height: 240)").unwrap();
+        floptle_vfs::write(&path, "(retro: true, retro_height: 240)").unwrap();
 
         let cfg = super::load_project(&path);
         assert_eq!(cfg.script_vec3_resolved(), super::ScriptVec3Doc::Exact);
@@ -3968,7 +4064,7 @@ mod tests {
 
         // And it survives the round trip it was pinned for.
         super::save_project(&cfg, &path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = floptle_vfs::read_to_string(&path).unwrap();
         assert!(text.contains("script_vec3"), "the pin never reached the file: {text}");
         assert_eq!(super::load_project(&path).script_vec3, Some(super::ScriptVec3Doc::Exact));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3979,7 +4075,7 @@ mod tests {
     #[test]
     fn a_missing_project_file_is_left_unpinned() {
         let path = std::env::temp_dir().join(format!("floptle_vec3_absent_{}", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let _ = floptle_vfs::remove_file(&path);
         let cfg = super::load_project(&path);
         assert_eq!(cfg.script_vec3, None, "nothing to be compatible with yet");
         // It still READS as exact, so no caller has to handle the absence.
@@ -3991,7 +4087,7 @@ mod tests {
     #[test]
     fn an_explicit_fast_survives_a_round_trip() {
         let dir = std::env::temp_dir().join(format!("floptle_vec3_fast_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let path = dir.join("project.ron");
         let cfg = ProjectConfigDoc {
             script_vec3: Some(super::ScriptVec3Doc::Fast),

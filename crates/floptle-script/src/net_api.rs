@@ -21,7 +21,18 @@ use crate::{LogLevel, ScriptLog};
 /// from every local test — `interestBudget` typo'd is a lobby that stutters for
 /// nobody who can reproduce it.
 pub(crate) const HOST_KEYS: &[&str] =
-    &["maxPlayers", "port", "relay", "interest", "interestBudget", "inputDelay"];
+    &[
+        "maxPlayers",
+        "port",
+        "relay",
+        "interest",
+        "interestBudget",
+        "interestOcclusion",
+        "inputDelay",
+        "requireIdentity",
+        "allow",
+        "deny",
+    ];
 pub(crate) const RPC_KEYS: &[&str] = &["to", "withInput"];
 pub(crate) const SPAWN_KEYS: &[&str] = &["x", "y", "z", "owner"];
 
@@ -45,6 +56,25 @@ pub enum NetCmd {
         /// `interestBudget = <bytes per second>` — per-client snapshot budget.
         /// Only meaningful alongside `interest`.
         interest_budget: Option<u32>,
+        /// `interestOcclusion = "Level"` — also require LINE OF SIGHT, tested
+        /// against that collision layer. Only meaningful alongside `interest`.
+        ///
+        /// A radius bounds a leak; it does not remove one. This is the part a
+        /// hidden-role or competitive game cannot write for itself, because
+        /// anything a client has already been sent is something a modified
+        /// client can look at. floptle/0182.
+        interest_occlusion: Option<String>,
+        /// `requireIdentity = true` — refuse anyone who presents no account
+        /// claim, with a reason their UI can show. Anonymous play is the
+        /// default: a LAN or friends game with nobody signed in has to keep
+        /// working exactly as it does. floptle/0183.
+        require_identity: bool,
+        /// `allow = { ids }` — if non-empty, ONLY these accounts may join.
+        allow: Vec<String>,
+        /// `deny = { ids }` — these accounts may never join. Consulted BEFORE
+        /// the join is accepted, because kicking someone every time they
+        /// reconnect is a chore, not a ban.
+        deny: Vec<String>,
         /// `inputDelay = <ticks>` — the rollback session's fixed input delay,
         /// clamped to `MAX_DELAY`. Absent = derive it from the worst peer's
         /// measured RTT at match start.
@@ -72,6 +102,15 @@ pub enum NetCmd {
     Spawn { path: String, pos: Option<[f64; 3]>, owner: Option<u64> },
     /// `net.despawn(node)` — server-only replicated despawn (entity index).
     Despawn { eid: u32 },
+    /// `net.setOwner(node, peer)` — server-only ownership reassignment;
+    /// `peer = nil` releases the node back to the server.
+    SetOwner { eid: u32, owner: Option<u64> },
+    /// `net.setRelevant(node, peer, bool)` — server-only per-client relevance
+    /// pin; `nil` hands the decision back to the radius and the sight test.
+    SetRelevant { eid: u32, peer: u64, relevant: Option<bool> },
+    /// `net.kick(peer, reason)` — server-only removal, with words that reach
+    /// the peer so its UI can say why rather than showing a generic drop.
+    Kick { peer: u64, reason: String },
 }
 
 /// This endpoint's role, mirrored to Lua.
@@ -117,6 +156,14 @@ pub struct NetState {
     pub role: NetRoleState,
     pub peers: Vec<u64>,
     pub rtt_ms: f32,
+    /// Server: who each connected peer is, for `net.identity(peer)`
+    /// (floptle/0183). Mirrored in like every other session fact rather than
+    /// queried, because a script reads it inside a tick and the session is
+    /// behind a borrow by then.
+    ///
+    /// `verified` is what matters: an unverified entry is what the CLIENT
+    /// said, and a game that bans on it is banning a string.
+    pub identities: std::collections::HashMap<u64, PeerIdentity>,
     /// Client: our peer id once welcomed (`net.isMine` needs it).
     pub my_peer: Option<u64>,
     /// Client: how the join attempt is going — `"connecting"`, `"joined"`, or
@@ -139,6 +186,17 @@ pub struct NetState {
     pub lobby_code: Option<String>,
 }
 
+/// One peer's account identity, mirrored to Lua.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerIdentity {
+    /// The account's stable subject id — `None` for an anonymous peer.
+    pub id: Option<String>,
+    pub name: String,
+    pub tier: String,
+    /// Checked with the provider? See [`crate::net_api::NetState::identities`].
+    pub verified: bool,
+}
+
 impl Default for NetState {
     fn default() -> Self {
         Self {
@@ -153,6 +211,7 @@ impl Default for NetState {
             join_state: "offline",
             join_error: None,
             lobby_code: None,
+            identities: std::collections::HashMap::new(),
         }
     }
 }
@@ -497,6 +556,8 @@ pub(crate) fn install_net_api(
             lua.create_function(move |_, opts: Option<Table>| {
                 let (mut max_players, mut port, mut relay) = (16, None, None);
                 let (mut interest, mut interest_budget) = (None, None);
+                let mut interest_occlusion = None;
+                let (mut require_identity, mut allow, mut deny) = (false, Vec::new(), Vec::new());
                 let mut input_delay = None;
                 if let Some(o) = opts {
                     crate::opts::check_keys(&o, HOST_KEYS, "net.host")?;
@@ -506,6 +567,12 @@ pub(crate) fn install_net_api(
                     relay = o.get::<Option<String>>("relay").ok().flatten();
                     interest = o.get::<Option<f64>>("interest").ok().flatten();
                     interest_budget = o.get::<Option<u32>>("interestBudget").ok().flatten();
+                    interest_occlusion =
+                        o.get::<Option<String>>("interestOcclusion").ok().flatten();
+                    require_identity =
+                        o.get::<Option<bool>>("requireIdentity").ok().flatten().unwrap_or(false);
+                    allow = o.get::<Option<Vec<String>>>("allow").ok().flatten().unwrap_or_default();
+                    deny = o.get::<Option<Vec<String>>>("deny").ok().flatten().unwrap_or_default();
                     input_delay = o
                         .get::<Option<u32>>("inputDelay")
                         .ok()
@@ -518,7 +585,11 @@ pub(crate) fn install_net_api(
                     relay,
                     interest,
                     interest_budget,
+                    interest_occlusion,
                     input_delay,
+                    require_identity,
+                    allow,
+                    deny,
                 });
                 Ok(())
             })?,
@@ -803,6 +874,88 @@ pub(crate) fn install_net_api(
                     owner = o.get::<Option<u64>>("owner").ok().flatten();
                 }
                 n.cmds.borrow_mut().push(NetCmd::Spawn { path, pos, owner });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "kick",
+            lua.create_function(move |_, (peer, reason): (u64, Option<String>)| {
+                if n.state.borrow().role != NetRoleState::Server {
+                    n.warn("net.kick: only the server removes players — ignored".into());
+                    return Ok(());
+                }
+                let reason = reason.unwrap_or_else(|| "removed by the server".into());
+                n.cmds.borrow_mut().push(NetCmd::Kick { peer, reason });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "identity",
+            lua.create_function(move |lua, peer: u64| {
+                let t = lua.create_table()?;
+                match n.state.borrow().identities.get(&peer) {
+                    Some(who) => {
+                        if let Some(id) = &who.id {
+                            t.set("id", id.clone())?;
+                        }
+                        t.set("name", who.name.clone())?;
+                        t.set("tier", who.tier.clone())?;
+                        t.set("verified", who.verified)?;
+                    }
+                    // A peer we hold no answer for, and one we know to be
+                    // anonymous, both read as unverified with no id — which is
+                    // the same thing to act on, and neither is an error.
+                    None => {
+                        t.set("verified", false)?;
+                    }
+                }
+                Ok(t)
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "setRelevant",
+            lua.create_function(move |_, (node, peer, relevant): (Table, u64, Value)| {
+                if n.state.borrow().role != NetRoleState::Server {
+                    n.warn(
+                        "net.setRelevant: only the server decides who is told about what \
+                         — ignored. A client hiding something it was already sent is a \
+                         setting a modified client turns off"
+                            .into(),
+                    );
+                    return Ok(());
+                }
+                let relevant = match relevant {
+                    Value::Nil => None,
+                    other => Some(other.as_boolean().unwrap_or(true)),
+                };
+                if let Ok(eid) = node.raw_get::<u32>("__id") {
+                    n.cmds.borrow_mut().push(NetCmd::SetRelevant { eid, peer, relevant });
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "setOwner",
+            lua.create_function(move |_, (node, peer): (Table, Option<u64>)| {
+                if n.state.borrow().role != NetRoleState::Server {
+                    n.warn("net.setOwner: only the server assigns owners — ignored".into());
+                    return Ok(());
+                }
+                if let Ok(eid) = node.raw_get::<u32>("__id") {
+                    n.cmds.borrow_mut().push(NetCmd::SetOwner { eid, owner: peer });
+                }
                 Ok(())
             })?,
         )?;

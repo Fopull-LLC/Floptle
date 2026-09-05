@@ -13,7 +13,9 @@ use floptle_scene::SceneDoc;
 use std::path::Path;
 use std::path::PathBuf;
 use crate::assets::{build_assets, script_name_of, unique_path};
+#[cfg(feature = "editor-ui")]
 use crate::dock::{focus_scripting_tab};
+#[cfg(feature = "editor-ui")]
 use crate::ide::{IdeState, script_template};
 use crate::lua_support::{seed_default_scripts, write_lua_support};
 use crate::prefs::{open_external_editor};
@@ -50,6 +52,7 @@ impl Editor {
 
     /// Open a script in the user's preferred editor — the external one (ADR-0011) if
     /// they prefer it, otherwise the in-engine IDE (focusing the Scripting tab).
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn open_script_preferred(&mut self, path: &str) {
         if self.prefer_external_editor {
             open_external_editor(&self.external_editor, &self.project_root, path, 1);
@@ -63,11 +66,12 @@ impl Editor {
 
     /// Open a script by its chunk `name` (as captured in a Console line) at `line`,
     /// in the preferred editor — the Console's double-click-to-source.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn open_source_at(&mut self, name: &str, line: u32) {
         let line = line.max(1) as usize;
         let path = if name.ends_with(".lua") {
             let p = self.project_root.join(name);
-            if p.exists() { p } else { self.scripts_dir().join(name) }
+            if floptle_vfs::exists(&p) { p } else { self.scripts_dir().join(name) }
         } else {
             self.scripts_dir().join(format!("{name}.lua"))
         };
@@ -164,9 +168,9 @@ impl Editor {
 
     pub(crate) fn save_texture_settings(&self) {
         let dir = self.project_root.join(".floptle");
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         if let Ok(s) = ron::ser::to_string_pretty(&self.texture_settings, Default::default()) {
-            let _ = std::fs::write(dir.join("textures.ron"), s);
+            let _ = floptle_vfs::write(dir.join("textures.ron"), s);
         }
     }
 
@@ -179,7 +183,7 @@ impl Editor {
     pub(crate) fn load_texture_settings(&mut self) {
         let path = self.project_root.join(".floptle").join("textures.ron");
         let raw: std::collections::HashMap<String, crate::assets::TexSetting> =
-            std::fs::read_to_string(&path)
+            floptle_vfs::read_to_string(&path)
                 .ok()
                 .and_then(|s| ron::from_str(&s).ok())
                 .unwrap_or_default();
@@ -264,7 +268,7 @@ impl Editor {
         // A missing file (e.g. a model deleted while still referenced by a VFX effect or
         // a scene node) must NOT be re-attempted + error-logged every frame — bail on the
         // cheap existence check. It re-imports for free if the file comes back.
-        if !file.exists() {
+        if !floptle_vfs::exists(&file) {
             return false;
         }
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
@@ -386,7 +390,7 @@ impl Editor {
             let n = name.trim();
             if n.is_empty() { "untitled".to_string() } else { n.to_string() }
         };
-        let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
+        let _ = floptle_vfs::create_dir_all(self.project_root.join("scenes"));
         let path = self.project_root.join("scenes").join(format!("{name}.ron"));
         // A starter Down gravity node so bodies fall without setup — part of
         // the NEW-scene template only (never healed back in on load): gravity
@@ -737,7 +741,7 @@ impl Editor {
     /// then rescan so it appears in the browser.
     pub(crate) fn new_folder(&mut self, dir: &str) {
         let target = unique_path(Path::new(dir), "new_folder", None);
-        if let Err(e) = std::fs::create_dir_all(&target) {
+        if let Err(e) = floptle_vfs::create_dir_all(&target) {
             eprintln!("  new folder failed: {e}");
             return;
         }
@@ -748,6 +752,7 @@ impl Editor {
     /// Create a new blank `.lua` script (seeded with a skeleton) and open it in the
     /// IDE. Scripts must live under a `scripts/` path to be recognised, so a `dir`
     /// that isn't already inside one falls back to the project `scripts/`.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn new_script(&mut self, dir: &str) {
         let dirp = PathBuf::from(dir);
         let target_dir = if dir.replace('\\', "/").contains("/scripts") {
@@ -755,13 +760,13 @@ impl Editor {
         } else {
             self.scripts_dir()
         };
-        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        if let Err(e) = floptle_vfs::create_dir_all(&target_dir) {
             eprintln!("  new script failed: {e}");
             return;
         }
         let path = unique_path(&target_dir, "script", Some("lua"));
         let name = script_name_of(&path.to_string_lossy());
-        if let Err(e) = std::fs::write(&path, script_template(&name)) {
+        if let Err(e) = floptle_vfs::write(&path, script_template(&name)) {
             eprintln!("  new script failed: {e}");
             return;
         }
@@ -781,6 +786,7 @@ impl Editor {
     /// Create a new `.flsl` shader in `dir` (or the project's `shaders/` folder when the
     /// target isn't shader-ish), seeded from the worked-example template, opened in the
     /// IDE with the naming modal up — the same flow as a new Lua script.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn new_shader(&mut self, dir: &str) {
         let dirp = PathBuf::from(dir);
         let target_dir = if dir.replace('\\', "/").contains("/shaders") {
@@ -788,12 +794,12 @@ impl Editor {
         } else {
             self.project_root.join("shaders")
         };
-        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        if let Err(e) = floptle_vfs::create_dir_all(&target_dir) {
             eprintln!("  new shader failed: {e}");
             return;
         }
         let path = unique_path(&target_dir, "shader", Some("flsl"));
-        if let Err(e) = std::fs::write(&path, floptle_shader::NEW_SHADER_TEMPLATE) {
+        if let Err(e) = floptle_vfs::write(&path, floptle_shader::NEW_SHADER_TEMPLATE) {
             eprintln!("  new shader failed: {e}");
             return;
         }
@@ -831,9 +837,9 @@ impl Editor {
         let prefix = format!("{old_stem}.");
         for dir in Self::SCENE_SIDECAR_DIRS {
             let d = self.project_root.join(dir);
-            let Ok(entries) = std::fs::read_dir(&d) else { continue };
-            for entry in entries.flatten() {
-                if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            let Ok(entries) = floptle_vfs::read_dir(&d) else { continue };
+            for entry in entries {
+                if !entry.is_file() {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -844,6 +850,8 @@ impl Editor {
         out
     }
 
+    #[cfg(feature = "editor-ui")]
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn rename_asset(&mut self, from: &str, new_name: &str) {
         let typed = new_name.trim();
         if typed.is_empty() {
@@ -855,7 +863,7 @@ impl Editor {
         // types just the base name.
         let src_name = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let suffix = src_name.find('.').map(|i| &src_name[i..]).unwrap_or("");
-        let final_name = if !src.is_dir() && !typed.contains('.') && !suffix.is_empty() {
+        let final_name = if !floptle_vfs::is_dir(&src) && !typed.contains('.') && !suffix.is_empty() {
             format!("{typed}{suffix}")
         } else {
             typed.to_string()
@@ -864,7 +872,7 @@ impl Editor {
         if dst == src {
             return;
         }
-        if dst.exists() {
+        if floptle_vfs::exists(&dst) {
             eprintln!("  rename: {} already exists", dst.display());
             return;
         }
@@ -891,7 +899,7 @@ impl Editor {
         // Refuse the WHOLE rename if any sidecar would land on a file that is
         // already there. Half a rename leaves a scene pointing at another
         // scene's terrain, which is worse than not renaming at all.
-        if let Some((_, taken)) = sidecars.iter().find(|(_, to)| to.exists()) {
+        if let Some((_, taken)) = sidecars.iter().find(|(_, to)| floptle_vfs::exists(to)) {
             let msg = format!(
                 "rename refused: {} already exists — rename or move it first",
                 taken.display()
@@ -957,8 +965,9 @@ impl Editor {
     /// that is already there, that would overwrite an existing entry, or that is
     /// the destination itself / an ancestor of it. Rebuilds the tree once and
     /// follows the moved paths in the selection + open IDE tabs.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn move_assets(&mut self, sources: &[String], dest_dir: &Path) {
-        if !dest_dir.is_dir() {
+        if !floptle_vfs::is_dir(dest_dir) {
             return;
         }
         let mut moved: Vec<(String, String)> = Vec::new();
@@ -970,7 +979,7 @@ impl Editor {
             if sp.parent() == Some(dest_dir) || dst == sp || dest_dir.starts_with(&sp) {
                 continue;
             }
-            if dst.exists() {
+            if floptle_vfs::exists(&dst) {
                 eprintln!("  move: {} already exists", dst.display());
                 continue;
             }
@@ -1010,10 +1019,11 @@ impl Editor {
     /// lands in `dest_dir` (auto-suffixed on name collision so nothing is
     /// clobbered). Directories are copied recursively. Dropped models are
     /// registered so they're usable immediately without a reload.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn import_files(&mut self, sources: &[PathBuf], dest_dir: &Path) {
         // Guard the destination: it must be a folder inside this project (a drop
         // that resolved to nothing falls back to the project root).
-        let dest = if dest_dir.is_dir() && dest_dir.starts_with(&self.project_root) {
+        let dest = if floptle_vfs::is_dir(dest_dir) && dest_dir.starts_with(&self.project_root) {
             dest_dir.to_path_buf()
         } else {
             self.project_root.clone()
@@ -1021,11 +1031,11 @@ impl Editor {
         let mut imported = 0usize;
         let mut model_refs: Vec<String> = Vec::new();
         for src in sources {
-            if !src.exists() {
+            if !floptle_vfs::exists(src) {
                 continue;
             }
             // Refuse to copy a folder into itself/a descendant of it.
-            if src.is_dir() && dest.starts_with(src) {
+            if floptle_vfs::is_dir(src) && dest.starts_with(src) {
                 continue;
             }
             let Some(stem) = src.file_stem().map(|s| s.to_string_lossy().to_string()) else {
@@ -1033,7 +1043,7 @@ impl Editor {
             };
             let ext = src.extension().map(|e| e.to_string_lossy().to_string());
             let dst = unique_path(&dest, &stem, ext.as_deref());
-            let ok = if src.is_dir() {
+            let ok = if floptle_vfs::is_dir(src) {
                 copy_dir_recursive(src, &dst).is_ok()
             } else {
                 std::fs::copy(src, &dst).is_ok()
@@ -1049,7 +1059,7 @@ impl Editor {
             imported += 1;
             // A model dropped in is ready to use immediately: register it under its
             // project-relative ref (how scenes/pickers reference meshes).
-            if src.is_file()
+            if floptle_vfs::is_file(src)
                 && crate::assets::is_model(&dst.to_string_lossy())
                 && let Ok(rel) = dst.strip_prefix(&self.project_root)
             {
@@ -1083,6 +1093,7 @@ impl Editor {
     /// [`crate::native_dialog`], which is also where the reason it *must* is
     /// written down), so the editor never freezes while it's open; the result is
     /// drained each frame in `apply_frame_commands`.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn open_import_dialog(&mut self, dir: std::path::PathBuf) {
         if self.import_rx.is_some() {
             return; // one dialog at a time
@@ -1093,11 +1104,12 @@ impl Editor {
 
     /// Delete files/folders (recursively) and drop any references to them —
     /// IDE tabs, the asset selection, the preview. One tree rebuild at the end.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn delete_assets(&mut self, paths: &[String]) {
         for path in paths {
             let p = Path::new(path);
             let res =
-                if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                if floptle_vfs::is_dir(p) { std::fs::remove_dir_all(p) } else { floptle_vfs::remove_file(p) };
             if let Err(e) = res {
                 self.console.push(
                     floptle_script::LogLevel::Error,
@@ -1165,7 +1177,7 @@ impl Editor {
     /// they already exist).
     pub(crate) fn seed_project_dirs(&self) {
         for d in ["scenes", "textures", "models", "materials", "audio", "scripts"] {
-            let _ = std::fs::create_dir_all(self.project_root.join(d));
+            let _ = floptle_vfs::create_dir_all(self.project_root.join(d));
         }
         let mat_dir = self.materials_dir();
         for (n, c) in [
@@ -1175,7 +1187,7 @@ impl Editor {
             ("green", [0.5, 0.85, 0.45]),
             ("gray", [0.6, 0.6, 0.62]),
         ] {
-            if !mat_dir.join(format!("{n}.ron")).exists() {
+            if !floptle_vfs::exists(mat_dir.join(format!("{n}.ron"))) {
                 let _ =
                     floptle_scene::save_material(n, &MaterialDoc { color: c, ..Default::default() }, &mat_dir);
             }
@@ -1285,9 +1297,8 @@ impl Editor {
             return (first, doc);
         }
         let scenes = self.project_root.join("scenes");
-        let mut rons: Vec<PathBuf> = std::fs::read_dir(&scenes)
+        let mut rons: Vec<PathBuf> = floptle_vfs::read_dir(&scenes)
             .into_iter()
-            .flatten()
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "ron"))
@@ -1410,6 +1421,7 @@ impl Editor {
         // Packages last: an extension's first line may read the project's
         // settings, its scenes or its assets, and all of those have to be
         // loaded before it does.
+        #[cfg(feature = "editor-ui")]
         self.ext_reload();
         // Re-scan the animation + particle registries against the NEW project
         // root. Without this they kept pointing at whatever was scanned at editor
@@ -1430,7 +1442,10 @@ impl Editor {
         self.clear_flsl_state();
         self.selection.clear();
         self.selected_asset = None;
-        self.ide = IdeState::default();
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ide = IdeState::default();
+        }
         self.history = History::default();
         self.playing = false;
         self.paused = false;
@@ -1462,11 +1477,11 @@ impl Editor {
     /// Create a fresh project at `root` (folders + a starter scene + example
     /// scripts), then open it.
     pub(crate) fn new_project(&mut self, root: PathBuf) {
-        let _ = std::fs::create_dir_all(root.join("scenes"));
-        let _ = std::fs::create_dir_all(root.join("scripts"));
+        let _ = floptle_vfs::create_dir_all(root.join("scenes"));
+        let _ = floptle_vfs::create_dir_all(root.join("scripts"));
         // A starter scene if none exists yet.
         let first = root.join("scenes/first.ron");
-        let fresh = !first.exists();
+        let fresh = !floptle_vfs::exists(&first);
         if fresh {
             let _ = floptle_scene::save(&default_scene(), &first);
         }
@@ -1492,6 +1507,7 @@ impl Editor {
             self.project.script_vec3 = floptle_scene::ProjectConfigDoc::for_new_project().script_vec3;
             self.apply_script_vec3_mode();
             let _ = floptle_scene::save_project(&self.project, &self.project_cfg_path());
+            #[cfg(feature = "editor-ui")]
             self.create_terrain(&crate::terrain_ui::NewTerrainCfg {
                 size_xz: 48.0,
                 thickness: 12.0,
@@ -1514,9 +1530,12 @@ impl Editor {
     pub(crate) fn close_project(&mut self) {
         // Before anything else is torn down: an extension's `onUnload` may want
         // to save what it was holding, and its stores are written here.
-        self.ext.save_prefs();
-        self.ext.teardown();
-        self.ext_painted.clear();
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ext.save_prefs();
+            self.ext.teardown();
+            self.ext_painted.clear();
+        }
         self.reset_anim_bindings();
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
@@ -1527,7 +1546,10 @@ impl Editor {
         self.terrain_slots.clear();
         self.selection.clear();
         self.selected_asset = None;
-        self.ide = IdeState::default();
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ide = IdeState::default();
+        }
         self.history = History::default();
         self.playing = false;
         self.paused = false;
@@ -1564,7 +1586,7 @@ impl Editor {
             if ok {
                 self.scene_dirty = false;
                 self.save_flash = Editor::SAVE_FLASH_SECS; // the status chip confirms it
-                let _ = std::fs::remove_file(self.autosave_path()); // saved for real
+                let _ = floptle_vfs::remove_file(self.autosave_path()); // saved for real
             }
             return ok;
         }
@@ -1574,7 +1596,7 @@ impl Editor {
         // parent was half of why a subfolder scene could never be written back
         // (`floptle/0111`).
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = floptle_vfs::create_dir_all(dir);
         }
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
         // Aggregated over EVERYTHING this save writes — the scene doc, terrain
@@ -1602,7 +1624,7 @@ impl Editor {
         // Terrain fields are large, so each lives beside the scene (one file per
         // terrain id), not inline in the scene doc.
         let dir = self.project_root.join("terrain");
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let terrain_writes: Vec<(u32, Vec<u8>)> = self
             .terrains
             .iter()
@@ -1613,7 +1635,7 @@ impl Editor {
             .collect();
         let mut saved_ids: Vec<u32> = Vec::new();
         for (id, bytes) in terrain_writes {
-            if let Err(e) = std::fs::write(self.terrain_field_path_id(id), bytes) {
+            if let Err(e) = floptle_vfs::write(self.terrain_field_path_id(id), bytes) {
                 self.console.push(
                     floptle_script::LogLevel::Error,
                     format!("💾 save terrain {id} failed: {e}"),
@@ -1684,7 +1706,7 @@ impl Editor {
                     }
                 })
                 .collect();
-            if let Err(e) = std::fs::write(self.terrain_palette_path(), palette.join("\n")) {
+            if let Err(e) = floptle_vfs::write(self.terrain_palette_path(), palette.join("\n")) {
                 self.console.push(
                     floptle_script::LogLevel::Error,
                     format!("💾 save terrain palette failed: {e}"),
@@ -1698,7 +1720,7 @@ impl Editor {
             // Visible confirmation, not just Console: the menu-bar status chip
             // glows "✓ saved" for a moment, wherever you're docked.
             self.save_flash = Editor::SAVE_FLASH_SECS;
-            let _ = std::fs::remove_file(self.autosave_path()); // saved for real
+            let _ = floptle_vfs::remove_file(self.autosave_path()); // saved for real
         } else {
             // ANY failed write — the scene doc or a sidecar full of sculpting —
             // must be as visible as a success, and the chip stays "unsaved".
@@ -1738,7 +1760,11 @@ impl Editor {
     /// it; a crash leaves it behind, and the next open offers to restore.
     pub(crate) fn autosave_tick(&mut self) {
         const AUTOSAVE_SECS: u64 = 45;
-        if !self.scene_dirty || self.playing || self.player_mode || self.anim_ui.record {
+        #[cfg(feature = "editor-ui")]
+        let recording = self.anim_ui.record;
+        #[cfg(not(feature = "editor-ui"))]
+        let recording = false;
+        if !self.scene_dirty || self.playing || self.player_mode || recording {
             return;
         }
         let due = self
@@ -1747,9 +1773,9 @@ impl Editor {
         if !due {
             return;
         }
-        self.last_autosave = Some(std::time::Instant::now());
+        self.last_autosave = Some(floptle_core::time::Instant::now());
         let path = self.autosave_path();
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&self.project_root));
+        let _ = floptle_vfs::create_dir_all(path.parent().unwrap_or(&self.project_root));
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
         if let Err(e) = floptle_scene::save(&doc, &path) {
             self.console.push(
@@ -1765,8 +1791,8 @@ impl Editor {
     pub(crate) fn check_autosave(&mut self) {
         self.autosave_prompt = None;
         let auto = self.autosave_path();
-        let Ok(auto_m) = std::fs::metadata(&auto).and_then(|m| m.modified()) else { return };
-        let scene_m = std::fs::metadata(self.edited_file_path()).and_then(|m| m.modified()).ok();
+        let Some(auto_m) = floptle_vfs::modified(&auto) else { return };
+        let scene_m = floptle_vfs::modified(self.edited_file_path());
         if scene_m.is_none_or(|s| auto_m > s) {
             self.autosave_prompt = Some(auto);
         }
@@ -1822,12 +1848,14 @@ impl Editor {
     /// they are edited from a dock tab like everything else and their file is
     /// not the scene's — a level's collision shapes used to walk out the door
     /// without a word.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn unsaved_work(&self) -> bool {
         self.scene_dirty || self.image.dirty || !self.tiles.dirty.is_empty()
     }
 
     /// Ctrl+S: save everything — the project config, the open scene, and every
     /// dirty script open in the IDE (so "the script you're editing" is saved too).
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn save_all(&mut self) {
         // While recording, the world carries previewed clip values — saving would
         // bake them into the scene file. End the recording (restoring the real
@@ -1864,7 +1892,7 @@ impl Editor {
         }
         let mut saved_scripts = 0;
         for f in &mut self.ide.open {
-            if f.dirty && std::fs::write(&f.path, &f.text).is_ok() {
+            if f.dirty && floptle_vfs::write(&f.path, &f.text).is_ok() {
                 f.dirty = false;
                 saved_scripts += 1;
             }
@@ -1886,9 +1914,9 @@ impl Editor {
 /// still use it.
 pub(crate) fn scene_files_in(project_root: &Path) -> Vec<String> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        for e in floptle_vfs::read_dir(dir).into_iter().flatten() {
             let p = e.path();
-            if p.is_dir() {
+            if e.is_dir() {
                 walk(&p, root, out);
             } else if p.extension().is_some_and(|x| x == "ron")
                 && !p.to_string_lossy().ends_with(floptle_scene::PREFAB_EXT)
@@ -1904,6 +1932,15 @@ pub(crate) fn scene_files_in(project_root: &Path) -> Vec<String> {
     out
 }
 
+// A tab has no file manager to hand a path to, and no local path to hand it.
+// The function stays, so callers do not need their own gate; it is the one place
+// that knows there is nothing to open.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn open_in_file_manager(path: &Path) {
+    log::warn!("no file manager in a browser build; asked to reveal {}", path.display());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "linux")]
     let cmd = "xdg-open";
@@ -1934,13 +1971,13 @@ pub(crate) fn seed_default_effects(project_root: &Path) {
         include_str!("../../../assets/vfx/MoveMarker.vfx.ron"),
     )];
     let dir = project_root.join("vfx");
-    if std::fs::create_dir_all(&dir).is_err() {
+    if floptle_vfs::create_dir_all(&dir).is_err() {
         return;
     }
     for (name, body) in DEFAULT_EFFECTS {
         let p = dir.join(name);
-        if !p.exists() {
-            let _ = std::fs::write(&p, body);
+        if !floptle_vfs::exists(&p) {
+            let _ = floptle_vfs::write(&p, body);
         }
     }
 }
@@ -1950,22 +1987,22 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
     // The stamp remembers that this project was seeded once — so a missing
     // folder afterwards means the user deleted it, and it stays deleted.
     let stamp = project_root.join(".floptle").join("examples_seeded");
-    if !dir.exists() {
-        if stamp.exists() {
+    if !floptle_vfs::exists(&dir) {
+        if floptle_vfs::exists(&stamp) {
             return; // deleted on purpose
         }
-        if std::fs::create_dir_all(&dir).is_err() {
+        if floptle_vfs::create_dir_all(&dir).is_err() {
             return;
         }
     }
     for (name, src) in floptle_shader::examples::EXAMPLES {
         let path = dir.join(name);
-        if !path.exists() {
-            let _ = std::fs::write(path, src);
+        if !floptle_vfs::exists(&path) {
+            let _ = floptle_vfs::write(path, src);
         }
     }
-    let _ = std::fs::create_dir_all(project_root.join(".floptle"));
-    let _ = std::fs::write(&stamp, "");
+    let _ = floptle_vfs::create_dir_all(project_root.join(".floptle"));
+    let _ = floptle_vfs::write(&stamp, "");
 }
 
 /// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.
@@ -1989,11 +2026,11 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
         return p;
     }
     let p = PathBuf::from(path);
-    if p.is_absolute() || p.exists() {
+    if p.is_absolute() || floptle_vfs::exists(&p) {
         return p;
     }
     let joined = project_root.join(&p);
-    if joined.exists() {
+    if floptle_vfs::exists(&joined) {
         return joined;
     }
     if let (Some(first), Some(root_name)) = (p.components().next(), project_root.file_name())
@@ -2001,7 +2038,7 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
     {
         let stripped: PathBuf = p.components().skip(1).collect();
         let rescued = project_root.join(stripped);
-        if rescued.exists() {
+        if floptle_vfs::exists(&rescued) {
             return rescued;
         }
     }
@@ -2215,13 +2252,13 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
 
 /// Recursively copy `src` (a directory) to `dst`, creating `dst` and every
 /// subfolder. Used when a whole folder is dragged in from the OS file explorer.
+#[cfg(feature = "editor-ui")]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
+    floptle_vfs::create_dir_all(dst)?;
+    for entry in floptle_vfs::read_dir(src)? {
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if entry.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
@@ -2245,11 +2282,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// bug was an editor being confident about a path.
 pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
     let scenes = root.join("scenes");
-    let at_root: std::collections::HashSet<String> = std::fs::read_dir(&scenes)
+    let at_root: std::collections::HashSet<String> = floptle_vfs::read_dir(&scenes)
         .into_iter()
         .flatten()
-        .flatten()
-        .filter(|e| e.path().is_file())
+        .filter(|e| e.is_file())
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             n.strip_suffix(".ron").map(str::to_owned)
@@ -2259,17 +2295,16 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = std::fs::read_dir(&scenes)
+    let mut stack: Vec<std::path::PathBuf> = floptle_vfs::read_dir(&scenes)
         .into_iter()
         .flatten()
-        .flatten()
+        .filter(|e| e.is_dir())
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
         .collect();
     while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        for e in floptle_vfs::read_dir(&dir).into_iter().flatten() {
             let p = e.path();
-            if p.is_dir() {
+            if e.is_dir() {
                 stack.push(p);
                 continue;
             }
@@ -2288,6 +2323,11 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
     out
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod path_tests {
     use super::*;
@@ -2321,8 +2361,8 @@ mod path_tests {
     fn asset_paths_resolve_without_double_join() {
         let dir = std::env::temp_dir().join(format!("floptle-resolve-{}", std::process::id()));
         let root = dir.join("assets");
-        std::fs::create_dir_all(root.join("shaders")).unwrap();
-        std::fs::write(root.join("shaders/s.flsl"), "shader s { stage fragment }").unwrap();
+        floptle_vfs::create_dir_all(root.join("shaders")).unwrap();
+        floptle_vfs::write(root.join("shaders/s.flsl"), "shader s { stage fragment }").unwrap();
 
         // Absolute (project opened by full path): used as-is.
         let abs = root.join("shaders/s.flsl");
@@ -2352,8 +2392,8 @@ mod path_tests {
     fn legacy_root_prefixed_refs_resolve_under_any_cwd() {
         let dir = std::env::temp_dir().join(format!("floptle-rescue-{}", std::process::id()));
         let root = dir.join("assets");
-        std::fs::create_dir_all(root.join("textures")).unwrap();
-        std::fs::write(root.join("textures/t.png"), b"png").unwrap();
+        floptle_vfs::create_dir_all(root.join("textures")).unwrap();
+        floptle_vfs::write(root.join("textures/t.png"), b"png").unwrap();
 
         // Absolute root, CWD anywhere (never inside `dir`): the legacy ref rescues.
         assert_eq!(
@@ -2382,9 +2422,9 @@ mod path_tests {
     #[test]
     fn a_scene_in_a_subfolder_saves_to_the_file_it_came_from() {
         let root = std::env::temp_dir().join(format!("flop-scenepath-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(root.join("scenes/cutscenes"));
+        let _ = floptle_vfs::create_dir_all(root.join("scenes/cutscenes"));
         let file = root.join("scenes/cutscenes/Opening.ron");
-        let _ = std::fs::write(&file, "()");
+        let _ = floptle_vfs::write(&file, "()");
 
         let mut ed = Editor { project_root: root.clone(), ..Default::default() };
         ed.set_scene_file(&file);
@@ -2396,7 +2436,7 @@ mod path_tests {
         // …and the round trip holds at any depth.
         for rel in ["scenes/first.ron", "scenes/maps/arena.ron", "scenes/a/b/c/deep.ron"] {
             let p = root.join(rel);
-            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            let _ = floptle_vfs::create_dir_all(p.parent().unwrap());
             ed.set_scene_file(&p);
             assert_eq!(ed.scene_path(), p, "{rel} did not round-trip");
         }
@@ -2408,17 +2448,17 @@ mod path_tests {
     #[test]
     fn a_project_already_split_by_the_old_bug_is_reported() {
         let root = std::env::temp_dir().join(format!("flop-scenesplit-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(root.join("scenes/cutscenes"));
-        let _ = std::fs::write(root.join("scenes/cutscenes/Opening.ron"), "()");
-        let _ = std::fs::write(root.join("scenes/Opening.ron"), "()");
-        let _ = std::fs::write(root.join("scenes/first.ron"), "()");
+        let _ = floptle_vfs::create_dir_all(root.join("scenes/cutscenes"));
+        let _ = floptle_vfs::write(root.join("scenes/cutscenes/Opening.ron"), "()");
+        let _ = floptle_vfs::write(root.join("scenes/Opening.ron"), "()");
+        let _ = floptle_vfs::write(root.join("scenes/first.ron"), "()");
 
         let split = super::scenes_shadowed_by_a_root_copy(&root);
         assert_eq!(split, vec!["scenes/cutscenes/Opening.ron".to_string()]);
 
         // A project with no collision reports nothing — this must not cry wolf
         // at every project that happens to use subfolders.
-        let _ = std::fs::remove_file(root.join("scenes/Opening.ron"));
+        let _ = floptle_vfs::remove_file(root.join("scenes/Opening.ron"));
         assert!(super::scenes_shadowed_by_a_root_copy(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2428,17 +2468,17 @@ mod path_tests {
         let root = std::env::temp_dir().join(format!("flop-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for d in ["scenes/cutscenes", "terrain", "maps", "paint", ".floptle/autosave"] {
-            let _ = std::fs::create_dir_all(root.join(d));
+            let _ = floptle_vfs::create_dir_all(root.join(d));
         }
         let scene = root.join(format!("scenes/cutscenes/{stem}.ron"));
-        let _ = std::fs::write(&scene, "()");
-        let _ = std::fs::write(root.join(format!("terrain/{stem}.1.cfield")), b"field-1");
-        let _ = std::fs::write(root.join(format!("terrain/{stem}.2.cfield")), b"field-2");
-        let _ = std::fs::write(root.join(format!("terrain/{stem}.1.meta")), b"meta");
-        let _ = std::fs::write(root.join(format!("terrain/{stem}.palette")), b"palette");
-        let _ = std::fs::write(root.join(format!("maps/{stem}.map.ron")), b"map");
-        let _ = std::fs::write(root.join(format!("paint/{stem}.vpaint")), b"paint");
-        let _ = std::fs::write(root.join(format!(".floptle/autosave/{stem}.ron")), b"auto");
+        let _ = floptle_vfs::write(&scene, "()");
+        let _ = floptle_vfs::write(root.join(format!("terrain/{stem}.1.cfield")), b"field-1");
+        let _ = floptle_vfs::write(root.join(format!("terrain/{stem}.2.cfield")), b"field-2");
+        let _ = floptle_vfs::write(root.join(format!("terrain/{stem}.1.meta")), b"meta");
+        let _ = floptle_vfs::write(root.join(format!("terrain/{stem}.palette")), b"palette");
+        let _ = floptle_vfs::write(root.join(format!("maps/{stem}.map.ron")), b"map");
+        let _ = floptle_vfs::write(root.join(format!("paint/{stem}.vpaint")), b"paint");
+        let _ = floptle_vfs::write(root.join(format!(".floptle/autosave/{stem}.ron")), b"auto");
         (root, scene)
     }
 
@@ -2468,7 +2508,7 @@ mod path_tests {
         // Multi-volume terrain keeps its per-id data distinct rather than
         // collapsing two fields onto one name.
         assert_eq!(
-            std::fs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
+            floptle_vfs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
             b"field-1"
         );
         // Nothing is left behind under the old name to be found later and
@@ -2487,7 +2527,7 @@ mod path_tests {
     fn a_rename_that_would_clobber_a_sidecar_is_refused_whole() {
         let (root, scene) = project_with_sidecars("rename-clobber", "TheVision");
         // Something already owns the name being renamed to.
-        let _ = std::fs::write(root.join("terrain/Part 1 Mission.1.cfield"), b"someone-else");
+        let _ = floptle_vfs::write(root.join("terrain/Part 1 Mission.1.cfield"), b"someone-else");
         let mut ed = Editor { project_root: root.clone(), ..Default::default() };
         ed.set_scene_file(&scene);
 
@@ -2496,7 +2536,7 @@ mod path_tests {
         assert!(scene.exists(), "the scene must not move when its data cannot");
         assert!(root.join("terrain/TheVision.1.cfield").exists());
         assert_eq!(
-            std::fs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
+            floptle_vfs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
             b"someone-else",
             "an existing file must never be overwritten by a rename"
         );
@@ -2531,13 +2571,13 @@ mod path_tests {
         let mut out = Vec::new();
         let mut stack = vec![PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))];
         while let Some(dir) = stack.pop() {
-            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            for e in floptle_vfs::read_dir(&dir).into_iter().flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                if e.is_dir() {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    out.push((name, std::fs::read_to_string(&p).unwrap_or_default()));
+                    out.push((name, floptle_vfs::read_to_string(&p).unwrap_or_default()));
                 }
             }
         }
@@ -2617,17 +2657,17 @@ mod script_vec3_pin_tests {
     #[test]
     fn a_headless_open_resolves_the_pin_without_writing_the_file() {
         let dir = std::env::temp_dir().join(format!("floptle_pin_headless_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let path = dir.join("project.ron");
         let text = "(retro: true, retro_height: 240)";
-        std::fs::write(&path, text).unwrap();
+        floptle_vfs::write(&path, text).unwrap();
 
         let mut ed = Editor { project_root: dir.clone(), ..Editor::default() };
         assert!(ed.window.is_none(), "this test is the headless case");
         let cfg = ed.read_project_config();
         assert_eq!(cfg.script_vec3, Some(floptle_scene::ScriptVec3Doc::Exact));
         assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
+            floptle_vfs::read_to_string(&path).unwrap(),
             text,
             "a headless open must leave project.ron exactly as it found it"
         );

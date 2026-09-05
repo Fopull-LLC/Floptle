@@ -237,6 +237,7 @@ pub(crate) fn set_place(place: &mut floptle_ui::Place, at: [f32; 2]) {
 /// exist for headers and tabs, not to make every panel a four-field chore. The
 /// row auto-collapses again as soon as the four values match, so nothing is
 /// left in a fiddly state by accident.
+#[cfg(feature = "editor-ui")]
 fn quad_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -346,7 +347,7 @@ impl Editor {
         if uir.has_font(path) {
             return;
         }
-        let bytes = std::fs::read(&file).unwrap_or_default();
+        let bytes = floptle_vfs::read(&file).unwrap_or_default();
         uir.ensure_font(path, &bytes);
     }
 
@@ -391,7 +392,7 @@ impl Editor {
         let (mut tokens_failed, mut styles_failed) = (false, false);
         let files = Self::scan_ui_style_files(&self.project_root);
         for (path, _) in &files {
-            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            let Ok(text) = floptle_vfs::read_to_string(path) else { continue };
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             if name.ends_with(".tokens.ron") {
                 match floptle_ui::Tokens::parse(&text) {
@@ -469,20 +470,20 @@ impl Editor {
     /// its mtime — the load list AND the hot-reload signature.
     fn scan_ui_style_files(
         root: &std::path::Path,
-    ) -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
+    ) -> Vec<(std::path::PathBuf, Option<floptle_core::time::SystemTime>)> {
         fn walk(
             dir: &std::path::Path,
-            out: &mut Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
+            out: &mut Vec<(std::path::PathBuf, Option<floptle_core::time::SystemTime>)>,
             depth: u32,
         ) {
             if depth > 8 {
                 return;
             }
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
-            for entry in rd.flatten() {
+            let Ok(rd) = floptle_vfs::read_dir(dir) else { return };
+            for entry in rd {
                 let p = entry.path();
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-                if p.is_dir() {
+                if entry.is_dir() {
                     // Skip the engine's own runtime dirs and anything hidden —
                     // `target/` alone would make this walk cost real time.
                     if name.starts_with('.') || name == "target" || name == "builds" {
@@ -490,7 +491,7 @@ impl Editor {
                     }
                     walk(&p, out, depth + 1);
                 } else if name.ends_with(".tokens.ron") || name.ends_with(".uistyle.ron") {
-                    let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+                    let m = floptle_vfs::modified(&p);
                     out.push((p, m));
                 }
             }
@@ -884,10 +885,12 @@ impl Editor {
         // The game is not on screen (another tab is in front). Menus still get
         // solved — gamepad navigation and `node:uiRect()` don't stop existing
         // because you switched tabs — against the size the tab last had.
-        self.game_tab_px().map(|(_, size)| size).or_else(|| {
-            let gpu = self.gpu.as_ref()?;
-            Some([gpu.config.width as f32, gpu.config.height.max(1) as f32])
-        })
+        #[cfg(feature = "editor-ui")]
+        if let Some((_, size)) = self.game_tab_px() {
+            return Some(size);
+        }
+        let gpu = self.gpu.as_ref()?;
+        Some([gpu.config.width as f32, gpu.config.height.max(1) as f32])
     }
 
     /// Pointer position + viewport (physical px, game-view space) for game-UI
@@ -917,6 +920,7 @@ impl Editor {
         // not a hole you clicked through. (Keyboard focus is a separate
         // question — `game_view()` — so a menu doesn't stop the game reading
         // keys, only the mouse.)
+        #[cfg(feature = "editor-ui")]
         if self.game_offscreen()
             && let Some(eg) = self.egui.as_ref()
             && !crate::scene_hit(&eg.ctx, self.cursor, self.game_rect)
@@ -1735,6 +1739,7 @@ impl Editor {
     /// The Inspector's UI section: shown for nodes carrying UiLayer and/or
     /// ElementSpec. Returns true when something changed (undo coalescing).
     #[allow(clippy::too_many_arguments)] // an Inspector section needs the project's context
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ui_inspector(
         world: &mut floptle_core::World,
         e: Entity,

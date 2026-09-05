@@ -1,6 +1,7 @@
 //! The engine Console: the log store (severity, merge-duplicates, source
 //! locations) and its dock tab UI (filter toolbar, search, jump-to-source).
 
+#[cfg(feature = "editor-ui")]
 use crate::EditorTabViewer;
 
 /// One line in the engine Console. Consecutive identical lines are merged at ingest
@@ -95,13 +96,17 @@ impl ConsoleState {
                 floptle_script::LogLevel::Warn => Some("warning"),
                 // `print` output is the game's own business; only problems are
                 // worth forcing onto a player's terminal.
-                floptle_script::LogLevel::Debug => None,
+                // In a browser the console IS the terminal, and it is hidden
+                // from a player unless they open it — so a script's prints go
+                // there too; nobody is being spammed.
+                floptle_script::LogLevel::Debug => cfg!(target_arch = "wasm32").then_some("print"),
             };
             if let Some(tag) = tag {
-                match &source {
-                    Some((file, line)) => eprintln!("floptle: {tag}: {file}:{line}: {msg}"),
-                    None => eprintln!("floptle: {tag}: {msg}"),
-                }
+                let line = match &source {
+                    Some((file, line)) => format!("floptle: {tag}: {file}:{line}: {msg}"),
+                    None => format!("floptle: {tag}: {msg}"),
+                };
+                mirror_line(&line);
             }
         }
         self.entries.push(ConsoleEntry { level, msg, source, count: 1 });
@@ -112,9 +117,11 @@ impl ConsoleState {
         }
     }
 }
+#[cfg(feature = "editor-ui")]
 impl EditorTabViewer<'_> {
     /// The engine Console: a filterable, searchable feed of script `print`/`log`
     /// output, warnings and errors. Double-click a line to open its source.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn console_ui(&mut self, ui: &mut egui::Ui) {
         use floptle_script::LogLevel;
         let c = &mut *self.console;
@@ -326,4 +333,13 @@ impl EditorTabViewer<'_> {
             self.cmd.open_log_source = Some(j);
         }
     }
+}
+
+/// One mirrored line to wherever a terminal is: stderr, or the browser's
+/// console — Rust's stderr is a no-op on `wasm32-unknown-unknown`.
+fn mirror_line(line: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(line));
 }

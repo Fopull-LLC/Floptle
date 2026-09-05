@@ -32,6 +32,8 @@ vm-luau = ["mlua/luau"]
 vm-luau-codegen = ["vm-luau", "mlua/luau-jit"]
 
 [dependencies]
+# Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
+floptle-vfs = { path = "../floptle-vfs" }
 # Types only (PlayParams + enums for the audio command queue); no OS audio stack.
 floptle-audio = { path = "../floptle-audio", default-features = false }
 floptle-core = { path = "../floptle-core" }
@@ -53,7 +55,19 @@ floptle-account = { path = "../floptle-account" }
 floptle-services = { path = "../floptle-services" }
 ron = { workspace = true }
 serde = { workspace = true }
-# `http.*` / `json.*` (proposal §4): blocking requests on worker threads, never
-# on the frame thread. ureq is already what the Hub and the dist pipeline use.
+# `json.*` (proposal §4).
 serde_json = { workspace = true }
+
+# **`http.*`, on the platforms that have sockets.** Blocking requests on worker
+# threads, never on the frame thread; ureq is already what the Hub and the dist
+# pipeline use. A browser has none of that shape available to it — see `dispatch` in
+# `src/http_api.rs`, which refuses the call there rather than hanging on it — and
+# ureq's TLS stack alone is a large slice of a wasm module nothing could call.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { workspace = true }
+
+# **`openUrl`, in the browser.** The one place the page itself is the platform's
+# browser, so this is a real implementation rather than another refusal — see
+# `open_in_browser` in `src/http_api.rs`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window"] }

@@ -28,6 +28,9 @@
 
 pub mod auth;
 pub mod cloud;
+// The browser sign-in (contract §6). Compiled everywhere so its protocol
+// tests run on the desktop; only its `fetch`/`location` layer is wasm-only.
+pub mod web_auth;
 
 mod account;
 

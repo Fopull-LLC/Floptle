@@ -41,9 +41,9 @@ impl Default for GridConfig {
 pub(crate) fn on_path(cmd: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&path).any(|dir| {
-        dir.join(cmd).is_file()
+        floptle_vfs::is_file(dir.join(cmd))
             || (cfg!(windows)
-                && ["exe", "cmd", "bat"].iter().any(|e| dir.join(format!("{cmd}.{e}")).is_file()))
+                && ["exe", "cmd", "bat"].iter().any(|e| floptle_vfs::is_file(dir.join(format!("{cmd}.{e}")))))
     })
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn editor_pref_path() -> Option<PathBuf> {
 /// The configured external editor command, or an auto-detected default if unset.
 pub(crate) fn load_external_editor() -> String {
     editor_pref_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(auto_detect_editor)
@@ -92,9 +92,9 @@ pub(crate) fn load_external_editor() -> String {
 pub(crate) fn save_external_editor(cmd: &str) {
     if let Some(p) = editor_pref_path() {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = std::fs::write(p, cmd.trim());
+        let _ = floptle_vfs::write(p, cmd.trim());
     }
 }
 
@@ -105,7 +105,7 @@ pub(crate) fn prefer_pref_path() -> Option<PathBuf> {
 /// Whether the user prefers their external editor over the in-engine IDE.
 pub(crate) fn load_prefer_external() -> bool {
     prefer_pref_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .map(|s| s.trim() == "1")
         .unwrap_or(false)
 }
@@ -113,9 +113,9 @@ pub(crate) fn load_prefer_external() -> bool {
 pub(crate) fn save_prefer_external(v: bool) {
     if let Some(p) = prefer_pref_path() {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = std::fs::write(p, if v { "1" } else { "0" });
+        let _ = floptle_vfs::write(p, if v { "1" } else { "0" });
     }
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn play_tint_path() -> Option<PathBuf> {
 /// File format is one line: `enabled r g b` (e.g. `1 10 18 30`).
 pub(crate) fn load_play_tint() -> (bool, [u8; 3]) {
     let parsed = play_tint_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .and_then(|s| {
             let nums: Vec<&str> = s.split_whitespace().collect();
             if nums.len() == 4 {
@@ -152,10 +152,10 @@ pub(crate) fn load_play_tint() -> (bool, [u8; 3]) {
 pub(crate) fn save_play_tint(enabled: bool, tint: [u8; 3]) {
     if let Some(p) = play_tint_path() {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
         let on = if enabled { 1 } else { 0 };
-        let _ = std::fs::write(p, format!("{on} {} {} {}", tint[0], tint[1], tint[2]));
+        let _ = floptle_vfs::write(p, format!("{on} {} {} {}", tint[0], tint[1], tint[2]));
     }
 }
 
@@ -168,7 +168,7 @@ pub(crate) fn game_gizmos_path() -> Option<PathBuf> {
 
 pub(crate) fn load_game_gizmos() -> bool {
     game_gizmos_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .map(|s| s.trim() == "1")
         .unwrap_or(false)
 }
@@ -176,9 +176,9 @@ pub(crate) fn load_game_gizmos() -> bool {
 pub(crate) fn save_game_gizmos(on: bool) {
     if let Some(p) = game_gizmos_path() {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = std::fs::write(p, if on { "1" } else { "0" });
+        let _ = floptle_vfs::write(p, if on { "1" } else { "0" });
     }
 }
 
@@ -195,7 +195,7 @@ pub(crate) fn grid_path() -> Option<PathBuf> {
 /// `show size extent r g b alpha snap y_offset`.
 pub(crate) fn load_grid() -> GridConfig {
     let mut g = GridConfig::default();
-    if let Some(s) = grid_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+    if let Some(s) = grid_path().and_then(|p| floptle_vfs::read_to_string(p).ok()) {
         let f: Vec<&str> = s.split_whitespace().collect();
         if f.len() >= 9 {
             g.show = f[0] == "1";
@@ -215,9 +215,9 @@ pub(crate) fn load_grid() -> GridConfig {
 pub(crate) fn save_grid(g: &GridConfig) {
     if let Some(p) = grid_path() {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = std::fs::write(
+        let _ = floptle_vfs::write(
             p,
             format!(
                 "{} {} {} {} {} {} {} {} {}",
@@ -244,7 +244,7 @@ pub(crate) fn code_theme_path() -> Option<PathBuf> {
 
 /// A persisted theme index, clamped to a valid entry (0 if unset/out of range).
 pub(crate) fn load_theme_index(path: Option<PathBuf>, count: usize) -> usize {
-    path.and_then(|p| std::fs::read_to_string(p).ok())
+    path.and_then(|p| floptle_vfs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&i| i < count)
         .unwrap_or(0)
@@ -253,27 +253,37 @@ pub(crate) fn load_theme_index(path: Option<PathBuf>, count: usize) -> usize {
 pub(crate) fn save_theme_index(path: Option<PathBuf>, idx: usize) {
     if let Some(p) = path {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = std::fs::write(p, idx.to_string());
+        let _ = floptle_vfs::write(p, idx.to_string());
     }
 }
 
 /// Launch the external editor on `file`. VSCode-family editors open the project as
 /// the workspace root and jump to `file:line` (ADR-0011); others just open the file.
 /// `cmd` may include leading args (e.g. "code -n").
+///
+/// A page cannot launch a program; there, this does nothing, and the ⌘-click
+/// that asked for it is the only thing that notices.
 pub(crate) fn open_external_editor(cmd: &str, project_root: &Path, file: &str, line: usize) {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let Some((prog, pre)) = parts.split_first() else { return };
-    let mut command = std::process::Command::new(prog);
-    command.args(pre);
-    if prog.contains("code") {
-        command.arg(project_root).arg("--goto").arg(format!("{file}:{line}"));
-    } else {
-        command.arg(file);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (cmd, project_root, file, line);
     }
-    if let Err(e) = command.spawn() {
-        eprintln!("  Open in IDE ({prog}) failed: {e}");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let Some((prog, pre)) = parts.split_first() else { return };
+        let mut command = std::process::Command::new(prog);
+        command.args(pre);
+        if prog.contains("code") {
+            command.arg(project_root).arg("--goto").arg(format!("{file}:{line}"));
+        } else {
+            command.arg(file);
+        }
+        if let Err(e) = command.spawn() {
+            eprintln!("  Open in IDE ({prog}) failed: {e}");
+        }
     }
 }
 
@@ -286,20 +296,22 @@ pub(crate) fn viewport_panels_path() -> Option<PathBuf> {
 /// Where the Scene view's overlay panels sit. Per-user, because it is a fact
 /// about how somebody likes to work, and persisted because moving your tool
 /// palette every session is worse than it being in the wrong place once.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn load_viewport_panels() -> crate::viewport_panel::ViewportPanels {
     viewport_panels_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .and_then(|s| ron::from_str(&s).ok())
         .unwrap_or_default()
 }
 
+#[cfg(feature = "editor-ui")]
 pub(crate) fn save_viewport_panels(p: &crate::viewport_panel::ViewportPanels) {
     let Some(path) = viewport_panels_path() else { return };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = floptle_vfs::create_dir_all(parent);
     }
     if let Ok(s) = ron::ser::to_string_pretty(p, ron::ser::PrettyConfig::default()) {
-        let _ = std::fs::write(path, s);
+        let _ = floptle_vfs::write(path, s);
     }
 }
 
@@ -374,7 +386,7 @@ pub(crate) fn canvas_look_path() -> Option<PathBuf> {
 /// half-edited one — still opens rather than resetting the lot.
 pub(crate) fn load_canvas_look() -> CanvasLook {
     canvas_look_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| floptle_vfs::read_to_string(p).ok())
         .and_then(|s| ron::from_str(&s).ok())
         .unwrap_or_default()
 }
@@ -382,10 +394,10 @@ pub(crate) fn load_canvas_look() -> CanvasLook {
 pub(crate) fn save_canvas_look(look: &CanvasLook) {
     let Some(p) = canvas_look_path() else { return };
     if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = floptle_vfs::create_dir_all(parent);
     }
     if let Ok(s) = ron::ser::to_string_pretty(look, ron::ser::PrettyConfig::default()) {
-        let _ = std::fs::write(p, s);
+        let _ = floptle_vfs::write(p, s);
     }
 }
 

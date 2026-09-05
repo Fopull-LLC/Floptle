@@ -60,6 +60,7 @@ pub(crate) enum Value {
 fn export_platforms() -> Vec<String> {
     let mut v = vec!["host".to_string()];
     v.extend(floptle_dist::PLATFORMS.iter().map(|s| (*s).to_string()));
+    v.push(floptle_dist::WEB_PLATFORM.to_string());
     v
 }
 
@@ -1772,6 +1773,7 @@ mod tests {
         for p in floptle_dist::PLATFORMS {
             assert!(choices.iter().any(|c| c == p), "{p} exports and is not offered");
         }
+        assert!(choices.iter().any(|c| c == floptle_dist::WEB_PLATFORM), "the browser exports and is not offered");
     }
 
     /// **A verb that exists is a verb the design page lists.**

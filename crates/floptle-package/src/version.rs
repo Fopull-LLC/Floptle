@@ -245,6 +245,29 @@ impl VersionReq {
         self.parts.iter().all(|c| c.matches(v))
     }
 
+    /// Does this requirement accept the ENGINE the player is running?
+    ///
+    /// The same test as [`matches`](Self::matches) with one difference, and it
+    /// is deliberate: a pre-release **engine** counts as the release it leads
+    /// up to. `0.85.0-rc1` satisfies `>=0.55.0`.
+    ///
+    /// Semver's rule — a pre-release satisfies only a bound that is itself a
+    /// pre-release of the same version — exists so an unfinished *package*
+    /// cannot install itself into a project that asked for a stable one. That
+    /// is the right rule there and the wrong one here, because the engine is
+    /// not a candidate being chosen from a list: it is the build in the
+    /// player's hands. Under the strict rule, shipping any beta of the engine
+    /// silently breaks **every** package that declares an `engine` bound —
+    /// which is exactly what a beta channel would do to everyone who switched
+    /// to it. Found by cutting 0.85.0-rc1, 2026-09-05.
+    pub fn matches_engine(&self, v: &Version) -> bool {
+        let released = Version { pre: Vec::new(), ..v.clone() };
+        if self.parts.is_empty() {
+            return true;
+        }
+        self.parts.iter().all(|c| c.matches(&released))
+    }
+
     /// The text the manifest carried, for error messages.
     pub fn as_str(&self) -> &str {
         &self.raw
@@ -339,6 +362,33 @@ impl<'de> serde::Deserialize<'de> for VersionReq {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A beta of the ENGINE must not break every package that names one.**
+    /// Semver says a pre-release satisfies only a pre-release bound of the
+    /// same version — right for a package being chosen, wrong for the engine
+    /// in the player's hands. Cutting 0.85.0-rc1 turned every
+    /// `engine: ">=0.55.0"` package into a load error until this split.
+    #[test]
+    fn a_prerelease_engine_still_satisfies_a_packages_engine_bound() {
+        let req: VersionReq = ">=0.55.0".parse().unwrap();
+        let beta: Version = "0.85.0-rc1".parse().unwrap();
+        let stable: Version = "0.85.0".parse().unwrap();
+
+        assert!(req.matches_engine(&stable), "a release engine must load it");
+        assert!(req.matches_engine(&beta), "and so must the beta that leads to it");
+        // The package-resolution rule is UNCHANGED: that is where semver's
+        // caution belongs, and the two must not be quietly merged.
+        assert!(!req.matches(&beta), "package matching still refuses a pre-release");
+
+        // A bound the engine genuinely misses is still a miss, beta or not.
+        let future: VersionReq = ">=0.99.0".parse().unwrap();
+        assert!(!future.matches_engine(&beta));
+        assert!(!future.matches_engine(&stable));
+        // An absent requirement accepts any engine, including a pre-release —
+        // `matches` refuses one there, which is the whole difference.
+        let any = VersionReq::default();
+        assert!(any.matches_engine(&beta));
+    }
     use super::*;
 
     fn v(s: &str) -> Version {

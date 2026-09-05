@@ -380,7 +380,7 @@ impl crate::Editor {
         if self.resolve_prefab_request(asset).is_some() {
             return true;
         }
-        crate::project::resolve_asset_path(&self.project_root, asset).exists()
+        floptle_vfs::exists(crate::project::resolve_asset_path(&self.project_root, asset))
     }
 
     fn bake_scatter_prototype(&mut self, asset: &str) -> Vec<Part> {
@@ -464,9 +464,9 @@ mod tests {
     #[test]
     fn a_gpuless_bake_does_not_call_a_perfectly_good_model_undrawable() {
         let dir = std::env::temp_dir().join(format!("floptle-scatter-warn-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join("models"));
+        let _ = floptle_vfs::create_dir_all(dir.join("models"));
         // A file that exists — the bake still cannot register it without a GPU.
-        std::fs::write(dir.join("models/rock.glb"), b"not really a glb, but it is HERE").unwrap();
+        floptle_vfs::write(dir.join("models/rock.glb"), b"not really a glb, but it is HERE").unwrap();
 
         let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
         assert!(ed.gpu.is_none(), "this test is about the no-GPU path");

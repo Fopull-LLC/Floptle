@@ -1598,6 +1598,18 @@ fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
 // marches the shadow field — the expensive part) and caps the raymarch per pixel.
 @fragment
 fn fs_depth(in: VsOut) {
+    // The texel FIRST, before the terrain test below returns early. Sampling
+    // with implicit derivatives is only legal in uniform control flow, and a
+    // return taken on per-instance data makes everything after it non-uniform.
+    // Native drivers never minded; a browser's WGSL compiler refuses the whole
+    // module ("'textureSample' must only be called from uniform control flow"),
+    // and it was the first shader the web build was refused on. Terrain pays
+    // one sample of the default texture for it, and nothing changes in `fs`'s
+    // own ordering — see the same rule spelled out at the top of `fs`.
+    // Same tiled sampling as the color pass, so the conservative alpha test
+    // sees the texels that will actually shade — INCLUDING painted alpha, or the
+    // prepass would prime depth for fragments the color pass then blends away.
+    let texel_a = base_texel(in).a;
     // Terrain is always opaque and its vcolor.a is a SLOT, not opacity — prime depth for it
     // unconditionally (else a hill wouldn't cap the raymarch and blobs would show through it).
     // The one exception is a chunk still dissolving in (`floptle/0067`): priming depth for a
@@ -1609,10 +1621,7 @@ fn fs_depth(in: VsOut) {
         }
         return;
     }
-    // Same tiled sampling as the color pass, so the conservative alpha test
-    // sees the texels that will actually shade — INCLUDING painted alpha, or the
-    // prepass would prime depth for fragments the color pass then blends away.
-    let a = base_texel(in).a * in.color.a * in.vcolor.a;
+    let a = texel_a * in.color.a * in.vcolor.a;
     if (a < 0.99) {
         discard;
     }

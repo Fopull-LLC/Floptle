@@ -18,10 +18,12 @@ use floptle_render::MeshId;
 use floptle_render::RaymarchGlobals;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use floptle_core::time::Instant;
+#[cfg(feature = "editor-ui")]
 use crate::dock::{focus_terrain_tab};
 use crate::gizmo::{Tool};
 use crate::shading::{OccKey, material_params};
+#[cfg(feature = "editor-ui")]
 use crate::terrain_ui::{NewTerrainCfg};
 use crate::viz::{TerrainViz, project};
 use crate::{Editor};
@@ -182,7 +184,7 @@ enum TerrainSource {
 pub(crate) struct TerrainLoadJob {
     pub e: Entity,
     pub name: String,
-    pub started: std::time::Instant,
+    pub started: floptle_core::time::Instant,
     pub rx: std::sync::mpsc::Receiver<Option<EditorTerrain>>,
 }
 
@@ -233,7 +235,7 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
     for src in sources {
         let field = match src {
-            TerrainSource::File(path) => std::fs::read(&path)
+            TerrainSource::File(path) => floptle_vfs::read(&path)
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b)),
             TerrainSource::Generate(spec) => ron::from_str(&spec)
@@ -361,6 +363,10 @@ pub(crate) struct RemeshDone {
 pub(crate) struct TerrainWorker {
     tx: std::sync::mpsc::Sender<RemeshJob>,
     rx: std::sync::mpsc::Receiver<RemeshDone>,
+    /// The worker's two ends, where there is no worker thread to hold them —
+    /// see [`Self::pump`].
+    #[cfg(target_arch = "wasm32")]
+    inline: (std::sync::mpsc::Receiver<RemeshJob>, std::sync::mpsc::Sender<RemeshDone>),
     /// Jobs sent and not yet drained — the main thread caps this so a big LOD
     /// migration streams in nearest-first instead of flooding the queue.
     pub in_flight: usize,
@@ -421,33 +427,49 @@ impl TerrainWorker {
     pub(crate) fn spawn() -> Self {
         let (jtx, jrx) = std::sync::mpsc::channel::<RemeshJob>();
         let (dtx, drx) = std::sync::mpsc::channel::<RemeshDone>();
-        std::thread::Builder::new()
-            .name("terrain-remesh".into())
-            .spawn(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::worker::spawn("terrain-remesh", move || {
                 while let Ok(job) = jrx.recv() {
-                    let mesh = floptle_field::mesh_scratch(&job.scratch, job.skirt);
-                    if dtx
-                        .send(RemeshDone {
-                            entity: job.entity,
-                            coord: job.coord,
-                            lod: job.lod,
-                            epoch: job.epoch,
-                            mesh,
-                        })
-                        .is_err()
-                    {
+                    if !Self::run(job, &dtx) {
                         break; // editor gone
                     }
                 }
-            })
-            .expect("spawn terrain remesh worker");
-        Self { tx: jtx, rx: drx, in_flight: 0 }
+            });
+            Self { tx: jtx, rx: drx, in_flight: 0 }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self { tx: jtx, rx: drx, in_flight: 0, inline: (jrx, dtx) }
+        }
+    }
+
+    /// One job: mesh the scratch and hand the result back. `false` when the
+    /// receiving side is gone.
+    fn run(job: RemeshJob, done: &std::sync::mpsc::Sender<RemeshDone>) -> bool {
+        let mesh = floptle_field::mesh_scratch(&job.scratch, job.skirt);
+        done.send(RemeshDone { entity: job.entity, coord: job.coord, lod: job.lod, epoch: job.epoch, mesh })
+            .is_ok()
+    }
+
+    /// A browser has no worker thread: every job queued so far is run now,
+    /// on this frame, and its answer is waiting in the same channel the
+    /// desktop drains a frame later.
+    #[cfg(target_arch = "wasm32")]
+    fn pump(&mut self) {
+        while let Ok(job) = self.inline.0.try_recv() {
+            if !Self::run(job, &self.inline.1) {
+                break;
+            }
+        }
     }
 
     pub(crate) fn send(&mut self, job: RemeshJob) {
         if self.tx.send(job).is_ok() {
             self.in_flight += 1;
         }
+        #[cfg(target_arch = "wasm32")]
+        self.pump();
     }
 
     pub(crate) fn try_recv(&mut self) -> Option<RemeshDone> {
@@ -1063,6 +1085,7 @@ pub(crate) fn terrain_nearest_mask(
 
 impl Editor {
     /// Focus (re-adding if closed) the Terrain dock tab.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn focus_terrain(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
             focus_terrain_tab(dock);
@@ -1196,6 +1219,7 @@ impl Editor {
     /// build the brush telegraph (ring + normal), and — if a stroke is queued —
     /// apply the brush. Editing is throttled here to one stroke per frame so a fast
     /// drag doesn't stall on the per-voxel work + GPU re-upload.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn terrain_frame_update(&mut self) {
         self.terrain_viz = None;
         if self.tool != Tool::Sculpt || self.terrains.is_empty() || !self.cursor_over_scene() {
@@ -1525,7 +1549,7 @@ impl Editor {
     pub(crate) fn touch_terrain_edit(&mut self, e: Entity) {
         self.terrain_disk_dirty.insert(e);
         self.terrain_edit_clock += 1;
-        self.terrain_edit_stamps.insert(e, (self.terrain_edit_clock, std::time::Instant::now()));
+        self.terrain_edit_stamps.insert(e, (self.terrain_edit_clock, floptle_core::time::Instant::now()));
     }
 
     /// End-of-stroke bookkeeping (mouse-up): if the stroke pushed the field past its
@@ -1549,6 +1573,7 @@ impl Editor {
     /// a color/texture up front — the sparse field is unbounded, so this is a seed to
     /// sculpt out from, not a boundary (the slab occupies `-thickness..0` in local Y,
     /// surface at the node's height).
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn create_terrain(&mut self, cfg: &NewTerrainCfg) {
         self.record();
         let id = self.next_terrain_id;
@@ -1610,11 +1635,11 @@ impl Editor {
     /// is one rename away".
     pub(crate) fn orphaned_field_stems(&self, id: u32) -> Vec<String> {
         let suffix = format!(".{id}.cfield");
-        let Ok(entries) = std::fs::read_dir(self.project_root.join("terrain")) else {
+        let Ok(entries) = floptle_vfs::read_dir(self.project_root.join("terrain")) else {
             return Vec::new();
         };
         let mut out: Vec<String> = entries
-            .flatten()
+            .into_iter()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
                 let stem = name.strip_suffix(&suffix)?;
@@ -1642,17 +1667,17 @@ impl Editor {
     pub(crate) fn write_terrain_meta(&self, id: u32, color: [f32; 3], spec_hash: Option<u64>) {
         let p = self.terrain_meta_path_id(id);
         if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = floptle_vfs::create_dir_all(dir);
         }
         let mut text = format!("{} {} {}", color[0], color[1], color[2]);
         if let Some(h) = spec_hash {
             text.push_str(&format!("\n{h}"));
         }
-        let _ = std::fs::write(p, text);
+        let _ = floptle_vfs::write(p, text);
     }
 
     fn read_terrain_meta(&self, id: u32) -> Option<[f32; 3]> {
-        let text = std::fs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
+        let text = floptle_vfs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
         let mut it = text.split_whitespace().map(|s| s.parse::<f32>());
         match (it.next(), it.next(), it.next()) {
             (Some(Ok(r)), Some(Ok(g)), Some(Ok(b))) => Some([r, g, b]),
@@ -1662,7 +1687,7 @@ impl Editor {
 
     /// The genspec hash the field file was written under (meta line 2, if any).
     fn read_terrain_meta_hash(&self, id: u32) -> Option<u64> {
-        let text = std::fs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
+        let text = floptle_vfs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
         text.split_whitespace().nth(3)?.parse().ok()
     }
 
@@ -1685,7 +1710,7 @@ impl Editor {
         // 1. terrain.flush() → queue every dirty resident field (dedup).
         if self.script_host.take_terrain_flush() {
             if self.script_host.terrain_save_dir().is_some() {
-                let now = std::time::Instant::now();
+                let now = floptle_core::time::Instant::now();
                 let dirty: Vec<Entity> = self
                     .terrains
                     .keys()
@@ -1774,13 +1799,13 @@ impl Editor {
                     }
                     let path = job.path.clone();
                     let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
+                    crate::worker::spawn("terrain-save", move || {
                         let res = (|| {
                             if let Some(dir) = path.parent() {
-                                std::fs::create_dir_all(dir)
+                                floptle_vfs::create_dir_all(dir)
                                     .map_err(|e| format!("create {dir:?}: {e}"))?;
                             }
-                            std::fs::write(&path, &bytes)
+                            floptle_vfs::write(&path, &bytes)
                                 .map_err(|e| format!("write {path:?}: {e}"))?;
                             Ok(bytes.len())
                         })();
@@ -1797,7 +1822,7 @@ impl Editor {
         if self.terrain_save_job.is_some() || self.terrain_flush_queue.is_empty() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = floptle_core::time::Instant::now();
         let stamps = &self.terrain_edit_stamps;
         let pick = self.terrain_flush_queue.iter().position(|(e, since)| {
             let quiet = stamps.get(e).is_none_or(|(_, at)| {
@@ -1884,10 +1909,10 @@ impl Editor {
             let path =
                 self.project_root.join(&sd).join(format!("{}.{id}.cfield", self.scene_name));
             if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
+                let _ = floptle_vfs::create_dir_all(dir);
             }
             if let Some(t) = self.terrains.get(&e)
-                && std::fs::write(&path, t.field.to_bytes()).is_ok()
+                && floptle_vfs::write(&path, t.field.to_bytes()).is_ok()
             {
                 self.terrain_disk_dirty.remove(&e);
                 wrote += 1;
@@ -1988,7 +2013,7 @@ impl Editor {
         // Residency anchors on the editor camera outside Play, and for a shot
         // the view being photographed IS the presence in the world.
         self.camera.position = anchor;
-        let deadline = std::time::Instant::now() + budget;
+        let deadline = floptle_core::time::Instant::now() + budget;
         let mut quiet = false;
         loop {
             self.pump_world_streaming();
@@ -2010,10 +2035,13 @@ impl Editor {
             // Out of budget with work still in flight is the honest false: the
             // caller is about to photograph something unfinished and has to be
             // told so.
-            if std::time::Instant::now() >= deadline {
+            if floptle_core::time::Instant::now() >= deadline {
                 return false;
             }
             // The work is on other threads; this one only has to let them finish.
+            // (In a browser the work ran inline when it was queued, so the loop
+            // above finds it done and there is nothing to wait for.)
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }
@@ -2084,7 +2112,7 @@ impl Editor {
             })
             .collect();
         for (e, id) in untracked {
-            let has_file = self.terrain_field_path_id(id).exists();
+            let has_file = floptle_vfs::exists(self.terrain_field_path_id(id));
             let color = (has_file.then(|| self.read_terrain_meta(id)).flatten())
                 .or_else(|| {
                     self.world
@@ -2247,12 +2275,12 @@ impl Editor {
                 .project_root
                 .join(&sd)
                 .join(format!("{}.{id}.cfield", self.scene_name));
-            if p.exists() {
+            if floptle_vfs::exists(&p) {
                 out.push(TerrainSource::File(p));
             }
         }
         let p = self.terrain_field_path_id(id);
-        if p.exists() {
+        if floptle_vfs::exists(&p) {
             let trusted = match &genspec {
                 None => true, // purely authored body: the file IS the truth
                 Some(g) => self.read_terrain_meta_hash(id) == Some(genspec_hash(g)),
@@ -2323,13 +2351,13 @@ impl Editor {
             None,
         );
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        crate::worker::spawn("terrain-load", move || {
             let _ = tx.send(load_terrain_from(sources));
         });
         self.terrain_load_jobs.push(TerrainLoadJob {
             e,
             name,
-            started: std::time::Instant::now(),
+            started: floptle_core::time::Instant::now(),
             rx,
         });
     }
@@ -2443,9 +2471,9 @@ impl Editor {
                 .or_else(|| (!self.playing).then(|| self.terrain_field_path_id(id)));
             if let Some(path) = dest {
                 if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+                    let _ = floptle_vfs::create_dir_all(dir);
                 }
-                if std::fs::write(&path, t.field.to_bytes()).is_err() {
+                if floptle_vfs::write(&path, t.field.to_bytes()).is_err() {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!("terrain id {id}: eviction save FAILED — keeping it resident"),
@@ -2520,7 +2548,7 @@ impl Editor {
             // yet (pre-G1 scenes) load eagerly below, cache their color, and go
             // cold from then on. Non-celestial terrains are always resident.
             if self.world.get::<floptle_core::CelestialBody>(e).is_some() {
-                let color = if self.terrain_field_path_id(id).exists() {
+                let color = if floptle_vfs::exists(self.terrain_field_path_id(id)) {
                     self.read_terrain_meta(id)
                 } else {
                     // A genspec body is ALWAYS cold (falling through to the eager
@@ -2539,13 +2567,13 @@ impl Editor {
                 }
             }
             let dense_migration = || {
-                std::fs::read(self.terrain_tfield_path_id(id))
+                floptle_vfs::read(self.terrain_tfield_path_id(id))
                     .ok()
                     .and_then(|b| floptle_field::Terrain::from_bytes(&b))
                     // legacy single-terrain scenes stored one `<scene>.tfield`.
                     .or_else(|| {
                         if single {
-                            std::fs::read(self.legacy_terrain_field_path())
+                            floptle_vfs::read(self.legacy_terrain_field_path())
                                 .ok()
                                 .and_then(|b| floptle_field::Terrain::from_bytes(&b))
                         } else {
@@ -2562,7 +2590,7 @@ impl Editor {
                         )
                     })
             };
-            let loaded = std::fs::read(self.terrain_field_path_id(id))
+            let loaded = floptle_vfs::read(self.terrain_field_path_id(id))
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
                 .or_else(dense_migration);
@@ -2595,7 +2623,7 @@ impl Editor {
             // can go cold on every later load/evict.
             if let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e)
                 && self.read_terrain_meta(id).is_none()
-                && self.terrain_field_path_id(id).exists()
+                && floptle_vfs::exists(self.terrain_field_path_id(id))
             {
                 let color = impostor_surface_color(&field, cb.body_radius as f32);
                 let hash = self.terrain_spec_hash_of(e);
@@ -2635,7 +2663,7 @@ impl Editor {
         // cave-visibility channel); the marker rides the sidecar, not the path.
         // (COLD terrains count — their fields still splat this palette on load.)
         if (!self.terrains.is_empty() || !self.terrain_cold.is_empty())
-            && let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
+            && let Ok(text) = floptle_vfs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut glow = 0u32;
                 let mut palette: Vec<String> = text
@@ -2827,7 +2855,7 @@ mod tests {
     #[test]
     fn a_world_with_nothing_to_stream_settles_at_once() {
         let mut ed = crate::Editor::default();
-        let t0 = std::time::Instant::now();
+        let t0 = floptle_core::time::Instant::now();
         assert!(
             ed.settle_world_streaming(DVec3::ZERO, std::time::Duration::from_secs(45)),
             "an empty world is a settled world"
@@ -3121,9 +3149,9 @@ mod residency_tests {
         // A corrupt FILE falls back to the genspec instead of failing the stream —
         // the exact failure Ty hit (LFS pointer stubs where fields should be).
         let dir = std::env::temp_dir().join(format!("floptle-badfield-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         let bad = dir.join("corrupt.cfield");
-        std::fs::write(&bad, b"version https://git-lfs -- not a field").unwrap();
+        floptle_vfs::write(&bad, b"version https://git-lfs -- not a field").unwrap();
         let t2 = load_terrain_from(vec![
             TerrainSource::File(bad),
             TerrainSource::Generate(spec),

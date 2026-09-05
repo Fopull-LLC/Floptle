@@ -410,11 +410,11 @@ impl FrameProfile {
 /// Deliberately not a Drop guard holding a `&mut FrameProfile` — the profile
 /// lives on the editor beside the things being measured, and a guard borrowing it
 /// for the length of a subsystem would fight every other borrow in the frame.
-pub struct Span(std::time::Instant);
+pub struct Span(crate::time::Instant);
 
 impl Span {
     pub fn new() -> Self {
-        Span(std::time::Instant::now())
+        Span(crate::time::Instant::now())
     }
 
     /// Milliseconds since the span started.

@@ -378,8 +378,8 @@ impl Editor {
         // the whole feature where a clock is allowed near the simulation. From
         // this moment it is replicated state like any other, and every draw
         // comes from (seed, tick, index).
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seed = floptle_core::time::SystemTime::now()
+            .duration_since(floptle_core::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E37_79B9_7F4A_7C15);
         let Some(s) = self.net_server.as_mut() else { return };
@@ -513,7 +513,7 @@ impl Editor {
             return;
         }
         let dir = crate::shadow::replay_dir(&self.project_root);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let Err(e) = floptle_vfs::create_dir_all(&dir) {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!("replay not saved: {e}"),
@@ -525,7 +525,7 @@ impl Editor {
         // it does not need a clock — which is the one thing this feature is not
         // allowed to depend on.
         let path = dir.join(format!("match-{:016x}.floptlereplay", log.seed));
-        match std::fs::write(&path, log.to_ron()) {
+        match floptle_vfs::write(&path, log.to_ron()) {
             Ok(()) => self.console.push(
                 floptle_script::LogLevel::Debug,
                 format!(
@@ -548,7 +548,7 @@ impl Editor {
     /// Play a recorded match back in a headless second world, and report
     /// whether it reproduced. Used by the ⚖ panel button and by tests.
     pub(crate) fn net_play_replay(&mut self, path: &std::path::Path) {
-        let text = match std::fs::read_to_string(path) {
+        let text = match floptle_vfs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
                 self.console.push(

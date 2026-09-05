@@ -112,6 +112,41 @@ impl FixedTimestep {
     }
 }
 
+// --- The wall clock ------------------------------------------------------------
+//
+// `std::time::Instant::now()` compiles for `wasm32-unknown-unknown` and panics
+// when called ("time not implemented on this platform"), so every subsystem
+// that times itself — the profiler, the mesher, physics, the runner — would
+// take the browser build down on its first frame. `web-time` is the drop-in:
+// the same API over `performance.now()` in a page, and a re-export of `std`'s
+// own types everywhere else, so on the desktop this is exactly what it was.
+//
+// The browser CI gate (`tools/web/clippy.toml`) refuses `std::time::Instant`
+// in the engine half outright; reach for these instead.
+
+/// A monotonic timestamp: `std::time::Instant` on every native target, and
+/// `performance.now()` in a browser.
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::Instant;
+/// A monotonic timestamp: `std::time::Instant` on every native target, and
+/// `performance.now()` in a browser.
+#[cfg(target_arch = "wasm32")]
+pub use web_time::Instant;
+
+/// The wall clock: `std::time::SystemTime` natively, `Date.now()` in a browser.
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::SystemTime;
+/// The wall clock: `std::time::SystemTime` natively, `Date.now()` in a browser.
+#[cfg(target_arch = "wasm32")]
+pub use web_time::SystemTime;
+
+/// The epoch [`SystemTime`] counts from — the one that matches it.
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::UNIX_EPOCH;
+/// The epoch [`SystemTime`] counts from — the one that matches it.
+#[cfg(target_arch = "wasm32")]
+pub use web_time::UNIX_EPOCH;
+
 #[cfg(test)]
 mod tests {
     use super::*;

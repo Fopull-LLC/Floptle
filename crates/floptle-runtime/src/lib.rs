@@ -8,4 +8,9 @@
 //! follows — a second implementation drifts and one call cannot. `server.rs`
 //! already referenced nothing else in this crate, so this costs a file.
 
+// **The dedicated server needs to LISTEN**, on QUIC or through a relay, and a
+// browser tab cannot: it can open connections, never accept them. There is also
+// nothing a browser build would do with it — a web export is a client. Same gate
+// the transport itself carries in `floptle-net`.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod server;

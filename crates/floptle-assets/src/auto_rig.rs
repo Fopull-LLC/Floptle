@@ -124,6 +124,6 @@ pub fn add_flow_rig(
 
     let bytes = write_glb(&nodes, &[skin], &textures);
     let output = model_path.with_extension("rigged.glb");
-    std::fs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
+    floptle_vfs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
     Ok(RigReport { output, object: object.to_string(), bones: n })
 }

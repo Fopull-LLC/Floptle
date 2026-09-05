@@ -121,10 +121,10 @@ impl Registry {
     /// install.
     pub fn load(project_root: &Path) -> Result<Registry, String> {
         let path = project_root.join(REGISTRY_FILE);
-        if !path.exists() {
+        if !floptle_vfs::exists(&path) {
             return Ok(Registry::default());
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = floptle_vfs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut reg: Registry = crate::manifest::ron_options()
             .from_str(&text)
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -156,15 +156,15 @@ impl Registry {
     pub fn save(&self, project_root: &Path) -> std::io::Result<()> {
         let path = project_root.join(REGISTRY_FILE);
         if self.packages.is_empty() {
-            if path.exists() {
-                std::fs::remove_file(&path)?;
+            if floptle_vfs::exists(&path) {
+                floptle_vfs::remove_file(&path)?;
             }
             return Ok(());
         }
         let cfg = ron::ser::PrettyConfig::new().struct_names(false);
         let text = ron::ser::to_string_pretty(self, cfg)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(path, format!("{text}\n"))
+        floptle_vfs::write(path, format!("{text}\n"))
     }
 
     pub fn find(&self, id: &str) -> Option<&Entry> {
@@ -198,7 +198,7 @@ mod tests {
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("flpkg-reg-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        floptle_vfs::create_dir_all(&d).unwrap();
         d
     }
 
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn a_duplicate_id_is_an_error_not_a_coin_flip() {
         let root = temp("dupe");
-        std::fs::write(
+        floptle_vfs::write(
             root.join(REGISTRY_FILE),
             r#"(packages: [
                 (id: "com.a.b", version: "1.0.0", source: Authored, enabled: true),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn enabled_defaults_to_true_for_a_hand_written_entry() {
         let root = temp("enabled");
-        std::fs::write(
+        floptle_vfs::write(
             root.join(REGISTRY_FILE),
             r#"(packages: [ (id: "com.a.b", version: "1.0.0", source: Authored) ])"#,
         )

@@ -134,7 +134,7 @@ pub(crate) fn extracted_path(model_rel: &str, material: &str) -> String {
 pub(crate) fn extracted_file(project_root: &Path, model_rel: &str, material: &str) -> Option<String> {
     let rel = extracted_path(model_rel, material);
     let abs: PathBuf = project_root.join(&rel);
-    abs.is_file().then_some(rel)
+    floptle_vfs::is_file(&abs).then_some(rel)
 }
 
 #[cfg(test)]
@@ -179,7 +179,7 @@ mod tests {
         }
         let out = std::env::temp_dir().join(format!("floptle-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
-        std::fs::create_dir_all(&out).unwrap();
+        floptle_vfs::create_dir_all(&out).unwrap();
 
         let written =
             extract_model_textures(&model, "models/avatar.glb", &out).expect("extraction");
@@ -191,7 +191,7 @@ mod tests {
             let abs = out.join(&e.path);
             assert!(abs.is_file(), "{} was reported and not written", e.path);
             // A real PNG, not an empty file — the header is the cheap proof.
-            let bytes = std::fs::read(&abs).unwrap();
+            let bytes = floptle_vfs::read(&abs).unwrap();
             assert!(bytes.len() > 100, "{} is {} bytes", e.path, bytes.len());
             assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{} is not a PNG", e.path);
             // Project-relative, which is how a material references a texture.

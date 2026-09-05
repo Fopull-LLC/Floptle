@@ -38,10 +38,13 @@ members = [
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
     "crates/floptle-services", # platform capability boundary: Platform trait + NullPlatform (steam plan, Phase 0)
     "crates/floptle-steam",    # Steamworks-backed Platform impl, behind the `steam` feature (steam plan, Phase 0)
-    "crates/floptle-editor",   # egui + egui_dock authoring application (bin)
+    "crates/floptle-editor",   # egui + egui_dock authoring application (bin) + the engine (lib)
+    "crates/floptle-player",   # the standalone game player — what an export ships (bin)
     "crates/floptle-hub",      # cross-platform launcher / version + project manager (bin)
     "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)
     "crates/floptle-proof",    # Beat 1: standalone raymarch proof slice (bin)
+    "crates/floptle-vfs",      # files: std::fs on the desktop, the preloaded bundle in a browser
+    "crates/floptle-web",      # the browser build: wasm module, canvas, WebGPU (cdylib)
 ]
 
 [workspace.package]
@@ -133,6 +136,15 @@ opt-level = 3          # always optimize dependencies (renderer/math heavy)
 # symbol names either way; what is dropped is file/line *inside* dependencies,
 # which is not where this project's bugs are and is not worth tens of gigabytes.
 debug = false
+
+# The browser build. Inherits release, then trades speed for size — the wasm is
+# the first thing a player downloads. `strip = "debuginfo"` rather than `true`:
+# a full strip removes every custom section, and the one wasm-bindgen reads to
+# generate the JS glue is a custom section.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
 
 [profile.release]
 opt-level = 3

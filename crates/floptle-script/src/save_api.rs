@@ -51,7 +51,7 @@ fn ensure_loaded(state: &mut SaveState, root: &std::path::Path) {
         return;
     }
     state.loaded = true;
-    state.store = std::fs::read_to_string(slot_path(root, &state.slot))
+    state.store = floptle_vfs::read_to_string(slot_path(root, &state.slot))
         .ok()
         .and_then(|text| ron::from_str(&text).ok())
         .unwrap_or_default();
@@ -64,11 +64,11 @@ pub(crate) fn flush(state: &mut SaveState, root: &std::path::Path) -> Result<(),
     }
     let path = slot_path(root, &state.slot);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("save: create {dir:?}: {e}"))?;
+        floptle_vfs::create_dir_all(dir).map_err(|e| format!("save: create {dir:?}: {e}"))?;
     }
     let text = ron::ser::to_string_pretty(&state.store, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("save: serialize: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("save: write {path:?}: {e}"))?;
+    floptle_vfs::write(&path, text).map_err(|e| format!("save: write {path:?}: {e}"))?;
     state.dirty = false;
     Ok(())
 }
@@ -150,7 +150,7 @@ pub(crate) fn install_save_api(
                 s.loaded = true; // a fresh, empty store — nothing to lazily read back
                 s.dirty = false;
             }
-            Ok(std::fs::remove_file(slot_path(&root.borrow(), &name)).is_ok())
+            Ok(floptle_vfs::remove_file(slot_path(&root.borrow(), &name)).is_ok())
         }) {
             let _ = t.set("deleteSlot", f);
         }

@@ -1,0 +1,21 @@
+[package]
+name = "floptle-player"
+version.workspace = true
+edition.workspace = true
+description = "The standalone game player — what an exported build ships"
+publish = false
+
+# The binary an export ships, renamed to the game's own title. It is a shim:
+# everything is in `floptle-editor`'s library half, so a build runs the same
+# engine the editor runs rather than a second copy of it.
+[[bin]]
+name = "floptle-player"
+path = "src/main.rs"
+
+[dependencies]
+# `default-features = false` is the whole point of this crate: it turns OFF the
+# editor half — egui, the dock, the Inspector, the asset browser, the file
+# pickers — so none of it is compiled into a shipped game. It also drops the
+# default script VM the same way every other dependent does (ADR-0028), so the
+# VM is chosen here and cannot be smuggled in twice.
+floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau"] }

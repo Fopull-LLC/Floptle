@@ -4,14 +4,19 @@
 
 ```
 MyGame/
-  MyGame            (or MyGame.exe — the engine binary, renamed)
+  MyGame            (or MyGame.exe — the player, renamed to your game)
   floptle-game.ron  (the manifest: title + project pointer)
   assets/           (your project, minus dot-entries like .floptle caches)
 ```
 
-Running that binary IS the game: the manifest next to it flips the engine into
-**player mode** — it boots straight into Play with the Game view filling the
-window, no editor chrome. `Esc` releases a captured cursor (it never quits);
+**What ships is the player, not the editor.** They are two binaries built from
+one engine: the editor you author in, and a player with the whole authoring
+half — egui, the dock, the Inspector, the asset browser, the file pickers —
+*not compiled into it at all*. On this machine that is 51 MB of editor against
+30 MB of player, and the difference is not hidden chrome, it is absent code.
+
+Running that binary IS the game: the manifest next to it names the title and
+the assets folder, and it boots straight into the game filling the window. `Esc` releases a captured cursor (it never quits);
 **F1 opens the multiplayer menu** — in a build it's the game-facing version
 (host → lobby code, join by code, direct address; the editor's simulated-link
 test tools don't ship), and a "F1 — multiplayer" hint shows for the first few
@@ -31,14 +36,15 @@ The dialog's **Target** picker chooses the build's platform. **Every target
 works from every machine** — Windows builds from Linux, Linux builds from a
 Mac, macOS builds from Windows. There is no compiler and no toolchain involved.
 
-- **This machine** — instant: the export copies the running binary itself.
+- **This machine** — instant: the export copies the player binary sitting
+  beside your editor (both come out of the same install).
 - **Windows (x86_64)**, **Linux (x86_64)**, **macOS (Apple Silicon)**,
   **macOS (Intel)** — the export uses an **engine template**: the release
   bundle the pipeline already publishes for that platform, downloaded once,
   checksum-verified against `releases.json`, and cached at
 
   ```
-  <data-dir>/templates/<engine-version>/<platform>/floptle[.exe]
+  <data-dir>/templates/<engine-version>/<platform>/floptle-player[.exe]
   ```
 
   (`~/.local/share/floptle/` on Linux, `~/Library/Application Support/Floptle/`
@@ -47,6 +53,9 @@ Mac, macOS builds from Windows. There is no compiler and no toolchain involved.
 
   The first export of a platform fetches ~15–40 MB and takes a few seconds;
   every export after that is instant.
+- **Web (browser)** — the same template mechanism, one more artifact: the
+  engine as a WebAssembly module with its page. The build is a **folder you
+  serve**, not a program you run — see [Web builds](#web-builds) below.
 
 ### Why templates, not compilation
 
@@ -90,6 +99,15 @@ before launching. Signing/notarization is a Hub-pipeline concern.
 
 The export owns the `assets/` copy, and deliberately leaves things out:
 
+- **Authoring inputs the engine has no loader for.** The model formats an
+  import turns into a `.glb` (`.fbx`, `.obj`, `.mtl`, `.dae`, `.stl`, `.ply`),
+  content-tool project files (`.blend`, `.psd`, `.c4d`), another engine's
+  artifacts (`.uasset`, `.umap`), and a project's own tooling (`.py`). The
+  `.glb` that came *out* of the import ships; the file that went *in* does
+  not. Nothing is lost — none of these could be loaded at runtime either way —
+  and the export reports the count and the megabytes. On a finished
+  first-person game it was **857 files and 45 MB**, most of it asset-pack
+  leftovers. `.meta` is *not* on that list: the terrain streamer writes those.
 - **dot-entries** (`.floptle` caches, `.luarc.json`) — editor and IDE plumbing.
 - **`save/`** — the engine writes player save slots there (`save.set` in Lua).
   Shipping your copy hands every player a pre-populated save and changes what
@@ -109,18 +127,88 @@ The **entry scene** is resolved the way `scene.load` resolves names: a path
 (`scenes/menu.ron`) or a bare scene name (`menu`) both work. If it resolves to
 nothing the export fails rather than shipping a build that boots somewhere else.
 
+## Web builds
+
+**Target ⏵ Web (browser)** stamps a folder that plays in a browser:
+
+```
+MyGame-web/
+  index.html          the page: a loading bar, a Play button, the game's canvas
+  game.flpk           your project, packed into one file the page downloads
+  pkg/                the engine — the WebAssembly module and its JS glue
+  README.txt          how to serve it
+```
+
+Serve the folder over HTTP and open it — a browser will not load a game from a
+`file://` URL, so double-clicking `index.html` shows nothing. For a look on
+your own machine, `python3 -m http.server 8000` inside the folder and open
+`http://localhost:8000/`. For itch.io, zip the folder's *contents* (so
+`index.html` is at the top of the zip) and upload it as an HTML project; no
+special headers are needed.
+
+What is different from a desktop build, and deliberately so:
+
+- **WebGPU is required.** Current Chrome, Edge and Safari have it; Firefox is
+  still rolling it out. The page checks first and says so by name rather than
+  showing a black canvas. There is no WebGL2 fallback — the engine's main mesh
+  shader cannot be expressed in it ([web-export.md](web-export.md) has the
+  table).
+- **The whole project downloads before the game starts.** The loading bar is
+  that download. There is no streaming in this version, so a build's size is a
+  player's wait. The export says how big the bundle came out and which kinds
+  of file fill it, e.g.:
+
+  ```
+  game.flpk is 294.0 MB (1275 asset file(s)), the engine module 18.5 MB
+    — mostly ogg 183.2 MB, png 61.4 MB, glb 23.3 MB
+  ```
+
+  That is a real game, and it is too big for the web as it stands. Audio is
+  almost always the bulk. Until the export re-encodes it for you (see the
+  limits below), the lever is in your project: shorter loops, mono where
+  stereo buys nothing, and a lower Vorbis quality when you export the source
+  from your audio tool.
+- **Saves live in the browser.** `save.*` writes to the page's own storage,
+  scoped to the game's title, so a slot survives a reload but stays on that
+  machine and browser. Browsers cap this at a few megabytes.
+- **Sound starts on a click.** Browsers only allow audio after the player has
+  interacted with the page; the Play button is that click.
+- **No networking, no Steam, no `http.*`.** Each refuses in one sentence
+  rather than hanging — the same as the desktop's rules for a feature that is
+  not there.
+- **Background work runs on the frame that asked for it.** A navmesh bake or a
+  planet being generated stalls the frame it starts on instead of running on a
+  thread, because a page has none without headers most hosts do not send. A
+  game that relies on those at runtime will hitch there.
+- **`backdrop()` UI shaders read black.** Frosting what is behind a panel means
+  sampling the image already drawn, and a browser's canvas cannot be sampled.
+  The UI draws normally; only the frosted backdrop is missing.
+
+### Not yet, and worth knowing before you plan around it
+
+The export does **not** re-encode your assets. Audio ships at the bitrate you
+authored, textures at the size you authored, and scripts as source. Those are
+the three levers that would take a large project from a few hundred megabytes
+to something a player will wait for, and they are the next piece of this
+feature rather than part of it today. The export tells you the numbers so the
+gap is visible rather than discovered by a player.
+
+From a source checkout, `tools/web/build.sh` builds the web template the
+export uses (it needs the WASI SDK and `wasm-bindgen-cli`, and says so).
+
 ## Headless / scripted builds
 
 ```
 floptle --export <PROJECT_DIR> <OUT_DIR> <PLATFORM> [TITLE]
 ```
 
-`PLATFORM` is `host` or a release artifact key (`windows-x86_64`,
+`PLATFORM` is `host`, `web`, or a release artifact key (`windows-x86_64`,
 `linux-x86_64`, `macos-aarch64`, `macos-x86_64`). No window, no GPU — same code
 the dialog runs, so CI gets exactly the editor's behaviour:
 
 ```bash
 floptle --export ~/games/MyGame ~/builds/MyGame-win windows-x86_64 "My Game"
+floptle export ~/games/MyGame ~/builds/MyGame-web web --title "My Game"
 ```
 
 ## The command line
@@ -222,10 +310,9 @@ See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
 
 ## v1 limits (deliberate)
 
-- The binary is the full editor in disguise (~the same size); the slim
-  dedicated `floptle-runtime` player + packed/compressed assets come with the
-  export phase of the roadmap. (It is also what makes templates free: the
-  thing a build ships is the thing the pipeline already publishes.)
+- Desktop builds ship the project folder as it is — no packing, no
+  compression. (The web build packs it into one file, because a page has to
+  download it; a desktop build has no reason to.)
 - No icon/branding, no asset obfuscation — playtest builds, not store builds.
 - Script errors in a build only surface in the netcode overlay/console
   machinery, not on screen: test in the editor first.

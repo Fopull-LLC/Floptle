@@ -330,21 +330,102 @@ fn drain_session(
     world: &mut World,
     host: &mut floptle_script::ScriptHost,
 ) {
+    // Moderation decisions, in words. A dedicated server has nobody watching a
+    // Console, so this is the only place a refused join or a kick can be seen
+    // at all — and an action nobody can audit is not a moderation tool.
+    for line in session.take_join_log() {
+        println!("  {line}");
+    }
+    // Voice is FORWARDED here, not heard: this process has no output device and
+    // nobody sitting at it. The session already relayed each frame to whoever
+    // the game said may hear it (floptle/0180); draining is what stops the
+    // host's own copy accumulating on a machine that never listens.
+    let _ = session.take_voice();
     for ev in session.take_events() {
         match ev {
             floptle_net::NetEvent::PeerJoined(p) => {
                 println!("  peer {p} joined");
+                if let Some(name) = claim_free_slot(session, world, p) {
+                    println!("    peer {p} drives authored player slot \"{name}\"");
+                }
                 host.fire_net_event(world, "playerJoined", Some(p), None);
             }
-            floptle_net::NetEvent::PeerLeft(p) => {
-                println!("  peer {p} left");
-                host.fire_net_event(world, "playerLeft", Some(p), None);
+            floptle_net::NetEvent::PeerLeft(p, why) => {
+                match &why {
+                    Some(reason) => println!("  peer {p} removed: {reason}"),
+                    None => println!("  peer {p} left"),
+                }
+                release_slots(session, world, p);
+                host.fire_net_event(world, "playerLeft", Some(p), why.as_deref());
             }
             _ => {}
         }
     }
     for rpc in session.take_rpcs() {
         host.dispatch_rpc(world, &rpc.name, &rpc.args, rpc.sender);
+    }
+}
+
+/// Hand a joining peer the first authored `Predicted` slot nobody owns.
+///
+/// **Why the server does this and a host does not.** In an editor- or
+/// player-hosted session the convention is "Predicted node #1 = host, #2+ =
+/// joiners" (`floptle-editor/src/net.rs`), because slot #1's driver is sitting
+/// at the keyboard. A dedicated server has no local player: leaving slot #1
+/// with no owner leaves an avatar in the world that nobody controls and no
+/// client predicts — the first joiner spectates their own body. So here the
+/// slots are handed out from #1, in node order, as peers arrive.
+///
+/// It only ever touches a slot that is **unowned**, so a game that assigns its
+/// own (`net.setOwner`, or `net.spawn{ owner = peer }`) keeps every decision it
+/// makes; and a peer that already owns something is left alone, so a returning
+/// player given their old slot back does not also collect a second one.
+fn claim_free_slot(
+    session: &mut NetSession,
+    world: &mut World,
+    peer: floptle_net::PeerId,
+) -> Option<String> {
+    let slots: Vec<floptle_core::Entity> = world
+        .query::<Transform>()
+        .map(|(e, _)| e)
+        .filter(|e| {
+            world
+                .get::<Replicated>(*e)
+                .is_some_and(|r| r.mode == floptle_core::ReplicationMode::Predicted)
+        })
+        .collect();
+    if slots.iter().any(|e| world.get::<Replicated>(*e).and_then(|r| r.owner) == Some(peer)) {
+        return None;
+    }
+    let free = slots
+        .iter()
+        .find(|e| world.get::<Replicated>(**e).is_some_and(|r| r.owner.is_none()))
+        .copied()?;
+    let name = world.get::<floptle_core::Name>(free).map(|n| n.0.clone()).unwrap_or_default();
+    session.set_owner(world, free, Some(peer)).then_some(name)
+}
+
+/// Clean up after a departed peer: its runtime spawns go, its authored slots
+/// come back.
+///
+/// The two halves are different on purpose. A rig the game spawned FOR a player
+/// belongs to that player and leaves with them, subtree and all — the same rule
+/// a hosted session has always followed. An authored slot belongs to the scene:
+/// it stays in the world and becomes free, so the next joiner can have it
+/// instead of the lobby shrinking by one every time somebody's wifi drops.
+fn release_slots(session: &mut NetSession, world: &mut World, peer: floptle_net::PeerId) {
+    // Runtime spawns first, so the sweep below doesn't try to release an
+    // entity that is about to stop existing.
+    for e in session.owned_runtime_spawns(peer) {
+        session.despawn(world, e);
+    }
+    let mine: Vec<floptle_core::Entity> = world
+        .query::<Replicated>()
+        .filter(|(_, r)| r.owner == Some(peer))
+        .map(|(e, _)| e)
+        .collect();
+    for e in mine {
+        session.set_owner(world, e, None);
     }
 }
 
@@ -426,6 +507,76 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Two authored player slots and a session nobody has joined yet — the
+    /// shape a dedicated server's scene actually has.
+    fn slots() -> (NetSession, World, Vec<floptle_core::Entity>) {
+        let hub = floptle_net::MemoryHub::new();
+        let mut session = NetSession::server(Box::new(hub.server_endpoint()), 0);
+        let mut world = World::default();
+        let ents: Vec<_> = ["Survivor1", "Survivor2"]
+            .iter()
+            .map(|name| {
+                let e = world.spawn();
+                world.insert(e, Transform::IDENTITY);
+                world.insert(e, floptle_core::Name((*name).into()));
+                world.insert(
+                    e,
+                    Replicated {
+                        mode: floptle_core::ReplicationMode::Predicted,
+                        ..Default::default()
+                    },
+                );
+                e
+            })
+            .collect();
+        session.register_scene(&world);
+        (session, world, ents)
+    }
+
+    fn owner_of(world: &World, e: floptle_core::Entity) -> Option<floptle_net::PeerId> {
+        world.get::<Replicated>(e).and_then(|r| r.owner)
+    }
+
+    /// floptle/0181 — **slot #1 is not reserved for a host that does not exist.**
+    ///
+    /// A hosted session gives slot #1 to the host, because somebody is sitting
+    /// at that keyboard. A dedicated server has nobody: reserving it leaves an
+    /// avatar in the world that no client predicts and no input drives, and the
+    /// first player to join spectates their own body.
+    #[test]
+    fn the_first_joiner_gets_slot_one_on_a_dedicated_server() {
+        let (mut session, mut world, ents) = slots();
+        assert_eq!(claim_free_slot(&mut session, &mut world, 1).as_deref(), Some("Survivor1"));
+        assert_eq!(owner_of(&world, ents[0]), Some(1));
+        assert_eq!(claim_free_slot(&mut session, &mut world, 2).as_deref(), Some("Survivor2"));
+        assert_eq!(owner_of(&world, ents[1]), Some(2));
+        // The lobby is full: a third joiner takes nothing rather than stealing.
+        assert_eq!(claim_free_slot(&mut session, &mut world, 3), None);
+        assert_eq!(owner_of(&world, ents[0]), Some(1), "…and nobody is displaced");
+    }
+
+    /// A peer that already owns something is left alone, so a game that assigns
+    /// its own slots (`net.setOwner` on reconnect, say) does not also collect a
+    /// spare one behind its back.
+    #[test]
+    fn a_peer_that_already_owns_a_node_is_not_handed_another() {
+        let (mut session, mut world, ents) = slots();
+        session.set_owner(&mut world, ents[1], Some(7));
+        assert_eq!(claim_free_slot(&mut session, &mut world, 7), None);
+        assert_eq!(owner_of(&world, ents[0]), None, "slot #1 stays free for a real joiner");
+    }
+
+    /// A slot comes back when its player drops, so a lobby does not shrink by
+    /// one every time somebody's wifi does.
+    #[test]
+    fn a_departed_peers_slot_is_freed_for_the_next_joiner() {
+        let (mut session, mut world, ents) = slots();
+        claim_free_slot(&mut session, &mut world, 1);
+        release_slots(&mut session, &mut world, 1);
+        assert_eq!(owner_of(&world, ents[0]), None);
+        assert_eq!(claim_free_slot(&mut session, &mut world, 2).as_deref(), Some("Survivor1"));
     }
 
     #[test]

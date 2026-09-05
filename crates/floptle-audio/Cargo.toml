@@ -20,9 +20,11 @@ rust-version.workspace = true
 # data-model crates (floptle-scene) can use it without dragging in the OS
 # audio stack. The editor/runtime enables "backend" for actual output.
 default = ["backend"]
-backend = ["dep:cpal", "dep:symphonia"]
+backend = ["dep:cpal", "dep:symphonia", "dep:opus-pure"]
 
 [dependencies]
+# Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
+floptle-vfs = { path = "../floptle-vfs" }
 glam.workspace = true
 log.workspace = true
 serde.workspace = true
@@ -30,6 +32,18 @@ cpal = { version = "0.18", optional = true }    # device output — ADR-0023
 symphonia = { version = "0.6", optional = true, default-features = false, features = [
     "wav", "ogg", "vorbis", "mp3", "flac", "pcm",
 ] } # clip decoding: the formats sound packs actually ship
+# Voice chat (floptle/0180). PURE RUST on purpose: the C bindings (opus,
+# audiopus) need libopus present or vendored and built, which would put a C
+# toolchain in the way of every contributor, every CI job, and the wasm32
+# target the web export gate builds. Measured at 219 us encode + 24 us decode
+# per 20 ms frame — ~1.2% of the real-time budget for a stream.
+opus-pure = { version = "0.2", optional = true }
+
+# The browser: cpal's WebAudio backend is a feature of the same crate. The
+# output stream runs on the page's audio thread the browser provides; there is
+# no capture device, and `capture.rs` reports that rather than opening one.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.18", optional = true, features = ["wasm-bindgen"] }
 
 [dev-dependencies]
 ron.workspace = true

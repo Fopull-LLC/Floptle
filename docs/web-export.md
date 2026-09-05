@@ -1,14 +1,14 @@
 # Web export
 
-**Not yet.** You cannot export a Floptle game to the browser today. This page is
-the answer to whether you will be able to — asked properly, with the riskiest
-claim compiled rather than assumed — and what it means for the project you are
-building right now.
+**File ⏵ Export Game… ⏵ Web (browser)** stamps a folder that plays in a
+browser; [export-builds.md](export-builds.md#web-builds) is the page for using
+it. This page is the story behind it — what a browser build is and is not,
+the change to the scripting engine it required, and the evidence each decision
+was made on — kept because the decisions still hold and will be asked about.
 
-The short version: **yes, and the work has started.** It targets WebGPU, it
-requires one change to the scripting engine, and that change is worth making
-even if your game never leaves the desktop. Nothing you have written needs
-rewriting.
+The short version: it targets WebGPU, it required one change to the scripting
+engine, and that change was worth making even for a game that never leaves the
+desktop. Nothing you had written needed rewriting.
 
 ---
 
@@ -176,9 +176,8 @@ reported honestly when it is measured, including if it is missed.
 
 ## How it lands
 
-In order, and each step is useful on its own. **Steps 1–3 have shipped; steps
-4–7 are the plan** — that line is where this page stops describing the engine
-you have and starts describing where it is going.
+In order, and each step was useful on its own. **Steps 1–6 have shipped;
+step 7's browser probe runs by hand, not yet in CI.**
 
 1. ~~**The Luau engine**, at full parity, behind a build switch.~~ **Shipped in
    v0.84.0.**
@@ -187,20 +186,154 @@ you have and starts describing where it is going.
 3. ~~**`exact` / `fast` vectors**, the lint, and the immutable helpers.~~
    **Shipped in v0.84.0**, and the rough edges around the setting were fixed in
    v0.84.1.
-4. **The engine running in a browser** — a skinned, vertex-painted character
+4. ~~**The engine running in a browser** — a skinned, vertex-painted character
    through the real render graph, at retro resolution, with a frame-time
    readout. This is the go/no-go moment for the web half, and it is a
-   screenshot, not a spreadsheet.
-5. **The platform edges**: assets from a preloaded bundle instead of the disk,
-   saves in browser storage, audio through WebAudio.
-6. **`export --target web`** and the asset pipeline above.
-7. **Verification and release**: a browser screenshot probe in CI, then a
-   version like any other.
+   screenshot, not a spreadsheet.~~ **Passed, 2026-09-04.** See the next
+   section: the go was a go, and it found three shader bugs on the way.
+5. ~~**The platform edges**: assets from a preloaded bundle instead of the
+   disk, saves in browser storage, audio through WebAudio.~~ **Shipped.** The
+   engine reads its files through one seam (`std::fs` on the desktop, the
+   bundle in a page), measures time with a clock that exists in both, and
+   runs its background jobs inline where there are no threads. The CI lint for
+   the browser target refuses a direct disk or clock call in the engine, so
+   this cannot quietly come undone.
+6. ~~**`export --target web`**.~~ **Shipped** — the dialog's Web target and
+   `floptle export … web`, with the template fetched and cached like any
+   platform's. The asset pipeline (re-encoding audio, downscaling textures,
+   precompiling scripts) is not part of it yet: a build downloads the project
+   as it is.
+7. **Verification and release**: the browser probe (`tools/web/shot.py`) runs
+   on a machine with a browser; a CI job with one is still to come.
 
-Steps 1–3 were worth doing whether or not the browser half ever ships, and the
-engine has already been faster for them. Step 4 is where the honest uncertainty
-is concentrated, and it is deliberately early enough to change the answer
-cheaply. It does not have a date.
+Steps 1–3 were worth doing whether or not the browser half ever shipped, and
+the engine has been faster for them since. Step 4 was where the honest
+uncertainty was concentrated, and it was answered before anything was built on
+it.
+
+**What the export target waited on**, kept for the record. Two things had to
+happen before the dialog listed a browser. The engine had to *compile* for it
+— everything that only exists on a desktop (the FBX importer's C library,
+QUIC, the OS keyring, blocking HTTP, the clipboard, the file manager, the
+dedicated server) behind a target gate with a browser answer or a one-sentence
+refusal. And then it had to *run* there, which compiling says nothing about: a
+disk read compiles for the browser and fails on the page, a clock read
+compiles and panics. So every file the engine reads goes through one seam that
+is `std::fs` on the desktop and the preloaded bundle in a page; saves go to the
+page's storage through the same seam; the frame clock is one that exists on
+both; and each background job runs inline where there is no thread to hand it
+to. The rule that keeps it that way is a lint on the browser target, in CI,
+that refuses a direct disk, clock, thread or process call in the engine — the
+gate is a build failure rather than a bug report from a tab.
+
+Signing in on a page is still not available, and that one is not the engine's
+to fix: a page may only talk to fopull.com once fopull.com allows the game's
+origin and offers a sign-in a page can redirect to.
+
+---
+
+## Step 4: the engine in a browser tab
+
+A wasm module — `crates/floptle-web`, built by `tools/web/build.sh` — runs a
+four-rung ladder on a page, each rung a line a headless browser can read:
+
+1. **The scripting engine.** Luau in a tab: eval, `pcall` recovering from an
+   error raised in Rust and one raised in Lua, a syntax error reported rather
+   than trapped, native vectors, two hundred thousand tables allocated and
+   collected, an uncaught error survived. All eight checks pass.
+2. **A WebGPU device** through the renderer's own device path, awaited rather
+   than blocked on — the only difference from the desktop.
+3. **Every shader module through the browser's own compiler**, then the real
+   raster pass with a mesh carrying vertex paint and a skin — the two
+   storage-buffer paths WebGL2 could not have carried. All eleven modules
+   compile.
+4. **Frames.** The skinned, painted bar curling at 240 rows, upscaled into a
+   640×360 canvas through the engine's own retro path and post chain, at the
+   display's 60 Hz. The picture came back from the GPU and it is the bar.
+
+The browser build weighs **2.4 MB of wasm** before any size work — the
+scripting engine, the whole renderer, and the C++ runtime it needed.
+
+### What it found
+
+The claim on this page was "every shader ships as-is on WebGPU". It was almost
+right, and the difference is worth knowing about because it is invisible from
+the desktop. wgpu on a desktop validates WGSL with its own compiler; a browser
+validates with *its* compiler, which enforces two rules the desktop one lets
+through. Three shader modules were refused — the mesh raster path, the post
+chain and the game UI — for:
+
+- **A texture sampled from non-uniform control flow.** Sampling with implicit
+  derivatives is only legal where every pixel in a group takes the same path.
+  The depth prepass took an early `return` on per-instance data and sampled
+  after it; the depth-of-field and motion-blur loops ran after a per-pixel
+  early return; the UI shader sampled inside branches on the element kind.
+  Fixed by sampling first or by asking for level 0 explicitly; nothing
+  rendered by a desktop changes, and the desktop probes for cutout, skinning,
+  paint, depth of field, motion blur and UI text all still pass.
+- **`*` and `^` mixed without parentheses**, which WGSL forbids, in the UI
+  grain hash.
+
+Two more things the desktop never sees:
+
+- **A browser canvas offers no sRGB surface format.** The renderer now views
+  the swapchain through an sRGB view where the surface itself has none, so
+  linear light reaches the screen encoded the same way it does on the desktop.
+- **The C++ runtime in a Rust wasm module.** Luau raises errors with C++
+  exceptions; Rust's browser target ships no C++ runtime; the WASI SDK's does
+  (version 33 or newer), with its C++ compiled for a different wasm target and
+  linked into this one. The dozen system calls its libc then wants are
+  answered in Rust, so the finished module imports nothing from WASI. And the
+  linker, seeing no reference to the constructor list, wraps every exported
+  function in a call to it — every call from the page re-ran every C++ static
+  constructor until the module referenced the list itself. That one cost an
+  afternoon and is written down in the crate.
+
+### A build is a real game binary now
+
+One thing had to change before a browser target could exist at all, and it is
+worth its own note because it improves every desktop build too.
+
+**An export used to ship the editor.** The engine was one program, and a
+"build" was that program with a manifest beside it that hid the authoring
+chrome — so every game you shipped carried an Inspector, an asset browser, a
+dock, a code editor and a set of OS file dialogs that the player could never
+open. A browser has an answer for none of those, so the web target was blocked
+behind the same wall.
+
+Floptle now builds **two binaries from one engine**: the editor you author in,
+and a player with the authoring half *not compiled into it*. Measured on the
+machine this was written on, in release:
+
+| | editor | player |
+| --- | --- | --- |
+| binary | 51.2 MB | **29.9 MB** |
+| crates compiled in | 535 | **415** |
+| egui in the dependency graph | yes | **none at all** |
+
+**File ⏵ Export Game… ships the player**, and the engine bundle published for
+each platform now carries both, so cross-platform export is unchanged: pick a
+target, get that platform's player. Nothing about how you export is different.
+A bundle from before the split has no player in it, and an export against one
+says so by name rather than quietly shipping the editor again.
+
+For the browser this is the difference between "port the editor" and "compile
+the game", and it is the piece step 5 was really waiting on.
+
+### Reproducing it
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version <the version Cargo.lock pins> --locked
+tools/web/build.sh          # fetches the WASI SDK on first use
+tools/web/shot.py --display # runs the page in a browser, prints the ladder,
+                            # writes target/web/probe.png
+```
+
+Headless Chromium runs the whole ladder but aborts the readback that makes
+the picture; `--display` opens a window, which completes it, and closes it
+again. CI builds and links the module on every push, and checks that its
+import list names nothing from WASI.
 
 ---
 

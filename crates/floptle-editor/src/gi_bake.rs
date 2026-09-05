@@ -55,7 +55,7 @@ pub(crate) struct GiBake {
     color_row: u32,
     depth_row: u32,
     format: wgpu::TextureFormat,
-    started: std::time::Instant,
+    started: floptle_core::time::Instant,
 }
 
 impl GiBake {
@@ -244,7 +244,7 @@ impl crate::Editor {
     /// Load the scene's bake from disk, if there is one. Called after a scene
     /// loads; a missing or stale file simply means "no GI yet".
     pub(crate) fn load_gi(&mut self) {
-        self.gi_baked = std::fs::read(self.gi_path()).ok().and_then(|b| BakedGi::from_bytes(&b));
+        self.gi_baked = floptle_vfs::read(self.gi_path()).ok().and_then(|b| BakedGi::from_bytes(&b));
         self.gi_dirty = true;
         // A new scene is a new room. Reflection captures are not stored, so
         // there is nothing to load — but the ones in hand belong to the scene
@@ -387,7 +387,7 @@ impl crate::Editor {
             color_row,
             depth_row,
             format,
-            started: std::time::Instant::now(),
+            started: floptle_core::time::Instant::now(),
         });
         // Bounce 1 is direct light only: the volume must not gather the light it
         // is in the middle of computing.
@@ -441,7 +441,7 @@ impl crate::Editor {
     /// Advance a bake by up to one frame's worth of work. Call once per frame.
     pub(crate) fn step_gi_bake(&mut self) {
         let Some(mut bake) = self.gi_bake.take() else { return };
-        let frame_start = std::time::Instant::now();
+        let frame_start = floptle_core::time::Instant::now();
 
         while bake.next < bake.grid.count() {
             let batch = BATCH.min(bake.grid.count() - bake.next);
@@ -476,7 +476,7 @@ impl crate::Editor {
         if bake.bounce >= bake.bounces {
             let path = self.gi_path();
             let bytes = self.gi_baked.as_ref().map(|b| b.to_bytes()).unwrap_or_default();
-            let msg = match std::fs::write(&path, &bytes) {
+            let msg = match floptle_vfs::write(&path, &bytes) {
                 Ok(()) => format!(
                     "baked GI: {} probes × {} bounce{} in {:.1}s → {} ({} KB)",
                     bake.grid.count(),

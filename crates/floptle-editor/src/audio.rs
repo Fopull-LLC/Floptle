@@ -79,12 +79,12 @@ impl AudioSystem {
         // legacy `assets/…`-prefixed, CWD-relative, absolute) — probe the key
         // as written, then with each audio extension appended.
         let direct = crate::project::resolve_asset_path(root, key);
-        if direct.is_file() {
+        if floptle_vfs::is_file(&direct) {
             return Some(direct);
         }
         for ext in floptle_audio::AUDIO_EXTENSIONS {
             let p = crate::project::resolve_asset_path(root, &format!("{key}.{ext}"));
-            if p.is_file() {
+            if floptle_vfs::is_file(&p) {
                 return Some(p);
             }
         }

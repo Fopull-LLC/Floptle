@@ -10,7 +10,7 @@
 //!   * blocks are copy-on-write, so painting a duplicated prop forks rather than
 //!     bleeding into the original (proposal §9.0).
 
-use std::time::Instant;
+use floptle_core::time::Instant;
 
 use floptle_core::math::{Vec2, Vec3, Vec4};
 use floptle_core::{Entity, Matter, VertexPaint};
@@ -65,6 +65,7 @@ pub(crate) struct PaintBlocks {
 impl Editor {
     /// Bring the ◨ Paint tab to the front (re-adding it if closed), so choosing the
     /// tool never leaves the brush controls hidden behind another tab.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn focus_paint(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
             crate::dock::focus_paint_tab(dock);
@@ -74,6 +75,7 @@ impl Editor {
     /// Bring the ◫ Tiles tab to the front (re-adding it if closed) — choosing
     /// the tile tool and finding no palette is the "why is nothing painting"
     /// moment, and it costs one line to avoid.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn focus_tiles(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
             crate::dock::focus_tiles_tab(dock);
@@ -82,6 +84,7 @@ impl Editor {
 
     /// Bring the ▦ Model tab to the front (re-adding it if closed) — the Map
     /// tool's shape/op controls live there.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn focus_map(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
             crate::dock::focus_map_tab(dock);

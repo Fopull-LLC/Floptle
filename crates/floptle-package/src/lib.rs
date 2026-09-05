@@ -44,6 +44,9 @@
 
 pub mod contents;
 pub mod index;
+// Installing, linking and scaffolding write a project's folder. Authoring;
+// a browser build only READS packages, from the bundle the export packed.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod install;
 pub mod manifest;
 pub mod registry;
@@ -52,6 +55,7 @@ pub mod version;
 
 pub use contents::{Contents, Facet};
 pub use index::{Index, Listing, Query, Release, Sort};
+#[cfg(not(target_arch = "wasm32"))]
 pub use install::InstallError;
 pub use manifest::{
     Author, Category, Dependency, DirKind, FontFace, Manifest, ManifestError, Media, Permission,

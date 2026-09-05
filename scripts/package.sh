@@ -25,8 +25,10 @@ case "$(uname -m)" in
 esac
 TARGET="$OS-$ARCH"   # must match floptle_hub::releases::platform_target()
 
-echo "==> building floptle-editor (release)"
+echo "==> building floptle-editor + floptle-player (release)"
 cargo build --release -p floptle-editor
+# The player is what an export ships; a bundle without it can stamp no build.
+cargo build --release -p floptle-player
 
 # Respect a custom CARGO_TARGET_DIR / .cargo/config target-dir (portable, no jq needed).
 TARGET_DIR="$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
@@ -35,11 +37,14 @@ TARGET_DIR="${TARGET_DIR:-target}"
 # The floptle-editor crate's [[bin]] is named `floptle`.
 BIN="$TARGET_DIR/release/floptle"
 [ -f "$BIN" ] || { echo "editor binary not found at $BIN"; exit 1; }
+PLAYER="$TARGET_DIR/release/floptle-player"
+[ -f "$PLAYER" ] || { echo "player binary not found at $PLAYER"; exit 1; }
 
 mkdir -p "$OUT"
 BUNDLE="$OUT/floptle-$VERSION-$TARGET"
 rm -rf "$BUNDLE"; mkdir -p "$BUNDLE"
 cp "$BIN" "$BUNDLE/floptle"
+cp "$PLAYER" "$BUNDLE/floptle-player"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VERSION" "$TARGET" "$COMMIT" \
   > "$BUNDLE/version.json"

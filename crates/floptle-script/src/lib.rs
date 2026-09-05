@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::SystemTime;
+use floptle_core::time::SystemTime;
 
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material};
@@ -282,6 +282,7 @@ pub fn set_vec3_mode(lua: &mlua::Lua, mode: Vec3Mode) -> mlua::Result<()> {
 pub mod nav_api;
 pub mod access_api;
 mod net_api;
+mod voice_api;
 pub mod opts;
 mod perf_api;
 pub mod rollback_api;
@@ -310,8 +311,10 @@ pub use api::{
     mirror_component_colors, mirror_components, HANDLE_KEYS,
 };
 pub use input_api::{SharedDomain, SharedInput};
+pub use voice_api::{VoiceCmd, VoiceOpts, VoiceState};
 pub use net_api::{
-    input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, RewindScope, RollbackInfo,
+    input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, PeerIdentity,
+    RewindScope, RollbackInfo,
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
@@ -889,6 +892,10 @@ pub struct ScriptHost {
     /// The `net.*` bridge: queued session commands, mirrored session state,
     /// `net.on` handlers, and the current-instance marker (docs/multiplayer.md §8).
     net: net_api::SharedNet,
+    /// The `voice.*` bridge: queued voice commands + mirrored microphone and
+    /// speaker state (floptle/0180). Separate from `net` because voice lives
+    /// with the SESSION, not the scene — a scene swap must not reset it.
+    voice: voice_api::SharedVoice,
     /// Per-(entity, script) `synced` STORE tables (the raw values behind the
     /// proxy scripts see) — the host collects them for the server session and
     /// writes received updates into them on clients. Shared (Rc) with the

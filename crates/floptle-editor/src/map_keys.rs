@@ -572,7 +572,7 @@ fn path() -> Option<std::path::PathBuf> {
 }
 
 pub(crate) fn load_map_keys() -> MapKeys {
-    match path().and_then(|p| std::fs::read_to_string(p).ok()) {
+    match path().and_then(|p| floptle_vfs::read_to_string(p).ok()) {
         Some(t) => MapKeys::decode(&t),
         None => MapKeys::default(),
     }
@@ -581,9 +581,9 @@ pub(crate) fn load_map_keys() -> MapKeys {
 pub(crate) fn save_map_keys(keys: &MapKeys) {
     let Some(p) = path() else { return };
     if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = floptle_vfs::create_dir_all(parent);
     }
-    let _ = std::fs::write(p, keys.encode());
+    let _ = floptle_vfs::write(p, keys.encode());
 }
 
 #[cfg(test)]

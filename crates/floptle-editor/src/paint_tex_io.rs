@@ -141,7 +141,7 @@ impl Editor {
             .collect();
         if self.paint_tex.is_empty() && keep.is_empty() {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect paint.
-            let _ = std::fs::remove_file(self.tex_paint_file_path());
+            let _ = floptle_vfs::remove_file(self.tex_paint_file_path());
             return true;
         }
         // Which mesh key each paint id belongs to, so we can hash the right geometry.
@@ -178,8 +178,8 @@ impl Editor {
         }
         nodes.extend(keep);
         let dir = self.project_root.join("paint");
-        let _ = std::fs::create_dir_all(&dir);
-        if let Err(e) = std::fs::write(self.tex_paint_file_path(), encode(&nodes)) {
+        let _ = floptle_vfs::create_dir_all(&dir);
+        if let Err(e) = floptle_vfs::write(self.tex_paint_file_path(), encode(&nodes)) {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!("💾 save texture paint failed: {e}"),
@@ -202,7 +202,7 @@ impl Editor {
         }
         self.paint_tex.clear();
         self.paint_tex_orphans.clear();
-        let Ok(bytes) = std::fs::read(self.tex_paint_file_path()) else { return };
+        let Ok(bytes) = floptle_vfs::read(self.tex_paint_file_path()) else { return };
         let Some(stored) = decode(&bytes) else {
             self.console.push(
                 floptle_script::LogLevel::Error,

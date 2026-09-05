@@ -195,13 +195,13 @@ pub(crate) fn effect_label(shader_path: &str) -> String {
 /// engine updates can add new effects). Mirrors `seed_example_shaders`.
 pub(crate) fn seed_ui_effects(project_root: &std::path::Path) {
     let dir = project_root.join("shaders").join("examples").join("ui");
-    if std::fs::create_dir_all(&dir).is_err() {
+    if floptle_vfs::create_dir_all(&dir).is_err() {
         return;
     }
     for (_, stem, src) in UI_EFFECTS {
         let path = dir.join(format!("{stem}.flsl"));
-        if !path.exists() {
-            let _ = std::fs::write(&path, src);
+        if !floptle_vfs::exists(&path) {
+            let _ = floptle_vfs::write(&path, src);
         }
     }
 }

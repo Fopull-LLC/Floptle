@@ -812,14 +812,122 @@ function net.rewind(peer, fn) end
 ---@param event string
 ---@param fn function
 function net.on(event, fn) end
----SERVER ONLY: spawn a scene asset's first node as a replicated runtime object.
----It appears on every client (and late joiners). Available next tick.
----@param path string Scene asset, project-relative (e.g. \"scenes/arrow.ron\").
+---SERVER ONLY: spawn a scene or prefab's first root, AND everything under it,
+---as a replicated runtime object. It appears on every client (and late
+---joiners). Only the root replicates; its children are local nodes that follow
+---it, unless a child carries its own Networked component. Available next tick.
+---@param path string Scene or prefab asset, project-relative (e.g. \"scenes/arrow.ron\").
 ---@param opts { x: number, y: number, z: number, owner: integer }|nil
 function net.spawn(path, opts) end
----SERVER ONLY: despawn a replicated runtime object everywhere.
+---SERVER ONLY: despawn a replicated runtime object, and the subtree it spawned
+---with, everywhere.
 ---@param node Node
 function net.despawn(node) end
+---@class VoiceSource
+---@field peer integer
+---@field live boolean Does this stream exist at all?
+local VoiceSource = {}
+---Route this speaker through a mixer track — how a voice becomes a monster.
+---@param track string
+function VoiceSource:setTrack(track) end
+---@param volume number
+function VoiceSource:setVolume(volume) end
+---Follow a node; the voice comes out of it and moves with it.
+---@param node Node
+function VoiceSource:setPosition(node) end
+---@param mode string Spatial | Distance | Flat
+function VoiceSource:setMode(mode) end
+---@param falloff string Inverse | Linear | Exponential
+function VoiceSource:setFalloff(falloff) end
+---@param d number
+function VoiceSource:setMinDistance(d) end
+---@param d number
+function VoiceSource:setMaxDistance(d) end
+
+---Proximity voice chat. A remote player's voice is an ORDINARY spatial sound:
+---it is spatialised, attenuated and routed through a mixer track like anything
+---else, so effects you already have apply to it.
+voice = {}
+---Input device names. Empty on a machine with no microphone — a normal state.
+---@return string[]
+function voice.devices() end
+---The input device currently open.
+---@return string|nil
+function voice.device() end
+---Open an input device; nil opens the system default.
+---@param name string|nil
+function voice.setDevice(name) end
+---Open or close the microphone. Push-to-talk is your decision; this is where
+---it takes effect.
+---@param on boolean
+function voice.setTransmit(on) end
+---@return boolean
+function voice.transmitting() end
+---The local microphone level, 0..1 — live whether or not transmit is on, so a
+---settings screen can prove the mic works without joining a lobby.
+---@return number
+function voice.level() end
+---Hear your own microphone. Off by default.
+---@param on boolean
+function voice.sidetone(on) end
+---A remote player's voice comes out of `node` and follows it.
+---@param peer integer
+---@param node Node
+---@param opts { mode: string, falloff: string, minDistance: number, maxDistance: number, volume: number, track: string }|nil
+function voice.attach(peer, node, opts) end
+---Stop following a node. The stream keeps running.
+---@param peer integer
+function voice.detach(peer) end
+---A handle shaped like the one `audio.play` returns.
+---@param peer integer
+---@return VoiceSource
+function voice.source(peer) end
+---Are that peer's frames arriving? For a HUD indicator.
+---@param peer integer
+---@return boolean
+function voice.speaking(peer) end
+---A LOCAL mute — one player's choice not to listen. Never leaves this machine.
+---@param peer integer
+---@param on boolean|nil
+function voice.mute(peer, on) end
+---@param peer integer
+---@return boolean
+function voice.muted(peer) end
+---SERVER ONLY: who may hear that speaker; nil for everyone. THIS is where
+---proximity voice is enforced — a peer not on the list is never sent the audio.
+---@param peer integer
+---@param peers integer[]|nil
+function voice.setForward(peer, peers) end
+---SERVER ONLY: remove a player, telling them why. The reason reaches them
+---before the link closes, so their UI can say what happened rather than
+---showing a generic drop; `playerLeft` carries it, and on their machine
+---`net.on(\"kicked\", fn)` fires with it. Kicking is not banning — without a
+---verified id it lasts until they reconnect.
+---@param peer integer
+---@param reason string|nil
+function net.kick(peer, reason) end
+---Who a connected peer is: `{ id, name, tier, verified }`. An anonymous peer
+---has no `id`, which is a normal state. **Check `verified` before acting on
+---`id`** — it is false for everyone today, because the engine carries what a
+---client says about itself and cannot yet check it with the provider.
+---@param peer integer
+---@return { id: string|nil, name: string, tier: string, verified: boolean }
+function net.identity(peer) end
+---SERVER ONLY: decide whether `peer` may be told about `node` at all, on top
+---of the interest radius. `false` withholds it, `true` pins it regardless of
+---distance or line of sight, `nil` hands the decision back to the two tests.
+---The hidden-role hook: hiding something a client was already sent is a
+---setting a modified client turns back off, so this happens on the server.
+---@param node Node
+---@param peer integer
+---@param relevant boolean|nil
+function net.setRelevant(node, peer, relevant) end
+---SERVER ONLY: hand a replicated node to `peer` after it already exists, or
+---pass nil to release it back to the server. What gives a reconnecting player
+---their own slot back instead of a fresh one.
+---@param node Node
+---@param peer integer|nil
+function net.setOwner(node, peer) end
 ---Deterministic RNG for a rollback session: drawn from (match seed, tick, draw
 ---index), so every peer rolls the same numbers AND a re-simulated tick rolls
 ---them again. Use this instead of `rng()` in anything a rollback node reads —
@@ -1856,25 +1964,25 @@ const LUARC_JSON_OLD: &[&str] = &[
 /// version — a user's own config is preserved).
 pub(crate) fn write_lua_support(project_root: &Path) {
     let lib = project_root.join(".floptle").join("library");
-    let _ = std::fs::create_dir_all(&lib);
-    let _ = std::fs::write(lib.join("floptle.lua"), LUA_ANNOTATIONS);
+    let _ = floptle_vfs::create_dir_all(&lib);
+    let _ = floptle_vfs::write(lib.join("floptle.lua"), LUA_ANNOTATIONS);
     let luarc = project_root.join(".luarc.json");
-    let migrate = match std::fs::read_to_string(&luarc) {
+    let migrate = match floptle_vfs::read_to_string(&luarc) {
         Ok(cur) => LUARC_JSON_OLD.contains(&cur.as_str()),
         Err(_) => true, // absent
     };
     if migrate {
-        let _ = std::fs::write(luarc, LUARC_JSON);
+        let _ = floptle_vfs::write(luarc, LUARC_JSON);
     }
 }
 
 /// Write the default scripts into `scripts_dir` (each only if absent).
 pub(crate) fn seed_default_scripts(scripts_dir: &Path) {
-    let _ = std::fs::create_dir_all(scripts_dir);
+    let _ = floptle_vfs::create_dir_all(scripts_dir);
     for (name, body) in DEFAULT_SCRIPTS {
         let p = scripts_dir.join(name);
-        if !p.exists() {
-            let _ = std::fs::write(&p, body);
+        if !floptle_vfs::exists(&p) {
+            let _ = floptle_vfs::write(&p, body);
         }
     }
 }
@@ -1907,11 +2015,11 @@ mod stub_tests {
             if !p.exists() {
                 continue;
             }
-            if std::fs::read_to_string(&p).unwrap_or_default() == super::LUA_ANNOTATIONS {
+            if floptle_vfs::read_to_string(&p).unwrap_or_default() == super::LUA_ANNOTATIONS {
                 continue;
             }
             if update {
-                std::fs::write(&p, super::LUA_ANNOTATIONS).expect("write stub");
+                floptle_vfs::write(&p, super::LUA_ANNOTATIONS).expect("write stub");
             } else {
                 stale.push(project);
             }

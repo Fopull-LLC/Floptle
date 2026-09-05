@@ -179,7 +179,10 @@ fn gradient_t(p: vec2<f32>, half: vec2<f32>, cfg: vec4<f32>) -> f32 {
 // corduroy rather than grain), and its precision varies by driver. This is
 // stable everywhere and costs the same.
 fn hash21(p: vec2<f32>) -> f32 {
-    var n = u32(i32(p.x)) * 1597334673u ^ u32(i32(p.y)) * 3812015801u;
+    // Parenthesised on purpose: WGSL forbids mixing `*` and `^` without them,
+    // and a browser's compiler refuses the whole module over it. naga lets it
+    // through, which is why this shipped for as long as it did.
+    var n = (u32(i32(p.x)) * 1597334673u) ^ (u32(i32(p.y)) * 3812015801u);
     n = (n ^ (n >> 15u)) * 2246822519u;
     n = (n ^ (n >> 13u)) * 3266489917u;
     n = n ^ (n >> 16u);
@@ -223,6 +226,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         cmask = clamp(0.5 - cd, 0.0, 1.0);
     }
     let kind = in.params.y;
+    // The texture, sampled ONCE up here before any branch on `kind`. Every
+    // element kind returns from its own branch on per-instance data, which is
+    // non-uniform control flow, and a browser's WGSL compiler refuses an
+    // implicit-derivative `textureSample` inside one — it took the whole UI
+    // module with it. The shadow kinds pay one sample of the 1x1 white default.
+    let texel = textureSample(tex, samp, in.uv);
     let tint = vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
     let r = corner_radius(in.local, in.half_size, in.radius);
 
@@ -256,7 +265,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     if kind > 0.5 {
         // Glyph: atlas red channel is coverage.
-        let a = textureSample(tex, samp, in.uv).r;
+        let a = texel.r;
         return vec4<f32>(tint.rgb, tint.a * a * cmask);
     }
 
@@ -270,7 +279,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let far = vec4<f32>(srgb_to_linear(in.grad_to.rgb), in.grad_to.a);
         fill = mix(fill, far, gradient_t(in.local, in.half_size, in.grad_cfg));
     }
-    var col = fill * textureSample(tex, samp, in.uv);
+    var col = fill * texel;
 
     if in.fx.x > 0.0 {
         // Quantize to a cell so `scale` above 1 gives chunky noise rather than

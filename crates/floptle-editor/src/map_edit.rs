@@ -285,6 +285,31 @@ pub(crate) fn map_collision_geometry(
     (verts, indices, tri_slot, mesh.slots.clone())
 }
 
+/// Copy the engine's shipped blockout texture to `dest`, from the source
+/// checkout this editor was built from or from the bundle beside the
+/// executable. `None` when neither has one.
+#[cfg(not(target_arch = "wasm32"))]
+fn seed_shipped_texture(dest: &std::path::Path) -> Option<()> {
+    let shipped = crate::export::repo_root()
+        .map(|r| r.join(MAP_DEFAULT_TEXTURE_SHIPPED))
+        .filter(|p| floptle_vfs::is_file(p))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| Some(e.parent()?.join(MAP_DEFAULT_TEXTURE_SHIPPED)))
+                .filter(|p| floptle_vfs::is_file(p))
+        })?;
+    floptle_vfs::create_dir_all(dest.parent()?).ok()?;
+    std::fs::copy(&shipped, dest).ok()?;
+    Some(())
+}
+
+/// A page has nothing to seed from.
+#[cfg(target_arch = "wasm32")]
+fn seed_shipped_texture(_dest: &std::path::Path) -> Option<()> {
+    None
+}
+
 impl Editor {
     pub(crate) fn maps_file_path(&self) -> PathBuf {
         self.project_root.join("maps").join(format!("{}.map.ron", self.scene_name))
@@ -358,26 +383,18 @@ impl Editor {
     /// from; this is the one place that is true of.
     fn ensure_map_default_texture(&mut self) -> Option<()> {
         // No project (or a headless test Editor) — never touch the filesystem.
-        if self.project_root.as_os_str().is_empty() || !self.project_root.is_dir() {
+        if self.project_root.as_os_str().is_empty() || !floptle_vfs::is_dir(&self.project_root) {
             return None;
         }
-        if self.resolve_asset_path(MAP_DEFAULT_TEXTURE).is_file() {
+        if floptle_vfs::is_file(self.resolve_asset_path(MAP_DEFAULT_TEXTURE)) {
             return Some(());
         }
         // Seed from the engine checkout this editor was built from, or from a
-        // packaged bundle's assets beside the executable.
-        let shipped = crate::export::repo_root()
-            .map(|r| r.join(MAP_DEFAULT_TEXTURE_SHIPPED))
-            .filter(|p| p.is_file())
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| Some(e.parent()?.join(MAP_DEFAULT_TEXTURE_SHIPPED)))
-                    .filter(|p| p.is_file())
-            })?;
+        // packaged bundle's assets beside the executable. A browser build
+        // ships what the export packed and has nothing to seed from; there
+        // the reference simply resolves to nothing, as any missing texture does.
         let dest = self.project_root.join(MAP_DEFAULT_TEXTURE);
-        std::fs::create_dir_all(dest.parent()?).ok()?;
-        std::fs::copy(&shipped, &dest).ok()?;
+        seed_shipped_texture(&dest)?;
         self.asset_tree = crate::assets::build_assets(&self.project_root);
         self.map_note(
             floptle_script::LogLevel::Debug,
@@ -521,7 +538,7 @@ impl Editor {
             return false;
         }
         if self.maps.meshes.is_empty() {
-            let _ = std::fs::remove_file(self.maps_file_path());
+            let _ = floptle_vfs::remove_file(self.maps_file_path());
             return true;
         }
         let ordered: BTreeMap<u32, &MapMesh> =
@@ -530,8 +547,8 @@ impl Editor {
         match ron::ser::to_string_pretty(&ordered, pretty) {
             Ok(text) => {
                 let dir = self.project_root.join("maps");
-                let _ = std::fs::create_dir_all(&dir);
-                if let Err(e) = std::fs::write(self.maps_file_path(), text) {
+                let _ = floptle_vfs::create_dir_all(&dir);
+                if let Err(e) = floptle_vfs::write(self.maps_file_path(), text) {
                     self.console.push(
                         floptle_script::LogLevel::Error,
                         format!("💾 save map meshes failed: {e}"),
@@ -571,7 +588,7 @@ impl Editor {
         self.maps.paint_ident.clear();
         self.maps.load_failed = false;
         let path = self.maps_file_path();
-        let text = match std::fs::read_to_string(&path) {
+        let text = match floptle_vfs::read_to_string(&path) {
             Ok(t) => t,
             // No file is the normal case for a scene with no map meshes. A file
             // that exists but won't open is NOT — poison the store so the next
@@ -812,11 +829,11 @@ pub(crate) fn owning_scene_of_map(project_root: &std::path::Path, map_path: &str
         .to_string();
     let want = format!("{stem}.ron");
     fn find(dir: &std::path::Path, want: &str) -> Option<PathBuf> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+        let mut entries = floptle_vfs::read_dir(dir).ok()?;
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             let p = e.path();
-            if p.is_dir() {
+            if e.is_dir() {
                 if let Some(hit) = find(&p, want) {
                     return Some(hit);
                 }
@@ -852,7 +869,7 @@ pub(crate) fn read_map_file(
     project_root: &std::path::Path,
     path: &str,
 ) -> Result<(Vec<MapImportEntry>, Option<PathBuf>), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("could not be read: {e}"))?;
+    let text = floptle_vfs::read_to_string(path).map_err(|e| format!("could not be read: {e}"))?;
     let meshes = ron::from_str::<BTreeMap<u32, MapMesh>>(&text)
         .map_err(|e| format!("failed to parse: {e}"))?;
     if meshes.is_empty() {
@@ -990,7 +1007,7 @@ fn bare_map_node(
 /// per-shape stats. Cached by path + mtime — see the Inspector's map branch.
 pub(crate) struct MapAssetPreview {
     pub(crate) path: String,
-    pub(crate) mtime: Option<std::time::SystemTime>,
+    pub(crate) mtime: Option<floptle_core::time::SystemTime>,
     /// `(name, verts, faces)` per shape the preview covers.
     pub(crate) shapes: Vec<(String, usize, usize)>,
     /// Floor-plan line segments in world XZ.
@@ -1008,7 +1025,7 @@ pub(crate) struct MapAssetPreview {
 const MAP_PREVIEW_MAX_SEGS: usize = 8000;
 
 pub(crate) fn map_asset_preview(project_root: &std::path::Path, path: &str) -> MapAssetPreview {
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mtime = floptle_vfs::modified(path);
     let mut out = MapAssetPreview {
         path: path.to_string(),
         mtime,
@@ -3483,7 +3500,7 @@ mod tests {
         let d = std::env::temp_dir()
             .join(format!("floptle-map-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("maps")).unwrap();
+        floptle_vfs::create_dir_all(d.join("maps")).unwrap();
         d
     }
 
@@ -3496,7 +3513,7 @@ mod tests {
         let mut ed =
             Editor { project_root: dir.clone(), scene_name: "level".into(), ..Default::default() };
         let path = ed.maps_file_path();
-        std::fs::write(&path, "this is not RON").unwrap();
+        floptle_vfs::write(&path, "this is not RON").unwrap();
 
         ed.adopt_maps();
         assert!(ed.maps.load_failed, "a parse failure must poison the store");
@@ -3505,10 +3522,10 @@ mod tests {
         // Whatever ends up in the store afterwards, the file stays untouched.
         ed.maps.meshes.insert(1, MapShape::Box.mesh(MapOpts::default()));
         ed.save_maps();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is not RON");
+        assert_eq!(floptle_vfs::read_to_string(&path).unwrap(), "this is not RON");
 
         // A healthy sidecar clears the poison and saves normally.
-        std::fs::remove_file(&path).unwrap();
+        floptle_vfs::remove_file(&path).unwrap();
         ed.adopt_maps();
         assert!(!ed.maps.load_failed);
         ed.maps.meshes.insert(1, MapShape::Box.mesh(MapOpts::default()));
@@ -3611,7 +3628,7 @@ mod tests {
     #[test]
     fn a_map_sidecar_imports_into_another_scene() {
         let dir = tmp_dir("import");
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
 
         // ---- author scene "level": two shapes, one nested under an Empty ----
         let mut ed =
@@ -3719,8 +3736,8 @@ mod tests {
     #[test]
     fn the_owning_scene_lookup_searches_subfolders() {
         let dir = tmp_dir("owner");
-        std::fs::create_dir_all(dir.join("scenes/dungeons")).unwrap();
-        std::fs::write(dir.join("scenes/dungeons/crypt.ron"), "").unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes/dungeons")).unwrap();
+        floptle_vfs::write(dir.join("scenes/dungeons/crypt.ron"), "").unwrap();
         assert_eq!(
             owning_scene_of_map(&dir, &dir.join("maps/crypt.map.ron").to_string_lossy()),
             Some(dir.join("scenes/dungeons/crypt.ron"))

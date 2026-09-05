@@ -5,9 +5,17 @@
 //! progress to a worker channel, the editor's export folds it into a status
 //! line, and neither wants the other's plumbing.
 
+// Both belong to the two network functions below, which a browser build does
+// not compile.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::manifest::Manifest;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write;
+
+#[cfg(not(target_arch = "wasm32"))]
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Read;
 use std::path::Path;
 
 /// True when `url`'s host is GitHub — the ONLY place it's safe to attach a private-repo
@@ -20,6 +28,7 @@ pub fn is_github_host(url: &str) -> bool {
     host == "github.com" || host.ends_with(".github.com") || host.ends_with(".githubusercontent.com")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Fetch and parse `releases.json` over HTTPS. A private host needs an auth token
 /// (sent as a bearer, GitHub hosts only). A non-http URL is read from disk, which
 /// is what makes the whole flow testable offline.
@@ -42,6 +51,7 @@ pub fn fetch_manifest(url: &str, token: Option<&str>) -> Result<Manifest, String
     Manifest::parse(&text)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Download `url` to `dest`, reporting `(done, total)` bytes as it goes.
 ///
 /// A non-http URL is a local file path — the dev / LocalBuilds source ships bundles from
@@ -94,6 +104,9 @@ pub fn download(
 }
 
 /// Stream the file through SHA-256 and compare (case-insensitive hex) to `expected`.
+///
+/// Not in a browser build: it reads an archive off a disk a page does not have.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
     let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -117,6 +130,7 @@ pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
 ///
 /// Callers restore the executable bit themselves via [`set_executable`] — which
 /// binary matters is the caller's business, not this crate's.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
     let name = archive.file_name().and_then(|s| s.to_str()).unwrap_or_default();
     if name.ends_with(".zip") {

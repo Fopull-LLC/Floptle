@@ -24,6 +24,8 @@ default = ["pads"]
 pads = ["dep:gilrs"]
 
 [dependencies]
+# Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
+floptle-vfs = { path = "../floptle-vfs" }
 floptle-core = { path = "../floptle-core" }
 serde.workspace = true
 ron.workspace = true

@@ -14,12 +14,39 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 13;
+pub const PROTO_VERSION: u16 = 16;
 
 /// Confirmed ticks between rollback state checksums (§6) — twice a second at
 /// 60 Hz. Often enough that a desync is caught within a exchange or two, rare
 /// enough that hashing the state ring is free.
 pub const CHECKSUM_EVERY: u64 = 30;
+
+/// What a joining client says about who it is (`floptle/0183`).
+///
+/// A peer used to be a transport id plus whatever display name the game's own
+/// handshake carried, so a server could not ban, allow-list, keep per-account
+/// statistics, or recognise a returning player except by trusting a string the
+/// client typed.
+///
+/// `proof` is the part that makes this an identity rather than an assertion:
+/// a short-lived credential the SERVER can check with the provider, scoped so
+/// that handing it over does not hand over the account. Until such a credential
+/// exists (`contracts/identity-auth.md` has no third-party verification route
+/// today — see the follow-on task), it is `None`, the server records the claim
+/// as **unverified**, and every consumer is told so rather than being allowed
+/// to assume otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityClaim {
+    /// The account's stable subject id — the same across sessions and machines.
+    pub id: String,
+    /// The account's display name, as the provider holds it.
+    pub name: String,
+    /// free | indie | studio.
+    pub tier: String,
+    /// A credential the server can verify with the provider. `None` = the
+    /// client is asserting, not proving.
+    pub proof: Option<String>,
+}
 
 /// One controller layer's playback in a snapshot, quantized for the wire:
 /// state index (`u16::MAX` = the layer is stopped/released), clip time in
@@ -156,7 +183,7 @@ pub enum Msg {
     /// each other's input as the wrong actions and desync with no error
     /// anywhere. Refusing the connection is the only safe answer; a player's
     /// personal rebinds deliberately don't affect the hash.
-    Hello { proto: u16, input_map: u64 },
+    Hello { proto: u16, input_map: u64, identity: Option<IdentityClaim> },
     /// Server → client: accepted; your peer id, the current tick, the snapshot
     /// cadence (ticks between snapshots), the CURRENT scene (project-root-
     /// relative path + its epoch) — a late joiner lands in the scene the
@@ -175,16 +202,44 @@ pub enum Msg {
         epoch: u8,
         input_delay: u8,
     },
-    /// Server → client: refused (wrong proto / full).
+    /// Server → client: refused (wrong proto / full / not on the allow list).
     Refused { reason: String },
+    /// Server → one client: you are being removed, and this is why.
+    ///
+    /// Sent before the link goes, so the client's UI can say what happened
+    /// rather than showing the generic "connection lost" every unexplained drop
+    /// produces. A client that ignores it is removed anyway — the roster entry
+    /// goes on the server's side of the wire.
+    Kicked { reason: String },
     /// Server → clients (reliable): the session switched scenes. Clients load
     /// `scene` from their local project, re-register NetIds against it, and
     /// drop any old-epoch state still in flight.
     Scene { epoch: u8, scene: String },
-    /// Server → clients: a runtime-spawned replicated node (RON `NodeDoc`).
-    Spawn { epoch: u8, id: u64, node_ron: String, owner: Option<PeerId> },
-    /// Server → clients: a replicated node despawned.
+    /// Server → clients: a runtime-spawned replicated **subtree** (RON
+    /// `Vec<NodeDoc>`, root first).
+    ///
+    /// The whole subtree travels because every avatar a real game has is a
+    /// hierarchy — a capsule with a camera child, an arms mesh, a bone-attached
+    /// item socket. Sending only the root (which is what this carried before
+    /// floptle/0181) meant a game could not spawn its own player, so projects
+    /// authored fixed slots into the map scene instead and capped their player
+    /// count at authoring time.
+    ///
+    /// `id` numbers the ROOT. A descendant that carries its own `Networked`
+    /// component is replicated in its own right, and its NetId is
+    /// `id + <its index in this vector>` — derived rather than sent, because
+    /// both ends spawn the same vector in the same order, so the indices are
+    /// already agreed.
+    Spawn { epoch: u8, id: u64, nodes_ron: String, owner: Option<PeerId> },
+    /// Server → clients: a replicated subtree despawned (its root's NetId).
     Despawn { epoch: u8, id: u64 },
+    /// Server → clients: this node's owner changed (`net.setOwner`, `None` to
+    /// release).
+    ///
+    /// Ownership used to be settable only at spawn, which is why authored
+    /// slots had to rely on scene order to decide who drove what — and why a
+    /// player who dropped could not be given their slot back on reconnect.
+    SetOwner { epoch: u8, id: u64, owner: Option<PeerId> },
     /// Server → clients, at the snapshot cadence: changed transforms + synced
     /// vars + changed animator states. `keyframe` marks a periodic full-state
     /// snapshot (loss healing). `epoch` is the scene generation: NetIds only
@@ -284,6 +339,23 @@ pub enum Msg {
     /// input lead from this, so clock hitches and drift self-heal instead of
     /// turning into permanent correction storms (`docs/multiplayer.md` §6).
     InputAck { margin: i32, late: u64 },
+    /// Client → server: one 20 ms Opus frame from this peer's microphone
+    /// (`floptle/0180`).
+    ///
+    /// [`Channel::UnreliableSequenced`], never reliable: a retransmitted word
+    /// arrives after the moment it belonged to, so the cost of resending it is
+    /// paid twice — once in bandwidth and once in delay — for audio the
+    /// listener would rather have simply missed. Loss shows as a gap that Opus
+    /// conceals, never as a stall.
+    ///
+    /// Nothing about voice touches the snapshot, the tick, or reliable traffic.
+    VoiceUp { seq: u16, frame: Vec<u8> },
+    /// Server → clients: `speaker`'s frame, forwarded.
+    ///
+    /// The server stamps the speaker rather than trusting a client-supplied id
+    /// — otherwise anyone could put words in anyone's mouth, which in a
+    /// hidden-role game is not a prank but a win condition.
+    Voice { speaker: PeerId, seq: u16, frame: Vec<u8> },
     /// Round-trip probe. Whoever receives one replies with a [`Msg::Pong`]
     /// carrying the same `id`, immediately — the point is to measure the link,
     /// so anything the responder does first is measurement error.

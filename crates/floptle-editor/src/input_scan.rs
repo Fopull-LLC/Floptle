@@ -72,7 +72,7 @@ const RAW_CALLS: &[&str] = &["key", "pressed", "released", "button", "clicked", 
 pub(crate) struct InputScan {
     pub(crate) usages: Vec<Usage>,
     /// (file count, newest mtime) when last scanned — a cheap change detector.
-    stamp: Option<(usize, std::time::SystemTime)>,
+    stamp: Option<(usize, floptle_core::time::SystemTime)>,
     /// Throttle: seconds of editor time at the last stamp check.
     last_check: f32,
 }
@@ -109,12 +109,12 @@ impl InputScan {
 }
 
 /// (file count, newest mtime) across the script tree.
-fn dir_stamp(dir: &Path) -> Option<(usize, std::time::SystemTime)> {
+fn dir_stamp(dir: &Path) -> Option<(usize, floptle_core::time::SystemTime)> {
     let mut count = 0;
-    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+    let mut newest = floptle_core::time::UNIX_EPOCH;
     for path in lua_files(dir) {
         count += 1;
-        if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+        if let Some(m) = floptle_vfs::modified(&path) {
             newest = newest.max(m);
         }
     }
@@ -126,10 +126,10 @@ fn lua_files(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for entry in rd.flatten() {
+        let Ok(rd) = floptle_vfs::read_dir(&d) else { continue };
+        for entry in rd {
             let p = entry.path();
-            if p.is_dir() {
+            if entry.is_dir() {
                 stack.push(p);
             } else if p.extension().is_some_and(|e| e == "lua") {
                 out.push(p);
@@ -145,7 +145,7 @@ fn scan_dir(dir: &Path) -> Vec<Usage> {
     // distinct; BTreeMap keeps the list stable between scans.
     let mut found: BTreeMap<(UsageKind, String), Usage> = BTreeMap::new();
     for path in lua_files(dir) {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = floptle_vfs::read_to_string(&path) else { continue };
         let rel = path
             .strip_prefix(dir)
             .unwrap_or(&path)
@@ -367,13 +367,13 @@ mod tests {
     fn scanning_a_tree_dedupes_and_counts() {
         let dir = std::env::temp_dir().join("floptle_input_scan_test");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("nested")).unwrap();
-        std::fs::write(
+        floptle_vfs::create_dir_all(dir.join("nested")).unwrap();
+        floptle_vfs::write(
             dir.join("a.lua"),
             "if input.action(\"Jump\") then end\nif input.action(\"Jump\") then end\n",
         )
         .unwrap();
-        std::fs::write(dir.join("nested/b.lua"), "\n\nif input.action(\"Jump\") then end\n")
+        floptle_vfs::write(dir.join("nested/b.lua"), "\n\nif input.action(\"Jump\") then end\n")
             .unwrap();
 
         let found = scan_dir(&dir);
@@ -397,9 +397,9 @@ mod tests {
 
         let dir = std::env::temp_dir().join("floptle_default_script_actions");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         for (name, body) in crate::lua_support::DEFAULT_SCRIPTS {
-            std::fs::write(dir.join(name), body).unwrap();
+            floptle_vfs::write(dir.join(name), body).unwrap();
         }
 
         let starter = InputMap::starter();
@@ -433,9 +433,9 @@ mod tests {
     fn the_default_scripts_no_longer_poll_raw_keys() {
         let dir = std::env::temp_dir().join("floptle_default_script_rawkeys");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         for (name, body) in crate::lua_support::DEFAULT_SCRIPTS {
-            std::fs::write(dir.join(name), body).unwrap();
+            floptle_vfs::write(dir.join(name), body).unwrap();
         }
         let raw: Vec<String> = scan_dir(&dir)
             .into_iter()
@@ -456,7 +456,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join("floptle_seed_input_map");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
 
         // A project with one custom action and a deliberately rebound Jump.
         let mut mine = InputMap::default();
@@ -483,10 +483,10 @@ mod tests {
         assert!(after.axis2_index("Move").is_some(), "and the starter entries arrive");
 
         // Running it again changes nothing at all.
-        let bytes = std::fs::read(dir.join(floptle_input::MAP_FILE)).unwrap();
+        let bytes = floptle_vfs::read(dir.join(floptle_input::MAP_FILE)).unwrap();
         ed.seed_input_map();
         assert_eq!(
-            std::fs::read(dir.join(floptle_input::MAP_FILE)).unwrap(),
+            floptle_vfs::read(dir.join(floptle_input::MAP_FILE)).unwrap(),
             bytes,
             "seeding is idempotent — a routine upgrade must not churn the file"
         );
@@ -498,14 +498,14 @@ mod tests {
     fn seeding_refuses_to_touch_an_unparseable_map() {
         let dir = std::env::temp_dir().join("floptle_seed_input_map_broken");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         let broken = "InputMap( actions: [ this isn't RON";
-        std::fs::write(dir.join(floptle_input::MAP_FILE), broken).unwrap();
+        floptle_vfs::write(dir.join(floptle_input::MAP_FILE), broken).unwrap();
 
         let ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
         ed.seed_input_map();
         assert_eq!(
-            std::fs::read_to_string(dir.join(floptle_input::MAP_FILE)).unwrap(),
+            floptle_vfs::read_to_string(dir.join(floptle_input::MAP_FILE)).unwrap(),
             broken,
             "the developer's file is theirs to fix"
         );

@@ -323,10 +323,10 @@ impl AnimSystem {
         let root = project_root.to_path_buf();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            for entry in rd.flatten() {
+            let Ok(rd) = floptle_vfs::read_dir(&dir) else { continue };
+            for entry in rd {
                 let p = entry.path();
-                if p.is_dir() {
+                if entry.is_dir() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
                     if !name.starts_with('.') && name != "target" {
@@ -579,6 +579,24 @@ impl AnimSystem {
 /// exactly — so a capitalised clip appeared in the browser, dragged onto a
 /// state, and resolved to nothing, because the registry it was being looked up
 /// in had never loaded it.
+/// `path` is an animation clip asset — a baked `.anim.ron`, or a frame-listed
+/// `.spriteanim.ron`, which plays as one and so drags as one.
+pub fn is_anim_clip(path: &str) -> bool {
+    has_ext(path, ANIM_CLIP_EXT)
+        || has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
+}
+
+/// `path` is specifically a **sprite** clip — a list of frames rather than a
+/// baked set of lanes. The Animating tab edits the two differently.
+pub fn is_sprite_anim(path: &str) -> bool {
+    has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
+}
+
+/// `path` is an animation controller asset.
+pub fn is_anim_ctl(path: &str) -> bool {
+    has_ext(path, floptle_scene::ANIM_CTL_EXT)
+}
+
 pub fn has_ext(path: &str, ext: &str) -> bool {
     path.len() >= ext.len()
         && path.is_char_boundary(path.len() - ext.len())
@@ -607,8 +625,8 @@ pub fn asset_key(path: &Path, project_root: &Path, ext: &str) -> String {
 /// `.spriteanim.ron` already owned — and the save was then refused, leaving a
 /// controller state pointing at a clip file that does not exist.
 pub fn clip_file_exists(project_root: &Path, key: &str) -> bool {
-    project_root.join(format!("{key}{ANIM_CLIP_EXT}")).exists()
-        || project_root.join(format!("{key}{}", floptle_scene::SPRITE_ANIM_EXT)).exists()
+    floptle_vfs::exists(project_root.join(format!("{key}{ANIM_CLIP_EXT}")))
+        || floptle_vfs::exists(project_root.join(format!("{key}{}", floptle_scene::SPRITE_ANIM_EXT)))
 }
 
 /// The registry key for a **clip** file, whichever of the two kinds it is.
@@ -1875,10 +1893,10 @@ pub fn new_controller_key(project_root: &Path, dir_rel: Option<&str>, name: &str
         Some(d) if !d.is_empty() => d.trim_matches('/').replace('\\', "/"),
         _ => "animation_controllers".to_string(),
     };
-    let _ = std::fs::create_dir_all(project_root.join(&rel));
+    let _ = floptle_vfs::create_dir_all(project_root.join(&rel));
     let mut key = format!("{rel}/{name}");
     let mut i = 2;
-    while project_root.join(format!("{key}{ANIM_CTL_EXT}")).exists() {
+    while floptle_vfs::exists(project_root.join(format!("{key}{ANIM_CTL_EXT}"))) {
         key = format!("{rel}/{name}{i}");
         i += 1;
     }
@@ -1888,7 +1906,7 @@ pub fn new_controller_key(project_root: &Path, dir_rel: Option<&str>, name: &str
 /// Default location for a fresh hand-authored clip.
 pub fn new_clip_key(project_root: &Path, name: &str) -> String {
     let dir = project_root.join("animations");
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = floptle_vfs::create_dir_all(&dir);
     let mut key = format!("animations/{name}");
     let mut i = 2;
     // BOTH extensions, because both land in the one clip registry under the
@@ -1910,10 +1928,11 @@ impl crate::Editor {
     /// way, and the person who just imported has no reason to think they still
     /// have a step to do — so the import does both, and says which texture it
     /// touched.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn import_aseprite_sheet(&mut self, json_path: &str) {
         let path = std::path::Path::new(json_path);
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let text = match std::fs::read_to_string(path) {
+        let text = match floptle_vfs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
                 self.toast = Some((format!("⚠  could not read {stem}: {e}"), 6.0));
@@ -1939,7 +1958,7 @@ impl crate::Editor {
         // which is what an export renamed after the fact looks like.
         let png = dir.join(if im.image.is_empty() { format!("{stem}.png") } else { im.image.clone() });
         let tex_rel = crate::assets::asset_rel_path(&png.to_string_lossy(), &self.project_root);
-        if !png.exists() {
+        if !floptle_vfs::exists(&png) {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
@@ -1966,8 +1985,8 @@ impl crate::Editor {
                 .collect();
             let mut out = dir.join(format!("{safe}{}", floptle_scene::SPRITE_ANIM_EXT));
             let mut n = 2;
-            while out.exists()
-                || dir.join(format!("{safe}{ANIM_CLIP_EXT}")).exists()
+            while floptle_vfs::exists(&out)
+                || floptle_vfs::exists(dir.join(format!("{safe}{ANIM_CLIP_EXT}")))
             {
                 out = dir.join(format!("{safe}{n}{}", floptle_scene::SPRITE_ANIM_EXT));
                 n += 1;
@@ -2004,7 +2023,7 @@ impl crate::Editor {
         );
         // Honest about a partial import. A success toast over a missing sheet or
         // a clip that would not write is the editor telling you it worked.
-        self.toast = Some(if failed > 0 || !png.exists() {
+        self.toast = Some(if failed > 0 || !floptle_vfs::exists(&png) {
             (format!("⚠  {stem} — {} clip(s), see the Console", written.len()), 8.0)
         } else {
             (format!("▦  {} clip(s) from {stem}", written.len()), 4.0)
@@ -2031,11 +2050,8 @@ impl crate::Editor {
         // registry key, and two files claiming it makes which one plays depend
         // on the order the folder was read in.
         let taken = |p: &std::path::Path| {
-            p.exists()
-                || p.with_extension("")
-                    .with_extension("")
-                    .with_extension("anim.ron")
-                    .exists()
+            floptle_vfs::exists(p)
+                || floptle_vfs::exists(p.with_extension("").with_extension("").with_extension("anim.ron"))
         };
         let mut out = dir.join(format!("{stem}{}", floptle_scene::SPRITE_ANIM_EXT));
         let mut n = 2;
@@ -2060,6 +2076,11 @@ impl crate::Editor {
     }
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2213,7 +2234,7 @@ mod tests {
         cpu_skin_part(&part, 0, &pose, &mut out); // warm
         let mut best = std::time::Duration::MAX;
         for _ in 0..7 {
-            let t = std::time::Instant::now();
+            let t = floptle_core::time::Instant::now();
             cpu_skin_part(&part, 0, &pose, &mut out);
             best = best.min(t.elapsed());
         }
@@ -2284,7 +2305,7 @@ mod tests {
         let best = |mut f: Box<dyn FnMut()>| {
             let mut best = std::time::Duration::MAX;
             for _ in 0..7 {
-                let t = std::time::Instant::now();
+                let t = floptle_core::time::Instant::now();
                 f();
                 best = best.min(t.elapsed());
             }

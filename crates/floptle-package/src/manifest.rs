@@ -358,7 +358,7 @@ impl Manifest {
     /// Read `<dir>/package.ron`.
     pub fn load(dir: &Path) -> Result<Manifest, ManifestError> {
         let path = dir.join(MANIFEST_FILE);
-        let text = std::fs::read_to_string(&path).map_err(|e| ManifestError {
+        let text = floptle_vfs::read_to_string(&path).map_err(|e| ManifestError {
             path: path.clone(),
             message: if e.kind() == std::io::ErrorKind::NotFound {
                 format!("no {MANIFEST_FILE} here — a package folder is the one holding it")
@@ -386,8 +386,8 @@ impl Manifest {
         let cfg = ron::ser::PrettyConfig::new().struct_names(false);
         let text = ron::ser::to_string_pretty(self, cfg)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(MANIFEST_FILE), format!("{text}\n"))
+        floptle_vfs::create_dir_all(dir)?;
+        floptle_vfs::write(dir.join(MANIFEST_FILE), format!("{text}\n"))
     }
 
     /// Everything wrong with this manifest, in one message — a package author
@@ -497,7 +497,7 @@ impl Manifest {
         };
         list.iter()
             .map(|d| root.join(d))
-            .filter(|p| p.is_dir())
+            .filter(|p| floptle_vfs::is_dir(p))
             .collect()
     }
 }
@@ -656,7 +656,7 @@ mod tests {
     fn a_missing_manifest_says_what_a_package_folder_is() {
         let dir = std::env::temp_dir().join("flpkg-nothing-here");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         let err = Manifest::load(&dir).unwrap_err();
         assert!(err.message.contains("package.ron"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);

@@ -1115,8 +1115,8 @@ end\n";
         /// test, which needs one that breaks the contract on purpose.
         fn with_script(tag: &str, script: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("floptle_rollback_{tag}"));
-            let _ = std::fs::create_dir_all(&dir);
-            std::fs::write(dir.join("fighter.lua"), format!("{PRELUDE}{script}")).unwrap();
+            let _ = floptle_vfs::create_dir_all(&dir);
+            floptle_vfs::write(dir.join("fighter.lua"), format!("{PRELUDE}{script}")).unwrap();
             let mut world = World::default();
             for (i, name) in ["P1", "P2"].iter().enumerate() {
                 let e = world.spawn();
@@ -1892,8 +1892,8 @@ end\n";
     #[test]
     fn a_rollback_node_without_hooks_is_reported_not_silently_accepted() {
         let dir = std::env::temp_dir().join("floptle_rollback_nohooks");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("cosmetic.lua"), "function fixedUpdate(node, dt) end\n").unwrap();
+        let _ = floptle_vfs::create_dir_all(&dir);
+        floptle_vfs::write(dir.join("cosmetic.lua"), "function fixedUpdate(node, dt) end\n").unwrap();
         let mut world = World::default();
         let e = world.spawn();
         world.insert(e, Name("Spinner".into()));
