@@ -15,6 +15,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
+// Only the native transport measures a timeout; a browser build has no
+// transport to bound.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// A PKCE (RFC 7636) pair: a random high-entropy `verifier` and its S256 `challenge`.
@@ -92,6 +95,8 @@ pub struct Entitlements {
     pub tier: String,
 }
 
+// Native transport only — the browser build has no ureq call to parse for.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Deserialize)]
 struct OauthError {
     #[serde(default)]
@@ -142,12 +147,14 @@ pub trait Provider {
 /// or a dev instance). It only ever contacts `base`, so the access token never reaches any
 /// other host — the transport itself is the scoping (see [`is_fopull_host`] for the future
 /// Cloud-call path). Requests are timeout-bounded so a hung endpoint can't wedge the worker.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct HttpProvider {
     base: String,
     client_id: String,
     agent: ureq::Agent,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HttpProvider {
     pub fn new(base: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
@@ -169,6 +176,7 @@ impl HttpProvider {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Provider for HttpProvider {
     fn start_device(&self, challenge: &str) -> Result<DeviceCode, String> {
         self.agent
@@ -258,6 +266,8 @@ impl Provider for HttpProvider {
     }
 }
 
+// Native transport only — the browser build has no ureq call to parse for.
+#[cfg(not(target_arch = "wasm32"))]
 /// Map a token-endpoint 4xx/5xx result to a poll outcome. Split out so it's unit-testable
 /// against the live provider's real error vocabulary — which, being generic Laravel OAuth
 /// infra, reports an **expired or consumed** `device_code` as `invalid_grant`, not RFC 8628's
@@ -454,23 +464,27 @@ pub trait TokenStore {
 /// historical rather than descriptive. That sharing is the feature: sign in once, in
 /// whichever of them you happened to open, and the rest already know you. Renaming it would
 /// sign everybody out for nothing.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct KeyringStore {
     service: String,
     user: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for KeyringStore {
     fn default() -> Self {
         Self { service: "com.fopull.floptle-hub".into(), user: "session".into() }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl KeyringStore {
     fn entry(&self) -> Result<keyring::Entry, String> {
         keyring::Entry::new(&self.service, &self.user).map_err(|e| format!("keyring: {e}"))
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TokenStore for KeyringStore {
     fn save(&self, session: &Session) -> Result<(), String> {
         let json = serde_json::to_string(session).map_err(|e| e.to_string())?;
@@ -489,6 +503,112 @@ impl TokenStore for KeyringStore {
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("keyring clear: {e}")),
         }
+    }
+}
+
+/// The browser's answer to the keyring: `localStorage`, under one key, holding
+/// the same JSON blob [`KeyringStore`] puts in the OS store.
+///
+/// **This is a weaker store than the desktop's, and the difference is worth
+/// saying out loud rather than hiding behind a shared trait.** A keyring entry
+/// is guarded by the operating system; `localStorage` is readable by any script
+/// running on the page's origin. For a game served as a static page from a
+/// single origin that is the same trade every web application makes, and it is
+/// the strongest thing a page can reach — there is no browser API that keeps a
+/// secret from the page it belongs to. It is a trade, not an equivalence.
+///
+/// Per-origin, so a game on `itch.io` and a game on your own domain do NOT
+/// share a session the way the Hub and a desktop game do. That is the browser's
+/// rule, not a choice made here.
+///
+/// Every failure is `None` or an error rather than a panic: a page can be opened
+/// with site data blocked, in which case `local_storage()` itself fails, and a
+/// player who has switched cookies off should get "not signed in", never a
+/// crash.
+#[cfg(target_arch = "wasm32")]
+pub struct WebStore {
+    key: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebStore {
+    fn default() -> Self {
+        Self { key: "com.fopull.floptle.session".into() }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebStore {
+    fn storage(&self) -> Result<web_sys::Storage, String> {
+        web_sys::window()
+            .ok_or_else(|| "no window: this is not a browser page".to_string())?
+            .local_storage()
+            .map_err(|_| "the browser refused local storage (site data may be blocked)".to_string())?
+            .ok_or_else(|| "this browser has no local storage".to_string())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl TokenStore for WebStore {
+    fn save(&self, session: &Session) -> Result<(), String> {
+        let json = serde_json::to_string(session).map_err(|e| e.to_string())?;
+        self.storage()?
+            .set_item(&self.key, &json)
+            .map_err(|_| "could not write the session (storage may be full)".to_string())
+    }
+
+    fn load(&self) -> Option<Session> {
+        serde_json::from_str(&self.storage().ok()?.get_item(&self.key).ok()??).ok()
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        self.storage()?
+            .remove_item(&self.key)
+            .map_err(|_| "could not clear the session".to_string())
+    }
+}
+
+/// The browser's [`Provider`]: the **device flow**, which a page must never use.
+///
+/// This is not "signing in does not work in a browser" any more — it does, by
+/// redirect, in [`crate::web_auth`]. This type exists because [`Provider`] is
+/// the device grant's shape and `Account` is generic over it, and a page is
+/// refused that grant deliberately at both ends: contract §6.1 gives
+/// `floptle-web` its own client id and refuses it a `device_code`, and §6.3
+/// leaves `/oauth/device` off the CORS list on purpose, because a page can
+/// redirect and therefore has no business in the flow built for things that
+/// cannot.
+///
+/// So every method here refuses, and points at the call that does work rather
+/// than describing the browser as incapable — a message that says "not
+/// available" about something that is available is worse than no message.
+#[cfg(target_arch = "wasm32")]
+pub struct OfflineProvider;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) const NO_WEB_AUTH: &str = "a browser build signs in by redirect, not by device code \
+     — call account.signIn(), which sends the page to fopull.com and finishes when it returns. \
+     See docs/web-export.md.";
+
+#[cfg(target_arch = "wasm32")]
+impl Provider for OfflineProvider {
+    fn start_device(&self, _challenge: &str) -> Result<DeviceCode, String> {
+        Err(NO_WEB_AUTH.into())
+    }
+    fn poll_token(&self, _device_code: &str, _verifier: &str) -> Result<PollOutcome, String> {
+        Err(NO_WEB_AUTH.into())
+    }
+    fn refresh(&self, _refresh_token: &str) -> Result<Tokens, RefreshError> {
+        Err(RefreshError::Transient(NO_WEB_AUTH.into()))
+    }
+    fn revoke(&self, _refresh_token: &str) -> Result<(), String> {
+        Err(NO_WEB_AUTH.into())
+    }
+    fn userinfo(&self, _access_token: &str) -> Result<UserInfo, String> {
+        Err(NO_WEB_AUTH.into())
+    }
+    fn entitlements(&self, _access_token: &str) -> Result<Entitlements, String> {
+        Err(NO_WEB_AUTH.into())
     }
 }
 

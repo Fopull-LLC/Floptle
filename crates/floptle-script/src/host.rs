@@ -812,7 +812,7 @@ impl ScriptHost {
                 "getFile",
                 lua.create_function(move |lua, path: String| {
                     let full = pr.borrow().join(&path);
-                    Ok(if full.is_file() {
+                    Ok(if floptle_vfs::is_file(&full) {
                         Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
                     } else {
                         Value::Nil
@@ -828,12 +828,12 @@ impl ScriptHost {
                     let mut files: Vec<String> = Vec::new();
                     let mut stack = vec![base];
                     while let Some(d) = stack.pop() {
-                        if let Ok(rd) = std::fs::read_dir(&d) {
-                            for entry in rd.flatten() {
+                        if let Ok(rd) = floptle_vfs::read_dir(&d) {
+                            for entry in rd {
                                 let p = entry.path();
-                                if p.is_dir() {
+                                if entry.is_dir() {
                                     stack.push(p);
-                                } else if p.is_file() {
+                                } else {
                                     files.push(p.to_string_lossy().to_string());
                                 }
                             }
@@ -951,10 +951,10 @@ impl ScriptHost {
                     let mut names: Vec<String> = Vec::new();
                     let mut stack = vec![base.clone()];
                     while let Some(d) = stack.pop() {
-                        if let Ok(rd) = std::fs::read_dir(&d) {
-                            for entry in rd.flatten() {
+                        if let Ok(rd) = floptle_vfs::read_dir(&d) {
+                            for entry in rd {
                                 let p = entry.path();
-                                if p.is_dir() {
+                                if entry.is_dir() {
                                     stack.push(p);
                                 } else if p.extension().is_some_and(|x| x == "ron")
                                     && let Ok(rel) = p.strip_prefix(&base)
@@ -1876,6 +1876,12 @@ impl ScriptHost {
         // answer it, which is the escape hatch for any cosmetic the engine's
         // queue gating can't see (a script writing a material, say).
         let replaying: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        // The `voice.*` API (floptle/0180) — proximity voice chat. Same
+        // queue-drain shape as `net.*`.
+        let voice = crate::voice_api::SharedVoice::new(logs.clone());
+        if let Err(e) = crate::voice_api::install_voice_api(&lua, &voice) {
+            eprintln!("[lua] failed to install the voice API: {e}");
+        }
         if let Err(e) = crate::net_api::install_net_api(
             &lua,
             &net,
@@ -2117,6 +2123,7 @@ impl ScriptHost {
             draw_texts,
             destroy_queue,
             net,
+            voice,
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
             param_warned: std::collections::HashSet::new(),
@@ -3542,6 +3549,21 @@ impl ScriptHost {
     /// Mirror the live session state in for `net.role()`/`peers()`/`ping()`.
     pub fn set_net_state(&self, state: crate::NetState) {
         *self.net.state.borrow_mut() = state;
+        // `voice.setForward` is server-only, and a client calling it should be
+        // told so rather than watching nothing happen. Derived from the session
+        // state so the two can never disagree.
+        self.voice.is_server.set(state_is_server(&self.net.state.borrow()));
+    }
+
+    /// `voice.*` calls queued this tick (floptle/0180).
+    pub fn take_voice_commands(&self) -> Vec<crate::VoiceCmd> {
+        std::mem::take(&mut *self.voice.cmds.borrow_mut())
+    }
+
+    /// Mirror the live microphone / speaker state in for `voice.level()`,
+    /// `voice.speaking(peer)` and friends.
+    pub fn set_voice_state(&self, state: crate::VoiceState) {
+        *self.voice.state.borrow_mut() = state;
     }
 
     /// Mirror networked nodes' owners in (entity index → `Replicated::owner`)
@@ -5270,7 +5292,7 @@ impl ScriptHost {
     /// `componentref(name)` marks a reference param (the Inspector shows a
     /// filtered node picker for it). Empty if none declared or unloadable.
     pub fn script_defaults(&self, path: &Path) -> crate::ScriptDefaults {
-        let Ok(src) = std::fs::read_to_string(path) else { return Default::default() };
+        let Ok(src) = floptle_vfs::read_to_string(path) else { return Default::default() };
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let Ok(env) = build_env(&self.lua, &src, &name) else { return Default::default() };
         let Ok(defaults) = env.get::<Table>("defaults") else { return Default::default() };
@@ -5327,7 +5349,7 @@ impl ScriptHost {
                 self.errors.push(err);
                 return false;
             }
-            let src = match std::fs::read_to_string(&path) {
+            let src = match floptle_vfs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(err) => {
                     self.fail_load(name, format!("{name}.lua could not be read: {err}"), generation);
@@ -6106,8 +6128,12 @@ impl ScriptHost {
     /// Stat the source; bump its generation (and clear the cached error) when the
     /// file's mtime changes. Returns the current generation, or `None` if missing.
     fn ensure_source(&mut self, name: &str, path: &Path) -> Option<u64> {
-        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        mtime?;
+        // A browser build has no mtimes at all: a file there is present or
+        // absent, and never newer. Only absence answers `None`.
+        if !floptle_vfs::exists(path) {
+            return None;
+        }
+        let mtime = floptle_vfs::modified(path);
         let entry = self.sources.entry(name.to_string()).or_insert_with(|| Source {
             generation: 0,
             mtime: None,
@@ -6196,7 +6222,7 @@ impl ScriptHost {
             Some(text) => text.clone(),
             None => {
                 src.reads += 1;
-                let Ok(text) = std::fs::read_to_string(&src.path) else { return msg };
+                let Ok(text) = floptle_vfs::read_to_string(&src.path) else { return msg };
                 let text: Rc<str> = text.into();
                 src.text = Some(text.clone());
                 text
@@ -6266,11 +6292,11 @@ impl ScriptHost {
 fn resolve_script_path(scripts_dir: &Path, extra: &[PathBuf], name: &str) -> PathBuf {
     for dir in std::iter::once(scripts_dir).chain(extra.iter().map(|p| p.as_path())) {
         let direct = dir.join(format!("{name}.lua"));
-        if direct.exists() {
+        if floptle_vfs::exists(&direct) {
             return direct;
         }
         let nested = dir.join(name).with_extension("lua");
-        if nested.exists() {
+        if floptle_vfs::exists(&nested) {
             return nested;
         }
     }
@@ -6285,8 +6311,8 @@ mod host_tests {
     fn resolve_script_path_supports_nested_script_folders() {
         let dir = std::env::temp_dir().join(format!("floptle-host-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scripts/fighterScripts")).unwrap();
-        std::fs::write(dir.join("scripts/fighterScripts/attack.lua"), "return {}\n").unwrap();
+        floptle_vfs::create_dir_all(dir.join("scripts/fighterScripts")).unwrap();
+        floptle_vfs::write(dir.join("scripts/fighterScripts/attack.lua"), "return {}\n").unwrap();
 
         let path = resolve_script_path(&dir.join("scripts"), &[], "fighterScripts/attack");
         assert_eq!(path, dir.join("scripts/fighterScripts/attack.lua"));
@@ -6342,4 +6368,10 @@ mod pretty_tests {
         let s = pretty_value(&Value::Table(t), 0, &mut Vec::new());
         assert!(s.starts_with("node #3"), "{s}");
     }
+}
+
+/// Is this endpoint the authoritative host? One place, so `net` and `voice`
+/// cannot disagree about it.
+fn state_is_server(state: &crate::NetState) -> bool {
+    state.role == crate::NetRoleState::Server
 }

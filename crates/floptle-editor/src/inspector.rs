@@ -2190,6 +2190,37 @@ impl EditorTabViewer<'_> {
                     if let Some(n) = world.get_mut::<Name>(e) {
                         cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
                     }
+                    // The selection lock. On the name row because that row is
+                    // the one line naming what would be lost, and because it is
+                    // drawn for the selected node — which is what guarantees the
+                    // switch is on screen whenever the lock is on.
+                    //
+                    // The state IS the alpha: opaque = held, faded = free. One
+                    // thing to look at, no second label saying which.
+                    let locked = self.selection_locked;
+                    let tint = {
+                        let c = ui.visuals().text_color();
+                        if locked { c } else { c.gamma_multiply(0.35) }
+                    };
+                    let lock = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(crate::icons::LOCK).color(tint),
+                            )
+                            .frame(locked),
+                        )
+                        .on_hover_text(if locked {
+                            "selection locked — clicking in the Scene or the Hierarchy \
+                             leaves it alone, so you can look around while editing this \
+                             node. Click to release."
+                        } else {
+                            "lock the selection — the Inspector, Hierarchy and Scene keep \
+                             these nodes however you click, so you can read another node's \
+                             values without losing this one. Click to hold."
+                        });
+                    if lock.clicked() {
+                        cmd.toggle_selection_lock = true;
+                    }
                 });
                 if off_inherited {
                     ui.small(

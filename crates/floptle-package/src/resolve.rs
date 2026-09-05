@@ -49,10 +49,10 @@ impl Loaded {
 }
 
 fn collect_lua(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
+    let Ok(rd) = floptle_vfs::read_dir(dir) else { return };
+    for e in rd {
         let p = e.path();
-        if p.is_dir() {
+        if e.is_dir() {
             collect_lua(&p, out);
         } else if p.extension().is_some_and(|x| x == "lua") {
             out.push(p);
@@ -162,7 +162,7 @@ pub fn resolve(project_root: &Path, engine_version: &Version) -> LoadReport {
             });
         }
         if let Some(req) = &manifest.engine
-            && !req.matches(engine_version)
+            && !req.matches_engine(engine_version)
         {
             report.problems.push(Problem {
                 id: Some(entry.id.clone()),
@@ -328,15 +328,15 @@ mod tests {
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("flpkg-res-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        floptle_vfs::create_dir_all(&d).unwrap();
         d
     }
 
     /// Write a package into `<proj>/packages/<id>` and register it.
     fn install(proj: &Path, id: &str, version: &str, body: &str) {
         let root = proj.join("packages").join(id);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
+        floptle_vfs::create_dir_all(&root).unwrap();
+        floptle_vfs::write(
             root.join("package.ron"),
             format!(r#"( id: "{id}", name: "{id}", version: "{version}", {body} )"#),
         )
@@ -460,7 +460,7 @@ mod tests {
         let proj = temp("broken");
         install(&proj, "com.t.good", "1.0.0", "");
         install(&proj, "com.t.bad", "1.0.0", "");
-        std::fs::write(proj.join("packages/com.t.bad/package.ron"), "not ron at all {{{").unwrap();
+        floptle_vfs::write(proj.join("packages/com.t.bad/package.ron"), "not ron at all {{{").unwrap();
         let r = resolve(&proj, &engine());
         assert_eq!(r.loaded.len(), 1);
         assert_eq!(r.loaded[0].id(), "com.t.good");
@@ -511,11 +511,11 @@ mod tests {
         let proj = temp("edscripts");
         install(&proj, "com.t.a", "1.0.0", "");
         let root = proj.join("packages/com.t.a");
-        std::fs::create_dir_all(root.join("editor/sub")).unwrap();
-        std::fs::write(root.join("editor/b.lua"), "").unwrap();
-        std::fs::write(root.join("editor/a.lua"), "").unwrap();
-        std::fs::write(root.join("editor/sub/c.lua"), "").unwrap();
-        std::fs::write(root.join("editor/notes.txt"), "").unwrap();
+        floptle_vfs::create_dir_all(root.join("editor/sub")).unwrap();
+        floptle_vfs::write(root.join("editor/b.lua"), "").unwrap();
+        floptle_vfs::write(root.join("editor/a.lua"), "").unwrap();
+        floptle_vfs::write(root.join("editor/sub/c.lua"), "").unwrap();
+        floptle_vfs::write(root.join("editor/notes.txt"), "").unwrap();
         let r = resolve(&proj, &engine());
         let names: Vec<String> = r.loaded[0]
             .editor_scripts()

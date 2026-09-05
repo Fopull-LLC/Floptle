@@ -15,6 +15,7 @@ use floptle_scene::NodeDoc;
 use floptle_scene::ScriptDoc;
 use floptle_scene::TransformDoc;
 use crate::assets::{is_model, is_script};
+#[cfg(feature = "editor-ui")]
 use crate::inspector::{ComponentClip};
 use crate::matter_catalog::{matter_doc_name};
 use crate::{Editor, snap_dvec3};
@@ -24,6 +25,7 @@ impl Editor {
     /// the component if missing, else overwrites its values; scripts add-or-update by
     /// name. Pasting a "type" (Matter) never morphs a Terrain node (its field is
     /// out-of-ECS).
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn paste_onto(&mut self, e: Entity) {
         let Some(clip) = self.component_clip.clone() else { return };
         if !self.world.is_alive(e) {
@@ -856,6 +858,56 @@ impl Editor {
 
     /// Lazily connect the OS clipboard (arboard under the hood; falls back to
     /// an in-app buffer if the OS clipboard is unreachable).
+    /// Put `text` on the system clipboard.
+    ///
+    /// **One call, two backings, because a build must still copy.** The editor
+    /// goes through egui-winit's clipboard, which already handles the Wayland
+    /// and X11 cases the whole application depends on. A build has no
+    /// egui-winit, and the alternative was to do nothing — which for Cut is not
+    /// "the feature is missing", it is deletion with nowhere to paste from. So
+    /// the player keeps its own `arboard` clipboard (the same crate egui-winit
+    /// wraps) alive for the session: on X11 the contents belong to a live
+    /// owner, so it cannot be opened and dropped per copy.
+    pub(crate) fn os_clipboard_set(&mut self, text: String) {
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ensure_os_clipboard();
+            if let Some(c) = self.os_clipboard.as_mut() {
+                c.set_text(text);
+            }
+        }
+        #[cfg(all(not(feature = "editor-ui"), not(target_arch = "wasm32")))]
+        {
+            if self.player_clipboard.is_none() {
+                match arboard::Clipboard::new() {
+                    Ok(c) => self.player_clipboard = Some(c),
+                    Err(e) => {
+                        log::warn!("no system clipboard available: {e}");
+                        return;
+                    }
+                }
+            }
+            if let Some(c) = self.player_clipboard.as_mut()
+                && let Err(e) = c.set_text(text)
+            {
+                log::warn!("could not put the selection on the clipboard: {e}");
+            }
+        }
+        // A browser's clipboard is an async, permissioned API reached through
+        // the page, not a library call. Not wired yet — and said, rather than
+        // dropped, because Cut has already removed the text by the time we get
+        // here.
+        #[cfg(all(not(feature = "editor-ui"), target_arch = "wasm32"))]
+        {
+            let _ = text;
+            log::warn!(
+                "the system clipboard is not wired up in a browser build yet, so this copy \
+                 went nowhere"
+            );
+        }
+    }
+
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ensure_os_clipboard(&mut self) {
         if self.os_clipboard.is_none() {
             use winit::raw_window_handle::HasDisplayHandle;
@@ -871,6 +923,7 @@ impl Editor {
             // Mirror onto the OS clipboard as tagged RON: paste then works in
             // ANOTHER scene, another editor window, even another project —
             // and you can read/share the copied nodes as plain text.
+            #[cfg(feature = "editor-ui")]
             if let Ok(ron) = ron::ser::to_string_pretty(&nodes, ron::ser::PrettyConfig::default())
             {
                 self.ensure_os_clipboard();
@@ -900,22 +953,32 @@ impl Editor {
         );
     }
 
+    /// Nodes sitting on the OS clipboard, when it holds tagged Floptle RON.
+    ///
+    /// This is what makes copy → switch scene/instance/project → paste work.
+    /// A build has no cross-application node clipboard (nothing in a game can
+    /// copy a node), so there it is simply nothing.
+    fn os_clipboard_nodes(&mut self) -> Option<Vec<NodeDoc>> {
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ensure_os_clipboard();
+            self.os_clipboard
+                .as_mut()
+                .and_then(|c| c.get())
+                .and_then(|t| {
+                    t.strip_prefix(Self::NODE_CLIP_TAG)
+                        .map(|rest| ron::from_str::<Vec<NodeDoc>>(rest.trim_start()))
+                })
+                .and_then(|r| r.ok())
+        }
+        #[cfg(not(feature = "editor-ui"))]
+        None
+    }
+
     pub(crate) fn paste(&mut self) {
-        // Prefer the OS clipboard when it holds tagged Floptle nodes — that's
-        // what makes copy → switch scene/instance/project → paste just work.
-        // Anything else on the OS clipboard (plain text) is ignored and the
-        // in-app clipboard is used.
-        self.ensure_os_clipboard();
-        let external = self
-            .os_clipboard
-            .as_mut()
-            .and_then(|c| c.get())
-            .and_then(|t| {
-                t.strip_prefix(Self::NODE_CLIP_TAG)
-                    .map(|rest| ron::from_str::<Vec<NodeDoc>>(rest.trim_start()))
-            })
-            .and_then(|r| r.ok());
-        let nodes = external.unwrap_or_else(|| self.clipboard.clone());
+        // Prefer the OS clipboard when it holds tagged Floptle nodes. Anything
+        // else on it (plain text) is ignored and the in-app clipboard is used.
+        let nodes = self.os_clipboard_nodes().unwrap_or_else(|| self.clipboard.clone());
         self.spawn_offset(nodes);
     }
 
@@ -1016,6 +1079,11 @@ impl Editor {
     }
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod subtree_tests {
     use floptle_core::math::DVec3;

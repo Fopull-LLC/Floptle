@@ -9,6 +9,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
+floptle-vfs = { path = "../floptle-vfs" }
 floptle-core = { path = "../floptle-core" }
 floptle-ui = { path = "../floptle-ui" }
 # Types only (map-mesh geometry carried by prefabs/clipboard); pure glam + serde.

@@ -399,45 +399,45 @@ use crate::SceneError;
 use std::path::Path;
 
 pub fn load_anim_clip(path: &Path) -> Result<AnimClipDoc, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
     ron::from_str(&text).map_err(SceneError::Ron)
 }
 
 pub fn load_sprite_anim(path: &Path) -> Result<SpriteAnimDoc, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
     ron::from_str(&text).map_err(SceneError::Ron)
 }
 
 pub fn save_sprite_anim(doc: &SpriteAnimDoc, path: &Path) -> Result<(), SceneError> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = floptle_vfs::create_dir_all(dir);
     }
     let text = ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 pub fn save_anim_clip(doc: &AnimClipDoc, path: &Path) -> Result<(), SceneError> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = floptle_vfs::create_dir_all(dir);
     }
     let text = ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 pub fn load_anim_controller(path: &Path) -> Result<AnimControllerDoc, SceneError> {
-    let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
     ron::from_str(&text).map_err(SceneError::Ron)
 }
 
 pub fn save_anim_controller(doc: &AnimControllerDoc, path: &Path) -> Result<(), SceneError> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = floptle_vfs::create_dir_all(dir);
     }
     let text = ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    std::fs::write(path, text).map_err(SceneError::Io)
+    floptle_vfs::write(path, text).map_err(SceneError::Io)
 }
 
 #[cfg(test)]

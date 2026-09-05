@@ -628,7 +628,7 @@ mod new_menu_tests {
         // Leaked so the parsed names can be `&'static str` like everything else
         // they are compared against. One allocation, in a test.
         let src: &'static str = Box::leak(
-            std::fs::read_to_string(
+            floptle_vfs::read_to_string(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../floptle-scene/src/lib.rs"),
             )

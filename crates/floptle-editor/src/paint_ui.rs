@@ -4,6 +4,7 @@
 //! rebuilds on every selection change, but brush state has to outlive selection (you
 //! pick a color once and paint ten props with it).
 
+#[cfg(feature = "editor-ui")]
 use crate::EditorTabViewer;
 
 /// What surface a brush paints INTO. Vertex = per-vertex color (resolution follows the
@@ -126,7 +127,9 @@ impl Default for VertexBrush {
     }
 }
 
+#[cfg(feature = "editor-ui")]
 impl EditorTabViewer<'_> {
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn paint_ui(&mut self, ui: &mut egui::Ui) {
         let brush = &mut *self.vertex_brush;
         let cmd = &mut *self.cmd;

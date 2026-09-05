@@ -404,12 +404,12 @@ impl Editor {
     /// reference a tileset the last scene never touched.
     pub(crate) fn adopt_tilesets(&mut self) {
         let dir = tileset_dir(&self.project_root);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = floptle_vfs::read_dir(&dir) else {
             // No folder yet is the normal state of a project that has not made a
             // tileset. Not an error, and not something to report.
             return;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
             if !name.ends_with(floptle_tiles::TILESET_EXT) {
@@ -419,7 +419,7 @@ impl Editor {
             if self.tiles.dirty.contains(&rel) {
                 continue; // unsaved edits win over what is on disk
             }
-            match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| {
+            match floptle_vfs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| {
                 TileSet::from_ron(&t).map_err(|e| e.to_string())
             }) {
                 Ok(set) => {
@@ -451,7 +451,7 @@ impl Editor {
             return;
         }
         let dir = tileset_dir(&self.project_root);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let Err(e) = floptle_vfs::create_dir_all(&dir) {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!("could not create {}: {e}", dir.display()),
@@ -481,7 +481,7 @@ impl Editor {
                     continue;
                 }
             };
-            match std::fs::write(dir.join(name), text) {
+            match floptle_vfs::write(dir.join(name), text) {
                 Ok(()) => {
                     self.tiles.dirty.remove(&rel);
                 }

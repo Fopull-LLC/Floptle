@@ -10,6 +10,7 @@ use crate::clip::ClipRef;
 use crate::mixer::{MixerDesc, MixerDsp};
 use crate::source::{EndBehavior, PlayParams, SpatialMode};
 use crate::spatial::{pan_gains, spatialize, Listener};
+use crate::stream::{StreamRef, STREAM_RATE};
 
 /// Handle to a playing (or finished) sound. Never reused.
 pub type VoiceId = u64;
@@ -21,10 +22,42 @@ pub const MAX_VOICES: usize = 256;
 /// Per-voice gain smoothing (declick) — fast enough to feel instant.
 const VOICE_SMOOTH_MS: f32 = 4.0;
 
+/// Where a voice's samples come from.
+///
+/// A stream is not a special kind of playback bolted on beside the mixer — it
+/// is a different *source* for the same voice, so a remote player's microphone
+/// gets spatialisation, distance falloff, mixer routing and effects for free.
+/// That is the whole reason `voice.source(peer)` can be handed to code that
+/// only knows about `audio.play`: it really is the same thing.
+enum Source {
+    Clip(ClipRef),
+    /// A live stream, plus the one-sample interpolation window the resampler
+    /// needs (`prev`/`next` bracket the fractional read position).
+    Stream { ring: StreamRef, prev: f32, next: f32 },
+}
+
+impl Source {
+    fn clip(&self) -> Option<&ClipRef> {
+        match self {
+            Self::Clip(c) => Some(c),
+            Self::Stream { .. } => None,
+        }
+    }
+
+    /// The source's native rate, for the resampling step.
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Clip(c) => c.sample_rate,
+            Self::Stream { .. } => STREAM_RATE,
+        }
+    }
+}
+
 struct Voice {
     id: VoiceId,
-    clip: ClipRef,
-    /// Fractional playhead in clip frames.
+    source: Source,
+    /// Fractional playhead in clip frames — or, for a stream, the fraction
+    /// between `prev` and `next`.
     pos: f64,
     params: PlayParams,
     track_idx: usize,
@@ -88,13 +121,34 @@ impl AudioCore {
     /// Start a voice. `emitter` = None means the sound has no world position
     /// (it plays as Flat regardless of the requested mode).
     pub fn play(&mut self, id: VoiceId, clip: ClipRef, emitter: Option<DVec3>, params: PlayParams) {
+        self.start(id, Source::Clip(clip), emitter, params);
+    }
+
+    /// Start a voice fed by a LIVE stream instead of a decoded clip — a remote
+    /// player's microphone (`floptle/0180`).
+    ///
+    /// It never finishes on its own. A clip ends when it runs out of samples;
+    /// a stream running out of samples means the network is late, and a voice
+    /// that ended cannot be resumed — the player would go silent mid-sentence
+    /// and stay that way. It plays silence and waits, until something stops it.
+    pub fn play_stream(
+        &mut self,
+        id: VoiceId,
+        ring: StreamRef,
+        emitter: Option<DVec3>,
+        params: PlayParams,
+    ) {
+        self.start(id, Source::Stream { ring, prev: 0.0, next: 0.0 }, emitter, params);
+    }
+
+    fn start(&mut self, id: VoiceId, source: Source, emitter: Option<DVec3>, params: PlayParams) {
         if self.voices.len() >= MAX_VOICES {
             self.finished.push(id);
             return;
         }
         self.voices.push(Voice {
             id,
-            clip,
+            source,
             pos: 0.0,
             track_idx: self.mixer.track_index(&params.track),
             params,
@@ -140,8 +194,12 @@ impl AudioCore {
 
     pub fn seek(&mut self, id: VoiceId, secs: f32) {
         if let Some(v) = self.voice_mut(id) {
-            let frames = v.clip.frames() as f64;
-            v.pos = (secs.max(0.0) as f64 * v.clip.sample_rate as f64).min(frames);
+            // A live stream has no timeline to seek within — the only audio
+            // that exists is what has arrived. Ignored rather than clamped to
+            // zero, which would restart the interpolation window for nothing.
+            let Some(clip) = v.source.clip() else { return };
+            let frames = clip.frames() as f64;
+            v.pos = (secs.max(0.0) as f64 * clip.sample_rate as f64).min(frames);
         }
     }
 
@@ -160,10 +218,10 @@ impl AudioCore {
         self.voices.iter().find(|v| v.id == id).map(|v| VoiceStatus {
             playing: !v.done && !v.paused,
             paused: v.paused,
-            position_secs: if v.clip.sample_rate == 0 {
-                0.0
-            } else {
-                (v.pos / v.clip.sample_rate as f64) as f32
+            // A stream has no position: it is not partway through anything.
+            position_secs: match v.source.clip() {
+                Some(c) if c.sample_rate > 0 => (v.pos / c.sample_rate as f64) as f32,
+                _ => 0.0,
             },
         })
     }
@@ -230,30 +288,58 @@ impl AudioCore {
             let (pl, pr) = pan_gains(s.pan);
             let (tgt_l, tgt_r) = (vol * pl, vol * pr);
 
-            let step = v.clip.sample_rate as f64 / self.sample_rate as f64
+            let step = v.source.sample_rate() as f64 / self.sample_rate as f64
                 * v.params.pitch.clamp(0.05, 8.0) as f64;
-            let frames = v.clip.frames() as f64;
             let looping = v.params.end == EndBehavior::Loop;
             let (buf_l, buf_r) = self.mixer.input(v.track_idx);
 
             let mut cur_l = v.cur_l;
             let mut cur_r = v.cur_r;
             let mut pos = v.pos;
-            for i in 0..n {
-                if pos >= frames {
-                    if looping && frames > 0.0 {
-                        pos -= frames;
-                    } else {
-                        v.done = true;
-                        break;
+            // Two loops rather than one with a branch in it: the clip path is
+            // every sound in the game and stays exactly as tight as it was.
+            match &mut v.source {
+                Source::Clip(clip) => {
+                    let frames = clip.frames() as f64;
+                    for i in 0..n {
+                        if pos >= frames {
+                            if looping && frames > 0.0 {
+                                pos -= frames;
+                            } else {
+                                v.done = true;
+                                break;
+                            }
+                        }
+                        let (sl, sr) = clip.sample_at(pos);
+                        cur_l = tgt_l + smooth * (cur_l - tgt_l);
+                        cur_r = tgt_r + smooth * (cur_r - tgt_r);
+                        buf_l[i] += sl * cur_l;
+                        buf_r[i] += sr * cur_r;
+                        pos += step;
                     }
                 }
-                let (sl, sr) = v.clip.sample_at(pos);
-                cur_l = tgt_l + smooth * (cur_l - tgt_l);
-                cur_r = tgt_r + smooth * (cur_r - tgt_r);
-                buf_l[i] += sl * cur_l;
-                buf_r[i] += sr * cur_r;
-                pos += step;
+                // A live stream is consumed, not indexed: `pos` is the fraction
+                // between the two samples bracketing the read head, and the
+                // head advances by pulling from the ring. Mono in, so both ears
+                // get the same sample and the panner does the placing.
+                Source::Stream { ring, prev, next } => {
+                    for i in 0..n {
+                        while pos >= 1.0 {
+                            *prev = *next;
+                            // Nothing there = the network is late. Ease toward
+                            // silence instead of holding the last sample, which
+                            // would buzz, or jumping to zero, which would click.
+                            *next = ring.pop().unwrap_or(*next * 0.5);
+                            pos -= 1.0;
+                        }
+                        let s = *prev + (*next - *prev) * pos as f32;
+                        cur_l = tgt_l + smooth * (cur_l - tgt_l);
+                        cur_r = tgt_r + smooth * (cur_r - tgt_r);
+                        buf_l[i] += s * cur_l;
+                        buf_r[i] += s * cur_r;
+                        pos += step;
+                    }
+                }
             }
             v.pos = pos;
             v.cur_l = cur_l;
@@ -294,6 +380,78 @@ mod tests {
         let mut fin = Vec::new();
         core.drain_finished(&mut fin);
         assert_eq!(fin, vec![1]);
+    }
+
+    /// A remote player's microphone has to be an ORDINARY sound: spatialised,
+    /// routed through a mixer track, pannable. If it needed its own playback
+    /// path, none of the mixer's effects would reach it and "make the killer's
+    /// voice a monster with the effects you already have" would be a rewrite.
+    #[test]
+    fn a_stream_plays_as_an_ordinary_voice() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        let ring = crate::stream::StreamRing::new(8192);
+        ring.push(&vec![0.5f32; 4096]);
+        core.play_stream(1, Arc::clone(&ring), None, PlayParams::default());
+        let (mut l, mut r) = (vec![0.0f32; 1024], vec![0.0f32; 1024]);
+        core.render(&mut l, &mut r);
+        assert!(l.iter().any(|s| s.abs() > 0.05), "the stream never reached the mix");
+        assert_eq!(core.active_voices(), 1, "a stream does not finish on its own");
+    }
+
+    /// The failure that would be worst in the field: a late packet must not END
+    /// the voice. A finished voice cannot be resumed, so the player would go
+    /// silent mid-sentence and stay silent for the rest of the match.
+    #[test]
+    fn an_empty_stream_goes_quiet_but_never_finishes() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        let ring = crate::stream::StreamRing::new(1024);
+        core.play_stream(1, Arc::clone(&ring), None, PlayParams::default());
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r); // 100 ms of nothing arriving
+        assert_eq!(core.active_voices(), 1, "still playing, just silent");
+        assert!(ring.starved() > 0, "and the starvation is on the record");
+
+        // Audio arrives late; the same voice picks it straight back up.
+        ring.push(&vec![0.6f32; 4096]);
+        let (mut l2, mut r2) = (vec![0.0f32; 2048], vec![0.0f32; 2048]);
+        core.render(&mut l2, &mut r2);
+        assert!(l2.iter().any(|s| s.abs() > 0.05), "the voice came back");
+    }
+
+    /// Distance falloff is the whole feature for proximity voice — this is what
+    /// makes hearing someone mean they are near you.
+    #[test]
+    fn a_positioned_stream_gets_quieter_with_distance() {
+        let level = |at: f64| {
+            let mut core = AudioCore::new(48_000.0, 128);
+            let ring = crate::stream::StreamRing::new(16384);
+            ring.push(&vec![0.5f32; 8192]);
+            let mut p = PlayParams { mode: SpatialMode::Distance, ..Default::default() };
+            p.min_distance = 1.0;
+            p.max_distance = 40.0;
+            core.play_stream(1, ring, Some(DVec3::new(at, 0.0, 0.0)), p);
+            let (mut l, mut r) = (vec![0.0f32; 2048], vec![0.0f32; 2048]);
+            core.render(&mut l, &mut r);
+            l.iter().map(|s| s.abs()).fold(0.0f32, f32::max)
+        };
+        let near = level(1.0);
+        let far = level(30.0);
+        assert!(near > 0.05, "a speaker at arm's length should be plainly audible: {near}");
+        assert!(far < near * 0.5, "near {near} vs far {far} — distance must matter");
+    }
+
+    /// A stream is not partway through anything, and asking it to seek must not
+    /// disturb it.
+    #[test]
+    fn a_stream_has_no_position_and_ignores_seeking() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        let ring = crate::stream::StreamRing::new(4096);
+        ring.push(&vec![0.5f32; 2048]);
+        core.play_stream(7, ring, None, PlayParams::default());
+        core.seek(7, 12.0);
+        let st = core.status(7).expect("still playing");
+        assert_eq!(st.position_secs, 0.0);
+        assert!(st.playing);
     }
 
     #[test]

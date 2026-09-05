@@ -130,6 +130,7 @@ impl EditorTab {
 /// anybody upgrading has a saved dock with no 📦 Packages in it, and a menu item
 /// that silently does nothing because the tab was closed once, six months ago,
 /// is indistinguishable from a broken menu item.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus(dock: &mut egui_dock::DockState<EditorTab>, tab: EditorTab) {
     if let Some(path) = dock.find_tab(&tab) {
         let _ = dock.set_active_tab(path);
@@ -142,12 +143,14 @@ pub(crate) fn focus(dock: &mut egui_dock::DockState<EditorTab>, tab: EditorTab) 
 /// Settings is a TAB, not a modal window: it can be dragged into any panel,
 /// split beside the viewport, or closed like anything else. It is deliberately
 /// absent from the default layout — you open it when you need it.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_settings_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Settings);
 }
 
 /// Focus the 📦 Packages dock tab. Like ⚙ Settings it is absent from the
 /// default layout and appears where you are working when you ask for it.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_packages_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Packages);
 }
@@ -155,6 +158,7 @@ pub(crate) fn focus_packages_tab(dock: &mut egui_dock::DockState<EditorTab>) {
 /// Show or hide a package's own tab. Showing adds it where the user is working
 /// and brings it forward; hiding takes it out of the layout entirely, which is
 /// what the ✕ on the tab does too.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn set_package_tab_open(
     dock: &mut egui_dock::DockState<EditorTab>,
     key: u64,
@@ -171,12 +175,14 @@ pub(crate) fn set_package_tab_open(
 /// True when the Game tab is the front (active) tab of its dock leaf — i.e. the game
 /// (active-camera) view should drive the full-window 3D render this frame. (When
 /// false the editor free-fly camera renders, for the Scene tab.)
+#[cfg(feature = "editor-ui")]
 pub(crate) fn game_tab_active(dock: &egui_dock::DockState<EditorTab>) -> bool {
     tab_is_front(dock, EditorTab::Game)
 }
 
 /// True when `tab` is the front (active) tab of some dock leaf — i.e. it's actually
 /// visible (egui_dock only runs the active tab's `ui` per leaf).
+#[cfg(feature = "editor-ui")]
 pub(crate) fn tab_is_front(dock: &egui_dock::DockState<EditorTab>, tab: EditorTab) -> bool {
     dock.main_surface()
         .iter()
@@ -185,6 +191,7 @@ pub(crate) fn tab_is_front(dock: &egui_dock::DockState<EditorTab>, tab: EditorTa
 
 /// True when BOTH the Scene and Game tabs are visible at once (split into separate
 /// leaves), so they must render independent camera views rather than sharing one.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bool {
     tab_is_front(dock, EditorTab::Scene) && tab_is_front(dock, EditorTab::Game)
 }
@@ -202,6 +209,7 @@ pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bo
 ///   Console, ⏱ Animating, ✱ Particles, ≣ Mixer.
 ///
 /// Users can drag/re-dock freely; **Window ▸ Reset layout** comes back here.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
     use egui_dock::{DockState, NodeIndex};
     // Scene (editor view) and Game (active-camera view) share the central leaf
@@ -248,11 +256,13 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
 /// Needed because the tab arrived after the layout did: anyone upgrading has a
 /// saved dock with no Learn in it, and a tutorial nobody can find teaches
 /// nothing. Help ▸ 🎓 Learn comes here.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_learn_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Learn);
 }
 
 /// Focus the Scripting tab (used after double-click-to-open-a-script).
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     let surface = dock.main_surface_mut();
     if let Some((node, tab)) = surface.find_tab(&EditorTab::Scripting) {
@@ -262,41 +272,48 @@ pub(crate) fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
 
 /// Focus the ◈ Shaders (graph) tab — re-adding it if the user closed it. Used
 /// by double-clicking a `.flsl` asset and the Inspector's shader row.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_shader_graph_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::ShaderGraph);
 }
 
 /// Focus the Terrain dock tab — re-adding it if the user closed it. Used when the
 /// Sculpt tool is selected or "Open Terrain tools" is clicked.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_terrain_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Terrain);
 }
 
 /// Focus the ◫ Tiles dock tab, re-adding it if it was closed.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_tiles_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Tiles);
 }
 
 /// Focus the Paint dock tab — re-adding it if the user closed it. Used when the
 /// Paint tool is selected, so the brush settings are never a tab-hunt away.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_paint_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Paint);
 }
 
 /// Focus the 🖼 Image dock tab — re-adding it if the user closed it. Used when
 /// an image asset is opened, so the canvas is never a tab-hunt away.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_image_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Image);
 }
 
 /// Focus the ◫ UI dock tab — re-adding it if the user closed it. Used by
 /// Add ⏵ UI and the Inspector, so building a screen never means hunting tabs.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_ui_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::UiDesign);
 }
 
 /// Focus the ▦ Model dock tab — re-adding it if the user closed it. Used when the
 /// Map tool is selected, so the shape/op controls are never a tab-hunt away.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn focus_map_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Map);
 }

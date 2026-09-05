@@ -276,8 +276,8 @@ impl Contents {
 const MAX_FILES: u32 = 20_000;
 
 fn walk(dir: &Path, base: &Path, kind: DirKind, out: &mut BTreeMap<Facet, u32>, seen: &mut u32) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
+    let Ok(entries) = floptle_vfs::read_dir(dir) else { return };
+    for e in entries {
         if *seen >= MAX_FILES {
             return;
         }
@@ -288,7 +288,7 @@ fn walk(dir: &Path, base: &Path, kind: DirKind, out: &mut BTreeMap<Facet, u32>, 
         if name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        if e.is_dir() {
             walk(&path, base, kind, out, seen);
         } else {
             *seen += 1;
@@ -313,8 +313,8 @@ mod tests {
 
     fn touch(root: &Path, rel: &str) {
         let p = root.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, b"x").unwrap();
+        floptle_vfs::create_dir_all(p.parent().unwrap()).unwrap();
+        floptle_vfs::write(p, b"x").unwrap();
     }
 
     /// **This test is the interface with the website** (floptle-platform 0134).
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn a_package_that_ships_nothing_contains_nothing() {
         let root = temp("empty");
-        std::fs::create_dir_all(&root).unwrap();
+        floptle_vfs::create_dir_all(&root).unwrap();
         let m = Manifest::new("com.e.k", "K", Version::new(1, 0, 0));
         let c = Contents::scan(&m, &root);
         assert!(c.is_empty());

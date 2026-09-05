@@ -1,0 +1,62 @@
+# Clippy configuration for the BROWSER build only.
+#
+# The engine library type-checks for `wasm32-unknown-unknown`, and that is
+# exactly the problem: `std::fs::read` compiles there and fails at runtime,
+# `std::time::Instant::now()` compiles there and panics, `std::thread::spawn`
+# compiles there and panics. A type-check cannot see any of it. This file makes
+# each one a lint error on the wasm target, so the gate in `.github/workflows/
+# ci.yml` ("wasm32 lint (engine library only)") fails on the call, not in a
+# player's tab. The desktop's own clippy runs without this file and is unaffected.
+#
+#   CLIPPY_CONF_DIR=tools/web cargo clippy -p floptle-editor \
+#       --no-default-features --features vm-luau --target wasm32-unknown-unknown \
+#       -- -D clippy::disallowed-methods -D clippy::disallowed-types
+#
+# The answers: files go through `floptle_vfs` (the same functions, backed by
+# the preloaded bundle in a page), the clock is `floptle_core::time::Instant`,
+# and anything that genuinely needs a thread or a process is authoring — put
+# it behind `editor-ui` or `cfg(not(target_arch = "wasm32"))` with a refusal
+# that says why.
+
+disallowed-methods = [
+    { path = "std::fs::read", reason = "use floptle_vfs::read — the browser has no disk" },
+    { path = "std::fs::read_to_string", reason = "use floptle_vfs::read_to_string" },
+    { path = "std::fs::write", reason = "use floptle_vfs::write" },
+    { path = "std::fs::read_dir", reason = "use floptle_vfs::read_dir" },
+    { path = "std::fs::metadata", reason = "use floptle_vfs::modified / exists" },
+    { path = "std::fs::symlink_metadata", reason = "use floptle_vfs::exists" },
+    { path = "std::fs::create_dir", reason = "use floptle_vfs::create_dir_all" },
+    { path = "std::fs::create_dir_all", reason = "use floptle_vfs::create_dir_all" },
+    { path = "std::fs::remove_file", reason = "use floptle_vfs::remove_file" },
+    { path = "std::fs::remove_dir", reason = "authoring — gate it" },
+    { path = "std::fs::remove_dir_all", reason = "authoring — gate it" },
+    { path = "std::fs::rename", reason = "authoring — gate it" },
+    { path = "std::fs::copy", reason = "authoring — gate it" },
+    { path = "std::fs::canonicalize", reason = "the bundle has no real paths — use floptle_vfs" },
+    { path = "std::path::Path::exists", reason = "use floptle_vfs::exists(&path)" },
+    { path = "std::path::Path::try_exists", reason = "use floptle_vfs::exists(&path)" },
+    { path = "std::path::Path::is_file", reason = "use floptle_vfs::is_file(&path)" },
+    { path = "std::path::Path::is_dir", reason = "use floptle_vfs::is_dir(&path)" },
+    { path = "std::path::Path::metadata", reason = "use floptle_vfs::modified(&path)" },
+    { path = "std::path::Path::read_dir", reason = "use floptle_vfs::read_dir(&path)" },
+    { path = "std::path::Path::canonicalize", reason = "the bundle has no real paths — use floptle_vfs" },
+    { path = "std::env::current_exe", reason = "a page has no binary — the bundle root is `/`" },
+    { path = "std::env::current_dir", reason = "a page has no working directory" },
+    { path = "std::env::args", reason = "a page has no command line" },
+    { path = "std::thread::spawn", reason = "wasm32-unknown-unknown has no threads — authoring, gate it" },
+    { path = "std::thread::Builder::spawn", reason = "wasm32-unknown-unknown has no threads — authoring, gate it" },
+    { path = "std::thread::sleep", reason = "would freeze the tab" },
+    { path = "std::process::exit", reason = "a page cannot exit — return an error the entry point reports" },
+    { path = "std::process::Command::new", reason = "a page cannot spawn a process" },
+    { path = "image::open", reason = "use floptle_assets::texture::load_image — reads through floptle_vfs" },
+    { path = "image::ImageReader::open", reason = "use floptle_assets::texture::load_image" },
+    { path = "gltf::import", reason = "use floptle_assets::gltf_import::import_from — reads through floptle_vfs" },
+]
+
+disallowed-types = [
+    { path = "std::fs::File", reason = "the browser has no disk — read the bytes through floptle_vfs" },
+    { path = "std::fs::OpenOptions", reason = "the browser has no disk — floptle_vfs::write" },
+    { path = "std::fs::DirEntry", reason = "use floptle_vfs::read_dir" },
+    { path = "std::time::Instant", reason = "panics on wasm — use floptle_core::time::Instant" },
+    { path = "std::time::SystemTime", reason = "panics on wasm — use floptle_core::time::SystemTime" },
+]

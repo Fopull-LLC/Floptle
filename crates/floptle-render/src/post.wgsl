@@ -434,7 +434,12 @@ fn fs_dof(in: VsOut) -> @location(0) vec4<f32> {
         // as much as the distance it is reaching. Without it, a sharp character
         // standing in front of a defocused wall grows a halo of wall.
         let tap_coc = dof_coc(uv);
-        let s = textureSample(tex, samp, uv).rgb;
+        // `textureSampleLevel`, not `textureSample`: this loop runs after a
+        // per-pixel early return (the in-focus pixel above), which is
+        // non-uniform control flow, and a browser's WGSL compiler refuses an
+        // implicit-derivative sample there. The frame has one mip level, so
+        // level 0 is the same texel it always was.
+        let s = textureSampleLevel(tex, samp, uv, 0.0).rgb;
         let w = step(rad - 0.5, tap_coc) * dof_weight(s);
         sum = sum + s * w;
         wsum = wsum + w;
@@ -631,7 +636,9 @@ fn fs_motion(in: VsOut) -> @location(0) vec4<f32> {
         let t = (i / taps) * 0.5;
         let a = clamp(in.uv + v * t, vec2<f32>(0.0), vec2<f32>(1.0));
         let b = clamp(in.uv - v * t, vec2<f32>(0.0), vec2<f32>(1.0));
-        sum = sum + textureSample(tex, samp, a).rgb + textureSample(tex, samp, b).rgb;
+        // Explicit level 0 for the same reason as the depth-of-field loop: the
+        // still-pixel return above makes this non-uniform control flow.
+        sum = sum + textureSampleLevel(tex, samp, a, 0.0).rgb + textureSampleLevel(tex, samp, b, 0.0).rgb;
         wsum = wsum + 2.0;
     }
     return vec4<f32>(sum / wsum, 1.0);

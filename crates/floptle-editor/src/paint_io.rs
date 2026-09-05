@@ -163,7 +163,7 @@ impl Editor {
         if ids.is_empty() && keep.is_empty() {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect
             // paint on next load.
-            let _ = std::fs::remove_file(self.paint_file_path());
+            let _ = floptle_vfs::remove_file(self.paint_file_path());
             return true;
         }
         // Which mesh key each paint id belongs to, so we can hash the right geometry.
@@ -192,8 +192,8 @@ impl Editor {
         }
         stored.extend(keep);
         let dir = self.project_root.join("paint");
-        let _ = std::fs::create_dir_all(&dir);
-        if let Err(e) = std::fs::write(self.paint_file_path(), encode(&stored)) {
+        let _ = floptle_vfs::create_dir_all(&dir);
+        if let Err(e) = floptle_vfs::write(self.paint_file_path(), encode(&stored)) {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!("💾 save vertex paint failed: {e}"),
@@ -217,7 +217,7 @@ impl Editor {
         self.paint_data.clear();
         self.paint_orphans.clear();
         self.vpaint_epoch += 1; // blocks realloc — texture-paint mirrors must resync
-        let Ok(bytes) = std::fs::read(self.paint_file_path()) else { return };
+        let Ok(bytes) = floptle_vfs::read(self.paint_file_path()) else { return };
         let Some(stored) = decode(&bytes) else {
             self.console.push(
                 floptle_script::LogLevel::Error,

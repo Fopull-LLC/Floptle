@@ -753,6 +753,30 @@ impl Sim {
         })
     }
 
+    /// Cast a ray against the colliders on `mask`'s layers only. World-space
+    /// origin, as [`Self::raycast`].
+    ///
+    /// Whether a point can be SEEN from another is a different question from
+    /// whether something is in the way — a trigger volume, a water surface and
+    /// a player's own capsule are all "in the way" and none of them is a wall.
+    /// So the caller names the layers that count as opaque rather than getting
+    /// an answer off every collider in the world.
+    pub fn raycast_masked(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        max_dist: f32,
+        mask: u32,
+    ) -> Option<RayHit> {
+        let o = (origin - self.world.origin).as_vec3();
+        crate::raycast_colliders(self.world.colliders(), o, dir, max_dist, mask).map(|mut h| {
+            let p = self.world.origin
+                + DVec3::new(h.point[0] as f64, h.point[1] as f64, h.point[2] as f64);
+            h.point = [p.x as f32, p.y as f32, p.z as f32];
+            h
+        })
+    }
+
     /// Advance by a (variable) real frame delta via a fixed-timestep accumulator, then
     /// write body positions back to the entities' local transform translations —
     /// interpolated by the accumulator's leftover fraction, so rendered motion is smooth

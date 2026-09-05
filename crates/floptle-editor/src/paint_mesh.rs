@@ -821,7 +821,7 @@ mod tests {
             return; // not a checkout with the test models — nothing to say
         }
         let mut tested = 0usize;
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        for entry in floptle_vfs::read_dir(dir).unwrap() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("glb") {
                 continue;
@@ -829,7 +829,7 @@ mod tests {
             let Ok(model) = floptle_assets::import(&path) else { continue };
             for part in &model.parts {
                 tested += 1;
-                let t0 = std::time::Instant::now();
+                let t0 = floptle_core::time::Instant::now();
                 let pp = PaintPart::build(&part.mesh);
                 let build_ms = t0.elapsed().as_secs_f32() * 1000.0;
                 assert!(
@@ -838,7 +838,7 @@ mod tests {
                     path.file_name().unwrap()
                 );
                 // 60 casts ≈ a second of hovering. Misses AND hits, at the real max_t.
-                let t0 = std::time::Instant::now();
+                let t0 = floptle_core::time::Instant::now();
                 for i in 0..60 {
                     let a = i as f32 * 0.1;
                     pp.raycast(Vec3::new(a.cos() * 50.0, 50.0, a.sin() * 50.0), Vec3::new(0.0, -1.0, 0.0), 1e5);
@@ -900,7 +900,7 @@ mod tests {
             d.indices.extend([b, b + 1, b + 2]);
         }
         let p = PaintPart::build(&d);
-        let t0 = std::time::Instant::now();
+        let t0 = floptle_core::time::Instant::now();
         for _ in 0..100 {
             // Aimed well away from the mesh, with the SAME max_t the brush passes.
             assert!(p.raycast(Vec3::new(0.0, 900.0, 5.0), Vec3::new(0.0, 0.0, -1.0), 1e5).is_none());
@@ -919,7 +919,7 @@ mod tests {
             colors: None,
         };
         let p = PaintPart::build(&d);
-        let t0 = std::time::Instant::now();
+        let t0 = floptle_core::time::Instant::now();
         for _ in 0..100 {
             // radius 0.5 against a ~1mm cell = r≈500 ⇒ 1001³ cells if swept naively.
             let n = p.in_radius(Vec3::ZERO, 0.5).len();

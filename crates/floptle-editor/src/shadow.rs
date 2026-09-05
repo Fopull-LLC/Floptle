@@ -244,9 +244,9 @@ pub fn replay_dir(project_root: &Path) -> PathBuf {
 /// A free function rather than an `Editor` method because the panel builds its
 /// list mid-render, with half the editor already mutably borrowed for the GPU.
 pub fn list_replays(project_root: &Path) -> Vec<(String, PathBuf)> {
-    let Ok(rd) = std::fs::read_dir(replay_dir(project_root)) else { return Vec::new() };
+    let Ok(rd) = floptle_vfs::read_dir(replay_dir(project_root)) else { return Vec::new() };
     let mut out: Vec<(String, PathBuf)> = rd
-        .flatten()
+        .into_iter()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "floptlereplay"))
         .filter_map(|p| p.file_stem().map(|s| (s.to_string_lossy().to_string(), p.clone())))
@@ -333,8 +333,8 @@ end\n";
 
     fn script_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("floptle_shadow_{tag}"));
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("fighter.lua"), FIGHTER).unwrap();
+        let _ = floptle_vfs::create_dir_all(&dir);
+        floptle_vfs::write(dir.join("fighter.lua"), FIGHTER).unwrap();
         dir
     }
 

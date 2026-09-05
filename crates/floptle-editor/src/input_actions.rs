@@ -299,6 +299,7 @@ impl Editor {
     }
 
     /// Apply the Input settings' collected edits.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn apply_input_edits(&mut self, edits: crate::input_ui::InputEdits) {
         use crate::input_ui::InputCmd;
         if edits.rescan {
@@ -470,8 +471,8 @@ fn add_entry(map: &mut InputMap, kind: crate::input_scan::UsageKind, name: Strin
     }
 }
 
-fn input_map_mtime(root: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(root.join(floptle_input::MAP_FILE)).ok()?.modified().ok()
+fn input_map_mtime(root: &std::path::Path) -> Option<floptle_core::time::SystemTime> {
+    floptle_vfs::modified(root.join(floptle_input::MAP_FILE))
 }
 
 #[cfg(test)]

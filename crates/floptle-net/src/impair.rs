@@ -30,7 +30,9 @@
 //! a substitute for the two-machine acceptance run.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use floptle_core::time::Instant;
 
 use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport};
 

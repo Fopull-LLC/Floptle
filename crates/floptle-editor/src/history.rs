@@ -113,7 +113,10 @@ impl Editor {
         if replace {
             self.selection.clear();
         }
-        self.vfx_ui.sel_track = None;
+        #[cfg(feature = "editor-ui")]
+        {
+            self.vfx_ui.sel_track = None;
+        }
         self.bone_selection = None;
         let order: Vec<Entity> = self.world.query::<Matter>().map(|(e, _)| e).collect();
         for e in refs.iter().filter_map(|&i| order.get(i).copied()) {
@@ -130,7 +133,11 @@ impl Editor {
     /// [`Snapshot::Selection`] step — unless something already on the history
     /// (or an undo/restore/load) explains it.
     pub(crate) fn begin_history_frame(&mut self) {
-        if !self.playing && !self.anim_ui.record {
+        #[cfg(feature = "editor-ui")]
+        let recording = self.anim_ui.record;
+        #[cfg(not(feature = "editor-ui"))]
+        let recording = false;
+        if !self.playing && !recording {
             self.frame_snapshot =
                 Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
             let explained = std::mem::take(&mut self.suppress_sel_step);

@@ -8,6 +8,9 @@
 //!
 //! So the host is fixed, the path is validated, and the token stays in Rust.
 
+// Only the native transport measures a timeout; a browser build has no
+// transport to bound.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// Production. There is no other one — `dev-auth.fopull.com` is retired.
@@ -18,6 +21,8 @@ pub const DEFAULT_BASE: &str = "https://fopull.com";
 /// the two are not interchangeable and this prefix is applied only here.
 pub const API_PREFIX: &str = "/api/floptle/v1";
 
+// Native transport only — the browser build has no ureq call to parse for.
+#[cfg(not(target_arch = "wasm32"))]
 /// Largest reply accepted. The biggest documented Cloud payload is a 256 KB
 /// save, so this is four times the largest legitimate answer — big enough to
 /// never be the reason something fails, small enough that a confused endpoint
@@ -83,6 +88,11 @@ fn is_root_endpoint(path: &str) -> bool {
 /// Send one authorized request, **blocking**. Callers run this on a worker
 /// thread — [`crate::Account`] does, and nothing else should call it directly
 /// from a frame.
+///
+/// Native only. A browser cannot make this call at all — see
+/// [`crate::auth::OfflineProvider`] for the three reasons — and
+/// [`crate::Account::request`] refuses before it reaches here.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn request(
     base: &str,
     access_token: &str,

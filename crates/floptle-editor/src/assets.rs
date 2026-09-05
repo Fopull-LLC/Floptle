@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::anim_ui;
+use crate::anim;
 
 /// A node in the project asset tree (the bottom file browser).
 pub(crate) enum AssetEntry {
@@ -30,6 +30,7 @@ pub(crate) fn is_model(path: &str) -> bool {
 /// Kept beside [`is_model`] because the two together are the whole answer to
 /// "can I do anything with this file": one opens, the other becomes one that
 /// opens.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn is_convertible_model(path: &str) -> bool {
     floptle_convert::is_convertible(std::path::Path::new(path))
 }
@@ -124,6 +125,7 @@ pub(crate) fn truncate_label(name: &str, max: usize) -> String {
 }
 
 /// A small type glyph + tint for an asset file, used in the browser tree + grid.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
     if is_model(path) {
         ("⬣", egui::Color32::from_rgb(120, 200, 210))
@@ -136,11 +138,11 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("🖼", egui::Color32::from_rgb(140, 210, 140))
     } else if is_material(path) {
         ("◑", egui::Color32::from_rgb(240, 180, 110))
-    } else if anim_ui::is_sprite_anim(path) {
+    } else if anim::is_sprite_anim(path) {
         ("▦", egui::Color32::from_rgb(235, 200, 110)) // sprite animation (frames)
-    } else if anim_ui::is_anim_clip(path) {
+    } else if anim::is_anim_clip(path) {
         ("▶", egui::Color32::from_rgb(235, 200, 110)) // baked animation clip
-    } else if anim_ui::is_anim_ctl(path) {
+    } else if anim::is_anim_ctl(path) {
         ("◎", egui::Color32::from_rgb(180, 160, 250)) // animation controller
     } else if is_vfx(path) {
         ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
@@ -162,6 +164,7 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
 }
 
 /// Open the OS file manager at `path` (revealing the file where supported).
+#[cfg(feature = "editor-ui")]
 pub(crate) fn reveal_in_explorer(path: &Path) {
     #[cfg(target_os = "macos")]
     {
@@ -176,7 +179,7 @@ pub(crate) fn reveal_in_explorer(path: &Path) {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         // xdg-open can't select a file, so open its containing folder.
-        let target = if path.is_dir() {
+        let target = if floptle_vfs::is_dir(path) {
             path.to_path_buf()
         } else {
             path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
@@ -561,15 +564,15 @@ mod tests {
 /// Read the project tree under `dir` (folders first, then files, alphabetically).
 pub(crate) fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
-    let mut entries: Vec<_> = rd.flatten().collect();
-    entries.sort_by_key(|e| (e.path().is_file(), e.file_name()));
+    let Ok(rd) = floptle_vfs::read_dir(dir) else { return out };
+    let mut entries = rd;
+    entries.sort_by_key(|e| (e.is_file(), e.file_name()));
     for e in entries {
         let name = e.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {
             continue;
         }
-        if e.path().is_dir() {
+        if e.is_dir() {
             out.push(AssetEntry::Dir(name, build_assets(&e.path())));
         } else {
             out.push(AssetEntry::File { name, path: e.path().to_string_lossy().to_string() });
@@ -650,7 +653,7 @@ pub(crate) fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf 
     };
     let mut p = make(stem.to_string());
     let mut n = 1;
-    while p.exists() {
+    while floptle_vfs::exists(&p) {
         p = make(format!("{stem}_{n}"));
         n += 1;
     }

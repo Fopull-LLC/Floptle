@@ -62,6 +62,11 @@ pub(crate) const MENU: &str = "▾";
 /// Settings / configuration.
 pub(crate) const SETTINGS: &str = "⚙";
 
+/// Selection lock, on the Inspector's name row. Drawn faded when the lock is
+/// off and opaque when it is on — the STATE is the glyph's alpha, so there is
+/// one thing to look at rather than an icon plus a label saying which it is.
+pub(crate) const LOCK: &str = "🔒";
+
 // --- tabs ---------------------------------------------------------------
 pub(crate) const TERRAIN: &str = "Δ";
 pub(crate) const MAP: &str = "▦";
@@ -105,6 +110,7 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("RESCAN", RESCAN),
     ("MENU", MENU),
     ("SETTINGS", SETTINGS),
+    ("LOCK", LOCK),
     ("TERRAIN", TERRAIN),
     ("MAP", MAP),
     ("SCENE", SCENE),

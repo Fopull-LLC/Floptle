@@ -21,9 +21,13 @@ use floptle_render::instance_of;
 use floptle_render::instance_of_mat;
 use std::path::Path;
 use crate::assets::{is_material, is_model, is_texture};
-use crate::dock::{EditorTab, game_tab_active, scene_and_game_split};
+use crate::dock::EditorTab;
+#[cfg(feature = "editor-ui")]
+use crate::dock::{game_tab_active, scene_and_game_split};
 use crate::shading::{material_params, post_process_uniforms};
-use crate::{Editor, Egui, PreviewTarget, PreviewView, scene_hit};
+use crate::Editor;
+#[cfg(feature = "editor-ui")]
+use crate::{Egui, PreviewTarget, PreviewView, scene_hit};
 
 /// Create a `w×h` offscreen color+depth target the scene renders into, and register its
 /// color with egui so a tab/inspector can draw it as an `Image`.
@@ -88,6 +92,7 @@ pub(crate) fn offscreen_textures(
     (color, depth)
 }
 
+#[cfg(feature = "editor-ui")]
 fn make_offscreen_target(
     gpu: &Gpu,
     egui: &mut Egui,
@@ -121,6 +126,7 @@ impl Editor {
     // ---- asset preview (Inspector) ------------------------------------------
     /// Lazily create the 320² offscreen target the asset preview renders into, and
     /// register its color view with egui so the Inspector can draw it as an image.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ensure_preview_target(&mut self) {
         if self.preview.is_some() {
             return;
@@ -132,6 +138,7 @@ impl Editor {
     }
 
     /// (Re)load a selected texture asset into an egui texture handle for preview.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ensure_preview_image(&mut self, path: &str) {
         if self.preview_image.as_ref().is_some_and(|(p, _, _)| p == path) {
             return;
@@ -169,6 +176,7 @@ impl Editor {
     /// Each frame: build the Inspector preview for the selected asset. Models and
     /// material presets render as a turntable-spinning subject into the offscreen
     /// target; textures load as an egui image.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn update_asset_preview(&mut self, dt: f32) {
         let Some(path) = self.selected_asset.clone() else {
             self.preview_material = None;
@@ -311,6 +319,7 @@ impl Editor {
 
     /// Lazily create the 16:9 offscreen target the selected-camera POV preview renders
     /// into, registering its color view with egui as a texture id for the Inspector.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ensure_cam_preview_target(&mut self) {
         if self.cam_preview.is_some() {
             return;
@@ -324,6 +333,7 @@ impl Editor {
     /// into the 16:9 offscreen target so the Inspector can show what it sees. Mirrors
     /// the main render path (raster meshes + raymarch blobs/terrain), camera-relative
     /// to the selected camera.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn update_camera_preview(&mut self, elapsed: f32) {
         let Some(e) = self.selection.last().copied() else { return };
         let (fov_y, mask, ortho, oh) = match self.world.get::<Matter>(e) {
@@ -452,6 +462,7 @@ impl Editor {
 
     /// Lazily (re)create the Game viewport's offscreen target at `w`×`h` pixels, freeing
     /// the previous egui texture registration on resize.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ensure_game_vp(&mut self, w: u32, h: u32) {
         let (w, h) = (w.max(16), h.max(16));
         if self.game_vp.is_some() && self.game_vp_dims == (w, h) {
@@ -482,6 +493,7 @@ impl Editor {
     /// or split. The tab then blits this at its exact rect+aspect, so the game view is
     /// always framed to its panel and never spills the full-window render behind other
     /// tabs. (A FULLSCREEN Game tab renders straight to the surface — it fills the window.)
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn update_game_viewport(&mut self, elapsed: f32) {
         if !self.game_offscreen() {
             return;
@@ -490,6 +502,65 @@ impl Editor {
             self.game_tab_px().unwrap_or(([0.0, 0.0], [640.0, 360.0]));
         let (w, h) = (tab_px[0] as u32, tab_px[1] as u32);
         self.ensure_game_vp(w, h);
+        let Some((cv, dv, dtex)) = self
+            .game_vp
+            .as_ref()
+            .map(|p| (p.color_view.clone(), p.depth_view.clone(), p.depth_tex.clone()))
+        else {
+            return;
+        };
+        // Only once the tab has actually reported a rect. Publishing the
+        // placeholder size would have `camera.exists()` answer yes with numbers
+        // off by the whole layout.
+        let publish_view = self.game_rect.is_some();
+        // An offscreen viewport target the editor made — always samplable.
+        self.render_game_into(cv, dv, Some(dtex), tab_org, tab_px, elapsed, publish_view, true);
+    }
+
+    /// **Draw the game exactly as a build shows it, into `cv`.**
+    ///
+    /// The one path that both hosts of a running game take: the editor's docked
+    /// Game tab (into a panel-sized offscreen texture) and the standalone
+    /// player (straight into the swapchain). Scene, world canvases, the post
+    /// chain, the retro upscale and the screen-space game UI, in that order.
+    ///
+    /// It is one function because the docked tab's whole promise is that it
+    /// shows what a build shows — and a second copy of this sequence is exactly
+    /// how the two would come to disagree, in a way only a player would ever
+    /// see. Everything host-specific is a parameter:
+    ///
+    /// * `cv` / `dv` / `dtex` — the final colour target, its depth view, and
+    ///   the depth TEXTURE behind that view. The texture is what lets the
+    ///   opaque prepass run, and therefore what makes contact shadows,
+    ///   reflections and lamp shadows appear at all; a view cannot be asked for
+    ///   it. Ignored in retro mode, which has its own depth.
+    /// * `org` / `px` — where the target sits in window pixels and how big it
+    ///   is, which is the space `input.mouse()` reports in. The player fills
+    ///   the window, so it passes the origin and the window size.
+    /// * `publish_view` — whether to hand the camera's projection to scripts
+    ///   (`camera.worldToScreen`). False while the host does not yet know its
+    ///   own rect.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_game_into(
+        &mut self,
+        cv: wgpu::TextureView,
+        dv: wgpu::TextureView,
+        dtex: Option<wgpu::Texture>,
+        tab_org: [f32; 2],
+        tab_px: [f32; 2],
+        elapsed: f32,
+        publish_view: bool,
+        target_samplable: bool,
+    ) {
+        let (w, h) = (tab_px[0].max(1.0) as u32, tab_px[1].max(1.0) as u32);
+        // The player has no `ensure_game_vp` to have made this for it, and the
+        // chain is the only route from the scene's floating-point target to a
+        // displayable one — so it is created on demand rather than assumed.
+        if self.game_post.is_none()
+            && let Some(gpu) = self.gpu.as_ref()
+        {
+            self.game_post = Some(floptle_render::PostStack::new(gpu, w, h));
+        }
         // The active gameplay camera, or the editor camera if the scene has none.
         let mut cull_mask = u32::MAX;
         let cam = {
@@ -518,12 +589,9 @@ impl Editor {
         // into — which is the panel's, unless a retro width is pinned. See
         // `ProjectConfigDoc::render_aspect`.
         let aspect = self.project.render_aspect(panel_aspect);
-        // Feed the map's world→screen picker for the DOCKED game tab: its rect in
-        // FULL-WINDOW physical pixels, matching the cursor space `input.mouse()`
-        // reports. Fullscreen feeds from render_frame. Only once the tab has
-        // actually reported a rect — publishing the placeholder size would have
-        // `camera.exists()` answer yes with numbers off by the whole layout.
-        if self.game_rect.is_some() {
+        // Feed the map's world→screen picker: this target's rect in FULL-WINDOW
+        // physical pixels, matching the cursor space `input.mouse()` reports.
+        if publish_view {
             // Screen-space `draw.rect` arrives in this same cursor space.
             self.game_view_origin = [tab_org[0], tab_org[1]];
             let vp = cam.view_proj(aspect);
@@ -553,11 +621,6 @@ impl Editor {
                 &mut self.game_gizmo_lines,
             );
         }
-        let Some((cv, dv)) =
-            self.game_vp.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
-        else {
-            return;
-        };
         let (mut post_settings, _) = post_process_uniforms(&self.world);
         // The Game panel gets the player's colour-vision filter too — the whole
         // point of it being a player setting is that it applies wherever the game
@@ -621,7 +684,7 @@ impl Editor {
         let depth_tex = if retro_on {
             self.game_retro.as_ref().map(|r| r.depth_texture().clone())
         } else {
-            self.game_vp.as_ref().map(|p| p.depth_tex.clone())
+            dtex
         };
         self.render_world_into(
             &scene_target,
@@ -731,18 +794,28 @@ impl Editor {
             }
             // Capture the composited scene (now in `cv`, before the UI draws on
             // top) into the backdrop, so `backdrop()` UI shaders can frost it.
-            {
+            //
+            // Only where the target can be SAMPLED. A build draws the game
+            // straight into the swapchain, and a swapchain is samplable only
+            // if the surface offered the flag — which a browser's canvas does
+            // not. Binding it anyway is a validation error per frame and the
+            // whole backdrop pass is dropped, so ask first and fall back to
+            // the black backdrop the UI already has for this case.
+            if target_samplable {
                 let mut enc = gpu
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") });
                 uir.capture_backdrop(gpu, &mut enc, &cv, w.max(1), h.max(1));
                 gpu.queue.submit(Some(enc.finish()));
+            } else {
+                uir.clear_backdrop();
             }
             uir.draw(gpu, &cv, vp, &ui_instances, &ui_batches, raster);
         }
     }
 
     /// What the Inspector should draw for the current selection's preview.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn preview_view(&self) -> Option<PreviewView> {
         let path = self.selected_asset.as_ref()?;
         if is_texture(path) {
@@ -766,9 +839,15 @@ impl Editor {
     /// moved into the tab's rect. Single source of truth for the render path
     /// and the input path alike; if they disagree, clicks land somewhere else.
     pub(crate) fn game_offscreen(&self) -> bool {
-        !self.player_mode
-            && self.fullscreen_tab.is_none()
-            && self.dock_state.as_ref().is_some_and(game_tab_active)
+        #[cfg(feature = "editor-ui")]
+        {
+            !self.player_mode
+                && self.fullscreen_tab.is_none()
+                && self.dock_state.as_ref().is_some_and(game_tab_active)
+        }
+        // A build has no dock, so the game is never rendered into a tab.
+        #[cfg(not(feature = "editor-ui"))]
+        false
     }
 
     /// True when the game owns the WHOLE window: the fullscreen Game tab, or
@@ -782,6 +861,10 @@ impl Editor {
     /// frame. The surface's own 3D render is only worth decorating — world
     /// canvases, element outlines — when someone can see it.
     pub(crate) fn scene_visible(&self) -> bool {
+        // A build has no Scene view at all.
+        #[cfg(not(feature = "editor-ui"))]
+        return false;
+        #[cfg(feature = "editor-ui")]
         match self.fullscreen_tab {
             Some(t) => t == EditorTab::Scene,
             None => self
@@ -805,7 +888,10 @@ impl Editor {
                 [gpu.config.width as f32, gpu.config.height.max(1) as f32],
             ));
         }
-        self.game_offscreen().then(|| self.game_tab_px()).flatten()
+        #[cfg(feature = "editor-ui")]
+        return self.game_offscreen().then(|| self.game_tab_px()).flatten();
+        #[cfg(not(feature = "editor-ui"))]
+        None
     }
 
     /// The docked Game tab's drawing surface in PHYSICAL pixels: its top-left
@@ -816,6 +902,7 @@ impl Editor {
     /// offset from this — if any of them did its own `rect * ppp` they could
     /// disagree, and a disagreement here is a cursor that points at the wrong
     /// thing.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn game_tab_px(&self) -> Option<([f32; 2], [f32; 2])> {
         let r = self.game_rect?;
         let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
@@ -832,19 +919,25 @@ impl Editor {
     /// the game is focused only while the mouse is over its viewport, so you can still
     /// edit in the Scene view and the game only gets input when you're in it.
     pub(crate) fn game_view(&self) -> bool {
-        match self.fullscreen_tab {
-            Some(EditorTab::Game) => return true,
-            Some(_) => return false,
-            None => {}
+        // In a build there is no other viewport for input to belong to.
+        #[cfg(not(feature = "editor-ui"))]
+        return true;
+        #[cfg(feature = "editor-ui")]
+        {
+            match self.fullscreen_tab {
+                Some(EditorTab::Game) => return true,
+                Some(_) => return false,
+                None => {}
+            }
+            let Some(dock) = self.dock_state.as_ref() else { return false };
+            if scene_and_game_split(dock) {
+                return self
+                    .egui
+                    .as_ref()
+                    .is_some_and(|e| scene_hit(&e.ctx, self.cursor, self.game_rect));
+            }
+            game_tab_active(dock)
         }
-        let Some(dock) = self.dock_state.as_ref() else { return false };
-        if scene_and_game_split(dock) {
-            return self
-                .egui
-                .as_ref()
-                .is_some_and(|e| scene_hit(&e.ctx, self.cursor, self.game_rect));
-        }
-        game_tab_active(dock)
     }
 
     // ---- cameras -----------------------------------------------------------
@@ -925,6 +1018,7 @@ impl Editor {
 
 impl Editor {
     /// Lazily (re)create the UI tab's offscreen canvas at `w`×`h` physical px.
+    #[cfg(feature = "editor-ui")]
     fn ensure_ui_design_vp(&mut self, w: u32, h: u32) {
         let (w, h) = (w.clamp(16, 8192), h.clamp(16, 8192));
         if self.ui_design_vp.is_some() && self.ui_design_vp_dims == (w, h) {
@@ -944,6 +1038,7 @@ impl Editor {
 
     /// Which layer the UI tab is editing: the chosen one if it still exists,
     /// else the first in the scene.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn ui_design_layer(&self) -> Option<(Entity, floptle_ui::UiLayer)> {
         let layers: Vec<(Entity, floptle_ui::UiLayer)> =
             self.world.query::<floptle_ui::UiLayer>().map(|(e, l)| (e, *l)).collect();
@@ -958,6 +1053,7 @@ impl Editor {
     /// Guides follow the SCENE, and are keyed inside it by layer name — an
     /// entity index is a runtime accident, and a guide that silently reattached
     /// to a different layer after a reload would be worse than no guide.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn sync_ui_design_guides(&mut self) {
         let scene = self.scene_name.clone();
         if self.ui_design_guides_scene.as_deref() != Some(scene.as_str()) {
@@ -992,6 +1088,7 @@ impl Editor {
     /// over this image — the image itself is the shipping renderer, so what the
     /// canvas shows is what the game shows. Also stashes the solved rects,
     /// which is what makes picking and snapping possible at all.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn update_ui_design_view(&mut self) {
         // Consumed here so a hidden tab stops costing a render.
         let visible = std::mem::take(&mut self.ui_design.tab_visible);
@@ -1152,6 +1249,11 @@ impl Editor {
     }
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -860,7 +860,7 @@ pub(crate) fn bake_with(
     links: Vec<OffLink>,
     areas: &[floptle_nav::Area],
 ) -> (Option<NavMesh>, f32) {
-    let t = std::time::Instant::now();
+    let t = floptle_core::time::Instant::now();
     let mesh = floptle_nav::bake_with(tris, settings, volumes, links)
         .map(|m| if areas.is_empty() { m } else { m.with_areas(areas.to_vec()) });
     (mesh, t.elapsed().as_secs_f32())
@@ -931,7 +931,7 @@ impl LoadError {
 /// Write a bake, version first.
 pub(crate) fn save(path: &std::path::Path, mesh: &NavMesh) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        floptle_vfs::create_dir_all(dir)?;
     }
     let mut bytes = Vec::with_capacity(1 << 16);
     bytes.extend_from_slice(MAGIC);
@@ -939,15 +939,15 @@ pub(crate) fn save(path: &std::path::Path, mesh: &NavMesh) -> std::io::Result<()
     let body = postcard::to_stdvec(mesh)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     bytes.extend_from_slice(&body);
-    std::fs::write(path, bytes)
+    floptle_vfs::write(path, bytes)
 }
 
 /// Read a bake back, or say why not.
 pub(crate) fn load(path: &std::path::Path) -> Result<NavMesh, LoadError> {
-    if !path.exists() {
+    if !floptle_vfs::exists(path) {
         return Err(LoadError::Missing);
     }
-    let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    let bytes = floptle_vfs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
     // No header at all is a bake from before this file had one. There is
     // nothing to migrate — the fields it lacks were never written — so the only
     // honest thing to do is say which file and why.
@@ -988,6 +988,7 @@ impl crate::Editor {
     /// for the five that were easy to find and the one that was not.
     pub(crate) fn publish_nav_mesh(&mut self) {
         self.script_host.set_nav_mesh(self.nav_baked.clone());
+        #[cfg(feature = "editor-ui")]
         self.ext.set_nav_mesh(self.nav_baked.clone());
     }
 
@@ -1280,7 +1281,7 @@ impl crate::Editor {
             [local[0] - half[0] - m, local[1] - half[1] - m, local[2] - half[2] - m],
             [local[0] + half[0] + m, local[1] + half[1] + m, local[2] + half[2] + m],
         );
-        let t0 = std::time::Instant::now();
+        let t0 = floptle_core::time::Instant::now();
         let g = gather(
             &self.world,
             anchor,
@@ -1488,16 +1489,13 @@ impl crate::Editor {
         // next can change the answer underneath it.
         let (tx, rx) = std::sync::mpsc::channel();
         let named = areas.clone();
-        std::thread::Builder::new()
-            .name("nav-bake".into())
-            .spawn(move || {
-                let (mesh, seconds) = bake_with(&tris, &settings, &volumes, links, &named);
-                let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
-                // A send that fails means the editor moved on — a scene change,
-                // a second bake, a close. Dropping the result is correct.
-                let _ = tx.send((mesh, seconds));
-            })
-            .ok();
+        crate::worker::spawn("nav-bake", move || {
+            let (mesh, seconds) = bake_with(&tris, &settings, &volumes, links, &named);
+            let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
+            // A send that fails means the editor moved on — a scene change,
+            // a second bake, a close. Dropping the result is correct.
+            let _ = tx.send((mesh, seconds));
+        });
         self.nav_job = Some(NavJob {
             rx,
             entity: e,
@@ -1801,7 +1799,7 @@ mod tests {
         let path = dir.join("scene.1.fnav");
         save(&path, &mesh).expect("write");
         let back = load(&path).expect("read");
-        let _ = std::fs::remove_file(&path);
+        let _ = floptle_vfs::remove_file(&path);
 
         assert_eq!(back.polys.len(), mesh.polys.len());
         assert_eq!(back.settings, mesh.settings);
@@ -1848,12 +1846,12 @@ mod tests {
         assert!(load(missing).unwrap_err().message(missing).is_none());
 
         let dir = std::env::temp_dir().join("floptle-nav-load-kinds");
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
 
         // A bake from before the header existed — which is every bake made
         // before v0.60, and the reason this whole mechanism is here.
         let old = dir.join("old.1.fnav");
-        std::fs::write(&old, b"\x01\x02postcard-ish bytes with no header").unwrap();
+        floptle_vfs::write(&old, b"\x01\x02postcard-ish bytes with no header").unwrap();
         let err = load(&old).unwrap_err();
         assert!(matches!(err, LoadError::Version { found: None }));
         let said = err.message(&old).expect("this one must be said out loud");
@@ -1865,7 +1863,7 @@ mod tests {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&99u32.to_le_bytes());
         bytes.extend_from_slice(b"whatever comes next");
-        std::fs::write(&future, &bytes).unwrap();
+        floptle_vfs::write(&future, &bytes).unwrap();
         assert!(matches!(load(&future), Err(LoadError::Version { found: Some(99) })));
 
         // The right header over damaged contents is a different sentence again.
@@ -1873,7 +1871,7 @@ mod tests {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         bytes.extend_from_slice(b"\x7f\x7f\x7f");
-        std::fs::write(&torn, &bytes).unwrap();
+        floptle_vfs::write(&torn, &bytes).unwrap();
         assert!(matches!(load(&torn), Err(LoadError::Corrupt(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1981,7 +1979,7 @@ mod tests {
         use floptle_core::Transform;
         let dir = std::env::temp_dir().join("floptle-nav-heal");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
 
         let mut ed = crate::Editor {
             project_root: dir.clone(),
@@ -1999,7 +1997,7 @@ mod tests {
 
         // A bake from an older engine — the one that cost Ty a rebake every time
         // he opened the project.
-        std::fs::write(ed.nav_path(1), b"postcard bytes from before the header").unwrap();
+        floptle_vfs::write(ed.nav_path(1), b"postcard bytes from before the header").unwrap();
         ed.load_nav();
         assert!(ed.nav_baked.is_none(), "it genuinely could not be read");
         assert!(ed.nav_heal, "and the level that made it is open right here");
@@ -2008,7 +2006,7 @@ mod tests {
         let mut torn = MAGIC.to_vec();
         torn.extend_from_slice(&VERSION.to_le_bytes());
         torn.extend_from_slice(b"\x7f\x7f\x7f");
-        std::fs::write(ed.nav_path(1), &torn).unwrap();
+        floptle_vfs::write(ed.nav_path(1), &torn).unwrap();
         ed.load_nav();
         assert!(ed.nav_heal);
 
@@ -2027,7 +2025,7 @@ mod tests {
         use floptle_core::{Collidable, Matter, Shape, Transform};
         let dir = std::env::temp_dir().join(format!("floptle-nav-reopen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
 
         // A level with a floor and a navmesh over it, saved the way ⌘S saves it.
         let mut ed = crate::Editor {
@@ -2116,8 +2114,8 @@ mod tests {
         use floptle_core::{Collidable, Matter, Shape, Transform};
         let dir = std::env::temp_dir().join(format!("floptle-nav-openproj-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
-        std::fs::write(dir.join("project.ron"), "(name: \"t\")").unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::write(dir.join("project.ron"), "(name: \"t\")").unwrap();
 
         // Bake a level and save it, the way somebody would before closing up.
         let mut ed = crate::Editor {
@@ -2203,7 +2201,7 @@ mod tests {
         use floptle_core::{Collidable, Matter, Shape, Transform};
         let dir = std::env::temp_dir().join(format!("floptle-nav-backstop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
 
         fn level(dir: &std::path::Path) -> crate::Editor {
             let mut ed = crate::Editor {
@@ -2392,7 +2390,7 @@ mod tests {
         let mesh = mesh.expect("this floor bakes");
 
         let dir = std::env::temp_dir().join("floptle-nav-roundtrip");
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let path = dir.join("scene.1.fnav");
         save(&path, &mesh).expect("write");
         let back = load(&path).expect("a bake written by this engine must read back");
@@ -2507,7 +2505,7 @@ mod tests {
             for i in 0..BASE_NODES {
                 ground_node(&mut ed.world, [i as f64, 0.0, 0.0]);
             }
-            let t0 = std::time::Instant::now();
+            let t0 = floptle_core::time::Instant::now();
             for _ in 0..ticks {
                 // ~40 pieces a frame, the card's own streaming figure.
                 for i in 0..40 {

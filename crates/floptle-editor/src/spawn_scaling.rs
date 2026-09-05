@@ -25,7 +25,7 @@
 //! scans the scene per node reads four times as long instead, and that is the
 //! difference the ceiling below is set to catch.
 
-use std::time::Instant;
+use floptle_core::time::Instant;
 
 use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform, World};
 

@@ -658,6 +658,12 @@ impl PhysicsWorld {
         }
     }
 
+    /// The live collider set, for a caller that needs to run its own query
+    /// shape over it (a masked line-of-sight test, say).
+    pub fn colliders(&self) -> &[AnchoredCollider] {
+        &self.colliders
+    }
+
     /// Cast a ray against every collider; the first surface hit within `max_dist`, else
     /// None. See [`raycast_colliders`].
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {

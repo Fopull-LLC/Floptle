@@ -65,9 +65,13 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build editor + hub
+      # Three binaries, because a bundle serves three jobs: the editor is what
+      # the Hub runs, the PLAYER is what File ⏵ Export Game… ships (it has no
+      # authoring half compiled into it), and the Hub updates itself.
+      - name: Build editor + player + hub
         run: |
           cargo build --release -p floptle-editor --target ${{ matrix.rust }}
+          cargo build --release -p floptle-player --target ${{ matrix.rust }}
           cargo build --release -p floptle-hub --target ${{ matrix.rust }}
 
       # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
@@ -82,6 +86,8 @@ jobs:
           B="floptle-$VER-$T"
           mkdir -p "$B"
           cp "target/${{ matrix.rust }}/release/floptle" "$B/floptle"
+          # An export for this platform copies THIS binary out of the bundle.
+          cp "target/${{ matrix.rust }}/release/floptle-player" "$B/floptle-player"
           printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
           tar -C "$B" -czf "$B.tar.gz" .
           if command -v sha256sum >/dev/null 2>&1; then SHA=$(sha256sum "$B.tar.gz" | cut -d' ' -f1)
@@ -108,6 +114,7 @@ jobs:
           $b = "floptle-$ver-$t"
           New-Item -ItemType Directory -Force -Path $b | Out-Null
           Copy-Item "target/${{ matrix.rust }}/release/floptle.exe" "$b/floptle.exe"
+          Copy-Item "target/${{ matrix.rust }}/release/floptle-player.exe" "$b/floptle-player.exe"
           $commit = $env:GITHUB_SHA.Substring(0,7)
           "{ ""version"": ""$ver"", ""target"": ""$t"", ""commit"": ""$commit"" }" | Set-Content -NoNewline "$b/version.json"
           Compress-Archive -Path "$b/*" -DestinationPath "$b.zip" -Force
@@ -135,9 +142,65 @@ jobs:
             hub-fragment-*.json
           if-no-files-found: error
 
+  # The browser template: the wasm module, its JS glue and the player page —
+  # what File ⏵ Export Game… → Web (browser) downloads for this version, under
+  # the `web` artifact key beside the platform bundles. Built the way
+  # tools/web/build.sh builds it locally (the WASI SDK compiles Luau's C++;
+  # wasm-bindgen at the version Cargo.lock pins writes the glue).
+  web:
+    needs: gate
+    name: bundle web
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - name: Version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: wasm-bindgen-cli at the lockfile's version
+        shell: bash
+        run: |
+          set -euo pipefail
+          WANT=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          cargo install wasm-bindgen-cli --version "$WANT" --locked
+      - name: Build the web template
+        shell: bash
+        run: |
+          set -euo pipefail
+          . tools/web/env.sh
+          tools/web/build.sh
+      - name: Package + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"; T=web
+          OUT=$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/web
+          B="floptle-$VER-$T"; rm -rf "$B"; mkdir -p "$B"
+          cp "$OUT/index.html" "$OUT/probe.html" "$B/"
+          cp -r "$OUT/pkg" "$B/pkg"
+          printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
+          tar -C "$B" -czf "$B.tar.gz" .
+          SHA=$(sha256sum "$B.tar.gz" | cut -d' ' -f1)
+          SIZE=$(wc -c < "$B.tar.gz" | tr -d ' ')
+          printf '{"target":"%s","file":"%s.tar.gz","sha256":"%s","size":%s}\n' "$T" "$B" "$SHA" "$SIZE" > "fragment-$T.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-web
+          path: |
+            floptle-*.tar.gz
+            fragment-*.json
+          if-no-files-found: error
+
   release:
     name: publish
-    needs: build
+    needs: [build, web]
     runs-on: ubuntu-latest
     # Distribution is PUBLIC (Fopull-LLC/Floptle-releases): the Hub's default
     # manifest URL points there and anyone can download — the engine source

@@ -92,7 +92,7 @@ impl std::error::Error for LoadError {}
 /// look to the developer like a hardware fault.
 pub fn load_map(project_root: &Path) -> Result<Option<InputMap>, LoadError> {
     let path = project_root.join(MAP_FILE);
-    match std::fs::read_to_string(&path) {
+    match floptle_vfs::read_to_string(&path) {
         Ok(text) => InputMap::parse(&text).map(Some).map_err(LoadError::Parse),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(LoadError::Io(e)),
@@ -101,7 +101,7 @@ pub fn load_map(project_root: &Path) -> Result<Option<InputMap>, LoadError> {
 
 /// Write `<project_root>/input.ron`.
 pub fn save_map(map: &InputMap, project_root: &Path) -> Result<(), std::io::Error> {
-    std::fs::write(project_root.join(MAP_FILE), map.to_ron())
+    floptle_vfs::write(project_root.join(MAP_FILE), map.to_ron())
 }
 
 #[cfg(test)]
@@ -111,7 +111,7 @@ mod tests {
     fn tmp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("floptle_input_test_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        floptle_vfs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -134,7 +134,7 @@ mod tests {
         // Substituting a default here would unbind every control in the game
         // and read to the developer as broken hardware.
         let dir = tmp("corrupt");
-        std::fs::write(dir.join(MAP_FILE), "InputMap( actions: [ this isn't RON").unwrap();
+        floptle_vfs::write(dir.join(MAP_FILE), "InputMap( actions: [ this isn't RON").unwrap();
         assert!(load_map(&dir).is_err());
     }
 

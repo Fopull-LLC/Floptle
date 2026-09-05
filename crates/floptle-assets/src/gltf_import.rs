@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+
+use floptle_core::time::SystemTime;
 
 use floptle_core::math::{Mat3, Mat4, Vec3};
 use floptle_render::{MeshData, TextureData, Vertex};
@@ -98,7 +99,7 @@ type GeometryCache = HashMap<(PathBuf, Option<SystemTime>), Arc<ImportedModel>>;
 /// having to know a cache exists.
 pub fn geometry(path: &Path) -> Result<Arc<ImportedModel>, ImportError> {
     static CACHE: OnceLock<Mutex<GeometryCache>> = OnceLock::new();
-    let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let stamp = floptle_vfs::modified(path);
     let key = (path.to_path_buf(), stamp);
     let cache = CACHE.get_or_init(Default::default);
     if let Ok(map) = cache.lock()
@@ -116,19 +117,88 @@ pub fn geometry(path: &Path) -> Result<Arc<ImportedModel>, ImportError> {
     Ok(model)
 }
 
+/// Read a glTF file and everything it references — the document, its
+/// buffers, and (when asked) its images decoded to pixels — through the
+/// engine's filesystem.
+///
+/// This is `gltf::import` re-done over `floptle_vfs`, because `gltf::import`
+/// opens files itself: fine on a desktop, and a browser build has no disk to
+/// open. The three sources a glTF buffer or image can name are all here — the
+/// `.glb` binary chunk, a sibling file by relative URI, and a base64 data URI.
+/// `want_images: false` skips the images entirely: nothing that asks for a
+/// model's *shape* should pay to decode its textures.
+pub(crate) fn read_gltf(
+    path: &Path,
+    want_images: bool,
+) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), ImportError> {
+    let bytes = floptle_vfs::read(path).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
+    let gltf::Gltf { document, mut blob } = gltf::Gltf::from_slice(&bytes).map_err(ImportError::Gltf)?;
+    let base = path.parent();
+    let mut buffers = Vec::with_capacity(document.buffers().len());
+    for buffer in document.buffers() {
+        let mut data = match buffer.source() {
+            gltf::buffer::Source::Bin => blob.take().ok_or(ImportError::Gltf(gltf::Error::MissingBlob))?,
+            gltf::buffer::Source::Uri(uri) => read_uri(base, uri)?,
+        };
+        if data.len() < buffer.length() {
+            return Err(ImportError::Gltf(gltf::Error::BufferLength {
+                buffer: buffer.index(),
+                expected: buffer.length(),
+                actual: data.len(),
+            }));
+        }
+        // glTF wants every buffer 4-byte aligned; `gltf::import` pads the same way.
+        while data.len() % 4 != 0 {
+            data.push(0);
+        }
+        buffers.push(gltf::buffer::Data(data));
+    }
+    let mut images = Vec::new();
+    if want_images {
+        for image in document.images() {
+            let encoded: std::borrow::Cow<[u8]> = match image.source() {
+                gltf::image::Source::View { view, .. } => {
+                    let parent = &buffers[view.buffer().index()].0;
+                    let (start, end) = (view.offset(), view.offset() + view.length());
+                    std::borrow::Cow::Borrowed(parent.get(start..end).ok_or(ImportError::NoGeometry)?)
+                }
+                gltf::image::Source::Uri { uri, .. } => std::borrow::Cow::Owned(read_uri(base, uri)?),
+            };
+            let decoded = image::load_from_memory(&encoded)
+                .map_err(|e| ImportError::Gltf(gltf::Error::Io(std::io::Error::other(e.to_string()))))?
+                .to_rgba8();
+            let (width, height) = decoded.dimensions();
+            images.push(gltf::image::Data {
+                pixels: decoded.into_raw(),
+                format: gltf::image::Format::R8G8B8A8,
+                width,
+                height,
+            });
+        }
+    }
+    Ok((document, buffers, images))
+}
+
+/// The bytes a glTF URI names: a base64 data URI decoded, or a file beside
+/// the model read through the engine's filesystem.
+fn read_uri(base: Option<&Path>, uri: &str) -> Result<Vec<u8>, ImportError> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        let payload = rest.split_once(";base64,").map(|(_, b)| b).unwrap_or(rest);
+        use base64::Engine as _;
+        return base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|e| ImportError::Gltf(gltf::Error::Io(std::io::Error::other(format!("data URI: {e}")))));
+    }
+    // A relative URI is percent-encoded; the common case is a plain name.
+    let name = uri.replace("%20", " ");
+    let file = base.map(|b| b.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+    floptle_vfs::read(&file).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))
+}
+
 fn import_inner(path: &Path, want_textures: bool) -> Result<ImportedModel, ImportError> {
-    let (doc, buffers, textures) = if want_textures {
-        let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
-        // Decode every image to RGBA8 once; parts reference them by index.
-        (doc, buffers, images.iter().map(to_rgba8).collect())
-    } else {
-        // `Gltf::open` parses the document and keeps the binary blob; it does
-        // not touch the images at all.
-        let gltf = gltf::Gltf::open(path).map_err(ImportError::Gltf)?;
-        let buffers = gltf::import_buffers(&gltf.document, path.parent(), gltf.blob.clone())
-            .map_err(ImportError::Gltf)?;
-        (gltf.document, buffers, Vec::new())
-    };
+    let (doc, buffers, images) = read_gltf(path, want_textures)?;
+    // Decode every image to RGBA8 once; parts reference them by index.
+    let textures: Vec<TextureData> = images.iter().map(to_rgba8).collect();
 
     let mut parts = Parts::default();
     if let Some(scene) = doc.default_scene().or_else(|| doc.scenes().next()) {

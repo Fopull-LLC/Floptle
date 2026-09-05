@@ -917,8 +917,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 if let Some(mut run) = lua.app_data_mut::<RunSeed>() {
                     return run.0.next_u32();
                 }
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                floptle_core::time::SystemTime::now()
+                    .duration_since(floptle_core::time::UNIX_EPOCH)
                     .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
                     .unwrap_or(1)
             });

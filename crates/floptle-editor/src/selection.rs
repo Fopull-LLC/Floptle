@@ -13,7 +13,9 @@ use floptle_core::math::Vec4;
 use floptle_core::transform::Transform;
 use crate::gizmo::{SCALE_SENS, TRACKBALL_SENS, Tool, local_axis, ray_aabb, ray_box, ray_sphere};
 use crate::viz::{cursor_ground, project};
-use crate::{Editor, FocusAnim, scene_hit, snap_dvec3};
+use crate::{Editor, FocusAnim, snap_dvec3};
+#[cfg(feature = "editor-ui")]
+use crate::scene_hit;
 
 impl Editor {
     /// Switch the active tool and cancel any in-progress gizmo drag.
@@ -22,15 +24,20 @@ impl Editor {
         self.grabbed = None;
         self.drag = None;
         // Selecting a brush tool focuses its settings so the controls are at hand.
-        if tool == Tool::Sculpt {
-            self.focus_terrain();
+        #[cfg(feature = "editor-ui")]
+        {
+            if tool == Tool::Sculpt {
+                self.focus_terrain();
+            }
+            if tool == Tool::Tiles {
+                self.focus_tiles();
+            }
         }
-        if tool == Tool::Tiles {
-            self.focus_tiles();
-        }
+        #[cfg(feature = "editor-ui")]
         if tool == Tool::Paint {
             self.focus_paint();
         }
+        #[cfg(feature = "editor-ui")]
         if tool == Tool::MapEdit {
             self.focus_map();
         }
@@ -52,25 +59,86 @@ impl Editor {
         self.selection.last().copied()
     }
 
+    /// **The one gate every selection GESTURE passes through.**
+    ///
+    /// A locked selection ignores viewport picks, Hierarchy clicks, select-all
+    /// and the arrow-key step — see [`Editor::selection_locked`]. It
+    /// deliberately does NOT gate the world changing underneath: undo/redo
+    /// restoring what was selected at the time, a scene switch dropping a dead
+    /// entity, an extension setting the selection through its own API. Those
+    /// are not somebody clicking, and a lock that swallowed them would leave
+    /// the Inspector pointing at a node that no longer exists.
+    fn selection_gesture_blocked(&self) -> bool {
+        self.selection_locked
+    }
+
+    /// Toggle the selection lock. Refuses to lock an EMPTY selection: the only
+    /// switch is on the Inspector's name row, which is drawn for the selected
+    /// node, so a lock held over nothing would hide its own release.
+    pub(crate) fn toggle_selection_lock(&mut self) {
+        if self.selection_locked {
+            self.selection_locked = false;
+        } else if !self.selection.is_empty() {
+            self.selection_locked = true;
+        }
+    }
+
+    /// Release a lock the world has emptied — the locked node deleted, or the
+    /// scene switched out from under it. Called once a frame.
+    ///
+    /// Without this the editor can reach a state with no way out: locked, with
+    /// nothing selected, so the Inspector draws no name row and the lock's own
+    /// switch is not on screen.
+    pub(crate) fn enforce_selection_lock(&mut self) {
+        if self.selection_locked && self.selection.is_empty() {
+            self.selection_locked = false;
+        }
+    }
+
+    /// Clear the selection as a GESTURE — clicking empty space in a viewport.
+    /// Held by the lock, unlike a bare `selection.clear()`, which is what the
+    /// paths that answer to the world (scene switch, delete) still use.
+    pub(crate) fn clear_selection(&mut self) {
+        if self.selection_gesture_blocked() {
+            return;
+        }
+        self.selection.clear();
+    }
+
     pub(crate) fn select_single(&mut self, e: Entity) {
+        if self.selection_gesture_blocked() {
+            return;
+        }
         self.selection.clear();
         self.selection.push(e);
         // Picking a scene node drops any particle-track and bone selection, so the
         // Inspector reverts from the track/bone editor to this node.
-        self.vfx_ui.sel_track = None;
+        #[cfg(feature = "editor-ui")]
+        {
+            self.vfx_ui.sel_track = None;
+        }
         self.bone_selection = None;
     }
 
     pub(crate) fn select_toggle(&mut self, e: Entity) {
+        if self.selection_gesture_blocked() {
+            return;
+        }
         if let Some(i) = self.selection.iter().position(|&x| x == e) {
             self.selection.remove(i);
         } else {
             self.selection.push(e);
         }
-        self.vfx_ui.sel_track = None;
+        #[cfg(feature = "editor-ui")]
+        {
+            self.vfx_ui.sel_track = None;
+        }
     }
 
     pub(crate) fn select_all(&mut self) {
+        if self.selection_gesture_blocked() {
+            return;
+        }
         self.selection = self.world.query::<Matter>().map(|(e, _)| e).collect();
     }
 
@@ -99,15 +167,29 @@ impl Editor {
     /// the side panels in the background layer, so `is_pointer_over_egui` alone
     /// can't separate them from the viewport; the Scene-tab rect is what does.
     pub(crate) fn cursor_over_scene(&self) -> bool {
-        let Some(eg) = self.egui.as_ref() else { return false };
-        scene_hit(&eg.ctx, self.cursor, self.scene_rect)
+        #[cfg(feature = "editor-ui")]
+        {
+            self.egui
+                .as_ref()
+                .is_some_and(|eg| scene_hit(&eg.ctx, self.cursor, self.scene_rect))
+        }
+        // A build has no Scene viewport for the cursor to be over.
+        #[cfg(not(feature = "editor-ui"))]
+        false
     }
 
     /// True when the cursor is over the Game viewport rect (and not under a popup) —
     /// the gate for trapping the cursor into the Game view on click.
     pub(crate) fn cursor_over_game(&self) -> bool {
-        let Some(eg) = self.egui.as_ref() else { return false };
-        scene_hit(&eg.ctx, self.cursor, self.game_rect)
+        #[cfg(feature = "editor-ui")]
+        {
+            self.egui
+                .as_ref()
+                .is_some_and(|eg| scene_hit(&eg.ctx, self.cursor, self.game_rect))
+        }
+        // The whole window is the game; "over it" is not a question here.
+        #[cfg(not(feature = "editor-ui"))]
+        false
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
@@ -125,6 +207,9 @@ impl Editor {
 
     /// Move the selection up (-1) / down (+1) through the hierarchy (arrow keys).
     pub(crate) fn step_selection(&mut self, delta: i32) {
+        if self.selection_gesture_blocked() {
+            return;
+        }
         let order: Vec<Entity> = self.world.query::<Matter>().map(|(e, _)| e).collect();
         if order.is_empty() {
             return;
@@ -617,6 +702,7 @@ impl Editor {
         // A gizmo drag on an armature BONE / model object (not an ECS entity):
         // in pivot-edit mode it moves the object's rotation pivot; otherwise it poses
         // the bone into the open clip. Route it before any Transform write.
+        #[cfg(feature = "editor-ui")]
         if let Some(idx) = self.drag.and_then(|d| (d.entity == e).then_some(d.bone).flatten()) {
             if self.pivot_edit {
                 self.set_bone_pivot(e, idx, world_xf);
@@ -698,6 +784,7 @@ impl Editor {
     /// back to the bone's LOCAL pose (relative to its parent bone) and auto-key it
     /// into the open clip at the playhead — exactly what the bone Inspector's numeric
     /// editor writes, so posing a bone with the gizmo == keying it.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn set_bone_world(&mut self, mesh: Entity, idx: usize, world_xf: Transform) {
         let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() else {
             return;
@@ -755,6 +842,7 @@ impl Editor {
         };
         // Auto-key at the playhead — same gate as bone_inspector_ui (this mesh must be
         // the Animating tab's target with a clip open, since channels bind by name).
+        #[cfg(feature = "editor-ui")]
         if self.anim_ui.target == Some(mesh) && self.anim_ui.clip_doc.is_some() {
             // One undo step per drag gesture (snapshot_clip is a no-op once dirty).
             crate::anim_ui::snapshot_clip(&mut self.anim_ui);
@@ -770,6 +858,7 @@ impl Editor {
     /// mode). The gizmo sits at the pivot in the node's REST frame, so the node-local
     /// pivot point is `(mesh_world · rest_world[idx])⁻¹ · gizmo_world`. Applied live +
     /// persisted to the `.rig.ron` sidecar.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn set_bone_pivot(&mut self, mesh: Entity, idx: usize, world_xf: Transform) {
         let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() else {
             return;
@@ -905,5 +994,90 @@ mod focus_tests {
         let forward = (ed.camera.rotation() * Vec3::NEG_Z).as_dvec3();
         let to_crate = DVec3::new(3.0, 1.0, -2.0) - anim.to;
         assert!(to_crate.normalize().dot(forward) > 0.999, "{to_crate:?}");
+    }
+
+    // ---- the selection lock -------------------------------------------------
+    //
+    // The lock exists so you can edit one node's fields while clicking around
+    // the rest of the scene. Every test here is about one of the two ways that
+    // can go wrong: a gesture getting through, or the lock stranding the editor
+    // with no way to release it.
+
+    /// A node with a name and a transform — the shape the Inspector draws for.
+    fn locked_node(ed: &mut Editor, name: &str) -> Entity {
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Name(name.into()));
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(e, Matter::Empty);
+        e
+    }
+
+    #[test]
+    fn a_held_selection_ignores_every_gesture() {
+        let mut ed = Editor::default();
+        let a = locked_node(&mut ed, "A");
+        let b = locked_node(&mut ed, "B");
+        ed.select_single(a);
+        ed.toggle_selection_lock();
+        assert!(ed.selection_locked, "a non-empty selection locks");
+
+        ed.select_single(b);
+        assert_eq!(ed.selection, vec![a], "a viewport pick must not move the selection");
+        ed.select_toggle(b);
+        assert_eq!(ed.selection, vec![a], "ctrl-click must not add to it");
+        ed.select_all();
+        assert_eq!(ed.selection, vec![a], "select-all must not replace it");
+        ed.clear_selection();
+        assert_eq!(ed.selection, vec![a], "clicking empty space must not clear it");
+        ed.step_selection(1);
+        assert_eq!(ed.selection, vec![a], "the arrow keys must not step off it");
+
+        ed.toggle_selection_lock();
+        assert!(!ed.selection_locked);
+        ed.select_single(b);
+        assert_eq!(ed.selection, vec![b], "released, the same gesture works again");
+    }
+
+    /// The trap this guards: the lock's only switch is the Inspector's name
+    /// row, which is drawn for the SELECTED node. Locked with nothing selected,
+    /// there is no row, so there is no way back.
+    #[test]
+    fn an_empty_selection_cannot_be_locked() {
+        let mut ed = Editor::default();
+        ed.toggle_selection_lock();
+        assert!(!ed.selection_locked, "there would be no name row to unlock from");
+    }
+
+    /// …and the same trap from the other side: locked, then the world takes the
+    /// node away (deleted, or the scene switched).
+    #[test]
+    fn a_lock_the_world_empties_releases_itself() {
+        let mut ed = Editor::default();
+        let a = locked_node(&mut ed, "A");
+        ed.select_single(a);
+        ed.toggle_selection_lock();
+
+        // Not a gesture — this is the scene changing underneath, which is the
+        // one thing the lock deliberately does not hold back.
+        ed.selection.clear();
+        ed.enforce_selection_lock();
+        assert!(!ed.selection_locked, "a lock over nothing must release itself");
+    }
+
+    /// The lock holds back CLICKS, not the world. Undo restoring what was
+    /// selected at the time is not somebody clicking, and a lock that swallowed
+    /// it would leave the Inspector pointing at a node that is not there.
+    #[test]
+    fn the_lock_does_not_hold_back_the_world_itself() {
+        let mut ed = Editor::default();
+        let a = locked_node(&mut ed, "A");
+        let b = locked_node(&mut ed, "B");
+        ed.select_single(a);
+        ed.toggle_selection_lock();
+
+        ed.selection = vec![b];
+        assert_eq!(ed.selection, vec![b], "history and scene paths still write directly");
+        ed.enforce_selection_lock();
+        assert!(ed.selection_locked, "and a non-empty result keeps the lock");
     }
 }

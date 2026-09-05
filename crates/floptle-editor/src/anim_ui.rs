@@ -16,7 +16,7 @@ use floptle_anim::TransformTRS;
 use floptle_core::{AnimController, Entity, Matter, Name};
 use floptle_scene::{
     AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc, AnimStateDoc,
-    AnimTrackDoc3, AnimTrackDoc4, AnimTransitionDoc, ANIM_CLIP_EXT,
+    AnimTrackDoc3, AnimTrackDoc4, AnimTransitionDoc,
 };
 
 use crate::anim;
@@ -279,23 +279,11 @@ pub(crate) fn clip_undo_redo(st: &mut AnimUiState, redo: bool) -> bool {
     true
 }
 
-/// `path` is an animation clip asset — a baked `.anim.ron`, or a frame-listed
-/// `.spriteanim.ron`, which plays as one and so drags as one.
-pub fn is_anim_clip(path: &str) -> bool {
-    crate::anim::has_ext(path, ANIM_CLIP_EXT)
-        || crate::anim::has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
-}
-
-/// `path` is specifically a **sprite** clip — a list of frames rather than a
-/// baked set of lanes. The Animating tab edits the two differently.
-pub fn is_sprite_anim(path: &str) -> bool {
-    crate::anim::has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
-}
-
-/// `path` is an animation controller asset.
-pub fn is_anim_ctl(path: &str) -> bool {
-    crate::anim::has_ext(path, floptle_scene::ANIM_CTL_EXT)
-}
+// The three "is this an animation asset" predicates moved to `anim` — they are
+// file-extension tests, not UI, and the asset browser's classifier needs them
+// in a build where this module is not compiled. Re-exported so every existing
+// `anim_ui::is_*` call site still reads the same.
+pub(crate) use crate::anim::{is_anim_clip, is_anim_ctl, is_sprite_anim};
 
 use crate::timeline::{draw_ruler, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
 

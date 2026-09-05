@@ -463,6 +463,7 @@ pub(crate) fn hit_test(
 }
 
 /// Brighten a handle color toward white when it is hovered or grabbed.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn brighten(c: egui::Color32, on: bool) -> egui::Color32 {
     if !on {
         return c;
@@ -472,6 +473,7 @@ pub(crate) fn brighten(c: egui::Color32, on: bool) -> egui::Color32 {
 }
 
 /// A small filled arrowhead at `to`, pointing away from `from`.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, col: egui::Color32) {
     let dir = to - from;
     let len = dir.length();
@@ -488,6 +490,7 @@ pub(crate) fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Po
 
 /// Paint the cached gizmo with the egui painter. Geometry is physical pixels; the
 /// painter works in logical points, so divide by `ppp`.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Option<Handle>, ppp: f32) {
     use egui::{Color32, Pos2, Stroke};
     let pt = |v: Vec2| Pos2::new(v.x / ppp, v.y / ppp);

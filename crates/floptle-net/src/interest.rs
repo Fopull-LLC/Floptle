@@ -42,6 +42,24 @@ use crate::transport::PeerId;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InterestConfig {
     pub enabled: bool,
+    /// Test line of sight as well as distance: a node the client's avatar
+    /// cannot see is not relevant to it (`net.host{ interestOcclusion = "Level" }`).
+    ///
+    /// **This is a security setting wearing a bandwidth setting's clothes.** A
+    /// radius bounds a leak; it does not remove one — a client that is TOLD
+    /// where everyone within 25 m is standing knows where everyone within 25 m
+    /// is standing, whatever it chooses to draw. For an open-world game that is
+    /// fine and the radius is the whole feature. For a hidden-role or
+    /// competitive game, seeing another player through a wall is the game, and
+    /// this is the only part of it a project cannot write for itself. Off by
+    /// default: it costs a ray per candidate per client, and most games do not
+    /// need it. floptle/0182.
+    pub occlusion: bool,
+    /// Consecutive snapshots a node the client already holds must test BLOCKED
+    /// before it goes quiet. Coming back is immediate — a player stepping out
+    /// from behind a wall has to appear on the frame they step out, while a
+    /// body strobing behind a door frame must not flicker.
+    pub occlusion_grace: u8,
     /// Metres around a client's own avatar.
     pub radius: f64,
     /// Extra metres a node may drift beyond `radius` before it stops being
@@ -57,6 +75,8 @@ impl Default for InterestConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            occlusion: false,
+            occlusion_grace: 3,
             radius: 150.0,
             hysteresis: 25.0,
             budget_bytes_per_sec: 16 * 1024,
@@ -95,6 +115,45 @@ pub struct InterestStat {
     pub deferred: usize,
     /// Bytes of entity entries in the last snapshot.
     pub bytes: usize,
+    /// Replicable nodes this client was NOT told about, and why. "Is my filter
+    /// working" has to be a number, or a project turns one on and has no way to
+    /// tell it from a typo. floptle/0182.
+    pub withheld_radius: usize,
+    pub withheld_occluded: usize,
+    pub withheld_filter: usize,
+}
+
+impl InterestStat {
+    /// Everything withheld from this client, however it was decided.
+    pub fn withheld(&self) -> usize {
+        self.withheld_radius + self.withheld_occluded + self.withheld_filter
+    }
+}
+
+/// A line-of-sight test, supplied by whatever is driving the session.
+///
+/// `floptle-net` cannot cast a ray — it has no physics, and giving it one would
+/// make every consumer of the netcode carry the solver. So the driver (the
+/// editor's host, the dedicated server) hands one in for the snapshot it is
+/// building, backed by the same scene the game is standing in.
+pub trait Occluder {
+    /// Is the straight line between these two world points blocked?
+    ///
+    /// Called once per candidate per client per snapshot, so it is on the
+    /// session's hot path — the implementation is expected to be a broadphase
+    /// query, not a mesh sweep.
+    fn blocked(&self, from: [f64; 3], to: [f64; 3]) -> bool;
+}
+
+/// The default: nothing is ever blocked. What a session runs with when the
+/// driver supplies no test, so turning occlusion on without one degrades to
+/// plain radius interest rather than to a world nobody can see.
+pub struct NoOcclusion;
+
+impl Occluder for NoOcclusion {
+    fn blocked(&self, _from: [f64; 3], _to: [f64; 3]) -> bool {
+        false
+    }
 }
 
 /// One candidate entity, as the accumulator sees it.
@@ -126,6 +185,9 @@ pub struct PeerInterest {
     /// Ids this client is considered to hold current state for. A node
     /// entering this set is sent in FULL, whatever the delta says.
     live: HashSet<u64>,
+    /// Consecutive snapshots each held id has tested out of sight — the
+    /// occlusion hysteresis. Cleared the moment it is visible again.
+    blocked_for: HashMap<u64, u8>,
 }
 
 impl PeerInterest {
@@ -136,6 +198,30 @@ impl PeerInterest {
     pub fn forget(&mut self, id: u64) {
         self.priority.remove(&id);
         self.live.remove(&id);
+        self.blocked_for.remove(&id);
+    }
+
+    /// Feed one line-of-sight result for a node this client already holds, and
+    /// get back whether it should go quiet now.
+    ///
+    /// Asymmetric on purpose. Losing sight is damped by `grace`, so a body
+    /// strobing behind a door frame or a lamp post keeps streaming; REGAINING
+    /// sight is instant, because a player stepping out from cover has to be
+    /// there on the frame they step out. Damping that direction too would trade
+    /// the flicker for a player who appears three snapshots after they shot you.
+    pub fn occluded(&mut self, id: u64, blocked: bool, grace: u8) -> bool {
+        if !blocked {
+            self.blocked_for.remove(&id);
+            return false;
+        }
+        // Something the client does not hold yet has nothing to flicker: it
+        // stays hidden until it is actually visible.
+        if !self.live.contains(&id) {
+            return true;
+        }
+        let n = self.blocked_for.entry(id).or_insert(0);
+        *n = n.saturating_add(1);
+        *n > grace
     }
 
     /// Everything this client holds that is no longer relevant.

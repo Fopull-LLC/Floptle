@@ -24,6 +24,12 @@ const BLOCK: usize = 128;
 
 enum Cmd {
     Play { id: VoiceId, clip: ClipRef, emitter: Option<DVec3>, params: Box<PlayParams> },
+    PlayStream {
+        id: VoiceId,
+        ring: crate::stream::StreamRef,
+        emitter: Option<DVec3>,
+        params: Box<PlayParams>,
+    },
     Stop(VoiceId),
     StopAll,
     Pause(VoiceId, bool),
@@ -167,6 +173,33 @@ impl AudioEngine {
         id
     }
 
+    /// Start a voice fed by a LIVE stream — a remote player's microphone
+    /// (`floptle/0180`). Identical to [`Self::play`] in every other way: it is
+    /// spatialised, routed through a mixer track, and retuned with
+    /// [`Self::update_params`], because it really is an ordinary voice.
+    ///
+    /// It never ends on its own; stop it when the speaker leaves.
+    pub fn play_stream(
+        &mut self,
+        ring: crate::stream::StreamRef,
+        emitter: Option<DVec3>,
+        params: PlayParams,
+    ) -> VoiceId {
+        let id = self.next_id;
+        self.next_id += 1;
+        if let Ok(mut v) = self.status.voices.lock() {
+            v.insert(
+                id,
+                VoiceEntry {
+                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0 },
+                    seen: false,
+                },
+            );
+        }
+        self.send(Cmd::PlayStream { id, ring, emitter, params: Box::new(params) });
+        id
+    }
+
     pub fn stop(&self, id: VoiceId) {
         self.send(Cmd::Stop(id));
     }
@@ -244,6 +277,9 @@ fn drain_commands(rx: &Receiver<Cmd>, core: &mut AudioCore) {
     for cmd in rx.try_iter() {
         match cmd {
             Cmd::Play { id, clip, emitter, params } => core.play(id, clip, emitter, *params),
+            Cmd::PlayStream { id, ring, emitter, params } => {
+                core.play_stream(id, ring, emitter, *params)
+            }
             Cmd::Stop(id) => core.stop(id),
             Cmd::StopAll => core.stop_all(),
             Cmd::Pause(id, p) => core.set_paused(id, p),

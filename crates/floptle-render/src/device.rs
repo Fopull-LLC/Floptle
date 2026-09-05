@@ -107,6 +107,15 @@ pub struct Gpu {
     /// fall back rather than fail.
     present_modes: Vec<wgpu::PresentMode>,
     vsync: Vsync,
+    /// The format the frame's VIEW has — what every pass that targets the
+    /// screen renders into. Equal to `config.format` everywhere a surface
+    /// offers an sRGB format directly. A browser's canvas does not: WebGPU
+    /// exposes only `Rgba8Unorm`/`Bgra8Unorm` and expects an sRGB *view*
+    /// (`view_formats`), so there this is the sRGB sibling of `config.format`
+    /// and the swapchain texture is viewed through it. Without that, the
+    /// engine's linear output reaches the glass unencoded and every colour
+    /// reads dark.
+    frame_format: wgpu::TextureFormat,
 }
 
 /// How finished frames are handed to the display.
@@ -182,7 +191,20 @@ impl Gpu {
     /// high-performance adapter, an sRGB surface format when available, and Mailbox
     /// present mode (low-latency) falling back to Fifo (vsync). Lifted from the
     /// proof's proven wgpu-29 bootstrap.
+    ///
+    /// Blocks on the adapter and device requests. That is fine on every desktop
+    /// target and impossible in a browser, where the same requests are real
+    /// promises and blocking the only thread deadlocks the tab — a web build
+    /// awaits [`Gpu::new_async`] instead. One body, two ways to wait for it.
     pub fn new(window: Arc<Window>) -> Self {
+        pollster::block_on(Self::new_async(window))
+    }
+
+    /// [`Gpu::new`] as a future: the same adapter, device, surface and depth
+    /// setup, awaited rather than blocked on. The browser's device path — the
+    /// canvas is the window, `request_adapter` is a JS promise — and the only
+    /// difference from the desktop is who waits.
+    pub async fn new_async(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -194,22 +216,26 @@ impl Gpu {
         });
         let surface = instance.create_surface(window).expect("create surface");
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-        }))
-        .expect("no compatible GPU adapter");
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .expect("no compatible GPU adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("floptle-device"),
-            required_features: timing_features(&adapter),
-            required_limits: wgpu::Limits::default(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .expect("no GPU device");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("floptle-device"),
+                required_features: timing_features(&adapter),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("no GPU device");
         // A GPU validation error must not end the session.
         //
         // wgpu's default handler panics, and a panic here is worse than it
@@ -228,20 +254,39 @@ impl Gpu {
         let caps = surface.get_capabilities(&adapter);
         let format =
             caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        // No sRGB surface format at all (a browser canvas): render through an
+        // sRGB view of the non-sRGB swapchain instead. See `frame_format`.
+        let frame_format = if format.is_srgb() { format } else { format.add_srgb_suffix() };
+        let view_formats = if frame_format == format { vec![] } else { vec![frame_format] };
         // Fifo (classic vsync) is the DEFAULT, deliberately — see [`Vsync`] for
         // why, and for why it is no longer the only choice.
         let present_modes = caps.present_modes.clone();
         let vsync = Vsync::default();
         let present_mode = pick_present_mode(vsync, &present_modes);
+        // **The swapchain image is SAMPLED, not only drawn into.** The standalone
+        // player renders the game straight to the surface, and the game-UI pass
+        // captures whatever is already there as its backdrop (what a `backdrop()`
+        // UI shader frosts). Without `TEXTURE_BINDING` that capture is a
+        // validation error every frame and the UI never composites — which is
+        // exactly how it failed the first time a player drew into a real
+        // swapchain, where the editor's offscreen target had always had the flag.
+        // Asked for only where the surface offers it, so a device that cannot
+        // sample its own swapchain still starts.
+        // `COPY_SRC` for the same reason, one step further on: it is what lets a
+        // build photograph the frame it actually presented (`floptle-player
+        // --shot`), rather than a second render that only resembles it.
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (caps.usages
+                & (wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC));
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats,
         };
         surface.configure(&device, &config);
 
@@ -257,6 +302,7 @@ impl Gpu {
             depth_tex,
             depth_view,
             scene_format: Self::HDR_FORMAT,
+            frame_format,
             present_modes,
             vsync,
         }
@@ -359,10 +405,11 @@ impl Gpu {
             device,
             queue,
             surface: None,
-            config,
             depth_tex,
             depth_view,
             scene_format,
+            frame_format: config.format,
+            config,
             // Headless has no surface, so no presentation to configure.
             present_modes: Vec::new(),
             vsync: Vsync::On,
@@ -405,9 +452,12 @@ impl Gpu {
         &self.depth_tex
     }
 
-    /// The surface's swapchain format — every pass that targets the screen needs it.
+    /// The format every pass that targets the screen renders into: the
+    /// swapchain's own format, or — where the surface offers no sRGB format,
+    /// as a browser canvas does not — the sRGB view the frame is seen through.
+    /// See `frame_format`.
     pub fn surface_format(&self) -> wgpu::TextureFormat {
-        self.config.format
+        self.frame_format
     }
 
     /// The format every SCENE-space pass renders into, which is **not** the
@@ -468,7 +518,10 @@ impl Gpu {
             }
             _ => return None,
         };
-        let view = surface.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = surface.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.frame_format),
+            ..Default::default()
+        });
         Some(Frame { surface, view })
     }
 

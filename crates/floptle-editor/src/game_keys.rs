@@ -67,6 +67,7 @@ pub(crate) fn reserved_reason(name: &str) -> Option<&'static str> {
 /// Modifiers are not consulted: Ctrl+Tab is not an editor binding, and a game
 /// that reads `input.key("tab")` while the player happens to hold Shift should
 /// still see it.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn claim_keys_for_game(raw: &mut egui::RawInput, ctx: &egui::Context) {
     raw.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Tab, .. }));
     if let Some(id) = ctx.memory(|m| m.focused()) {
@@ -74,6 +75,11 @@ pub(crate) fn claim_keys_for_game(raw: &mut egui::RawInput, ctx: &egui::Context)
     }
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod tests {
     use super::*;

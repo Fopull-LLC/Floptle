@@ -242,10 +242,7 @@ impl Editor {
                     // clipboard is a bug, not a convenience.
                     if a != b && !spec.mask {
                         let text: String = value.chars().skip(a).take(b - a).collect();
-                        self.ensure_os_clipboard();
-                        if let Some(c) = self.os_clipboard.as_mut() {
-                            c.set_text(text);
-                        }
+                        self.os_clipboard_set(text);
                         if op == TextOp::Cut {
                             field::apply(&mut value, &mut cur, &Edit::Delete, false, &spec);
                         }

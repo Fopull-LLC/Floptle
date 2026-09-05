@@ -165,10 +165,13 @@ pub(crate) fn read_node(
              viewed at. Sample it with scene.raycast instead"
                 .into(),
         ),
+        #[cfg(feature = "editor-ui")]
         Some(other) => Err(format!(
             "a {} node has no geometry to read",
             crate::ext::scene_mirror::kind_name(other)
         )),
+        #[cfg(not(feature = "editor-ui"))]
+        Some(_) => Err("that node has no geometry to read".into()),
         None => Err("that node is gone".into()),
     }
 }

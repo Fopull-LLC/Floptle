@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 129
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 144
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
-- [networking — net.*, synced](#networking--net-synced) — 31
+- [networking — net.*, synced](#networking--net-synced) — 35
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
 - [pathfinding — nav.*](#pathfinding--nav) — 25
@@ -616,6 +616,66 @@ function update(node, dt)
   node.yaw = node.yaw + math.rad(90) * dt
 end
 ```
+
+### `voice`
+
+Proximity voice chat: the microphone, and every remote player's voice as an ordinary spatial sound. A remote speaker plays through a mixer track like anything else, so a track carrying PitchShift + Distortion + Reverb turns the killer into a monster with no new audio API. Frames are Opus (48 kHz, 20 ms, ~24 kbps mono) on unreliable datagrams: loss shows as a gap the decoder conceals, never as a stall. WHO HEARS WHOM IS THE SERVER'S DECISION (voice.setForward) — attenuating a stream a client already received is a volume slider a modified client turns back up.
+
+### `voice.attach`
+
+voice.attach(peer, node, { mode = "Spatial", falloff = "Inverse", minDistance = 2, maxDistance = 22, track = "Voice" }) — a remote player's voice comes out of that node and follows it. The same knob set audio.play takes, because a remote speaker IS an ordinary spatial sound. Survives scene.load: the stream lives with the SESSION, so a server switching maps does not cut anyone off mid-sentence — re-attach in the new scene and the stream never restarted.
+
+### `voice.detach`
+
+voice.detach(peer) — the voice stops following a node and goes back to being unpositioned. The stream keeps running.
+
+### `voice.device`
+
+voice.device() — the input device currently open, or nil.
+
+### `voice.devices`
+
+voice.devices() — input device names, for a settings screen. EMPTY on a machine with no microphone, which is most machines and is not an error: every other voice call goes on working as a no-op.
+
+### `voice.level`
+
+voice.level() — the local microphone's level, 0..1, for a settings-screen meter. LIVE WHETHER OR NOT TRANSMIT IS ON, which is the point: a player can prove their mic works without joining a lobby to find out. 0 with no device.
+
+### `voice.mute`
+
+voice.mute(peer, on) — a LOCAL mute: one player's choice not to listen, which never leaves this machine. It stops the decode as well as the sound, so a muted speaker costs nothing.
+
+### `voice.muted`
+
+voice.muted(peer) — has this machine muted that peer locally?
+
+### `voice.setDevice`
+
+voice.setDevice(name) — open that input device; voice.setDevice(nil) opens the system default. A device that isn't there is one Console line, not a crash.
+
+### `voice.setForward`
+
+SERVER ONLY: voice.setForward(peer, { peers }) — who may hear that speaker; nil for everyone. THIS IS WHERE PROXIMITY VOICE IS ENFORCED. A game using it sets this from distance every tick or so, and a peer not on the list is never sent the audio at all — because attenuating a stream a client already received is a volume slider a modified client turns back up, and in a hidden-role game hearing someone is knowing where they are.
+
+### `voice.setTransmit`
+
+voice.setTransmit(on) — open or close the microphone. Push-to-talk is your decision (voice.setTransmit(input.action("Talk"))); this is where it takes effect. The gate is on the CAPTURE side, so nothing further down the path can leak a live mic into a lobby, and releasing it discards the half-built frame rather than splicing two moments together.
+
+### `voice.sidetone`
+
+voice.sidetone(on) — hear your own microphone. Off by default because it is disconcerting; it plays the raw capture rather than the encoded copy, so it confirms the mic is live without the codec's delay.
+
+### `voice.source`
+
+voice.source(peer) — a handle shaped like the one audio.play returns: :setTrack, :setVolume, :setPosition(node), :setMode, :setFalloff, :setMinDistance, :setMaxDistance. `.live` says whether that stream exists at all, so a game can tell "quiet" from "not in this session". Moving a peer between mixer tracks is how a voice becomes a monster: voice.source(peer):setTrack("Voice Monster").
+
+### `voice.speaking`
+
+voice.speaking(peer) — true while that peer's frames are arriving, for a HUD indicator. Holds for a moment past the last frame so it does not flicker between syllables.
+
+### `voice.transmitting`
+
+voice.transmitting() — is the microphone open right now?
 
 ## node — transform & body fields
 
@@ -1644,7 +1704,7 @@ account.cancel() — abandon a sign-in in progress (the player pressed Escape). 
 
 ### `account.code`
 
-account.code() — while state() is "waiting": { code = "WXYZ-9999", url = "...", expiresIn = 900 }. Show the code and send them to the url (openUrl does it) — that pairing is what the player approves. nil at any other time.
+account.code() — while state() is "waiting": { code = "WXYZ-9999", url = "...", expiresIn = 900 }. Show the code and send them to the url (openUrl does it) — that pairing is what the player approves. nil at any other time, and ALWAYS nil in a browser build, which redirects rather than pairing a code — so a sign-in screen that only draws the code shows an empty box there. Draw a button that calls signIn() as well.
 
 ### `account.delete`
 
@@ -1676,7 +1736,7 @@ account.put("/games/mygame/saves/slot1", { data = t, expected_version = v }, fun
 
 ### `account.signIn`
 
-account.signIn() — begin signing the player in to their Foverse account (fopull.com). Returns IMMEDIATELY; watch account.state() and draw account.code(). The engine drives the OAuth device flow in Rust — the player approves in their browser, so the game never sees a password and never holds a token. Play only.
+account.signIn() — begin signing the player in to their Foverse account (fopull.com). Returns IMMEDIATELY; watch account.state() and draw account.code(). The engine drives the OAuth device flow in Rust — the player approves in their browser, so the game never sees a password and never holds a token. Play only. IN A BROWSER BUILD this is a redirect instead: the page leaves for fopull.com and the game RESTARTS when it comes back already signed in, so call it from a menu and never mid-play, and expect account.code() to stay nil (there is no code to show). The game's address has to be registered as a redirect URI first, or the sign-in is refused.
 
 ### `account.signOut`
 
@@ -2012,11 +2072,15 @@ Multiplayer: host and join, synced state, RPCs, ownership (net.isMine), and the 
 
 ### `net.despawn`
 
-SERVER ONLY: net.despawn(node) — remove a replicated runtime object everywhere.
+SERVER ONLY: net.despawn(node) — remove a replicated runtime object, and the whole subtree it spawned with, everywhere.
 
 ### `net.host`
 
 net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards); port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client; inputDelay = rollback input delay in TICKS (clamped to 6) — omit it and the host derives one from the worst peer's measured RTT (2 on a LAN, 5 across a country).
+
+### `net.identity`
+
+net.identity(peer) — who a connected peer is: { id, name, tier, verified }. `id` is the account's stable subject, the same across sessions and machines; an anonymous peer (a LAN game with nobody signed in) has no `id`, which is a normal state and not an error. READ `verified` BEFORE ACTING ON `id`: it is false for everyone today, because the engine carries what a client says about itself and has no way to check it with the provider yet — so a ban list or a statistic keyed on an unverified id is keyed on a string the client chose. See docs/multiplayer.md, "Running a public server".
 
 ### `net.inputDelay`
 
@@ -2041,6 +2105,10 @@ net.join(addr) — join a session: "relay://relayaddr/CODE" = a lobby code throu
 ### `net.joinState`
 
 net.joinState() -> state, reason — how a join is going: "offline" | "connecting" | "joined" | "refused". On "refused" the second return is the relay's own words ("no lobby QK7RM") — print it. WAIT ON THIS, not on net.role(): joining does not block, so role reads "client" from the frame you called net.join, whether or not that code matched any lobby.
+
+### `net.kick`
+
+SERVER ONLY: net.kick(peer, reason) — remove a player, with words that reach them. The reason goes out before the link closes, so their UI can say what happened instead of showing the generic "connection lost" every unexplained drop produces; `playerLeft` fires with it attached, and on their machine net.on("kicked", fn) does. Kicking is not banning: without a verified id it lasts until they reconnect — pair it with net.host{ deny = { ids } }.
 
 ### `net.leave`
 
@@ -2101,6 +2169,14 @@ net.rpc(name, args, {to=peer, withInput=true}) — remote call: server→clients
 ### `net.setInputDelay`
 
 net.setInputDelay(ticks) — the rollback input delay for the NEXT match, in ticks, clamped to 6. Too low and the opponent's input lands after the tick that needed it on every tick, so the driver guesses and re-simulates: correct, and five times the work. Fixed for a session on purpose — adaptive delay hides a bad connection by changing how the game FEELS while you are playing it. Call it between matches; the roster re-announce restarts the driver.
+
+### `net.setOwner`
+
+SERVER ONLY: net.setOwner(node, peer) — hand a replicated node to a player after it already exists; net.setOwner(node, nil) releases it back to the server. Ownership used to be settable only at spawn, which is why a player who dropped could never be given their own slot back. On a dedicated server, authored Predicted slots are handed out from #1 as players join and freed when they leave — a slot you assign yourself is never reassigned behind your back.
+
+### `net.setRelevant`
+
+SERVER ONLY: net.setRelevant(node, peer, true|false) — decide per client whether that client may be told about that node at all, on top of the interest radius; pass nil to hand the decision back to the radius and the line-of-sight test. This is the hidden-role hook. It has to be server-side: a client that has already been sent a position knows the position, whatever it chooses to draw, so hiding or attenuating it client-side is a setting a modified client turns back off. Needs interest management on (net.host{ interest = … }); the 🌐 panel shows how many nodes each client is being withheld, and why.
 
 ### `net.spawn`
 

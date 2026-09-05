@@ -19,12 +19,40 @@ rust-version.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-ureq = { workspace = true }
 log = { workspace = true }
 # PKCE: 32 random bytes, S256, base64url. The whole reason a Lua script cannot
 # drive this flow itself and the engine has to.
 base64 = "0.22"
 getrandom = "0.2"
 sha2 = "0.10"
+
+# **The desktop's transport and its secret store.** Both are platform, not
+# policy: `Provider` and `TokenStore` are traits, and these are the two impls a
+# machine with sockets and a secret service gets. A browser has neither, and
+# gets its own pair below.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { workspace = true }
 # The session lives in the OS keyring, never on disk in plaintext.
 keyring = "3"
+
+# **The browser's secret store is `localStorage`, and that is a real downgrade
+# worth naming.** A keyring entry is guarded by the OS and readable only by an
+# unlocked session; `localStorage` is readable by any script on the origin. For
+# a game served as a static page from one origin that is the same trade every
+# web application makes, and there is no stronger option a page can reach — but
+# it is a trade, not an equivalence, so `WebStore` says so in its own docs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `std::time::SystemTime::now()` panics in a page; this is `Date.now()`.
+web-time = "1.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "Storage", "Location", "History",
+    "Request", "RequestInit", "RequestMode", "Response", "Headers",
+] }
+# PKCE's 32 random bytes. `getrandom` 0.2 has no default source on
+# wasm32-unknown-unknown — there is no OS to ask — and refuses to build without
+# being told which one to use. `js` routes it to `crypto.getRandomValues`, which
+# is a CSPRNG; PKCE is worthless with anything less.
+getrandom = { version = "0.2", features = ["js"] }

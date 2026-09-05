@@ -15,11 +15,17 @@
 //! Prediction (2c), lag compensation (2d), and the QUIC transport + relay (2e)
 //! build on these seams without changing the game-facing API.
 
+pub mod identity;
 pub mod impair;
 pub mod interest;
 pub mod lagcomp;
 pub mod predict;
+// No UDP socket in a browser — see this crate's manifest. The relay goes with
+// it rather than beside it: a relay leg IS a `QuicClient`, and the module's
+// first line is `use crate::quic`.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod quic;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod relay;
 pub mod replay;
 pub mod rollback;
@@ -29,9 +35,14 @@ pub mod value;
 pub mod wire;
 
 pub use impair::{ImpairHandle, Impaired, Impairment, IMPAIR_ENV};
-pub use interest::{Candidate, InterestConfig, InterestSets, InterestStat, PeerInterest};
+pub use identity::{AssertedOnly, Identity, JoinPolicy, Verifier};
+pub use interest::{
+    Candidate, InterestConfig, InterestSets, InterestStat, NoOcclusion, Occluder, PeerInterest,
+};
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
+#[cfg(not(target_arch = "wasm32"))]
 pub use quic::{QuicClient, QuicServer};
+#[cfg(not(target_arch = "wasm32"))]
 pub use relay::{RelayClient, RelayHost, RelayServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};
@@ -42,7 +53,10 @@ pub use session::{
     AnimSrcLayer, AnimStates, BodyStates, JoinState, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
     SyncedVars,
 };
-pub use wire::{AnimEntry, AnimLayerWire, InputCmd, NetInput, CHECKSUM_EVERY, PROTO_VERSION};
+pub use wire::{
+    AnimEntry, AnimLayerWire, IdentityClaim, InputCmd, NetInput, CHECKSUM_EVERY,
+    PROTO_VERSION,
+};
 pub use transport::{
     Channel, Incoming, LinkStats, MemoryHub, MemoryTransport, PeerId, Transport, SERVER,
 };
@@ -318,7 +332,7 @@ mod tests {
             light_falloff: None,
             light_shadows: None,
         };
-        let arrow = server.spawn_doc(&mut sw, &node, Some(1));
+        let arrow = server.spawn_subtree(&mut sw, std::slice::from_ref(&node), Some(1))[0];
         // Tick the empty-peers server a few times.
         for t in 1..5u64 {
             hub.set_now(t);
@@ -526,7 +540,7 @@ mod tests {
         hub.disconnect(1);
         hub.set_now(10);
         server.tick_server(&sw, 10);
-        assert!(server.take_events().contains(&NetEvent::PeerLeft(1)));
+        assert!(server.take_events().contains(&NetEvent::PeerLeft(1, None)));
         assert!(server.peers().is_empty());
     }
 

@@ -36,6 +36,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
+// The blocking agent is shared into the worker thread; both are native-only.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 use mlua::{Function, Lua, Table, Value};
@@ -49,7 +51,9 @@ const MAX_IN_FLIGHT: usize = 8;
 /// is a bug; this is where it finds out.
 const MAX_PER_SECOND: usize = 20;
 /// Largest response body accepted, in bytes. Past this the request fails with
-/// an error instead of buying a script an unbounded allocation.
+/// an error instead of buying a script an unbounded allocation. Only the native
+/// transport reads a body, so only it has one to bound.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Default per-request timeout, seconds.
 const DEFAULT_TIMEOUT: f64 = 15.0;
@@ -444,6 +448,35 @@ fn send(
     s.pending.insert(id, Pending { callback, want_json });
     drop(s);
 
+    // Hand it to the transport. **On the failure path the pending entry has to
+    // come back out**: it was inserted above so a reply could find its callback,
+    // and a request that never left would otherwise sit in `pending` for the
+    // life of the play session — one of `MAX_IN_FLIGHT`, held by nothing,
+    // with a script callback that never fires and nothing said about it.
+    if let Err(e) = dispatch(id, generation, tx, method, url, headers, body, timeout) {
+        state.borrow_mut().pending.remove(&id);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Put one request on the wire.
+///
+/// **This is the whole of `http.*`'s contact with the network**, kept in one
+/// function so the platforms that have no sockets can have their own — see
+/// `docs/web-export.md`.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    id: u64,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<HttpReply>,
+    method: &'static str,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    timeout: f64,
+) -> mlua::Result<()> {
     // One thread per request, bounded by MAX_IN_FLIGHT above. A pool would save
     // a few hundred microseconds of spawn and cost a lifetime of shutdown
     // bookkeeping; at eight concurrent requests this is the right trade.
@@ -504,6 +537,36 @@ fn send(
         })
         .map_err(|e| mlua::Error::RuntimeError(format!("http: could not start a worker: {e}")))?;
     Ok(())
+}
+
+/// The browser has no answer for this one yet — and says so, in the call, at the
+/// moment the script makes it.
+///
+/// A browser CAN fetch; what it cannot do is any of it the way the rest of this
+/// file assumes — a blocking agent on a thread of its own, with no regard for
+/// the origin the page was served from. That is `fetch` plus CORS plus an async
+/// reply, which is Phase 5 of the web plan and a real piece of work rather than
+/// a swapped dependency. Until it exists this refuses out loud: the one thing a
+/// stub must never do here is accept the call and leave the callback pending
+/// forever, which reads to the author as the server being slow.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    _id: u64,
+    _generation: u64,
+    _tx: std::sync::mpsc::Sender<HttpReply>,
+    method: &'static str,
+    _url: String,
+    _headers: Vec<(String, String)>,
+    _body: Option<String>,
+    _timeout: f64,
+) -> mlua::Result<()> {
+    Err(mlua::Error::RuntimeError(format!(
+        "http.{} is not available in a browser build yet — the request was not sent, and your \
+         callback will not run. Everything else in the engine works the same here; this one \
+         call does not. See docs/web-export.md.",
+        method.to_ascii_lowercase()
+    )))
 }
 
 /// Sort `http.get(url [, opts], fn)` / `http.post(url, body [, opts], fn)` out
@@ -677,6 +740,7 @@ pub(crate) fn install_http_api(
 
 /// Hand a URL to the platform's browser. The Hub does the same for its own
 /// hyperlinks; this is the one call, kept here so a script can use it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     let cmd = ("xdg-open", vec![url]);
@@ -690,6 +754,31 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
+}
+
+/// The same, in a browser — where the platform's browser is the one already
+/// running the game.
+///
+/// **`window.open` is popup-blocked unless it happens during a user gesture**,
+/// and a blocked call returns `null` rather than raising. That silent `null` is
+/// the whole reason this is not a one-liner: `openUrl` called from `update()`
+/// would do nothing, say nothing, and look like an engine bug. It is reported
+/// as what it is, and the caller's own warning path then prints the URL so the
+/// player can still get there by hand.
+#[cfg(target_arch = "wasm32")]
+pub fn open_in_browser(url: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let win = web_sys::window()
+        .ok_or_else(|| Error::new(ErrorKind::Unsupported, "no window: not a browser page"))?;
+    match win.open_with_url(url) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "the browser blocked it — a page may only open a link while handling a click, so \
+             call openUrl from an input handler rather than from update()",
+        )),
+        Err(_) => Err(Error::other("the browser refused to open the link")),
+    }
 }
 
 #[cfg(test)]

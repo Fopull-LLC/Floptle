@@ -115,11 +115,20 @@ fn every_vm_carrier_declares_both_halves_and_defaults_to_luau() {
                  is buildable for one release; it is removed deliberately, not by omission"
             ));
         }
-        if !body.contains("default = [\"vm-luau\"]") {
+        // **Which VM the default selects**, not the exact text of the list.
+        // A carrier may legitimately default to more than a VM —
+        // `floptle-editor` also defaults to `editor-ui`, the feature that makes
+        // it the authoring application rather than the engine a build ships —
+        // and pinning the literal `[\"vm-luau\"]` turned that into a failure
+        // about something else entirely. What must never drift is the VM.
+        let default_line =
+            body.lines().find(|l| l.trim_start().starts_with("default = [")).unwrap_or("");
+        if !default_line.contains("\"vm-luau\"") || default_line.contains("\"vm-luajit\"") {
             bad.push(format!(
-                "crates/{name}/Cargo.toml — `default` must be [\"vm-luau\"]: Luau is the default \
-                 as of v0.84.0, and a carrier still defaulting to LuaJIT puts both VMs in the \
-                 graph of anything that depends on it"
+                "crates/{name}/Cargo.toml — `default` must select `vm-luau` and not \
+                 `vm-luajit`: Luau is the default as of v0.84.0, and a carrier still \
+                 defaulting to LuaJIT puts both VMs in the graph of anything that depends \
+                 on it. Found: {default_line:?}"
             ));
         }
     }

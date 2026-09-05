@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::time::SystemTime;
+use floptle_core::time::SystemTime;
 
 use egui::{
     Align2, Color32, CornerRadius, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Stroke,

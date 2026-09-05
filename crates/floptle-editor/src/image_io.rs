@@ -17,7 +17,9 @@
 //!   Krita hot-reload too** — a real win for artists who won't switch tools.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use floptle_core::time::Instant;
 
 use floptle_image::doc::{Image, Mode};
 use floptle_image::{io as fio, Palette};

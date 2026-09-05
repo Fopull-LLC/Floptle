@@ -58,7 +58,14 @@ pub enum NetEvent {
     Disconnected(String),
     /// A player joined (server: transport-level; client: relayed).
     PeerJoined(PeerId),
-    PeerLeft(PeerId),
+    /// A player left. The reason is present when the SERVER decided — a kick,
+    /// with the words the operator gave — and `None` when they simply went
+    /// away, which is every other case. floptle/0183.
+    PeerLeft(PeerId, Option<String>),
+    /// Client: the server removed us, and this is why. Distinct from
+    /// `Disconnected` on purpose: a kick has an explanation a player is owed,
+    /// where a dropped link has none.
+    Kicked(String),
 }
 
 /// Where an outgoing RPC goes.
@@ -222,10 +229,60 @@ pub struct NetSession {
     /// What the last snapshot cost each client — read by the 🌐 panel so the
     /// feature is visible while it runs. Also empty while interest is off.
     interest_stats: HashMap<PeerId, crate::interest::InterestStat>,
+    /// Who each connected peer is (`floptle/0183`). An anonymous peer has an
+    /// entry too — it says it is anonymous, which is different from having no
+    /// answer at all.
+    identities: HashMap<PeerId, crate::identity::Identity>,
+    /// Who this server will admit, consulted before a join is accepted.
+    join_policy: crate::identity::JoinPolicy,
+    /// How a claim becomes an identity. `AssertedOnly` by default — see
+    /// [`crate::identity`] for why that is the honest default rather than a
+    /// stub.
+    verifier: Box<dyn crate::identity::Verifier>,
+    /// Join refusals and kicks, in words, for a process with no Console. Drained
+    /// by the driver each tick.
+    join_log: Vec<String>,
+    /// Peers kicked last tick, whose links close this one — see [`Self::kick`].
+    pending_hangup: Vec<PeerId>,
+    /// SERVER: who may hear each speaker. `None` (absent) = everyone.
+    ///
+    /// **This is where proximity voice is enforced, and it has to be here.**
+    /// Attenuating a stream every client already received is a volume slider a
+    /// modified client turns back up — and in a game where hearing someone is
+    /// knowing where they are, that is the difference between a mode that can
+    /// ship competitively and one that cannot. So a speaker's frames are
+    /// forwarded only to the peers the game names, and a client it does not
+    /// name never receives the bytes at all. floptle/0180.
+    voice_forward: HashMap<PeerId, Vec<PeerId>>,
+    /// Voice frames received since the last drain — (speaker, seq, payload).
+    ///
+    /// Bounded, because a driver that never drains it is a real configuration
+    /// rather than a bug: a dedicated server forwards voice and listens to none
+    /// of it, having no output device and nobody sitting at it. Unbounded, this
+    /// would be a slow leak that only shows up on the machine expected to stay
+    /// up for weeks.
+    voice_in: Vec<(PeerId, u16, Vec<u8>)>,
+    /// This endpoint's outgoing voice frame counter.
+    voice_seq: u16,
+    /// The game's own say on relevance, per (peer, NetId): `false` withholds a
+    /// node from that client, `true` pins it regardless of distance or sight.
+    /// Absent = the radius and the occlusion test decide. `net.setRelevant`.
+    ///
+    /// A pin can never expose or hide a client's OWN avatar: it is what that
+    /// client reconciles its prediction against, and a game that hid it would
+    /// get a player who cannot see themselves rather than an error.
+    /// floptle/0182.
+    relevance_pins: HashMap<(PeerId, u64), bool>,
     /// Current synced values, refreshed by the driver each tick (diffed here).
     synced_now: SyncedVars,
-    /// Runtime spawns alive right now, for late-joiner catch-up.
+    /// Runtime spawns alive right now, for late-joiner catch-up. Keyed by the
+    /// subtree's ROOT NetId; the string is a RON `Vec<NodeDoc>`.
     spawned_docs: HashMap<u64, (String, Option<PeerId>)>,
+    /// Every entity a runtime spawn produced, root first — what a despawn has
+    /// to take away. Held on BOTH roles: a subtree's non-networked children
+    /// (the camera, the arms mesh, the item socket) have no NetId of their own,
+    /// so nothing else records that they belong to the root.
+    spawned_ents: HashMap<u64, Vec<Entity>>,
     snap_count: u32,
     /// The scene GENERATION: bumped by every [`Self::switch_scene`], carried on
     /// scene-scoped messages (snapshots/spawns/despawns) so old-scene state
@@ -312,9 +369,19 @@ pub struct NetSession {
     predicted_in: Vec<(Entity, u64, PredictedState)>,
     /// Replicated spawns materialized since the last drain — (NetId, entity,
     /// owner). The driver registers physics bodies / binds prediction.
+    ///
+    /// Every entity the spawn created is listed, not only the replicated ones:
+    /// a rig's collider, mesh and lights are as likely to hang off a child as
+    /// off the root, and a child the driver never hears about is a body that
+    /// never registers and a model that never imports. A child with no NetId of
+    /// its own is listed under its ROOT's id.
     spawned_in: Vec<(u64, Entity, Option<PeerId>)>,
     /// Entities despawned since the last drain (their bodies must go too).
     despawned_in: Vec<u32>,
+    /// Ownership reassignments received since the last drain — (NetId, entity,
+    /// new owner). The driver re-binds prediction: a node handed TO us becomes
+    /// the predicted avatar, one handed away becomes snapshot-driven.
+    owner_changed_in: Vec<(u64, Entity, Option<PeerId>)>,
     /// Received animator entries per NetId, buffered as (server tick, local
     /// arrival tick, entry) so they apply on the SAME delayed timeline as the
     /// transforms they accompany — a jump animation lands with the jump arc,
@@ -393,7 +460,7 @@ pub struct NetSession {
     /// Round-trip probes in flight: `(id, peer)` ⏵ when it was sent. Cleared
     /// on reply and aged out, so a peer that stops answering doesn't leak one
     /// entry per probe.
-    pings_out: HashMap<(u32, PeerId), std::time::Instant>,
+    pings_out: HashMap<(u32, PeerId), floptle_core::time::Instant>,
     /// Next probe id.
     ping_id: u32,
     /// Smoothed application-level round trip per peer, milliseconds. This is
@@ -490,8 +557,24 @@ impl NetSession {
 
     /// Client: says hello immediately; `Connected` arrives via events once the
     /// server welcomes us.
-    pub fn client(mut transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
-        let hello = Msg::Hello { proto: PROTO_VERSION, input_map: input_map_hash };
+    pub fn client(transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
+        Self::client_as(transport, input_map_hash, None)
+    }
+
+    /// [`Self::client`], presenting an account identity in the handshake
+    /// (`floptle/0183`).
+    ///
+    /// Optional by design: a LAN or friends game with nobody signed in has to
+    /// keep working exactly as it does today, so an absent claim is a normal
+    /// state and not an error. The server decides whether it will admit one
+    /// (`net.host{ requireIdentity = true }`).
+    pub fn client_as(
+        mut transport: Box<dyn Transport>,
+        input_map_hash: u64,
+        identity: Option<crate::wire::IdentityClaim>,
+    ) -> Self {
+        let hello =
+            Msg::Hello { proto: PROTO_VERSION, input_map: input_map_hash, identity };
         transport.send(SERVER, Channel::Reliable, &hello.encode());
         let mut s = Self::new(NetRole::Client, transport);
         s.input_map_hash = input_map_hash;
@@ -513,8 +596,18 @@ impl NetSession {
             interest: crate::interest::InterestConfig::default(),
             interest_sets: crate::interest::InterestSets::default(),
             interest_stats: HashMap::new(),
+            identities: HashMap::new(),
+            join_policy: crate::identity::JoinPolicy::default(),
+            verifier: Box::new(crate::identity::AssertedOnly),
+            join_log: Vec::new(),
+            pending_hangup: Vec::new(),
+            voice_forward: HashMap::new(),
+            voice_in: Vec::new(),
+            voice_seq: 0,
+            relevance_pins: HashMap::new(),
             synced_now: Vec::new(),
             spawned_docs: HashMap::new(),
+            spawned_ents: HashMap::new(),
             snap_count: 0,
             scene_epoch: 0,
             scene: String::new(),
@@ -542,6 +635,7 @@ impl NetSession {
             predicted_in: Vec::new(),
             spawned_in: Vec::new(),
             despawned_in: Vec::new(),
+            owner_changed_in: Vec::new(),
             anim_bufs: HashMap::new(),
             anim_started: HashSet::new(),
             anims_due: Vec::new(),
@@ -590,6 +684,183 @@ impl NetSession {
     /// Server: currently connected client peers.
     pub fn peers(&self) -> &[PeerId] {
         &self.peers
+    }
+
+    // -- identity and moderation (floptle/0183) -----------------------------
+
+    /// Who a connected peer is. `None` for a peer that is not on the roster.
+    ///
+    /// Read [`crate::identity::Identity::verified`] before acting on `id`: an
+    /// unverified claim is what the client SAID, and until an audience-scoped
+    /// credential exists there is no other kind. See [`crate::identity`].
+    pub fn identity(&self, peer: PeerId) -> Option<&crate::identity::Identity> {
+        self.identities.get(&peer)
+    }
+
+    /// Server: who this server will admit. Consulted before a join is accepted,
+    /// so a ban is a closed door rather than a kick you repeat forever.
+    pub fn set_join_policy(&mut self, policy: crate::identity::JoinPolicy) {
+        self.join_policy = policy;
+    }
+
+    pub fn join_policy(&self) -> &crate::identity::JoinPolicy {
+        &self.join_policy
+    }
+
+    /// Server: how a presented claim becomes an identity. The seam an
+    /// audience-scoped provider check plugs into.
+    pub fn set_verifier(&mut self, verifier: Box<dyn crate::identity::Verifier>) {
+        self.verifier = verifier;
+    }
+
+    /// Server: remove a peer, telling it why.
+    ///
+    /// The reason travels first, so the client's UI can say what happened
+    /// instead of showing the generic "connection lost" that every unexplained
+    /// drop produces. Then the roster entry goes on THIS side of the wire: a
+    /// client that ignores the message is off the session regardless, and its
+    /// traffic is dropped rather than merely discouraged.
+    ///
+    /// Kicking is not banning. Without a stable id a kick lasts until the
+    /// offender reconnects — pair it with [`Self::set_join_policy`].
+    pub fn kick(&mut self, peer: PeerId, reason: &str) -> bool {
+        debug_assert_eq!(self.role, NetRole::Server, "only the server kicks");
+        if !self.peers.contains(&peer) {
+            return false;
+        }
+        let msg = Msg::Kicked { reason: reason.to_string() }.encode();
+        self.transport.send(peer, Channel::Reliable, &msg);
+        let who = self
+            .identities
+            .get(&peer)
+            .map(|i| i.label())
+            .unwrap_or_else(|| "an unknown peer".into());
+        self.log_join(format!("kicked peer {peer} ({who}): {reason}"));
+        // The roster entry goes NOW — that is the removal, and it is what stops
+        // the peer's traffic being acted on. Hanging up the link is deferred by
+        // a tick, because closing a connection discards whatever has not gone
+        // out yet, and the one thing that must go out is the reason. Kicking
+        // somebody and leaving them staring at a generic "connection lost" is
+        // the failure this whole card exists to remove.
+        self.pending_hangup.push(peer);
+        self.drop_peer_with(peer, Some(reason.to_string()));
+        true
+    }
+
+    // -- voice chat (floptle/0180) ------------------------------------------
+
+    /// CLIENT: send one encoded 20 ms frame from this machine's microphone.
+    ///
+    /// Fire and forget on the unreliable channel. A frame that does not arrive
+    /// is a gap the listener's decoder conceals; a frame that arrives late is
+    /// worse than one that never arrives at all.
+    pub fn send_voice(&mut self, frame: &[u8]) {
+        if self.role != NetRole::Client || !self.connected {
+            return;
+        }
+        let seq = self.voice_seq;
+        self.voice_seq = self.voice_seq.wrapping_add(1);
+        let msg = Msg::VoiceUp { seq, frame: frame.to_vec() }.encode();
+        self.transport.send(SERVER, Channel::UnreliableSequenced, &msg);
+    }
+
+    /// SERVER: speak as the host — the host is a player too, and its voice
+    /// reaches the same peers under the same forwarding rules.
+    pub fn host_voice(&mut self, frame: &[u8]) {
+        if self.role != NetRole::Server {
+            return;
+        }
+        let seq = self.voice_seq;
+        self.voice_seq = self.voice_seq.wrapping_add(1);
+        self.forward_voice(SERVER, seq, frame);
+    }
+
+    /// SERVER: restrict who hears `speaker`. An empty list means nobody; call
+    /// [`Self::clear_voice_forward`] to go back to everyone.
+    ///
+    /// A game using proximity voice sets this from distance every tick or so.
+    pub fn set_voice_forward(&mut self, speaker: PeerId, to: Vec<PeerId>) {
+        self.voice_forward.insert(speaker, to);
+    }
+
+    /// SERVER: `speaker` is heard by everyone again (the default).
+    pub fn clear_voice_forward(&mut self, speaker: PeerId) {
+        self.voice_forward.remove(&speaker);
+    }
+
+    /// Who may currently hear `speaker`, or `None` for everyone.
+    pub fn voice_forward(&self, speaker: PeerId) -> Option<&[PeerId]> {
+        self.voice_forward.get(&speaker).map(|v| v.as_slice())
+    }
+
+    /// Voice frames received since the last drain — (speaker, sequence, Opus
+    /// payload). The driver hands each to that speaker's jitter buffer.
+    pub fn take_voice(&mut self) -> Vec<(PeerId, u16, Vec<u8>)> {
+        std::mem::take(&mut self.voice_in)
+    }
+
+    /// The most undrained voice frames to hold — a second of eight people all
+    /// talking. Past that the oldest go: this queue is live audio, and audio
+    /// nobody collected a second ago is worthless.
+    const MAX_VOICE_IN: usize = 8 * 50;
+
+    /// SERVER, HARNESS ONLY: play a frame in as though `speaker` had sent it.
+    ///
+    /// Goes through the real forwarding rules — the same
+    /// [`Self::forward_voice`] a genuine datagram reaches — so what it proves
+    /// is the routing a live session would do, not a shortcut around it. This
+    /// is what lets voice be tested on one desk with no second machine and no
+    /// microphone.
+    pub fn inject_voice_from(&mut self, speaker: PeerId, seq: u16, frame: &[u8]) {
+        if self.role != NetRole::Server {
+            return;
+        }
+        self.forward_voice(speaker, seq, frame);
+    }
+
+    /// SERVER: relay one speaker's frame to whoever is allowed to hear it.
+    fn forward_voice(&mut self, speaker: PeerId, seq: u16, frame: &[u8]) {
+        let msg = Msg::Voice { speaker, seq, frame: frame.to_vec() }.encode();
+        // Collected first: the borrow checker aside, the allow list is what
+        // decides, and reading it once per frame keeps that decision in one
+        // place instead of inside the send loop.
+        let allowed = self.voice_forward.get(&speaker).cloned();
+        let targets: Vec<PeerId> = match &allowed {
+            Some(list) => list.iter().copied().filter(|p| self.peers.contains(p)).collect(),
+            None => self.peers.clone(),
+        };
+        for p in targets {
+            if p == speaker {
+                continue; // a speaker never gets their own voice back
+            }
+            self.transport.send(p, Channel::UnreliableSequenced, &msg);
+        }
+        // The host hears remote speakers locally, and only if allowed to.
+        if speaker != SERVER
+            && allowed.as_ref().map(|l| l.contains(&SERVER)).unwrap_or(true)
+        {
+            if self.voice_in.len() >= Self::MAX_VOICE_IN {
+                self.voice_in.remove(0);
+            }
+            self.voice_in.push((speaker, seq, frame.to_vec()));
+        }
+    }
+
+    /// Join refusals and kicks since the last drain, in words.
+    ///
+    /// A dedicated server has nobody watching a Console, so this is the only
+    /// place a moderation decision can be seen at all — and a moderation action
+    /// nobody can audit is not a moderation tool.
+    pub fn take_join_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.join_log)
+    }
+
+    fn log_join(&mut self, line: String) {
+        // Bounded: a server under a reconnect storm must not grow a log until
+        // it dies, and the driver drains this every tick in normal operation.
+        if self.join_log.len() < 512 {
+            self.join_log.push(line);
+        }
     }
 
     pub fn stats(&self, peer: PeerId) -> LinkStats {
@@ -653,7 +924,11 @@ impl NetSession {
         self.last_sent.clear();
         self.last_synced.clear();
         self.interest_sets.clear();
+        // NetIds only mean anything within one scene, so a pin held across a
+        // scene swap would name a stranger.
+        self.relevance_pins.clear();
         self.spawned_docs.clear();
+        self.spawned_ents.clear();
         self.body_states.clear();
         self.anims_now.clear();
         self.last_anim.clear();
@@ -666,6 +941,7 @@ impl NetSession {
         self.predicted_in.clear();
         self.spawned_in.clear();
         self.despawned_in.clear();
+        self.owner_changed_in.clear();
         self.synced_in.clear();
         self.scene_pending = false;
         self.register_scene(world);
@@ -931,6 +1207,8 @@ impl NetSession {
         self.interest = cfg;
         self.interest_sets.clear();
         self.interest_stats.clear();
+        // The game's filters are the game's; only the engine's own bookkeeping
+        // resets when the settings change.
         self.last_sent.clear();
         self.last_synced.clear();
         self.last_anim.clear();
@@ -940,6 +1218,37 @@ impl NetSession {
     /// The interest settings in force.
     pub fn interest(&self) -> crate::interest::InterestConfig {
         self.interest
+    }
+
+    /// Server: the game's own say on whether `peer` may be told about `e`.
+    /// `Some(false)` withholds it, `Some(true)` pins it regardless of distance
+    /// or line of sight, `None` hands the decision back to the two tests.
+    ///
+    /// This is the hidden-role hook (floptle/0182). It is a **server-side**
+    /// decision by construction: attenuating, hiding or not drawing something a
+    /// client has already been sent is a volume slider a modified client turns
+    /// back up, and in a game where hearing or seeing someone is knowing where
+    /// they are, that is the difference between a mode that can ship
+    /// competitively and one that cannot.
+    ///
+    /// Returns whether the node is replicated at all — a caller can say so
+    /// rather than pinning nothing and reporting success.
+    pub fn set_relevant(&mut self, e: Entity, peer: PeerId, relevant: Option<bool>) -> bool {
+        let Some(&id) = self.ent_to_net.get(&e) else { return false };
+        match relevant {
+            Some(v) => {
+                self.relevance_pins.insert((peer, id), v);
+            }
+            None => {
+                self.relevance_pins.remove(&(peer, id));
+            }
+        }
+        true
+    }
+
+    /// Every game filter in force, for the 🌐 panel and for tests.
+    pub fn relevance_pins(&self) -> impl Iterator<Item = ((PeerId, u64), bool)> + '_ {
+        self.relevance_pins.iter().map(|(&k, &v)| (k, v))
     }
 
     /// What the last snapshot cost each connected client, in join order.
@@ -1114,7 +1423,7 @@ impl NetSession {
 
     /// Drop probes nobody answered, so a silent peer costs one entry rather
     /// than one per probe forever.
-    fn expire_pings(&mut self, now: std::time::Instant) {
+    fn expire_pings(&mut self, now: floptle_core::time::Instant) {
         self.pings_out
             .retain(|_, sent| now.duration_since(*sent) < std::time::Duration::from_secs(5));
     }
@@ -1476,32 +1785,112 @@ impl NetSession {
         std::mem::take(&mut self.despawned_in)
     }
 
-    /// Server: spawn a replicated runtime node — locally now, on every client
-    /// via a reliable `Spawn`, and re-sent to late joiners.
-    pub fn spawn_doc(
+    /// Client: ownership reassignments since the last drain — (NetId, entity,
+    /// new owner). Drained like spawns because they need the same answer: who
+    /// predicts this node from now on.
+    pub fn take_owner_changed(&mut self) -> Vec<(u64, Entity, Option<PeerId>)> {
+        std::mem::take(&mut self.owner_changed_in)
+    }
+
+    /// Server: spawn a replicated runtime **subtree** — locally now, on every
+    /// client via a reliable `Spawn`, and re-sent to late joiners. `nodes[0]`
+    /// is the root; the returned entities are in the same order.
+    ///
+    /// Only the root is replicated by default: its children are ordinary local
+    /// nodes that follow it, their scripts running on every peer exactly as an
+    /// authored child of a networked node does. A child that carries its own
+    /// `Networked` component is replicated in its own right, under the same
+    /// owner, and keeps its parent link on the clients.
+    pub fn spawn_subtree(
         &mut self,
         world: &mut World,
-        node: &floptle_scene::NodeDoc,
+        nodes: &[floptle_scene::NodeDoc],
         owner: Option<PeerId>,
-    ) -> Entity {
+    ) -> Vec<Entity> {
         debug_assert_eq!(self.role, NetRole::Server, "only the server spawns");
-        let e = floptle_scene::spawn_node(node, world);
-        // Ensure the node replicates (a doc without the component still nets —
-        // spawning through the session IS the intent to replicate).
-        let mut rep = world.get::<Replicated>(e).copied().unwrap_or_default();
-        rep.owner = owner;
-        world.insert(e, rep);
+        if nodes.is_empty() {
+            return Vec::new();
+        }
+        let ents = floptle_scene::spawn_nodes(nodes, world);
+        // NetIds are handed out per subtree POSITION rather than one at a time,
+        // so a client can derive a replicated descendant's id from the vector
+        // it was sent instead of needing one message per node. Ids stay
+        // reserved for the whole subtree even where a node does not use one.
         let id = self.next_id;
-        self.next_id += 1;
-        self.net_to_ent.insert(id, e);
-        self.ent_to_net.insert(e, id);
-        let ron = ron::to_string(node).unwrap_or_default();
+        self.next_id += ents.len() as u64;
+        Self::bind_spawned(
+            &mut self.net_to_ent,
+            &mut self.ent_to_net,
+            None,
+            world,
+            &ents,
+            id,
+            owner,
+        );
+        let ron = ron::to_string(&nodes.to_vec()).unwrap_or_default();
         self.spawned_docs.insert(id, (ron.clone(), owner));
-        let msg = Msg::Spawn { epoch: self.scene_epoch, id, node_ron: ron, owner }.encode();
+        self.spawned_ents.insert(id, ents.clone());
+        let msg = Msg::Spawn { epoch: self.scene_epoch, id, nodes_ron: ron, owner }.encode();
         for &p in &self.peers {
             self.transport.send(p, Channel::Reliable, &msg);
         }
-        e
+        ents
+    }
+
+    /// Register a freshly spawned subtree's NetIds, on either role.
+    ///
+    /// The root always replicates — spawning through the session IS the intent
+    /// to replicate, so a doc without the component still gets one. A
+    /// descendant replicates only if its own doc asked to.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_spawned(
+        net_to_ent: &mut HashMap<u64, Entity>,
+        ent_to_net: &mut HashMap<Entity, u64>,
+        mut interp: Option<&mut HashMap<u64, InterpBuf>>,
+        world: &mut World,
+        ents: &[Entity],
+        base: u64,
+        owner: Option<PeerId>,
+    ) {
+        for (i, &e) in ents.iter().enumerate() {
+            let existing = world.get::<Replicated>(e).copied();
+            // A child with no Networked component of its own is a local node
+            // that follows its parent — not a replicated one.
+            if i > 0 && existing.is_none() {
+                continue;
+            }
+            let mut rep = existing.unwrap_or_default();
+            rep.owner = owner;
+            world.insert(e, rep);
+            let id = base + i as u64;
+            net_to_ent.insert(id, e);
+            ent_to_net.insert(e, id);
+            if let Some(interp) = interp.as_deref_mut() {
+                interp.insert(id, InterpBuf::new(&rep));
+            }
+        }
+    }
+
+    /// Server: hand a node to a different owner, or release it (`None`).
+    ///
+    /// Ownership used to be decidable only at spawn, which meant a scene's
+    /// authored player slots were assigned by scene order and a player who
+    /// dropped could never be given their slot back. Returns whether the node
+    /// was a replicated one (a caller can say so rather than failing silently).
+    pub fn set_owner(&mut self, world: &mut World, e: Entity, owner: Option<PeerId>) -> bool {
+        debug_assert_eq!(self.role, NetRole::Server, "only the server assigns owners");
+        let Some(&id) = self.ent_to_net.get(&e) else { return false };
+        let mut rep = world.get::<Replicated>(e).copied().unwrap_or_default();
+        rep.owner = owner;
+        world.insert(e, rep);
+        if let Some(entry) = self.spawned_docs.get_mut(&id) {
+            entry.1 = owner;
+        }
+        let msg = Msg::SetOwner { epoch: self.scene_epoch, id, owner }.encode();
+        for &p in &self.peers {
+            self.transport.send(p, Channel::Reliable, &msg);
+        }
+        true
     }
 
     /// Server: the runtime spawns owned by `peer` — what a disconnect should
@@ -1514,17 +1903,30 @@ impl NetSession {
             .collect()
     }
 
-    /// Server: despawn a replicated node everywhere.
+    /// Server: despawn a replicated node everywhere — with the whole subtree it
+    /// spawned with, if it was a runtime spawn.
     pub fn despawn(&mut self, world: &mut World, e: Entity) {
         debug_assert_eq!(self.role, NetRole::Server, "only the server despawns");
-        let Some(id) = self.ent_to_net.remove(&e) else { return };
-        self.net_to_ent.remove(&id);
+        let Some(&id) = self.ent_to_net.get(&e) else { return };
+        // A subtree's children go with the root. Everything the spawn created
+        // is despawned, whether or not it carried a NetId of its own — a
+        // player's camera and arms are not separately addressable, and leaving
+        // them behind would leave a headless rig standing in the world.
+        let ents = self.spawned_ents.remove(&id).unwrap_or_else(|| vec![e]);
         self.spawned_docs.remove(&id);
-        self.last_sent.retain(|(_, sid), _| *sid != id);
-        self.last_synced.retain(|(_, sid, _, _), _| *sid != id);
-        self.last_anim.retain(|(_, aid, _), _| *aid != id);
-        self.interest_sets.forget_everywhere(id);
-        world.despawn(e);
+        for &ent in &ents {
+            let Some(nid) = self.ent_to_net.remove(&ent) else {
+                world.despawn(ent);
+                continue;
+            };
+            self.net_to_ent.remove(&nid);
+            self.last_sent.retain(|(_, sid), _| *sid != nid);
+            self.last_synced.retain(|(_, sid, _, _), _| *sid != nid);
+            self.last_anim.retain(|(_, aid, _), _| *aid != nid);
+            self.interest_sets.forget_everywhere(nid);
+            self.relevance_pins.retain(|(_, pid), _| *pid != nid);
+            world.despawn(ent);
+        }
         let msg = Msg::Despawn { epoch: self.scene_epoch, id }.encode();
         for &p in &self.peers {
             self.transport.send(p, Channel::Reliable, &msg);
@@ -1541,6 +1943,11 @@ impl NetSession {
     /// inputs. [`Self::tick_server`] also calls it, so a simple driver that
     /// only ticks at the end still works.
     pub fn pump_server(&mut self, world: &World, tick: u64) {
+        // Last tick's kicks: the reason has been on the wire for a whole tick
+        // by now, so the link can go.
+        for p in std::mem::take(&mut self.pending_hangup) {
+            self.transport.disconnect(p);
+        }
         for inc in self.transport.poll() {
             match inc {
                 Incoming::Connected(_) => { /* wait for Hello to admit */ }
@@ -1556,6 +1963,23 @@ impl NetSession {
     /// Server, once per gameplay tick AFTER physics: handle joins/leaves/RPCs,
     /// then (at the snapshot cadence) send changed state.
     pub fn tick_server(&mut self, world: &World, tick: u64) {
+        self.tick_server_seen(world, tick, &crate::interest::NoOcclusion)
+    }
+
+    /// [`Self::tick_server`], with the line-of-sight test that decides what
+    /// each client may be told about (`net.host{ interestOcclusion = … }`).
+    ///
+    /// A separate entry point rather than a parameter on the existing one: most
+    /// drivers have no ray to offer — and none of this crate's own tests does —
+    /// so the common call stays two arguments and the occluding one says what
+    /// it is doing at the call site. Only the OUTGOING half needs it; pumping
+    /// incoming traffic decides nothing about who hears what.
+    pub fn tick_server_seen(
+        &mut self,
+        world: &World,
+        tick: u64,
+        occl: &dyn crate::interest::Occluder,
+    ) {
         self.pump_server(world, tick);
         // Flush queued RPCs (server → clients; no perceived-tick stamp — the
         // server's view is the authority).
@@ -1594,7 +2018,7 @@ impl NetSession {
             self.ping_id = self.ping_id.wrapping_add(1);
             let id = self.ping_id;
             let probe = Msg::Ping { id }.encode();
-            let now = std::time::Instant::now();
+            let now = floptle_core::time::Instant::now();
             for i in 0..self.peers.len() {
                 let p = self.peers[i];
                 let margin = self.peer_margin.get(&p).map(|m| m.round() as i32).unwrap_or(0);
@@ -1614,7 +2038,7 @@ impl NetSession {
         self.snap_count += 1;
         let keyframe = self.snap_count % KEYFRAME_EVERY == 1;
         if self.interest.enabled {
-            self.send_interest_snapshots(world, tick, keyframe);
+            self.send_interest_snapshots(world, tick, keyframe, occl);
             return;
         }
         // Broadcast: one snapshot, encoded once, identical for everyone. Below
@@ -1632,7 +2056,13 @@ impl NetSession {
     /// One snapshot per client, carrying only what that client is near enough
     /// to care about and only as much of it as its byte budget allows
     /// (`docs/multiplayer.md` §5.2, [`crate::interest`]).
-    fn send_interest_snapshots(&mut self, world: &World, tick: u64, keyframe: bool) {
+    fn send_interest_snapshots(
+        &mut self,
+        world: &World,
+        tick: u64,
+        keyframe: bool,
+        occl: &dyn crate::interest::Occluder,
+    ) {
         let snaps_per_sec = if self.tick_dt > 0.0 {
             1.0 / (self.tick_dt * SNAPSHOT_EVERY as f32)
         } else {
@@ -1640,6 +2070,7 @@ impl NetSession {
         };
         let budget = self.interest.budget_per_snapshot(snaps_per_sec);
         let (radius, hyst) = (self.interest.radius, self.interest.hysteresis);
+        let (occlusion, grace) = (self.interest.occlusion, self.interest.occlusion_grace);
 
         // Everything replicable this tick, gathered once and reused per peer —
         // the whole point is to scale with player count, so an O(players ×
@@ -1667,6 +2098,7 @@ impl NetSession {
 
             let mut relevant: std::collections::HashSet<u64> = std::collections::HashSet::new();
             let mut candidates: Vec<crate::interest::Candidate> = Vec::new();
+            let (mut withheld_radius, mut withheld_occluded, mut withheld_filter) = (0, 0, 0);
             for r in &all {
                 let (id, rep, pos, rot) = (&r.id, &r.rep, &r.pos, &r.rot);
                 let owned = rep.owner == Some(peer);
@@ -1675,14 +2107,48 @@ impl NetSession {
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 });
                 let held = self.interest_sets.get_mut(peer).is_live(*id);
-                // Hysteresis applies only on the way OUT. Something already
-                // being tracked gets to drift a little past the edge before it
-                // goes quiet, so a node hovering on the boundary doesn't enter
-                // and leave every single snapshot.
-                let reach = if held { radius + hyst } else { radius };
-                let near = distance.is_none_or(|d| d <= reach);
-                if !(rep.always_relevant || owned || near) {
-                    continue;
+                // A client's own avatar and anything flagged never-cull are
+                // decided before any test runs. Prediction reconciles against
+                // the first, and the second is the match clock, the objective,
+                // the boss — the things every player must agree on from
+                // anywhere.
+                if !(rep.always_relevant || owned) {
+                    // The GAME's answer wins over both tests. This is the
+                    // hidden-role hook: a survivor is simply not told about the
+                    // killer, whatever the geometry says.
+                    match self.relevance_pins.get(&(peer, *id)).copied() {
+                        Some(false) => {
+                            withheld_filter += 1;
+                            continue;
+                        }
+                        Some(true) => {}
+                        None => {
+                            // Hysteresis applies only on the way OUT. Something
+                            // already being tracked gets to drift a little past
+                            // the edge before it goes quiet, so a node hovering
+                            // on the boundary doesn't enter and leave every
+                            // single snapshot.
+                            let reach = if held { radius + hyst } else { radius };
+                            if !distance.is_none_or(|d| d <= reach) {
+                                withheld_radius += 1;
+                                continue;
+                            }
+                            // Near enough — but can this client SEE it? A
+                            // spectator has no eye to look from, and then
+                            // nothing is hidden rather than everything.
+                            if occlusion
+                                && let Some(c) = eye
+                                && self.interest_sets.get_mut(peer).occluded(
+                                    *id,
+                                    occl.blocked(c, *pos),
+                                    grace,
+                                )
+                            {
+                                withheld_occluded += 1;
+                                continue;
+                            }
+                        }
+                    }
                 }
                 relevant.insert(*id);
                 let base = self.last_sent.get(&(Some(peer), *id));
@@ -1731,6 +2197,9 @@ impl NetSession {
                         .filter(|c| chosen.contains(&c.id))
                         .map(|c| c.cost)
                         .sum(),
+                    withheld_radius,
+                    withheld_occluded,
+                    withheld_filter,
                 },
             );
             let mut entries = Vec::new();
@@ -1800,7 +2269,13 @@ impl NetSession {
 
     fn server_message(&mut self, world: &World, from: PeerId, msg: Msg, tick: u64) {
         match msg {
-            Msg::Hello { proto, input_map } => {
+            Msg::VoiceUp { seq, frame } => {
+                if !self.peers.contains(&from) {
+                    return; // not on the roster: a kicked peer stops being heard
+                }
+                self.forward_voice(from, seq, &frame);
+            }
+            Msg::Hello { proto, input_map, identity } => {
                 if proto != PROTO_VERSION {
                     let refuse = Msg::Refused {
                         reason: format!("protocol {proto} != {PROTO_VERSION}"),
@@ -1821,6 +2296,21 @@ impl NetSession {
                     self.transport.send(from, Channel::Reliable, &refuse.encode());
                     return;
                 }
+                // Who is this, and will this server have them? Both questions
+                // are answered before the peer is on the roster, so a refused
+                // join never becomes a `playerJoined` the game has to undo.
+                let who = self.verifier.verify(identity.as_ref());
+                if let Some(reason) = self.join_policy.refuse(&who) {
+                    self.log_join(format!(
+                        "refused peer {from} ({}): {reason}",
+                        who.label()
+                    ));
+                    let refuse = Msg::Refused { reason };
+                    self.transport.send(from, Channel::Reliable, &refuse.encode());
+                    return;
+                }
+                self.log_join(format!("peer {from} joined as {}", who.label()));
+                self.identities.insert(from, who);
                 self.peers.push(from);
                 self.events.push(NetEvent::PeerJoined(from));
                 let welcome = Msg::Welcome {
@@ -1848,7 +2338,7 @@ impl NetSession {
                     .map(|(&id, (ron, owner))| Msg::Spawn {
                         epoch: self.scene_epoch,
                         id,
-                        node_ron: ron.clone(),
+                        nodes_ron: ron.clone(),
                         owner: *owner,
                     })
                     .collect();
@@ -1922,6 +2412,11 @@ impl NetSession {
     }
 
     fn drop_peer(&mut self, p: PeerId) {
+        self.drop_peer_with(p, None)
+    }
+
+    fn drop_peer_with(&mut self, p: PeerId, why: Option<String>) {
+        self.identities.remove(&p);
         if let Some(i) = self.peers.iter().position(|&x| x == p) {
             self.peers.remove(i);
             self.peer_inputs.remove(&p);
@@ -1930,6 +2425,11 @@ impl NetSession {
             self.peer_late.remove(&p);
             self.interest_sets.drop_peer(p);
             self.interest_stats.remove(&p);
+            self.relevance_pins.retain(|(peer, _), _| *peer != p);
+            self.voice_forward.remove(&p);
+            for list in self.voice_forward.values_mut() {
+                list.retain(|q| *q != p);
+            }
             self.peer_rtt.remove(&p);
             // A peer that left must stop holding the retention floor down —
             // otherwise every ring grows to its cap for the rest of the session
@@ -1940,7 +2440,7 @@ impl NetSession {
             self.last_sent.retain(|(a, _), _| *a != Some(p));
             self.last_synced.retain(|(a, _, _, _), _| *a != Some(p));
             self.last_anim.retain(|(a, _, _), _| *a != Some(p));
-            self.events.push(NetEvent::PeerLeft(p));
+            self.events.push(NetEvent::PeerLeft(p, why));
             let left = Msg::PeerLeft { peer: p }.encode();
             for &q in &self.peers {
                 self.transport.send(q, Channel::Reliable, &left);
@@ -2179,7 +2679,7 @@ impl NetSession {
             self.ping_id = self.ping_id.wrapping_add(1);
             let id = self.ping_id;
             self.transport.send(SERVER, Channel::Unreliable, &Msg::Ping { id }.encode());
-            let now = std::time::Instant::now();
+            let now = floptle_core::time::Instant::now();
             self.pings_out.insert((id, SERVER), now);
             self.expire_pings(now);
         }
@@ -2310,6 +2810,22 @@ impl NetSession {
                 self.connected = false;
                 self.events.push(NetEvent::Disconnected(reason));
             }
+            Msg::Voice { speaker, seq, frame } => {
+                if self.voice_in.len() >= Self::MAX_VOICE_IN {
+                    self.voice_in.remove(0);
+                }
+                self.voice_in.push((speaker, seq, frame));
+            }
+            Msg::Kicked { reason } => {
+                // Both events, in this order: `Kicked` is what a game shows the
+                // player ("you were removed: <why>"), `Disconnected` is what
+                // every existing teardown path already listens for. A kick that
+                // only fired the new one would leave games written before this
+                // sitting in a session that no longer exists.
+                self.connected = false;
+                self.events.push(NetEvent::Kicked(reason.clone()));
+                self.events.push(NetEvent::Disconnected(reason));
+            }
             Msg::Scene { epoch, scene } => {
                 self.scene_epoch = epoch;
                 self.scene = scene.clone();
@@ -2336,37 +2852,64 @@ impl NetSession {
                 self.rollback_confirmed = 0;
                 self.state_hashes.clear();
             }
-            Msg::Spawn { epoch, id, node_ron, owner } => {
+            Msg::Spawn { epoch, id, nodes_ron, owner } => {
                 if epoch != self.scene_epoch || self.scene_pending {
                     return; // another scene's spawn — stale or early
                 }
                 if self.net_to_ent.contains_key(&id) {
                     return; // duplicate catch-up
                 }
-                let Ok(node) = ron::from_str::<floptle_scene::NodeDoc>(&node_ron) else {
+                let Ok(nodes) = ron::from_str::<Vec<floptle_scene::NodeDoc>>(&nodes_ron) else {
                     return;
                 };
-                let e = floptle_scene::spawn_node(&node, world);
-                let mut rep = world.get::<Replicated>(e).copied().unwrap_or_default();
-                rep.owner = owner;
-                world.insert(e, rep);
-                self.net_to_ent.insert(id, e);
-                self.ent_to_net.insert(e, id);
-                self.interp.insert(id, InterpBuf::new(&rep));
-                self.spawned_in.push((id, e, owner));
+                if nodes.is_empty() {
+                    return;
+                }
+                // The same call the server made, on the same vector, in the
+                // same order — which is what makes `base + index` mean the
+                // same node on both ends without sending a single id.
+                let ents = floptle_scene::spawn_nodes(&nodes, world);
+                Self::bind_spawned(
+                    &mut self.net_to_ent,
+                    &mut self.ent_to_net,
+                    Some(&mut self.interp),
+                    world,
+                    &ents,
+                    id,
+                    owner,
+                );
+                for &e in &ents {
+                    let nid = self.ent_to_net.get(&e).copied().unwrap_or(id);
+                    self.spawned_in.push((nid, e, owner));
+                }
+                self.spawned_ents.insert(id, ents);
             }
             Msg::Despawn { epoch, id } => {
                 if epoch != self.scene_epoch || self.scene_pending {
                     return;
                 }
-                if let Some(e) = self.net_to_ent.remove(&id) {
-                    self.ent_to_net.remove(&e);
-                    self.interp.remove(&id);
-                    self.anim_bufs.retain(|(bid, _), _| *bid != id);
-                    self.anim_started.retain(|(bid, _)| *bid != id);
+                let Some(&root) = self.net_to_ent.get(&id) else { return };
+                let ents = self.spawned_ents.remove(&id).unwrap_or_else(|| vec![root]);
+                for e in ents {
+                    if let Some(nid) = self.ent_to_net.remove(&e) {
+                        self.net_to_ent.remove(&nid);
+                        self.interp.remove(&nid);
+                        self.anim_bufs.retain(|(bid, _), _| *bid != nid);
+                        self.anim_started.retain(|(bid, _)| *bid != nid);
+                    }
                     self.despawned_in.push(e.index());
                     world.despawn(e);
                 }
+            }
+            Msg::SetOwner { epoch, id, owner } => {
+                if epoch != self.scene_epoch || self.scene_pending {
+                    return;
+                }
+                let Some(&e) = self.net_to_ent.get(&id) else { return };
+                let mut rep = world.get::<Replicated>(e).copied().unwrap_or_default();
+                rep.owner = owner;
+                world.insert(e, rep);
+                self.owner_changed_in.push((id, e, owner));
             }
             Msg::Snapshot { epoch, tick, entries, synced, anims, .. } => {
                 if epoch != self.scene_epoch || self.scene_pending {
@@ -2452,7 +2995,7 @@ impl NetSession {
                 self.rpcs_in.push(ReceivedRpc { name, args, sender, tick });
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
-            Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer)),
+            Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer, None)),
             Msg::RollbackStart { peers, input_delay, seed } => {
                 // The host set the roster and the parameters; this is also the
                 // shared tick origin, so the driver restarts at 0 on it.

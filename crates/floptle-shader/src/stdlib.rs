@@ -289,7 +289,16 @@ fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
     return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-// Integer-lattice hashes (PCG-style bit mixing). The old float hashes
+// Integer-lattice hashes (PCG-style bit mixing).
+//
+// **The parentheses around each `*` before a `^` are required, not style.**
+// WGSL's spec refuses a mix of `*` and `^` without them, and a browser's
+// compiler (Tint) enforces that while naga does not — so an unparenthesised
+// version validates on the desktop, ships, and is refused WHOLE in a tab,
+// taking every pipeline in the module with it. That is exactly what happened
+// to any game shader using noise until 2026-09-05. The probe's shader census
+// (`tools/web/shot.py`) compiles the shipped examples through a real browser
+// and is what catches this class. The old float hashes
 // (`fract(p * 456.21)`…) silently quantized once the product outgrew f32
 // fract precision — beyond ~50 lattice cells the noise degraded into
 // straight-edged constant sheets (sky shaders hit this instantly: a cloud
@@ -299,7 +308,7 @@ fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
 fn flsl_hash2(p: vec2<f32>) -> f32 {
     let xi = bitcast<u32>(i32(round(p.x * 8.0)));
     let yi = bitcast<u32>(i32(round(p.y * 8.0)));
-    var h = xi * 0x85EBCA6Bu ^ yi * 0xC2B2AE35u;
+    var h = (xi * 0x85EBCA6Bu) ^ (yi * 0xC2B2AE35u);
     h = (h ^ (h >> 16u)) * 0x045D9F3Bu;
     h = h ^ (h >> 16u);
     return f32(h >> 8u) * (1.0 / 16777216.0);
@@ -309,7 +318,7 @@ fn flsl_hash3(p: vec3<f32>) -> f32 {
     let xi = bitcast<u32>(i32(round(p.x * 8.0)));
     let yi = bitcast<u32>(i32(round(p.y * 8.0)));
     let zi = bitcast<u32>(i32(round(p.z * 8.0)));
-    var h = xi * 0x85EBCA6Bu ^ yi * 0xC2B2AE35u ^ zi * 0x27D4EB2Fu;
+    var h = (xi * 0x85EBCA6Bu) ^ (yi * 0xC2B2AE35u) ^ (zi * 0x27D4EB2Fu);
     h = (h ^ (h >> 16u)) * 0x045D9F3Bu;
     h = h ^ (h >> 16u);
     return f32(h >> 8u) * (1.0 / 16777216.0);

@@ -11,7 +11,7 @@
 //! IDE squiggle — a failed save never black-screens the scene.
 
 use std::collections::{HashMap, HashSet};
-use std::time::SystemTime;
+use floptle_core::time::SystemTime;
 
 use floptle_core::{Entity, Material, ObjectMaterials};
 use floptle_render::{FlslBindingId, FlslBlend, FlslShaderId, TexId};
@@ -237,7 +237,7 @@ impl Editor {
     /// Console-reports each new error once.
     fn ensure_flsl_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
-        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.flsl_cache.get(rel)
             && entry.mtime == mtime
         {
@@ -257,7 +257,7 @@ impl Editor {
             msg
         };
 
-        let src = match std::fs::read_to_string(&full) {
+        let src = match floptle_vfs::read_to_string(&full) {
             Ok(s) => s,
             Err(e) => {
                 let msg = report(self, format!("can't read shader ({e})"));
@@ -345,7 +345,10 @@ impl Editor {
 
     /// Drop every flsl cache (project switch — the raster pass was rebuilt).
     pub(crate) fn clear_flsl_state(&mut self) {
-        self.shader_graph = Default::default();
+        #[cfg(feature = "editor-ui")]
+        {
+            self.shader_graph = Default::default();
+        }
         self.flsl_cache.clear();
         self.flsl_binds.clear();
         self.flsl_free.clear();
@@ -561,14 +564,14 @@ impl Editor {
     /// Compile (or hot-reload) one Sdf-stage `.flsl` by material path.
     fn ensure_sdf_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
-        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.sdf_cache.get(rel)
             && entry.mtime == mtime
         {
             return;
         }
         let prev_gen = self.sdf_cache.get(rel).map(|s| s.generation).unwrap_or(0);
-        let outcome = std::fs::read_to_string(&full)
+        let outcome = floptle_vfs::read_to_string(&full)
             .map_err(|e| format!("can't read shader ({e})"))
             .and_then(|src| floptle_shader::check_sdf(&src));
         match outcome {
@@ -787,7 +790,7 @@ impl Editor {
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_ui_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
-        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.ui_flsl_cache.get(rel)
             && entry.mtime == mtime
         {
@@ -805,7 +808,7 @@ impl Editor {
             }
             msg
         };
-        let src = match std::fs::read_to_string(&full) {
+        let src = match floptle_vfs::read_to_string(&full) {
             Ok(s) => s,
             Err(e) => {
                 let msg = report(self, format!("can't read shader ({e})"));
@@ -967,7 +970,7 @@ impl Editor {
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_post_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
-        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.post_flsl_cache.get(rel)
             && entry.mtime == mtime
         {
@@ -989,7 +992,7 @@ impl Editor {
             );
         };
 
-        let src = match std::fs::read_to_string(&full) {
+        let src = match floptle_vfs::read_to_string(&full) {
             Ok(s) => s,
             Err(e) => {
                 let msg = report(self, format!("can't read shader ({e})"));

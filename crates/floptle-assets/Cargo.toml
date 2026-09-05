@@ -17,5 +17,10 @@ floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render", default-features = false }
 
 gltf = { workspace = true } # Blender/glTF 2.0 import (ADR-0006)
+# Files go through the engine's filesystem: std::fs on the desktop, the game's
+# bundle in a browser. `gltf::import` reads the disk itself, so the model reader
+# here does its own I/O — `base64` is for the data-URI buffers a .gltf may embed.
+floptle-vfs = { path = "../floptle-vfs" }
+base64 = "0.22"
 image = { workspace = true } # loose texture decode (PNG/JPEG) for materials
 serde_json = "1"            # build the glTF JSON chunk for the .glb writer (mirror-apply)

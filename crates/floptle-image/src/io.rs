@@ -128,17 +128,17 @@ pub fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
 /// Read an image file from disk to straight RGBA8.
 pub fn load_image(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    decode_image(&std::fs::read(path).ok()?)
+    decode_image(&floptle_vfs::read(path).ok()?)
 }
 
 /// Write straight RGBA8 to `path` as a PNG, creating parent directories.
 pub fn save_png(path: &Path, px: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        floptle_vfs::create_dir_all(parent)?;
     }
     let bytes = encode_png(px, w, h)
         .ok_or_else(|| std::io::Error::other("PNG encode failed"))?;
-    std::fs::write(path, bytes)
+    floptle_vfs::write(path, bytes)
 }
 
 fn encode_mask(m: &Mask) -> Option<Vec<u8>> {
@@ -357,9 +357,9 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
 /// Returns the PNG path actually written.
 pub fn save_document(path: &Path, img: &Image) -> std::io::Result<std::path::PathBuf> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        floptle_vfs::create_dir_all(parent)?;
     }
-    std::fs::write(path, encode(img))?;
+    floptle_vfs::write(path, encode(img))?;
     let png_path = png_path_for(path);
     let flat = crate::composite::flatten(img, 0);
     save_png(&png_path, &flat, img.w, img.h)?;
@@ -379,7 +379,7 @@ pub fn doc_path_for(png: &Path) -> std::path::PathBuf {
 
 /// Read a document from disk.
 pub fn load_document(path: &Path) -> Option<Image> {
-    decode(&std::fs::read(path).ok()?)
+    decode(&floptle_vfs::read(path).ok()?)
 }
 
 /// Open ANY image path as a document: the sibling `.flimg` if there is one,
@@ -390,7 +390,7 @@ pub fn open_any(path: &Path, default_mode: Mode) -> Option<Image> {
         return load_document(path);
     }
     let doc = doc_path_for(path);
-    if doc.is_file()
+    if floptle_vfs::is_file(&doc)
         && let Some(img) = load_document(&doc)
     {
         return Some(img);
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn saving_writes_the_png_beside_the_document() {
         let dir = std::env::temp_dir().join(format!("flimg-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let doc = dir.join("thing.flimg");
         let mut img = Image::new(8, 8, Mode::Pixel);
         img.layers[0].grid_mut(0).unwrap().fill([10, 200, 30, 255]);
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn opening_a_bare_png_wraps_it_in_a_document() {
         let dir = std::env::temp_dir().join(format!("flimg-open-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let png = dir.join("loose.png");
         save_png(&png, &[7, 8, 9, 255, 1, 2, 3, 255], 2, 1).unwrap();
         let img = open_any(&png, Mode::Painterly).expect("wrap");
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn opening_a_png_prefers_its_sibling_document() {
         let dir = std::env::temp_dir().join(format!("flimg-sib-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = floptle_vfs::create_dir_all(&dir);
         let doc_path = dir.join("art.flimg");
         let mut img = Image::new(4, 4, Mode::Pixel);
         img.add_raster_layer(); // two layers — proof we got the document, not the PNG

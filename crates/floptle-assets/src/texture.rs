@@ -15,8 +15,8 @@ use floptle_render::TextureData;
 /// so a mislabeled file (e.g. a WebP saved as `.png`) still loads. `None` on any
 /// I/O or decode error.
 fn decode(path: &Path) -> Option<image::DynamicImage> {
-    image::ImageReader::open(path)
-        .ok()?
+    let bytes = floptle_vfs::read(path).ok()?;
+    image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .decode()
@@ -75,10 +75,10 @@ pub fn decode_png(bytes: &[u8]) -> Option<TextureData> {
 /// Write an RGBA8 [`TextureData`] to `path` as a PNG.
 pub fn save_texture_png(tex: &TextureData, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        floptle_vfs::create_dir_all(parent)?;
     }
-    image::save_buffer(path, &tex.pixels, tex.width, tex.height, image::ColorType::Rgba8)
-        .map_err(|e| std::io::Error::other(e.to_string()))
+    let bytes = encode_png(tex).ok_or_else(|| std::io::Error::other("PNG encode failed"))?;
+    floptle_vfs::write(path, bytes)
 }
 
 #[cfg(test)]

@@ -15,6 +15,39 @@ use floptle_script::{NetCmd, NetRoleState, NetState};
 
 use crate::{anim, Editor};
 
+/// Line of sight against the level, for interest management
+/// (`net.host{ interestOcclusion = "Level" }`, floptle/0182).
+///
+/// The ray stops a hair short of the target: a node standing ON the floor, or
+/// with a collider of its own, would otherwise be blocked by the very surface
+/// it is sitting on and never be relevant to anybody.
+struct LevelSight<'a> {
+    sim: &'a floptle_physics::Sim,
+    /// The layer bit walls are on. Only that layer blocks — a trigger volume, a
+    /// water surface and another player's capsule are all "in the way" and none
+    /// of them is a wall.
+    mask: u32,
+}
+
+/// How far short of the target the sight ray stops, metres.
+const SIGHT_EPSILON: f32 = 0.35;
+
+impl floptle_net::Occluder for LevelSight<'_> {
+    fn blocked(&self, from: [f64; 3], to: [f64; 3]) -> bool {
+        let a = floptle_core::math::DVec3::from_array(from);
+        let b = floptle_core::math::DVec3::from_array(to);
+        let d = b - a;
+        let len = d.length();
+        if len <= SIGHT_EPSILON as f64 {
+            return false; // close enough to be touching: never hide it
+        }
+        let dir = (d / len).as_vec3();
+        self.sim
+            .raycast_masked(a, dir, len as f32 - SIGHT_EPSILON, self.mask)
+            .is_some()
+    }
+}
+
 /// The rewound world for a stamped combat intent (`docs/multiplayer.md`
 /// §7): every networked node's pose (+ its scripts' `synced` vars) at the
 /// tick the SENDER perceived — their stamp minus each node's interp delay,
@@ -79,9 +112,21 @@ impl Editor {
     /// drain Lua session commands, advance the hub clock, run the server and
     /// ghost-client sessions, and dispatch received RPCs/events into scripts.
     pub(crate) fn net_tick(&mut self, tick: u64) {
+        self.voice_tick();
         for cmd in self.script_host.take_net_commands() {
             match cmd {
-                NetCmd::Host { relay, port, interest, interest_budget, input_delay, .. } => {
+                NetCmd::Host {
+                    relay,
+                    port,
+                    interest,
+                    interest_budget,
+                    interest_occlusion,
+                    input_delay,
+                    require_identity,
+                    allow: allow_ids,
+                    deny: deny_ids,
+                    ..
+                } => {
                     // Recorded BEFORE the session comes up: `net_rollback_host_setup`
                     // runs inside the host call and reads it (floptle/0049).
                     self.net_input_delay = input_delay;
@@ -100,6 +145,7 @@ impl Editor {
                         s.set_interest(floptle_net::InterestConfig {
                             enabled: true,
                             radius,
+                            occlusion: interest_occlusion.is_some(),
                             budget_bytes_per_sec: interest_budget
                                 .unwrap_or(d.budget_bytes_per_sec),
                             ..d
@@ -115,6 +161,73 @@ impl Editor {
                             ),
                             None,
                         );
+                    }
+                    // Who this server will have. Applied after the session
+                    // exists, like interest, so it reaches whichever transport
+                    // came up.
+                    if let Some(s) = self.net_server.as_mut() {
+                        let policy = floptle_net::JoinPolicy {
+                            require_identity,
+                            allow: allow_ids.iter().cloned().collect(),
+                            deny: deny_ids.iter().cloned().collect(),
+                        };
+                        let active = policy.is_active();
+                        s.set_join_policy(policy);
+                        if active {
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                "🌐 a join policy is in force, and account claims are \
+                                 UNVERIFIED — the engine carries what a client says about \
+                                 itself and has no way to check it yet, so allow/deny lists \
+                                 and requireIdentity keep out the careless, not the \
+                                 determined. net.identity(peer).verified is false for \
+                                 everyone until that lands."
+                                    .into(),
+                                None,
+                            );
+                        }
+                    }
+                    self.net_occlusion_layer = interest_occlusion.clone();
+                    if let Some(layer) = &interest_occlusion {
+                        // `None` = no sim to ask yet, which is not the same as
+                        // "no such layer". Warning about an unknown layer on the
+                        // strength of a question nobody answered sends someone
+                        // to Project Settings to look for a layer that is
+                        // already there.
+                        let known = self.sim.as_ref().map(|s| s.layers().index_of(layer).is_some());
+                        let (level, line) = if interest.is_none() {
+                            (
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "net.host{{ interestOcclusion = \"{layer}\" }} without \
+                                     `interest` does nothing — line of sight narrows the \
+                                     radius, it does not replace it. Add `interest = <metres>`."
+                                ),
+                            )
+                        } else if known == Some(false) {
+                            (
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "net.host{{ interestOcclusion = \"{layer}\" }}: no layer \
+                                     named that in this project, so NOTHING blocks sight and \
+                                     every client is told about its whole radius. Add the \
+                                     layer in Project Settings, or name the one your walls \
+                                     are on."
+                                ),
+                            )
+                        } else {
+                            (
+                                floptle_script::LogLevel::Debug,
+                                format!(
+                                    "🌐 line-of-sight interest ON — a client is told about a \
+                                     node only when nothing on \"{layer}\" stands between \
+                                     them. This is a security boundary, not a bandwidth one: \
+                                     a radius alone still hands a modified client every \
+                                     position inside it."
+                                ),
+                            )
+                        };
+                        self.console.push(level, line, None);
                     }
                 }
                 NetCmd::SetInputDelay { ticks } => {
@@ -208,6 +321,60 @@ impl Editor {
                         }
                     }
                 }
+                NetCmd::Kick { peer, reason } => {
+                    let known = self
+                        .net_server
+                        .as_mut()
+                        .map(|s| s.kick(peer, &reason))
+                        .unwrap_or(false);
+                    if !known {
+                        self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            format!("net.kick({peer}): no such peer in this session"),
+                            None,
+                        );
+                    }
+                }
+                NetCmd::SetRelevant { eid, peer, relevant } => {
+                    let ent = self.world.entity_with::<Transform>(eid);
+                    if let (Some(s), Some(e)) = (self.net_server.as_mut(), ent)
+                        && !s.set_relevant(e, peer, relevant)
+                    {
+                        self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            "net.setRelevant: that node is not replicated, so there is \
+                             nothing to withhold — give it a Networked component"
+                                .into(),
+                            None,
+                        );
+                    }
+                }
+                NetCmd::SetOwner { eid, owner } => {
+                    let ent = self.world.entity_with::<Transform>(eid);
+                    if let (Some(s), Some(e)) = (self.net_server.as_mut(), ent) {
+                        if !s.set_owner(&mut self.world, e, owner) {
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                "net.setOwner: that node is not replicated — give it a \
+                                 Networked component, or spawn it with net.spawn"
+                                    .into(),
+                                None,
+                            );
+                            continue;
+                        }
+                        // Whoever drives it changed: a Predicted node handed to
+                        // a peer runs on THEIR replayed input from now on, and
+                        // one released stops being replayed at all.
+                        self.net_remote_predicted.retain(|(re, _)| *re != e);
+                        if let Some(rep) = self.world.get::<floptle_core::Replicated>(e)
+                            && rep.mode == ReplicationMode::Predicted
+                            && let Some(p) = owner
+                        {
+                            self.net_remote_predicted.push((e, p));
+                        }
+                        self.net_apply_host_filters();
+                    }
+                }
             }
         }
         if let Some(hub) = &self.net_hub {
@@ -279,11 +446,24 @@ impl Editor {
             // controller — ship each one's (state, time, weight) per layer for
             // snapshot diffing (transitions cost bytes; steady loops cost none).
             let anims = anim::collect_net_states(&self.world, &self.mesh_registry, &self.anim);
+            // Line-of-sight interest, when the game asked for it: the mask is
+            // resolved once per tick rather than once per ray, and an unknown
+            // layer name resolves to nothing — which blocks nothing, so the
+            // session degrades to plain radius interest instead of going dark.
+            // (`net.host` already said so in the Console when it came up.)
+            let sight = self.net_occlusion_layer.as_ref().and_then(|name| {
+                let sim = self.sim.as_ref()?;
+                let bit = sim.layers().index_of(name)?;
+                Some(LevelSight { sim, mask: 1u32 << bit })
+            });
             if let Some(s) = self.net_server.as_mut() {
                 s.update_synced(synced);
                 s.update_body_states(bstates);
                 s.update_anim_states(anims);
-                s.tick_server(&self.world, tick);
+                match &sight {
+                    Some(o) => s.tick_server_seen(&self.world, tick, o),
+                    None => s.tick_server(&self.world, tick),
+                }
                 (s.take_rpcs(), s.take_events())
             } else {
                 (Vec::new(), Vec::new())
@@ -327,7 +507,12 @@ impl Editor {
                         self.net_rollback_resync();
                         self.script_host.fire_net_event(&mut self.world, "playerJoined", Some(p), None)
                     }
-                    NetEvent::PeerLeft(p) => {
+                    NetEvent::PeerLeft(p, why) => {
+                        // Their voice goes with them, before anything else —
+                        // a stream left playing is a stream that never ends.
+                        let mut v = std::mem::take(&mut self.voice);
+                        v.drop_peer(p, &mut self.audio);
+                        self.voice = v;
                         // Their avatar leaves with them: every runtime spawn
                         // that peer owned despawns everywhere, automatically.
                         let owned = self
@@ -349,7 +534,7 @@ impl Editor {
                             self.net_apply_host_filters();
                         }
                         self.net_rollback_resync();
-                        self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), None)
+                        self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), why.as_deref())
                     }
                     _ => {}
                 }
@@ -393,6 +578,7 @@ impl Editor {
         }
         // --- mirror session state into Lua (net.role()/peers()/ping()/isMine) ---
         let state = if let Some(s) = &self.net_server {
+            let identities = Self::mirror_identities(s);
             NetState {
                 role: NetRoleState::Server,
                 peers: s.peers().to_vec(),
@@ -404,6 +590,7 @@ impl Editor {
                 // The relay's answer, so a game can put the code on its own
                 // lobby screen instead of sending players to the 🌐 panel.
                 lobby_code: self.net_lobby_code.clone(),
+                identities,
             }
         } else {
             NetState::default()
@@ -646,6 +833,161 @@ impl Editor {
         }
     }
 
+    /// Pick up a finished "test voice from a WAV" file dialog and start it.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn poll_voice_test_pick(&mut self) {
+        let Some(rx) = self.voice_test_pick.as_ref() else { return };
+        let paths = match crate::native_dialog::poll(rx) {
+            crate::native_dialog::Answer::Waiting => return,
+            crate::native_dialog::Answer::Chose(p) => p,
+            crate::native_dialog::Answer::Closed => {
+                self.voice_test_pick = None;
+                return;
+            }
+        };
+        self.voice_test_pick = None;
+        let Some(path) = paths.first() else { return };
+        match floptle_audio::load_clip(path) {
+            Ok(clip) => {
+                // Whoever is NOT us: a test voice attributed to our own peer id
+                // would be filtered out as our own microphone coming back.
+                let peer = self
+                    .net_server
+                    .as_ref()
+                    .and_then(|s| s.peers().first().copied())
+                    .unwrap_or(1);
+                self.voice.set_test_speaker(peer, std::sync::Arc::new(clip));
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "🎤 playing \"{}\" as peer {peer}'s microphone — through the real \
+                         forwarding rules, jitter buffer and spatial voice",
+                        path.display()
+                    ),
+                    None,
+                );
+            }
+            Err(e) => self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("test voice: {} — {e}", path.display()),
+                None,
+            ),
+        }
+    }
+
+    /// One tick of voice chat (`floptle/0180`): apply the game's `voice.*`
+    /// calls, ship what the microphone heard, hand arriving frames to the right
+    /// speaker, keep every voice attached to its node, and mirror the result
+    /// back to Lua.
+    ///
+    /// Runs whether or not a session exists, because the settings screen does:
+    /// a player has to be able to pick a device and watch the level meter move
+    /// before they join anything.
+    fn voice_tick(&mut self) {
+        let cmds = self.script_host.take_voice_commands();
+        // The server's say on who hears whom goes to the SESSION, not to this
+        // machine's audio path — that is the whole point of it being a rule
+        // rather than a volume.
+        for (peer, to) in crate::voice::VoiceChat::take_forwards(&cmds) {
+            if let Some(s) = self.net_server.as_mut() {
+                match to {
+                    Some(list) => s.set_voice_forward(peer, list),
+                    None => s.clear_voice_forward(peer),
+                }
+            }
+        }
+        // Split the borrow: `apply_commands` reads the world, the rest doesn't.
+        let mut voice = std::mem::take(&mut self.voice);
+        voice.apply_commands(cmds, &self.world);
+
+        // The harness microphone: a WAV played in as though a peer were
+        // speaking, through the real forwarding rules. Voice normally needs two
+        // machines and two people to try at all, which is what makes it the
+        // feature most likely to ship broken.
+        // One 20 ms frame per tick: this is real time, not a dump.
+        if let Some((peer, seq, packet)) = voice.next_test_frame() {
+            if let Some(s) = self.net_server.as_mut() {
+                s.inject_voice_from(peer, seq, &packet);
+            } else {
+                // No session: play it straight into our own ears, so the
+                // spatial routing can still be checked with nothing hosted.
+                voice.receive(peer, seq, &packet);
+            }
+        }
+        // Ship the microphone. A client sends to the server; a host is a
+        // player too and forwards its own voice under the same rules.
+        for frame in voice.encode_captured() {
+            if let Some(c) = self.net_play_client.as_mut() {
+                c.send_voice(&frame);
+            } else if let Some(s) = self.net_server.as_mut() {
+                s.host_voice(&frame);
+            }
+        }
+        // Take delivery. Both roles receive: the host hears its players, and
+        // each player hears whoever the host forwarded.
+        let incoming = match (self.net_play_client.as_mut(), self.net_server.as_mut()) {
+            (Some(c), _) => c.take_voice(),
+            (None, Some(s)) => s.take_voice(),
+            _ => Vec::new(),
+        };
+        for (peer, seq, frame) in incoming {
+            voice.receive(peer, seq, &frame);
+        }
+
+        voice.advance(self.game_tick.step * 1000.0, &self.world, &mut self.audio);
+        for line in std::mem::take(&mut voice.notices) {
+            self.console.push(floptle_script::LogLevel::Debug, line, None);
+        }
+        let is_server = self.net_server.is_some();
+        self.script_host.set_voice_state(voice.state(is_server));
+        self.voice = voice;
+    }
+
+    /// This machine's account claim, for the join handshake (floptle/0183).
+    ///
+    /// `None` when nobody is signed in, which is a normal state: a LAN or
+    /// friends game works exactly as it always has, and the server decides for
+    /// itself whether it will admit an anonymous peer.
+    ///
+    /// **No token travels.** What goes out is the account's public claim — the
+    /// subject id, the display name, the tier — and `proof: None`, because
+    /// there is nothing a server could check it against that would not also let
+    /// that server act AS this account. The moment the provider can mint an
+    /// audience-scoped credential, it goes in `proof` and the claim starts
+    /// arriving verified; until then the server is told plainly that this is an
+    /// assertion. See `crates/floptle-net/src/identity.rs`.
+    fn net_identity_claim(&self) -> Option<floptle_net::IdentityClaim> {
+        let who = self.account.as_ref()?.session()?;
+        Some(floptle_net::IdentityClaim {
+            id: who.sub.clone(),
+            name: who.name.clone().or_else(|| who.email.clone()).unwrap_or_default(),
+            tier: who.tier.clone(),
+            proof: None,
+        })
+    }
+
+    /// Each connected peer's account identity, mirrored into Lua for
+    /// `net.identity(peer)` (floptle/0183).
+    fn mirror_identities(
+        s: &floptle_net::NetSession,
+    ) -> HashMap<u64, floptle_script::PeerIdentity> {
+        s.peers()
+            .iter()
+            .filter_map(|&p| {
+                let who = s.identity(p)?;
+                Some((
+                    p,
+                    floptle_script::PeerIdentity {
+                        id: who.id.clone(),
+                        name: who.name.clone(),
+                        tier: who.tier.clone(),
+                        verified: who.verified,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     /// Networked nodes' owners, mirrored into Lua for `net.isMine(node)`.
     fn collect_net_owners(world: &World) -> HashMap<u32, Option<u64>> {
         world.query::<floptle_core::Replicated>().map(|(e, r)| (e.index(), r.owner)).collect()
@@ -775,6 +1117,12 @@ impl Editor {
                 s.switch_scene(&rel);
                 s.rebind_scene(&self.world);
             }
+            // The conversation outlives the map. Only the node attachments go —
+            // the nodes they named are gone — and the game re-attaches in the
+            // new scene without the stream ever having restarted.
+            let mut v = std::mem::take(&mut self.voice);
+            v.rebind_scene(&mut self.audio);
+            self.voice = v;
             self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
             // A scene switch ENDS the match rather than carrying it across. The
             // state ring is indexed by node position, the slot order comes from
@@ -810,6 +1158,7 @@ impl Editor {
     /// is the authoritative server — and scene-authored Predicted nodes belong
     /// to the FIRST joining peer, whose replayed inputs drive them in the tick
     /// loop (the one-script model, server side).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_host_quic(&mut self, port: u16) {
         if !self.playing {
             self.console.push(
@@ -822,6 +1171,21 @@ impl Editor {
         if self.net_server.is_some() || self.net_play_client.is_some() {
             return;
         }
+        // A browser build has no UDP socket to bind. Said out loud, because a
+        // game whose host button does nothing is worse than one that says why.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = port;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.host: hosting is not available in a browser build yet — a browser has \
+                 no UDP socket for the QUIC transport. Desktop builds are unaffected."
+                    .into(),
+                None,
+            );
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let transport = match floptle_net::QuicServer::bind(port) {
             Ok(t) => t,
             Err(e) => {
@@ -847,6 +1211,7 @@ impl Editor {
     /// the relay hands out a lobby code and friends join with it from
     /// anywhere that can reach the relay. Self-host `floptle-relay`, or use a
     /// managed one (Floptle Cloud).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_host_relay(&mut self, relay_addr: &str) {
         if !self.playing {
             self.console.push(
@@ -969,6 +1334,7 @@ impl Editor {
     /// Join a REAL session at `host:port` (QUIC). The play world becomes a
     /// predicting client of a server on another machine — same machinery as
     /// "Test as remote player", minus the hidden server.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_join_quic(&mut self, addr: &str) {
         if !self.playing {
             self.console.push(
@@ -981,6 +1347,19 @@ impl Editor {
         if self.net_server.is_some() || self.net_play_client.is_some() {
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = addr;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.join: joining is not available in a browser build yet — a browser has \
+                 no UDP socket for the QUIC transport. Desktop builds are unaffected."
+                    .into(),
+                None,
+            );
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let transport = match floptle_net::QuicClient::connect(addr) {
             Ok(t) => t,
             Err(e) => {
@@ -996,6 +1375,7 @@ impl Editor {
     }
 
     /// Join a session through a relay by LOBBY CODE.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
         if !self.playing {
             self.console.push(
@@ -1027,7 +1407,8 @@ impl Editor {
         let transport = Self::net_impair_wrap(transport);
         self.net_impair_note();
         Self::net_assign_scene_owners(&mut self.world);
-        let mut client = NetSession::client(transport, self.input_map_hash());
+        let mut client =
+            NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
         client.register_scene(&self.world);
         // Which slot is ours depends on the peer id the server assigns —
         // everything is snapshot-driven until the Welcome binds our avatar.
@@ -1221,6 +1602,7 @@ impl Editor {
             join_error: None,
             // The hidden harness server is loopback: no relay, no code.
             lobby_code: None,
+            identities: Self::mirror_identities(&hs.session),
         });
         hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
@@ -1315,6 +1697,11 @@ impl Editor {
                         hs.sim.remove_body(eid);
                     }
                 }
+                NetCmd::SetOwner { eid, owner } => {
+                    if let Some(e) = hs.world.entity_with::<Transform>(eid) {
+                        hs.session.set_owner(&mut hs.world, e, owner);
+                    }
+                }
                 // Deferred, not handled here: resolving what the path names
                 // needs `self` (the prefab registry, the project root) and the
                 // hidden server is holding a mutable borrow of it.
@@ -1371,8 +1758,8 @@ impl Editor {
                 NetEvent::PeerJoined(p) => {
                     hs.host.fire_net_event(&mut hs.world, "playerJoined", Some(p), None)
                 }
-                NetEvent::PeerLeft(p) => {
-                    hs.host.fire_net_event(&mut hs.world, "playerLeft", Some(p), None)
+                NetEvent::PeerLeft(p, why) => {
+                    hs.host.fire_net_event(&mut hs.world, "playerLeft", Some(p), why.as_deref())
                 }
                 _ => {}
             }
@@ -1411,14 +1798,16 @@ impl Editor {
     /// is the same guarantee the real host gives.
     fn net_hidden_spawn(&mut self, spawns: Vec<(String, Option<[f64; 3]>, Option<u64>)>) {
         for (path, pos, owner) in spawns {
-            let Some(node) = self.net_spawn_node_doc(&path, pos) else { continue };
+            let Some(nodes) = self.net_spawn_node_doc(&path, pos) else { continue };
             let Some(hs) = self.net_hidden.as_mut() else { return };
-            let e = hs.session.spawn_doc(&mut hs.world, &node, owner);
+            let ents = hs.session.spawn_subtree(&mut hs.world, &nodes, owner);
             // A runtime spawn simulates immediately on the server, exactly as
             // it does in a real session — otherwise a spawned avatar would
             // stand still here and move over a real link, which is the worst
             // possible way for a harness to differ.
-            hs.sim.add_body_for(e, &hs.world);
+            for e in ents {
+                hs.sim.add_body_for(e, &hs.world);
+            }
         }
     }
 
@@ -1496,6 +1885,7 @@ impl Editor {
         let events = cs.take_events();
         let spawned = cs.take_spawned();
         let despawned = cs.take_despawned();
+        let reowned = cs.take_owner_changed();
         let my_peer = cs.my_peer();
         let scene_switch = cs.take_scene_switch();
         for (delta, margin) in lead_events {
@@ -1508,8 +1898,10 @@ impl Editor {
         // Replicated spawns/despawns materialize live: bodies register or go,
         // and ownership re-evaluates — a spawn owned by US becomes the
         // predicted avatar (the net.spawn player-avatar flow), everyone
-        // else's becomes snapshot-driven.
-        if !spawned.is_empty() || !despawned.is_empty() {
+        // else's becomes snapshot-driven. A `net.setOwner` re-runs the same
+        // evaluation: being handed a node mid-session is the reconnecting
+        // player getting their slot back, and it has to start predicting.
+        if !spawned.is_empty() || !despawned.is_empty() || !reowned.is_empty() {
             for eid in &despawned {
                 if let Some(sim) = self.sim.as_mut() {
                     sim.remove_body(*eid);
@@ -1746,11 +2138,27 @@ impl Editor {
                     None,
                     Some(&reason),
                 ),
+                // A kick is a disconnect the player is owed an explanation for.
+                // `net.on("kicked", …)` fires FIRST, so a game can put the
+                // words on screen before its own teardown runs.
+                NetEvent::Kicked(reason) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("🌐 removed from the session by the server: {reason}"),
+                        None,
+                    );
+                    self.script_host.fire_net_event(
+                        &mut self.world,
+                        "kicked",
+                        None,
+                        Some(&reason),
+                    )
+                }
                 NetEvent::PeerJoined(p) => {
                     self.script_host.fire_net_event(&mut self.world, "playerJoined", Some(p), None)
                 }
-                NetEvent::PeerLeft(p) => {
-                    self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), None)
+                NetEvent::PeerLeft(p, why) => {
+                    self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), why.as_deref())
                 }
             }
         }
@@ -1777,6 +2185,9 @@ impl Editor {
                 if let Some(cs) = self.net_play_client.as_mut() {
                     cs.rebind_scene(&self.world);
                 }
+                let mut v = std::mem::take(&mut self.voice);
+                v.rebind_scene(&mut self.audio);
+                self.voice = v;
                 let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
                 self.net_client_side_setup(owner, false);
             } else {
@@ -1818,6 +2229,10 @@ impl Editor {
             // A joiner already knows the code — they typed it. It is the host's
             // to publish, so this stays None rather than echoing it back.
             lobby_code: None,
+            // Identity is the SERVER's conclusion about a peer, so a client
+            // holds none. `net.identity` answers `verified = false` here rather
+            // than repeating whatever the client would like to be true.
+            identities: HashMap::new(),
         });
         self.script_host.set_net_owners(Self::collect_net_owners(&self.world));
     }
@@ -1928,6 +2343,13 @@ impl Editor {
         // state that must never survive a stop, and this path is reached with
         // no session precisely when something went wrong on the way up.
         self.net_lobby_code = None;
+        // Also ahead of the early-out: the microphone must close when the
+        // session does, whatever state the session got into. A live mic left
+        // open after a failed host is the one bug in this feature nobody would
+        // notice from inside the game.
+        let mut v = std::mem::take(&mut self.voice);
+        v.shutdown(&mut self.audio);
+        self.voice = v;
         if self.net_server.is_none() && self.net_client.is_none() && self.net_play_client.is_none()
         {
             return;
@@ -1969,48 +2391,63 @@ impl Editor {
         if self.net_server.is_none() {
             return;
         }
-        let Some(node) = self.net_spawn_node_doc(path, pos) else { return };
+        let Some(nodes) = self.net_spawn_node_doc(path, pos) else { return };
+        let mesh = nodes.iter().any(|n| matches!(n.matter, floptle_scene::MatterDoc::Mesh { .. }));
         let s = self.net_server.as_mut().unwrap();
-        let e = s.spawn_doc(&mut self.world, &node, owner);
+        let ents = s.spawn_subtree(&mut self.world, &nodes, owner);
         // A spawned mesh needs its GPU import like any script-swapped model.
-        if let floptle_scene::MatterDoc::Mesh { .. } = node.matter {
+        if mesh {
             self.load_script_swapped_models();
         }
-        // Runtime spawns simulate immediately: register a live physics body.
-        if let Some(sim) = self.sim.as_mut() {
-            sim.add_body_for(e, &self.world);
+        // Runtime spawns simulate immediately: register live physics bodies —
+        // for every node in the subtree, since a rig's collider is as likely to
+        // be on a child as on the root.
+        for &e in &ents {
+            if let Some(sim) = self.sim.as_mut() {
+                sim.add_body_for(e, &self.world);
+            }
         }
         // A remote player's avatar (`net.spawn(..., { owner = peer })` +
         // Predicted): its scripts run with the OWNER's replayed input, not
         // the host's keyboard.
-        if let Some(rep) = self.world.get::<floptle_core::Replicated>(e)
-            && rep.mode == ReplicationMode::Predicted
-            && let Some(p) = rep.owner
-        {
-            self.net_remote_predicted.push((e, p));
+        let mut bound = false;
+        for &e in &ents {
+            if let Some(rep) = self.world.get::<floptle_core::Replicated>(e)
+                && rep.mode == ReplicationMode::Predicted
+                && let Some(p) = rep.owner
+            {
+                self.net_remote_predicted.push((e, p));
+                bound = true;
+            }
+        }
+        if bound {
             self.net_apply_host_filters();
         }
     }
 
-    /// Resolve what `net.spawn(path)` names into the one node that will be
+    /// Resolve what `net.spawn(path)` names into the SUBTREE that will be
     /// spawned, positioned. Shared by the real host and the local harness, so
     /// the two cannot drift about what a path means.
+    ///
+    /// Returns the subtree root-first, with parent links renumbered against the
+    /// returned vector. A path naming several roots contributes the first root
+    /// and everything under it: `net.spawn` spawns one thing, and which thing
+    /// should not depend on how many others happen to sit beside it in the file.
     fn net_spawn_node_doc(
         &mut self,
         path: &str,
         pos: Option<[f64; 3]>,
-    ) -> Option<floptle_scene::NodeDoc> {
-        // Accepts a scene file (its first node spawns) or a PREFAB — by name
-        // ("bullet") or path ("prefabs/bullet.prefab.ron"). Replication is
-        // single-node, so a multi-node prefab spawns its first root only.
-        let first = if path.ends_with(floptle_scene::PREFAB_EXT)
+    ) -> Option<Vec<floptle_scene::NodeDoc>> {
+        // Accepts a scene file or a PREFAB — by name ("bullet") or path
+        // ("prefabs/bullet.prefab.ron").
+        let all = if path.ends_with(floptle_scene::PREFAB_EXT)
             || self.resolve_prefab_request(path).is_some()
         {
             let full = self
                 .resolve_prefab_request(path)
                 .unwrap_or_else(|| self.project_root.join(path));
             match crate::prefab::load_prefab_docs(&full) {
-                Ok(docs) => docs.into_iter().find(|d| d.parent.is_none()),
+                Ok(docs) => docs,
                 Err(e) => {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
@@ -2022,11 +2459,11 @@ impl Editor {
             }
         } else {
             let full = self.project_root.join(path);
-            match std::fs::read_to_string(&full)
+            match floptle_vfs::read_to_string(&full)
                 .map_err(|e| e.to_string())
                 .and_then(|s| floptle_scene::from_ron(&s).map_err(|e| e.to_string()))
             {
-                Ok(d) => d.nodes.first().cloned(),
+                Ok(d) => d.nodes,
                 Err(e) => {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
@@ -2037,7 +2474,10 @@ impl Editor {
                 }
             }
         };
-        let Some(mut node) = first else {
+        let by_id = floptle_scene::node_id_positions(&all);
+        let Some(root) =
+            (0..all.len()).find(|&i| floptle_scene::resolve_parent(&all[i], &by_id).is_none())
+        else {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!("net.spawn(\"{path}\"): no nodes in it"),
@@ -2045,11 +2485,13 @@ impl Editor {
             );
             return None;
         };
-        node.parent = None;
-        if let Some(p) = pos {
-            node.transform.translation = p;
+        let mut nodes = floptle_scene::subtree_from(&all, root);
+        if let Some(p) = pos
+            && let Some(first) = nodes.first_mut()
+        {
+            first.transform.translation = p;
         }
-        Some(node)
+        Some(nodes)
     }
 
     /// Ghost gizmos: CYAN = where a ghost client believes every replicated
@@ -2199,5 +2641,46 @@ mod tests {
         assert_eq!(plan.predicted, None, "nothing here is ours");
         assert_eq!(plan.fskip, None, "no frame filter is owed, so none is written");
         assert!(plan.park.contains(&es[4].index()), "an unowned avatar is snapshot-driven");
+    }
+}
+
+/// **Multiplayer over the network, in a browser: not yet.**
+///
+/// Both transports this editor offers are UDP QUIC — direct, or through a relay
+/// — and a page cannot open a UDP socket at all. The browser's answer is
+/// WebTransport, which is QUIC over HTTP/3 and would be a third `Transport`
+/// impl beside the two in `floptle-net`; it is not a gate that can be flipped.
+/// `net.local` (same-process sessions) is unaffected and works here.
+///
+/// Each refusal names the transport it refused, because "net.join did nothing"
+/// is the report this exists to prevent.
+#[cfg(target_arch = "wasm32")]
+impl Editor {
+    fn net_no_transport(&mut self, call: &str) {
+        self.console.push(
+            floptle_script::LogLevel::Warn,
+            format!(
+                "{call}: a browser build cannot open a QUIC socket, so hosting and joining over \
+                 the network are not available yet — see docs/web-export.md. net.local still \
+                 works."
+            ),
+            None,
+        );
+    }
+
+    pub(crate) fn net_host_quic(&mut self, port: u16) {
+        self.net_no_transport(&format!("net.host{{port = {port}}}"));
+    }
+
+    pub(crate) fn net_host_relay(&mut self, relay_addr: &str) {
+        self.net_no_transport(&format!("net.host{{relay = \"{relay_addr}\"}}"));
+    }
+
+    pub(crate) fn net_join_quic(&mut self, addr: &str) {
+        self.net_no_transport(&format!("net.join(\"quic://{addr}\")"));
+    }
+
+    pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
+        self.net_no_transport(&format!("net.join(\"relay://{relay_addr}/{code}\")"));
     }
 }

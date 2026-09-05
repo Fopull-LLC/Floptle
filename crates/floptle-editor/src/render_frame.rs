@@ -26,18 +26,28 @@ use floptle_scene::ShapeDoc;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Instant;
+use floptle_core::time::Instant;
 use crate::assets::{AssetPayload, build_assets, collect_texture_paths, is_model};
+#[cfg(feature = "editor-ui")]
 use crate::dock::{EditorTab, default_dock, focus_scripting_tab};
+#[cfg(feature = "editor-ui")]
 use crate::gizmo::{build_gizmo, Tool};
+#[cfg(feature = "editor-ui")]
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
 use crate::shading::{blob_default_material, blob_mat_arrays, collect_shadow_proxies, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
+#[cfg(feature = "editor-ui")]
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
+#[cfg(feature = "editor-ui")]
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
+#[cfg(feature = "editor-ui")]
 use crate::export::EXPORT_TARGETS;
-use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
+use crate::{Editor, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, grab_cursor};
+#[cfg(feature = "editor-ui")]
+use crate::{EditorCmd, EditorTabViewer, scene_hit};
+#[cfg(feature = "editor-ui")]
+use crate::anim_ui;
 
 /// The extras an offscreen render needs to match what the window shows.
 ///
@@ -75,6 +85,69 @@ pub(crate) enum HistorySlot {
     None,
     /// The docked Game panel — the one offscreen view that IS the game.
     GamePanel,
+}
+
+/// Copy a presented swapchain image back to the CPU as tightly packed RGBA.
+///
+/// For `floptle-player --shot`: the one way to see what a real build put on
+/// screen. `None` when the surface was not created with `COPY_SRC` (the device
+/// declined it) — said out loud by the caller rather than answered with a
+/// picture that came from somewhere else.
+fn read_back_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture) -> Option<Vec<u8>> {
+    if !tex.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+        return None;
+    }
+    let (w, h) = (tex.width(), tex.height());
+    let bpp = 4u32;
+    let padded =
+        (w * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("player-shot"),
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("player-shot") });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([enc.finish()]);
+    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+    let view = buf.slice(..).get_mapped_range();
+    // The surface may be BGRA; the PNG is RGBA.
+    let bgra = tex.format().remove_srgb_suffix() == wgpu::TextureFormat::Bgra8Unorm;
+    let mut px = Vec::with_capacity((w * h * bpp) as usize);
+    for y in 0..h {
+        let row = (y * padded) as usize;
+        for x in 0..w {
+            let i = row + (x * bpp) as usize;
+            if bgra {
+                px.extend_from_slice(&[view[i + 2], view[i + 1], view[i], view[i + 3]]);
+            } else {
+                px.extend_from_slice(&view[i..i + 4]);
+            }
+        }
+    }
+    drop(view);
+    buf.unmap();
+    Some(px)
 }
 
 /// A node's sorting-layer rank if it takes part in 2D lighting, else `None`.
@@ -376,6 +449,7 @@ impl Editor {
     /// `played` latches: `Check::Played` asks "have you run this yet", which
     /// stays true after you press Stop — otherwise the step would tick and then
     /// immediately un-tick itself, which reads as the editor changing its mind.
+    #[cfg(feature = "editor-ui")]
     fn refresh_learn(&mut self) {
         self.learn.played |= self.playing;
         let front = self
@@ -415,7 +489,13 @@ impl Editor {
         }
     }
 
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn render(&mut self) {
+        // A held selection the world has emptied — the node deleted, the scene
+        // switched — releases here, before anything draws. The lock's only
+        // switch is on the Inspector's name row, so a lock over nothing would
+        // have no way out.
+        self.enforce_selection_lock();
         // Terrain brush telegraph + throttled stroke (before the destructure, so it
         // can freely borrow `self`).
         self.terrain_frame_update();
@@ -443,6 +523,9 @@ impl Editor {
         // the tab is actually visible, because it reads every script in the
         // project and a panel nobody has open is not worth a file walk.
         self.refresh_learn();
+        // A finished "test voice from a WAV" pick — up here with the other
+        // whole-`self` passes, before the GPU destructure splits `self` apart.
+        self.poll_voice_test_pick();
         // The project's packages get their frame here — before the GPU state is
         // borrowed for the rest of `render`, because an extension's hooks need
         // the whole editor and the draw path holds pieces of it. What they
@@ -3002,6 +3085,9 @@ impl Editor {
         // of half the editor, and it does not change during the dock draw.
         let focused_tab = self.focused_tab;
         let has_selection = !self.selection.is_empty();
+        // Copied out before the mutable borrow below: the panels read the lock,
+        // and ask for the flip through `cmd`.
+        let selection_locked = self.selection_locked;
         let selection = &mut self.selection;
         let bone_selection = &mut self.bone_selection;
         let pivot_edit = &mut self.pivot_edit;
@@ -3270,6 +3356,17 @@ impl Editor {
             let cfg = s.interest();
             cfg.enabled.then(|| (cfg, s.interest_stats()))
         });
+        // Voice chat (floptle/0180): `None` when nothing is captured or heard,
+        // which is a different statement from "on, and silent". A voice that
+        // is quiet because the jitter buffer is starving looks exactly like a
+        // player who stopped talking, and these are the numbers that tell them
+        // apart.
+        let net_voice = self.voice.active().then(|| {
+            (self.voice.diagnostics(), self.voice.mic_summary())
+        });
+        let voice_test_peer = self.voice.test_speaker();
+        // Set by the panel below, acted on after the UI closure releases `self`.
+        let (mut voice_test_pick, mut voice_test_stop) = (false, false);
         // A REAL session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -3791,26 +3888,54 @@ impl Editor {
                         if let Some((cfg, stats)) = &net_interest {
                             ui.separator();
                             ui.label(format!(
-                                "👁 interest · {:.0} m radius · {} KB/s per client",
+                                "👁 interest · {:.0} m radius · {} KB/s per client{}",
                                 cfg.radius,
-                                cfg.budget_bytes_per_sec / 1024
+                                cfg.budget_bytes_per_sec / 1024,
+                                if cfg.occlusion { " · line of sight" } else { "" }
                             ))
                             .on_hover_text(
                                 "each client is told about its own neighbourhood instead of the \
                                  whole world. Nothing is dropped for good — what doesn't fit \
-                                 the budget accrues priority and goes in a later snapshot.",
+                                 the budget accrues priority and goes in a later snapshot.\n\n\
+                                 A radius is a BANDWIDTH boundary, not a security one: a client \
+                                 told where everyone within it is standing knows where they \
+                                 are, whatever it draws. Line of sight is the part that answers \
+                                 that — net.host{ interestOcclusion = \"Level\" }.",
                             );
                             if stats.is_empty() {
                                 ui.small("no clients yet — nothing to build a relevant set from");
                             }
                             for (peer, st) in stats {
                                 let line = format!(
-                                    "peer {peer}: {} of {} sent · {} B{}",
+                                    "peer {peer}: {} of {} sent · {} B{}{}",
                                     st.sent,
                                     st.relevant,
                                     st.bytes,
                                     if st.deferred > 0 {
                                         format!(" · {} waiting", st.deferred)
+                                    } else {
+                                        String::new()
+                                    },
+                                    // What this client is NOT being told, and
+                                    // by which rule. "Is my filter working"
+                                    // has to be a number, or a project turns
+                                    // one on and cannot tell it from a typo.
+                                    if st.withheld() > 0 {
+                                        format!(
+                                            " · withheld {} ({} far{}{})",
+                                            st.withheld(),
+                                            st.withheld_radius,
+                                            if st.withheld_occluded > 0 {
+                                                format!(", {} unseen", st.withheld_occluded)
+                                            } else {
+                                                String::new()
+                                            },
+                                            if st.withheld_filter > 0 {
+                                                format!(", {} by the game", st.withheld_filter)
+                                            } else {
+                                                String::new()
+                                            },
+                                        )
                                     } else {
                                         String::new()
                                     }
@@ -3831,7 +3956,82 @@ impl Editor {
                                 } else {
                                     ui.small(line).on_hover_text(
                                         "relevant = what this client may hear about at all; \
-                                         sent = what fit in the last snapshot's budget.",
+                                         sent = what fit in the last snapshot's budget; \
+                                         withheld = replicable nodes it was told nothing \
+                                         about, split by which rule decided — out of range, \
+                                         out of sight, or net.setRelevant.",
+                                    );
+                                }
+                            }
+                        }
+                        // ---- voice chat, when anything is speaking or listening ----
+                        if let Some((rows, mic)) = &net_voice {
+                            ui.separator();
+                            ui.label(format!("🎤 voice · {mic}")).on_hover_text(
+                                "the local microphone. The level meter is live whether or not \
+                                 transmit is on, so a settings screen can prove the mic works \
+                                 without joining a lobby.",
+                            );
+                            if rows.is_empty() {
+                                ui.small("nobody else is speaking");
+                            }
+                            // The harness microphone. Voice normally needs two
+                            // machines and two people to try at all; this makes
+                            // a WAV stand in for the far end, through the real
+                            // forwarding rules.
+                            ui.horizontal(|ui| {
+                                match voice_test_peer {
+                                    Some(p) => {
+                                        if ui.small_button("⏹ stop test voice").clicked() {
+                                            voice_test_stop = true;
+                                        }
+                                        ui.small(format!("speaking as peer {p}"));
+                                    }
+                                    None => {
+                                        if ui
+                                            .small_button("🎤 test voice from a WAV…")
+                                            .on_hover_text(
+                                                "play an audio file in as though a remote \
+                                                 player were speaking it — through the real \
+                                                 forwarding rules, jitter buffer and spatial \
+                                                 voice. Proves the routing without a second \
+                                                 machine or a microphone.",
+                                            )
+                                            .clicked()
+                                        {
+                                            voice_test_pick = true;
+                                        }
+                                    }
+                                }
+                            });
+                            for (peer, buffered, cushion, concealed, late) in rows {
+                                let line = format!(
+                                    "peer {peer}: {buffered:.0} ms buffered (target {cushion:.0})\
+                                     {}{}",
+                                    if *concealed > 0 {
+                                        format!(" · {concealed} concealed")
+                                    } else {
+                                        String::new()
+                                    },
+                                    if *late > 0 { format!(" · {late} late") } else { String::new() }
+                                );
+                                // A cushion pinned at its ceiling means the link
+                                // is the problem, and it is the one shape worth
+                                // colouring: the voice still works, it is just
+                                // permanently 60 ms behind and will stay there.
+                                if *cushion >= 60.0 {
+                                    ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                                        .on_hover_text(
+                                            "the jitter buffer is as wide as it goes. Packets \
+                                             keep arriving late, so this speaker is held at the \
+                                             maximum delay to stop them dropping out.",
+                                        );
+                                } else {
+                                    ui.small(line).on_hover_text(
+                                        "buffered = audio waiting to play; target = the cushion \
+                                         the jitter buffer is holding, which widens on lateness \
+                                         and shrinks again when the link settles. concealed = \
+                                         gaps Opus filled in for packets that never came.",
                                     );
                                 }
                             }
@@ -4278,6 +4478,22 @@ impl Editor {
                     });
             }
 
+            // The 🌐 panel's test-voice buttons, acted on out here where the
+            // borrow of the panel's destructured fields has ended.
+            if voice_test_stop {
+                self.voice.stop_test_speaker();
+            }
+            if voice_test_pick && self.voice_test_pick.is_none() {
+                self.voice_test_pick = Some(crate::native_dialog::pick_files_filtered(
+                    "Play a WAV as a remote player's microphone",
+                    Some(("audio", &floptle_audio::AUDIO_EXTENSIONS
+                        .iter()
+                        .map(|e| (*e).to_string())
+                        .collect::<Vec<_>>())),
+                    false,
+                ));
+            }
+
             // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
             // The Scene tab is transparent so the 3D render shows through; the others
             // paint opaque over it. Users can drag/re-dock/tab these freely.
@@ -4291,6 +4507,7 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                selection_locked,
                 maps,
                 map_sel,
                 map_mode,
@@ -4713,9 +4930,7 @@ impl Editor {
 
             // ---- autosave recovery (a newer autosave than the scene file) ----
             if let Some(auto) = &autosave_prompt {
-                let age = std::fs::metadata(auto)
-                    .and_then(|m| m.modified())
-                    .ok()
+                let age = floptle_vfs::modified(auto)
                     .and_then(|t| t.elapsed().ok())
                     .map(|d| {
                         let s = d.as_secs();
@@ -5096,7 +5311,7 @@ impl Editor {
                 // The fixed suffix = everything after the FIRST dot, so compound
                 // extensions (.prefab.ron, .vfx.ron) ride along whole. Folders
                 // have no suffix.
-                let ext = if Path::new(path.as_str()).is_dir() {
+                let ext = if floptle_vfs::is_dir(Path::new(path.as_str())) {
                     String::new()
                 } else {
                     Path::new(path.as_str())
@@ -5375,7 +5590,7 @@ impl Editor {
                     .default_width(340.0)
                     .show(ui.ctx(), |ui| {
                         match paths.as_slice() {
-                            [p] if Path::new(p).is_dir() => {
+                            [p] if floptle_vfs::is_dir(Path::new(p)) => {
                                 ui.label(format!(
                                     "Delete the folder \"{}\" and everything in it?",
                                     name(p)
@@ -5754,7 +5969,7 @@ impl Editor {
         // ---- draw: scene into the retro target, blit, then egui on top ----
         // Timed, because blocking here is not the same thing as being slow — see
         // `present_wait_ms`.
-        let wait_t = std::time::Instant::now();
+        let wait_t = floptle_core::time::Instant::now();
         let acquired = gpu.acquire();
         let wait_ms = wait_t.elapsed().as_secs_f32() * 1000.0;
         self.present_wait_ms = if self.present_wait_ms > 0.0 {
@@ -6381,6 +6596,141 @@ impl Editor {
         self.script_host.profile().borrow_mut().end_frame();
     }
 
+    /// **One frame of a shipped game** — the standalone player's whole loop.
+    ///
+    /// [`Editor::render`] is this same frame with an editor around it: the
+    /// tools, the docked panels, the authoring overlays and egui itself. This
+    /// is deliberately not that function with the UI switched off. A build has
+    /// no tool state to advance, no autosave, no asset-preview turntable, no
+    /// file watchers and no editor camera, and a frame that ran them anyway
+    /// would be spending a player's milliseconds on an editor they cannot see.
+    ///
+    /// What it must never become is a second implementation of *playing the
+    /// game*. The two things that are the game — [`Editor::play_step`] for the
+    /// step and [`Editor::render_game_into`] for the draw — are called here
+    /// exactly as the editor calls them. That shared pair is what makes the
+    /// docked Game tab an honest preview of a build rather than a lookalike.
+    ///
+    /// The list below is therefore the interesting part: it is `render`'s
+    /// prefix with every editor-only entry removed, in the same order. When a
+    /// new per-frame subsystem is added to `render`, the question to ask is
+    /// whether a *player* needs it, and if it does it belongs here too.
+    pub(crate) fn player_frame(&mut self, capture: bool) -> Option<(Vec<u8>, u32, u32)> {
+        let now = Instant::now();
+        let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
+        self.last = Some(now);
+        // Smoothed the same way the editor smooths it: a build inherits the
+        // frame pacing work, including the snap to the display's period.
+        let dt = self.smooth_dt(raw_dt);
+        let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
+        if dt > 0.0 {
+            let ms = dt * 1000.0;
+            self.frame_ms = if self.frame_ms > 0.0 { self.frame_ms * 0.9 + ms * 0.1 } else { ms };
+            self.fps = 1000.0 / self.frame_ms.max(1e-4);
+            self.record_frame_time(ms);
+        }
+        // Clocks the game's own presentation reads: UI style transitions, and
+        // the drift on the volumetric-fog noise.
+        self.ui_style_dt = dt.min(0.25);
+        self.ui_style_rt.begin_frame();
+        self.ui_frame_dt = dt.min(0.25);
+        self.fog_time = elapsed;
+        self.poll_ui_styles(elapsed);
+
+        // ---- world sync, before the step (render()'s prefix, game parts only) ----
+        self.sync_map_meshes();
+        self.sync_map_paint();
+        self.sync_tilemaps();
+        // Capture the dirty flag BEFORE `sync_terrain_gpu` consumes it, exactly
+        // as the editor frame does — a structural change is a full re-mesh.
+        let terrain_full_rebuild = self.terrain_gpu_dirty;
+        self.sync_terrain_gpu();
+        // LOD rings centre on what the player actually sees. There is no editor
+        // fly-camera to fall back to here, so a scene with no active camera
+        // streams around the origin rather than around nothing.
+        let lod_cam = floptle_core::active_camera(&self.world)
+            .map(|e| floptle_core::world_transform(&self.world, e).translation)
+            .unwrap_or(self.camera.position);
+        self.drain_terrain_generates();
+        self.update_terrain_residency(lod_cam);
+        self.publish_terrain_busy();
+        self.step_terrain_checkpoint();
+        {
+            let _t = floptle_core::profile::Span::new();
+            self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+            self.profile_record(floptle_core::profile::Bucket::Terrain, _t.ms());
+        }
+        self.sync_sky_texture();
+        self.sync_sky_shader();
+        self.sync_tex_paint_mirrors();
+        // Gamepads: polled once a frame, absent hardware is fine.
+        self.pump_input_devices();
+
+        // ---- the game ----
+        // `true`: a build's window IS the game, so input is never somebody
+        // else's. In the editor this is "does the Game view have focus".
+        self.timed_script_pass(|ed| ed.play_step(dt, true));
+        self.finish_input_frame();
+        self.load_script_swapped_models();
+
+        // ---- what the frame needs on the GPU ----
+        self.ensure_vfx_assets();
+        self.ensure_scene_textures();
+        self.ensure_flsl_materials();
+        self.ensure_ui_shaders();
+        self.ensure_post_shaders();
+        self.refresh_gi();
+        self.step_reflection_probes();
+        self.sync_field_shapes();
+        self.update_render_targets(elapsed);
+
+        // ---- draw ----
+        // The swapchain image is acquired first and the device borrow dropped,
+        // because the draw below needs the whole editor mutably.
+        let Some(frame) = self.gpu.as_mut().and_then(|g| g.acquire()) else {
+            // A surface that was outdated or lost reconfigures itself and the
+            // frame is skipped — the same answer the editor gives.
+            self.drain_script_logs();
+            return None;
+        };
+        let (depth_view, depth_tex, w, h) = self.gpu.as_ref().map(|g| {
+            (g.depth_view().clone(), g.depth_texture().clone(), g.config.width, g.config.height)
+        })?;
+        // The swapchain is the target, and whether it can be sampled is the
+        // surface's answer, not ours — see `Gpu::new`, which asks for the flag
+        // only where the surface offers it. A browser's canvas does not.
+        let samplable = self
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.config.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
+        self.render_game_into(
+            frame.view.clone(),
+            depth_view,
+            Some(depth_tex),
+            [0.0, 0.0],
+            [w as f32, h as f32],
+            elapsed,
+            true,
+            samplable,
+        );
+        // **Photographed before it is presented**, and out of the swapchain
+        // image itself — so what lands in the PNG is the frame the player saw,
+        // not a second render that resembles it.
+        let shot = capture
+            .then(|| self.gpu.as_ref().and_then(|g| read_back_frame(g, &frame.surface.texture)))
+            .flatten();
+        frame.present();
+
+        // Anything the game's scripts printed reaches stderr (the Console
+        // mirrors there in player mode), so a shipped build can still be
+        // debugged from a terminal.
+        self.drain_script_logs();
+        // The frame is over: fold every bucket into its history, once, exactly
+        // as the editor frame does.
+        self.script_host.profile().borrow_mut().end_frame();
+        shot.map(|px| (px, w, h))
+    }
+
     /// Add a subsystem's cost to this frame (`floptle/0077`).
     ///
     /// A one-line helper because the alternative is `self.script_host.profile()
@@ -6393,6 +6743,7 @@ impl Editor {
 
     /// Live syntax check for the active IDE file (drives the red squiggle):
     /// Lua through the script host, `.flsl` through the shader compiler.
+    #[cfg(feature = "editor-ui")]
     fn check_active_script_syntax(&mut self) {
         self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
             if f.path.ends_with(".lua") {
@@ -6533,7 +6884,7 @@ impl Editor {
     }
 
     /// (Re)upload the skybox equirect when the Skybox node's texture changes.
-    fn sync_sky_texture(&mut self) {
+    pub(crate) fn sync_sky_texture(&mut self) {
         // Re-upload the skybox texture when the skybox node's texture path changes.
         let sky_tex_path = self.world.query::<Matter>().find_map(|(_, m)| match m {
             Matter::Skybox { texture, .. } => texture.clone(),
@@ -6552,7 +6903,7 @@ impl Editor {
     /// Compile + splice the Skybox node's Sky-stage `.flsl` (a procedural sky). Recompiles
     /// only on path/mtime change; a compile error keeps the last-good shader and logs.
     /// `None` path clears back to the built-in sky.
-    fn sync_sky_shader(&mut self) {
+    pub(crate) fn sync_sky_shader(&mut self) {
         let path = self.world.query::<Matter>().find_map(|(_, m)| match m {
             Matter::Skybox { shader, .. } => shader.clone(),
             _ => None,
@@ -6570,16 +6921,14 @@ impl Editor {
         // project_root onto them gave assets/assets/… ENOENT, so NO picked sky
         // shader ever loaded (the Material-shader double-join bug, same fix).
         let abs = self.resolve_asset_path(&path);
-        let mtime = std::fs::metadata(&abs)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        let mtime = floptle_vfs::modified(&abs)
+            .and_then(|t| t.duration_since(floptle_core::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
         // Unchanged (same path + mtime) → nothing to do.
         if self.sky_shader.as_ref().is_some_and(|(p, mt, _)| *p == path && *mt == mtime) {
             return;
         }
-        let Ok(src) = std::fs::read_to_string(&abs) else {
+        let Ok(src) = floptle_vfs::read_to_string(&abs) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!("◈ sky shader {path} — can't read file"),
@@ -6635,7 +6984,7 @@ impl Editor {
     const FRAME_LOG: usize = 512;
 
     /// Bank one frame time (milliseconds) for the 1% low.
-    fn record_frame_time(&mut self, ms: f32) {
+    pub(crate) fn record_frame_time(&mut self, ms: f32) {
         if self.frame_log.len() != Self::FRAME_LOG {
             self.frame_log = vec![0.0; Self::FRAME_LOG];
             self.frame_log_at = 0;
@@ -6728,7 +7077,7 @@ impl Editor {
     /// jitter that came and went with window mode / load). The residual error
     /// is banked and folded back a hair per frame, so long-term time stays
     /// wall-clock exact (a fast clip on the bank absorbs one-off stalls).
-    fn smooth_dt(&mut self, raw: f32) -> f32 {
+    pub(crate) fn smooth_dt(&mut self, raw: f32) -> f32 {
         // (Re)read the monitor's refresh rate occasionally — cheap, and the
         // window can move between monitors.
         if self.refresh_poll == 0 {
@@ -7740,7 +8089,7 @@ impl Editor {
 
     /// End-of-input bookkeeping: clear the per-frame key/button edges, re-pin a
     /// CONFINE-only cursor grab, and drain script logs into the Console.
-    fn finish_input_frame(&mut self) {
+    pub(crate) fn finish_input_frame(&mut self) {
         // Clear per-frame input edges after scripts consumed them.
         self.input_keys_pressed.clear();
         self.input_keys_released.clear();
@@ -7823,6 +8172,7 @@ impl Editor {
 
     /// Apply the frame's deferred [`EditorCmd`] intents — runs after every
     /// gpu/egui borrow has ended, so `self` is fully free again.
+    #[cfg(feature = "editor-ui")]
     pub(crate) fn apply_frame_commands(&mut self, mut cmd: EditorCmd, frame_pointer_down: bool) {
         // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
         if let Some(action) = cmd.project_action {
@@ -7830,7 +8180,7 @@ impl Editor {
                 ProjectAction::New(p) => self.new_project(PathBuf::from(p)),
                 ProjectAction::Open(p) => {
                     let path = PathBuf::from(p);
-                    if path.is_dir() {
+                    if floptle_vfs::is_dir(&path) {
                         self.open_project(path);
                     } else {
                         eprintln!("  open project: not a folder: {}", path.display());
@@ -8183,7 +8533,7 @@ impl Editor {
             if let Some((_, floptle_core::Matter::NavMesh { id, .. })) =
                 crate::nav_bake::nav_node(&self.world)
             {
-                let _ = std::fs::remove_file(self.nav_path(id));
+                let _ = floptle_vfs::remove_file(self.nav_path(id));
             }
             self.nav_baked = None;
             self.nav_overlay = None;
@@ -8197,7 +8547,7 @@ impl Editor {
         if cmd.gi_clear {
             self.gi_baked = None;
             self.gi_dirty = true;
-            let _ = std::fs::remove_file(self.gi_path());
+            let _ = floptle_vfs::remove_file(self.gi_path());
         }
         // Close the undo-coalescing session whenever the pointer isn't held. A drag
         // (gizmo, DragValue, UI move) keeps the button down across frames, so it stays
@@ -8227,6 +8577,9 @@ impl Editor {
                 }
                 self.anim_ui.clip_dirty = false;
             }
+        }
+        if cmd.toggle_selection_lock {
+            self.toggle_selection_lock();
         }
         if cmd.toggle_play {
             self.toggle_play();
@@ -8511,7 +8864,7 @@ impl Editor {
                 let key =
                     if n == 0 { format!("vfx/{stem}") } else { format!("vfx/{stem}{n}") };
                 let path = self.project_root.join(format!("{key}{}", floptle_scene::VFX_EXT));
-                if !path.exists() {
+                if !floptle_vfs::exists(&path) {
                     break (key, path);
                 }
                 n += 1;
@@ -8868,8 +9221,8 @@ impl Editor {
                     // Carry any object re-parenting onto the mirrored model (same node
                     // names), so the sidecar keeps working after the bake.
                     let src_side = crate::rig_overrides::RigOverrides::sidecar_path(&abs);
-                    if src_side.exists() {
-                        let _ = std::fs::copy(
+                    if floptle_vfs::exists(&src_side) {
+                        let _ = floptle_vfs::copy(
                             &src_side,
                             crate::rig_overrides::RigOverrides::sidecar_path(&r.output),
                         );
@@ -8908,8 +9261,8 @@ impl Editor {
                     // Carry any object re-parenting/pivots onto the rigged model
                     // (same node names), so the sidecar keeps working after the bake.
                     let src_side = crate::rig_overrides::RigOverrides::sidecar_path(&abs);
-                    if src_side.exists() {
-                        let _ = std::fs::copy(
+                    if floptle_vfs::exists(&src_side) {
+                        let _ = floptle_vfs::copy(
                             &src_side,
                             crate::rig_overrides::RigOverrides::sidecar_path(&r.output),
                         );
@@ -9325,7 +9678,7 @@ impl Editor {
             // Seed with the BASE name (up to the first dot) — the modal shows
             // the rest as a fixed suffix, compound extensions included.
             let full = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let name = if p.is_dir() {
+            let name = if floptle_vfs::is_dir(p) {
                 full
             } else {
                 full.split('.').next().unwrap_or_default().to_string()
@@ -9392,7 +9745,7 @@ impl Editor {
             if restore {
                 self.restore_autosave();
             } else if let Some(auto) = self.autosave_prompt.take() {
-                let _ = std::fs::remove_file(auto);
+                let _ = floptle_vfs::remove_file(auto);
             }
         }
         // Pre-warm a model being dragged so its live ghost can render next frame
@@ -9509,6 +9862,7 @@ impl Editor {
             }
         };
         // The open working doc first (it holds edits not yet in the registry).
+        #[cfg(feature = "editor-ui")]
         if let Some(doc) = &self.vfx_ui.doc {
             for t in &doc.tracks {
                 match &t.render {
@@ -10256,11 +10610,15 @@ impl Editor {
 
         // Live particles render in offscreen views too (the split Game viewport
         // must show what the game shows).
+        // The Particles tab previews effects live; a build has no tab.
+        #[cfg(feature = "editor-ui")]
         let vfx_preview_on = !self.playing
             && self
                 .dock_state
                 .as_ref()
                 .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
+        #[cfg(not(feature = "editor-ui"))]
+        let vfx_preview_on = false;
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
         self.vfx.collect(
@@ -10931,6 +11289,11 @@ impl PerfSnapshot {
     }
 }
 
+// These exercise the AUTHORING half — the dock, the Inspector, the
+// command line — so they compile only where that half does. Without the
+// gate the player configuration cannot be linted or tested at all, which
+// is how it went unlinted through a whole release.
+#[cfg(feature = "editor-ui")]
 #[cfg(test)]
 mod readout_tests {
     /// **The readout has to smooth frame time, not its reciprocal.**
@@ -11265,6 +11628,7 @@ mod refresh_tests {
 /// judders by `velocity x noise`. That used to happen in total silence
 /// (`floptle/0160`), which is the worst possible way for a load-bearing path to
 /// be switched off.
+#[cfg(feature = "editor-ui")]
 fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
     if p.mean_ms <= 0.0 {
         return;
@@ -11348,6 +11712,7 @@ fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
 /// Two columns per row on purpose: the rolling mean AND the worst frame of the
 /// last second. The spike is what anybody is ever chasing, and a mean hides it —
 /// a 40 ms hitch once a second adds under a millisecond to a 60-frame average.
+#[cfg(feature = "editor-ui")]
 fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
     if !s.on {
         ui.label("Not collecting.");

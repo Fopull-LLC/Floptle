@@ -614,10 +614,10 @@ impl Editor {
                     .join(&sd)
                     .join(format!("{}.{id}.cfield", self.scene_name));
                 if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+                    let _ = floptle_vfs::create_dir_all(dir);
                 }
                 if let Some(t) = self.terrains.get(&e) {
-                    let _ = std::fs::write(&path, t.field.to_bytes());
+                    let _ = floptle_vfs::write(&path, t.field.to_bytes());
                 }
             }
             let color = self
@@ -655,11 +655,15 @@ impl Editor {
     pub(crate) fn reset_anim_bindings(&mut self) {
         self.stop_recording();
         self.anim.clear_instances();
-        self.anim_ui.target = None;
-        self.anim_ui.sel_anim = None;
-        self.anim_ui.clip_doc = None;
-        self.anim_ui.preview_playing = false;
-        self.anim_ui.last_scene_local.clear();
+        // The Animating tab's own bindings. A build has no tab to unbind.
+        #[cfg(feature = "editor-ui")]
+        {
+            self.anim_ui.target = None;
+            self.anim_ui.sel_anim = None;
+            self.anim_ui.clip_doc = None;
+            self.anim_ui.preview_playing = false;
+            self.anim_ui.last_scene_local.clear();
+        }
     }
 
     /// Turn ● Record off and put the posed subtree back exactly as it was
@@ -668,11 +672,15 @@ impl Editor {
     /// restores transforms AND recorded property values, and forgets the
     /// preview snapshot (stale mid-record state — never to be applied).
     pub(crate) fn stop_recording(&mut self) {
-        if !self.anim_ui.record && self.anim_ui.record_restore.is_empty() {
-            return;
+        // Recording is an authoring gesture; nothing in a build can start one.
+        #[cfg(feature = "editor-ui")]
+        {
+            if !self.anim_ui.record && self.anim_ui.record_restore.is_empty() {
+                return;
+            }
+            crate::anim_ui::stop_record_ui(&mut self.world, &mut self.anim_ui);
+            self.anim.forget_preview();
         }
-        crate::anim_ui::stop_record_ui(&mut self.world, &mut self.anim_ui);
-        self.anim.forget_preview();
     }
 
     pub(crate) fn toggle_play(&mut self) {
@@ -681,7 +689,10 @@ impl Editor {
         self.anim.clear_instances();
         // Same for particle instances — nothing emits outside Play (phase 1).
         self.vfx.clear_instances();
-        self.anim_ui.preview_playing = false;
+        #[cfg(feature = "editor-ui")]
+        {
+            self.anim_ui.preview_playing = false;
+        }
         // Recording must never run during Play (gameplay motion would bake into
         // the clip asset), and stale queued animator commands must not leak
         // across sessions.
@@ -698,12 +709,15 @@ impl Editor {
         // The packages hear about it before anything else moves: a tool that
         // has to stand down for Play (an overlay, a pending edit) needs to do
         // so while the scene is still the one it was reasoning about.
-        self.ext.fire(if self.playing {
-            crate::ext::HookKind::Stop
-        } else {
-            crate::ext::HookKind::Play
-        });
-        self.drain_ext_log();
+        #[cfg(feature = "editor-ui")]
+        {
+            self.ext.fire(if self.playing {
+                crate::ext::HookKind::Stop
+            } else {
+                crate::ext::HookKind::Play
+            });
+            self.drain_ext_log();
+        }
         if self.playing {
             self.playing = false;
             self.paused = false;
@@ -827,9 +841,13 @@ impl Editor {
         } else {
             // Scripts run from what's on DISK — flush unsaved IDE edits first so
             // Play always tests the code you're looking at.
+            #[allow(unused_mut)]
             let mut flushed = 0;
+            // A build runs the scripts it shipped with; there is no editor
+            // buffer that could be ahead of the file.
+            #[cfg(feature = "editor-ui")]
             for f in self.ide.open.iter_mut().filter(|f| f.dirty) {
-                if std::fs::write(&f.path, &f.text).is_ok() {
+                if floptle_vfs::write(&f.path, &f.text).is_ok() {
                     f.dirty = false;
                     flushed += 1;
                 }
@@ -913,6 +931,7 @@ impl Editor {
             }
             // Press Play → bring the Game tab to the front (active-camera view), so it's
             // clear you're testing the game, not the editor scene view.
+            #[cfg(feature = "editor-ui")]
             if let Some(dock) = self.dock_state.as_mut()
                 && let Some(path) = dock.find_tab(&EditorTab::Game) {
                     let _ = dock.set_active_tab(path);
@@ -1020,7 +1039,7 @@ impl Editor {
         [with_ext.clone(), format!("scenes/{with_ext}")]
             .into_iter()
             .map(|c| self.project_root.join(c))
-            .find(|p| p.is_file())
+            .find(|p| floptle_vfs::is_file(p))
     }
 
     /// Perform a scene transition while Play runs: swap the world to the new
@@ -1442,7 +1461,7 @@ impl Editor {
         name: &str,
     ) -> crate::ScriptDefaults {
         let path = self.project_root.join("scripts").join(format!("{name}.lua"));
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mtime = floptle_vfs::modified(&path);
         let key = name.to_string();
         if let (Some(mt), Some((cached_mt, vals))) = (mtime, self.script_defaults_cache.get(&key))
             && *cached_mt == mt {
@@ -1516,7 +1535,7 @@ impl Editor {
         if self.world.get::<Transform>(e).is_none() || !is_script(path) {
             return;
         }
-        if !Path::new(path).exists() {
+        if !floptle_vfs::exists(Path::new(path)) {
             eprintln!("  script not found: {path}");
             return;
         }
@@ -1569,9 +1588,9 @@ mod scene_request_tests {
         let root =
             std::env::temp_dir().join(format!("floptle-scene-req-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("scenes/arenas")).unwrap();
-        std::fs::write(root.join("scenes/first.ron"), "()").unwrap();
-        std::fs::write(root.join("scenes/arenas/desert.ron"), "()").unwrap();
+        floptle_vfs::create_dir_all(root.join("scenes/arenas")).unwrap();
+        floptle_vfs::write(root.join("scenes/first.ron"), "()").unwrap();
+        floptle_vfs::write(root.join("scenes/arenas/desert.ron"), "()").unwrap();
         let ed = Editor { project_root: root.clone(), ..Default::default() };
 
         let first = root.join("scenes/first.ron");
@@ -1600,8 +1619,8 @@ mod scene_request_tests {
         let dir = std::env::temp_dir()
             .join(format!("floptle-find-lighting-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("scripts")).unwrap();
-        std::fs::write(
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
             dir.join("scripts/probe.lua"),
             "function update(node, dt)\n\
              \x20 local l = find(\"Lighting\")\n\

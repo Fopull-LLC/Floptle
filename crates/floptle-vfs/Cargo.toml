@@ -1,0 +1,19 @@
+[package]
+name = "floptle-vfs"
+description = "The engine's view of files: std::fs on the desktop, a preloaded bundle in a browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# For the clock type `modified` answers with — real on the desktop, absent in a page.
+floptle-core = { path = "../floptle-core" }
+
+# Only a page needs these: the bundle lives in memory, and what a game writes
+# (its saves) persists in the page's own storage.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.126"
+web-sys = { version = "0.3", features = ["Window", "Storage"] }

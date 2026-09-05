@@ -9,6 +9,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
+floptle-vfs = { path = "../floptle-vfs" }
 serde = { workspace = true } # a manifest and the installed list are both RON documents
 ron = { workspace = true }
 serde_json = { workspace = true } # …but the registry CATALOGUE is a web file, so it is JSON
