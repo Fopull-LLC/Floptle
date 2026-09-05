@@ -483,9 +483,10 @@ pub mod web {
     }
 
     /// A line to the page's transcript — what `eprintln!` cannot do here:
-    /// Rust's stderr is a no-op on `wasm32-unknown-unknown`.
-    pub(crate) fn log(line: &str) {
-        let _ = page_log(line);
+    /// Rust's stderr is a no-op on `wasm32-unknown-unknown`. `false` when the
+    /// page defines no `floptleLog` (a host page of someone's own).
+    pub(crate) fn log(line: &str) -> bool {
+        page_log(line).is_ok()
     }
 
     /// A frame copied into a mappable buffer, waiting for `due` to arrive.

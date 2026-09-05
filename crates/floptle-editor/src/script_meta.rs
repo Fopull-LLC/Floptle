@@ -106,7 +106,9 @@ impl ScriptMeta {
 /// mtime-keyed cache: the Inspector asks for this every frame, per selected node.
 #[derive(Default)]
 pub(crate) struct ScriptMetaCache {
-    entries: HashMap<PathBuf, (floptle_core::time::SystemTime, ScriptMeta)>,
+    /// The stamp is `None` where the platform has none (a browser bundle) or
+    /// the file is missing; either way it is a key, not a "re-parse every call".
+    entries: HashMap<PathBuf, (Option<floptle_core::time::SystemTime>, ScriptMeta)>,
 }
 
 impl ScriptMetaCache {
@@ -116,16 +118,11 @@ impl ScriptMetaCache {
     pub(crate) fn get(&mut self, project_root: &Path, kind: &str) -> &ScriptMeta {
         let path = project_root.join("scripts").format_lua(kind);
         let mtime = floptle_vfs::modified(&path);
-        let stale = match (self.entries.get(&path), mtime) {
-            (Some((seen, _)), Some(now)) => *seen != now,
-            (Some(_), None) => true,
-            (None, _) => true,
-        };
+        let stale = self.entries.get(&path).is_none_or(|(seen, _)| *seen != mtime);
         if stale {
             let src = floptle_vfs::read_to_string(&path).unwrap_or_default();
             let meta = parse(&src);
-            self.entries
-                .insert(path.clone(), (mtime.unwrap_or(floptle_core::time::UNIX_EPOCH), meta));
+            self.entries.insert(path.clone(), (mtime, meta));
         }
         &self.entries.get(&path).expect("just inserted").1
     }

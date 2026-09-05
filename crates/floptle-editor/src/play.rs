@@ -1461,16 +1461,18 @@ impl Editor {
         name: &str,
     ) -> crate::ScriptDefaults {
         let path = self.project_root.join("scripts").join(format!("{name}.lua"));
+        // `None` is every file's mtime in a browser (a bundle has no clock) and
+        // a missing file's anywhere; both key the cache, and a file that
+        // appears later has a real stamp that misses it.
         let mtime = floptle_vfs::modified(&path);
         let key = name.to_string();
-        if let (Some(mt), Some((cached_mt, vals))) = (mtime, self.script_defaults_cache.get(&key))
-            && *cached_mt == mt {
-                return vals.clone();
-            }
-        let vals = self.script_host.script_defaults(&path);
-        if let Some(mt) = mtime {
-            self.script_defaults_cache.insert(key, (mt, vals.clone()));
+        if let Some((cached_mt, vals)) = self.script_defaults_cache.get(&key)
+            && *cached_mt == mtime
+        {
+            return vals.clone();
         }
+        let vals = self.script_host.script_defaults(&path);
+        self.script_defaults_cache.insert(key, (mtime, vals.clone()));
         vals
     }
 

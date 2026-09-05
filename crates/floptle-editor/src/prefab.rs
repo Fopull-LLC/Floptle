@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use floptle_core::Entity;
+use floptle_core::time::SystemTime;
 use floptle_core::math::DVec3;
 use floptle_scene::NodeDoc;
 use crate::assets::{build_assets, unique_path};
@@ -301,7 +302,22 @@ impl Editor {
     /// A prefab's parsed docs, cached by file mtime (spawning the same prefab
     /// every tick must not re-read + re-parse the file).
     fn cached_prefab_docs(&mut self, path: &Path) -> Option<Vec<NodeDoc>> {
-        let mtime = floptle_vfs::modified(path)?;
+        let mtime = floptle_vfs::modified(path);
+        self.cached_prefab_docs_at(path, mtime)
+    }
+
+    /// [`Self::cached_prefab_docs`] with the mtime supplied. `None` is what a
+    /// browser reports for EVERY file — a bundle has no clock — and it used to
+    /// be read as "no file", so every `spawn()` in a web build silently did
+    /// nothing (the 2026-09-05 playtest: no NPCs, no entity, no tracers). A
+    /// bundled file never changes, so `None` keys the cache like any other
+    /// stamp: parsed once, good for the run. The file's existence was settled
+    /// by `resolve_prefab_request`; a read that fails still reports.
+    pub(crate) fn cached_prefab_docs_at(
+        &mut self,
+        path: &Path,
+        mtime: Option<SystemTime>,
+    ) -> Option<Vec<NodeDoc>> {
         if let Some((t, docs)) = self.prefab_cache.get(path)
             && *t == mtime
         {
@@ -902,10 +918,46 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    use floptle_core::time::SystemTime;
     use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform};
     use floptle_ui::UiLayer;
 
     use crate::Editor;
+
+    /// The 2026-09-05 browser playtest: NPCs, the entity and the tracer pool
+    /// never spawned, with nothing in the log. In a browser every file's mtime
+    /// is `None` (a bundle has no clock), and the prefab cache read `None` as
+    /// "no such file" and gave up before the read. A stamp that is absent is a
+    /// stamp like any other: parse once, and that parse serves the whole run.
+    #[test]
+    fn a_prefab_with_no_mtime_still_spawns_and_is_parsed_once() {
+        let dir = std::env::temp_dir().join(format!("floptle_no_mtime_{}", std::process::id()));
+        let _ = floptle_vfs::create_dir_all(dir.join("prefabs"));
+        let path = dir.join("prefabs").join("Nurse.prefab.ron");
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let root = ed.world.spawn();
+        ed.world.insert(root, Transform::IDENTITY);
+        ed.world.insert(root, Name("Nurse".into()));
+        ed.world.insert(root, Matter::Empty);
+        let docs = ed.subtree_docs(&[root]);
+        floptle_vfs::write(&path, ron::ser::to_string(&docs).unwrap()).unwrap();
+
+        let got = ed.cached_prefab_docs_at(&path, None).expect("no mtime is not no file");
+        assert_eq!(got.len(), 1, "the prefab's one node");
+        assert_eq!(got[0].name, "Nurse");
+        // The file is gone; the run's parse still answers, because a bundle
+        // never changes under the game and `None` keys the cache like a stamp.
+        floptle_vfs::remove_file(&path).unwrap();
+        assert!(ed.cached_prefab_docs_at(&path, None).is_some(), "parsed once, good for the run");
+        // A REAL stamp that differs is a change, and a change re-reads — which
+        // now fails, and says so, rather than serving the stale parse.
+        assert!(ed.cached_prefab_docs_at(&path, Some(SystemTime::now())).is_none());
+        assert!(
+            ed.console.entries.iter().any(|e| e.msg.contains("Nurse.prefab.ron")),
+            "a failed read is reported by file name"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Editing a prefab on its own, end to end (`floptle/0090`): open it, change
     /// something, save, reopen.

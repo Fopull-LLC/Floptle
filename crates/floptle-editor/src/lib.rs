@@ -2992,7 +2992,7 @@ struct Editor {
     env_layer: Option<(String, Vec<Entity>, floptle_core::Light)>,
     /// Parsed prefab files by path (mtime-validated) — `spawn("…")` every tick
     /// must not re-read + re-parse the asset.
-    prefab_cache: HashMap<std::path::PathBuf, (SystemTime, Vec<floptle_scene::NodeDoc>)>,
+    prefab_cache: HashMap<std::path::PathBuf, (Option<SystemTime>, Vec<floptle_scene::NodeDoc>)>,
     /// Compiled `.flsl` shaders by project-relative path (mtime hot reload).
     flsl_cache: shaders::FlslCache,
     /// Live group(3) material bindings per shader-material entity.
@@ -3245,7 +3245,7 @@ struct Editor {
     script_errors: Vec<String>,
     /// Cache of each script file's declared `defaults` keyed by path, with the file's
     /// mtime so we only re-parse when it changes — drives live inspector param sync.
-    script_defaults_cache: HashMap<String, (SystemTime, ScriptDefaults)>,
+    script_defaults_cache: HashMap<String, (Option<SystemTime>, ScriptDefaults)>,
     /// Syntax diagnostic (line, message) for the active IDE file, for red squiggles.
     ide_diag: Option<(usize, String)>,
     /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
