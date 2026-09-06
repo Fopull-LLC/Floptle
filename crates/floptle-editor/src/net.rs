@@ -501,6 +501,32 @@ impl Editor {
             for ev in events {
                 match ev {
                     NetEvent::PeerJoined(p) => {
+                        // **A dedicated server hands out a slot here.** Nobody
+                        // is at this keyboard, so the authored slots start
+                        // unowned; the first one nobody has taken goes to this
+                        // peer BEFORE `playerJoined` runs, because a script
+                        // that asks what the joiner drives must not be answered
+                        // "nothing". A game that assigns its own (net.setOwner,
+                        // net.spawn{owner=…}) has already claimed one, and this
+                        // leaves it alone.
+                        if self.dedicated {
+                            let claimed = match self.net_server.as_mut() {
+                                Some(s) => {
+                                    crate::dedicated::claim_free_slot(s, &mut self.world, p)
+                                }
+                                None => None,
+                            };
+                            if let Some(name) = claimed {
+                                self.console.push(
+                                    floptle_script::LogLevel::Debug,
+                                    format!(
+                                        "🎮 peer {p} drives authored player slot \"{name}\""
+                                    ),
+                                    None,
+                                );
+                                self.net_refresh_remote_predicted();
+                            }
+                        }
                         // A new roster means a new match clock: the session has
                         // already re-announced `RollbackStart`, so the host
                         // restarts its own driver on the same roster.
@@ -532,6 +558,19 @@ impl Editor {
                         }
                         if cleaned {
                             self.net_apply_host_filters();
+                        }
+                        // The other half of the same rule, and it is deliberately
+                        // NOT the same half. A rig the game spawned FOR a player
+                        // belongs to that player and left with them, just above.
+                        // An authored slot belongs to the SCENE: it stays in the
+                        // world and becomes free, so the next joiner can have it
+                        // instead of the lobby shrinking by one every time
+                        // somebody's wifi drops.
+                        if self.dedicated {
+                            if let Some(s) = self.net_server.as_mut() {
+                                crate::dedicated::release_slots(s, &mut self.world, p);
+                            }
+                            self.net_refresh_remote_predicted();
                         }
                         self.net_rollback_resync();
                         self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), why.as_deref())
@@ -576,7 +615,23 @@ impl Editor {
                 }
             }
         }
-        // --- mirror session state into Lua (net.role()/peers()/ping()/isMine) ---
+        self.net_mirror_server_state();
+    }
+
+    /// Mirror the SERVER session's state into Lua — `net.role()`, `net.peers()`,
+    /// `net.ping()`, `net.isMine()`, the lobby code.
+    ///
+    /// **Called when the session comes up as well as at the end of every tick**,
+    /// and the first of those is not tidiness. A peer can be on the roster
+    /// before the host's first tick ends — an in-process client, a LAN join, a
+    /// relay reconnect — and `playerJoined` fires from inside that tick, ahead
+    /// of the mirror at the bottom of it. `net.role()` still said `offline`
+    /// there, so every server-only call the handler made (`net.spawn`,
+    /// `net.kick`, `net.setOwner`, `net.setRelevant`) was refused with "only
+    /// the server does this — ignored". The FIRST player to join a session got
+    /// no avatar and no moderation; the second onwards were fine, which is
+    /// exactly the shape that reads as a flaky network rather than a bug.
+    pub(crate) fn net_mirror_server_state(&mut self) {
         let state = if let Some(s) = &self.net_server {
             let identities = Self::mirror_identities(s);
             NetState {
@@ -811,7 +866,15 @@ impl Editor {
     /// #2 the first joiner (peer 1), #3 the second (peer 2), and so on. No
     /// negotiation needed; registration, snapshot routing, and input routing
     /// all agree. Runtime avatars carry explicit owners via `net.spawn`.
-    fn net_assign_scene_owners(world: &mut World) {
+    ///
+    /// **A dedicated server has no host, so it reserves nothing.** Slot #1's
+    /// owner is `None` above because somebody is sitting at that keyboard;
+    /// with `dedicated` set nobody is, so every slot starts unowned and is
+    /// handed out from #1 as peers arrive (`dedicated::claim_free_slot`).
+    /// Reserving it there would leave an avatar in the world that nobody
+    /// controls and no client predicts, and the first joiner would spectate
+    /// their own body.
+    fn net_assign_scene_owners(world: &mut World, dedicated: bool) {
         let preds: Vec<Entity> = world
             .query::<Transform>()
             .map(|(e, _)| e)
@@ -824,7 +887,11 @@ impl Editor {
             .collect();
         for (i, e) in preds.iter().enumerate() {
             if let Some(r) = world.get_mut::<floptle_core::Replicated>(*e) {
-                r.owner = if i == 0 { None } else { Some(i as u64) };
+                r.owner = match (dedicated, i) {
+                    (true, _) => None,
+                    (false, 0) => None,
+                    (false, i) => Some(i as u64),
+                };
                 // Prediction needs vel+grounded in snapshots on BOTH ends.
                 if !r.physics {
                     r.physics = true;
@@ -1001,6 +1068,22 @@ impl Editor {
         world.query::<floptle_core::Replicated>().map(|(e, r)| (e.index(), r.owner)).collect()
     }
 
+    /// Recompute who drives what, from the world, and reapply the filters.
+    ///
+    /// Ownership moves for four reasons — the session came up, a scene
+    /// switched, `net.setOwner` ran, or a dedicated server handed a joiner a
+    /// slot (or took one back) — and every one of them has to end here, or a
+    /// node keeps running under the wrong input for the rest of the session.
+    pub(crate) fn net_refresh_remote_predicted(&mut self) {
+        self.net_remote_predicted = self
+            .world
+            .query::<floptle_core::Replicated>()
+            .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+            .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
+            .collect();
+        self.net_apply_host_filters();
+    }
+
     /// (Re)apply the HOST's script filters from the remote-owned Predicted
     /// set: those nodes leave the global passes (they run per tick with their
     /// owner's replayed input) — everything else runs under the host normally.
@@ -1010,6 +1093,25 @@ impl Editor {
         for (e, _) in &self.net_remote_predicted {
             skip.insert(e.index());
             fskip.insert(e.index());
+        }
+        // **A dedicated server drives no slot itself.** On a hosted session the
+        // slots left out of `net_remote_predicted` are the host's own, and they
+        // run in the global passes under the keyboard. Here there is no
+        // keyboard: an authored slot nobody has claimed is driven by nobody, so
+        // running its controller against permanently-empty input would simulate
+        // a player who is not there — and then hand every client snapshots of
+        // it. It comes alive when a joiner claims it.
+        if self.dedicated {
+            let idle: Vec<u32> = self
+                .world
+                .query::<floptle_core::Replicated>()
+                .filter(|(_, r)| r.mode == ReplicationMode::Predicted && r.owner.is_none())
+                .map(|(e, _)| e.index())
+                .collect();
+            for eid in idle {
+                skip.insert(eid);
+                fskip.insert(eid);
+            }
         }
         // Same split as the client side: the driver's nodes run their TICKS
         // under it, so they leave both global tick passes — but their
@@ -1024,6 +1126,14 @@ impl Editor {
     /// controllers against the same keyboard would move every copy at once.
     /// Applied at Play start and again when a session ends.
     pub(crate) fn net_apply_offline_slots(&mut self) {
+        // A dedicated server is never offline in this sense: it hosts the
+        // instant Play starts, and `net_apply_host_filters` has the stricter
+        // rule (every unclaimed slot idles, not just the ones after #1). Saying
+        // "idle offline" here would also be the first thing an operator read in
+        // the log of a server that is about to come up.
+        if self.dedicated {
+            return;
+        }
         let preds: Vec<Entity> = self
             .world
             .query::<Transform>()
@@ -1111,15 +1221,8 @@ impl Editor {
             // Re-run the host's per-scene session setup against the new world:
             // slot ownership, script filters, fresh NetIds, a clean lag-comp
             // ring — and the announcement that makes every client follow.
-            Self::net_assign_scene_owners(&mut self.world);
-            let remote: Vec<(Entity, u64)> = self
-                .world
-                .query::<floptle_core::Replicated>()
-                .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
-                .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
-                .collect();
-            self.net_remote_predicted = remote;
-            self.net_apply_host_filters();
+            Self::net_assign_scene_owners(&mut self.world, self.dedicated);
+            self.net_refresh_remote_predicted();
             self.net_history = floptle_net::LagHistory::new();
             if let Some(s) = self.net_server.as_mut() {
                 s.switch_scene(&rel);
@@ -1305,23 +1408,22 @@ impl Editor {
         );
     }
 
-    fn net_host_with(&mut self, transport: Box<dyn floptle_net::Transport>, how: &str) {
+    pub(crate) fn net_host_with(
+        &mut self,
+        transport: Box<dyn floptle_net::Transport>,
+        how: &str,
+    ) {
         let transport = Self::net_impair_wrap(transport);
         self.net_impair_note();
-        Self::net_assign_scene_owners(&mut self.world);
+        Self::net_assign_scene_owners(&mut self.world, self.dedicated);
         // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
         // global script passes, run per-tick with their owner's replayed
         // input instead. Slot #1 (owner None) is the HOST's — it stays in the
-        // global passes under the host's live keyboard.
-        let remote: Vec<(Entity, u64)> = self
-            .world
-            .query::<floptle_core::Replicated>()
-            .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
-            .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
-            .collect();
-        let slots = remote.len();
-        self.net_remote_predicted = remote;
-        self.net_apply_host_filters();
+        // global passes under the host's live keyboard. On a DEDICATED server
+        // there is no host, so nothing is pre-assigned and this starts empty:
+        // the slots are handed out as peers arrive.
+        self.net_refresh_remote_predicted();
+        let slots = self.net_remote_predicted.len();
         let mut s = NetSession::server(transport, self.input_map_hash());
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.set_scene(&self.scene_rel_or_default()); // joiners land in OUR scene
@@ -1329,14 +1431,31 @@ impl Editor {
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.net_rollback_host_setup();
-        self.console.push(
-            floptle_script::LogLevel::Debug,
+        // **Before anyone can join, not at the end of the first tick.** A peer
+        // on the roster inside that tick fires `playerJoined` ahead of the
+        // mirror at the bottom of it, and a handler that ran while `net.role()`
+        // still said `offline` had every server-only call refused.
+        self.net_mirror_server_state();
+        let who = if self.dedicated {
+            // No local player, so nothing is pre-assigned and `slots` is zero:
+            // count the authored slots that are waiting to be handed out.
+            let waiting = self
+                .world
+                .query::<floptle_core::Replicated>()
+                .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+                .count();
+            format!(
+                "🌐 hosting {how}. No local player: {waiting} authored slot(s) go to joiners \
+                 in node order as they arrive (or spawn avatars per joiner — see \
+                 player_spawner.lua)."
+            )
+        } else {
             format!(
                 "🌐 hosting {how}. Predicted node #1 is YOURS; {slots} joiner slot(s) follow \
                  in node order (or spawn avatars per joiner — see player_spawner.lua)."
-            ),
-            None,
-        );
+            )
+        };
+        self.console.push(floptle_script::LogLevel::Debug, who, None);
     }
 
     /// Join a REAL session at `host:port` (QUIC). The play world becomes a
@@ -1414,7 +1533,7 @@ impl Editor {
     fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
         let transport = Self::net_impair_wrap(transport);
         self.net_impair_note();
-        Self::net_assign_scene_owners(&mut self.world);
+        Self::net_assign_scene_owners(&mut self.world, self.dedicated);
         let mut client =
             NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
         client.register_scene(&self.world);
@@ -2180,7 +2299,7 @@ impl Editor {
         // new scene can land on the old world's entities.
         if let Some(scene) = scene_switch {
             if self.switch_scene_during_play(&scene).is_some() {
-                Self::net_assign_scene_owners(&mut self.world);
+                Self::net_assign_scene_owners(&mut self.world, self.dedicated);
                 // Stale prediction history must not survive into the new scene.
                 self.net_predictor = None;
                 // Neither may a stale DRIVER. Its nodes belong to the world

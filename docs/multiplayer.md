@@ -381,15 +381,25 @@ their laptop, and so the host isn't also a player with an unfair zero-latency
 view:
 
 ```
-floptle-runtime --server <project-dir> [--scene scenes/arena.ron]
-                [--port 7777 | --relay host:port] [--tick 60]
-                [--interest 150] [--budget 16384]
+floptle serve <project-dir> [--scene scenes/arena.ron]
+              [--port 7777 | --relay host:port] [--tick 60]
+              [--interest 150] [--budget 16384]
 ```
 
-Same `World`, same `Sim`, same scripts, no window and no GPU. It hosts
-`Authority` and `Predicted` sessions. It **refuses `Rollback` scenes** by
-design — a rollback match has every peer simulating every tick, so its "host" is
-a referee and a relay, and for a fighting game that is one of the players.
+(`floptle-runtime --server <project-dir> …` runs the same server, and takes the
+same flags. It is the older spelling of it.)
+
+**It is the engine you already know, hosting.** Same `World`, same `Sim`, same
+scripts, same session, same tick — with no window, no GPU and nobody at the
+keyboard. Not a second, smaller server that has to be kept in step with the one
+the editor runs: every `net.*` call a server script can make, the
+lag-compensation history behind `net.rewind`, interest management and its line
+of sight, the join policy, your project's packages, animation and nav all behave
+here exactly as they do when you press Play, because it is the same code.
+
+It hosts `Authority` and `Predicted` sessions. It **refuses `Rollback` scenes**
+by design — a rollback match has every peer simulating every tick, so its "host"
+is a referee and a relay, and for a fighting game that is one of the players.
 
 **Player slots on a dedicated server.** In a hosted session, authored
 `Predicted` node #1 belongs to the host and #2 onward to joiners, because

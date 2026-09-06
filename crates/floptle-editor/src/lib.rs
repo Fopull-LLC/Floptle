@@ -78,6 +78,12 @@ mod lint_vec3;
 mod console;
 #[cfg(feature = "editor-ui")]
 mod curve_edit;
+// The dedicated server. Public because the `floptle-runtime --server` binary
+// is a shim over it, exactly as `floptle-player` is a shim over `player`. Its
+// **loop** is gated off wasm32 inside the module — a browser tab can open
+// connections but never accept them, so it has nothing to listen with — while
+// the slot policy is ordinary ECS and builds everywhere.
+pub mod dedicated;
 mod dock;
 #[cfg(feature = "editor-ui")]
 mod exec;
@@ -2389,6 +2395,17 @@ struct Editor {
     /// right, or the H key). Off = a clean view; the selected node's collider still
     /// hides too.
     show_gizmos: bool,
+    /// **This engine is a dedicated server: nobody is sitting at it.**
+    ///
+    /// The only thing it changes is who owns an authored `Predicted` slot. A
+    /// hosted session reserves slot #1 for the host, because that slot's driver
+    /// is at the keyboard; here there is no keyboard, so reserving it would put
+    /// an avatar in the world that nobody controls and no client predicts, and
+    /// the first joiner would spectate their own body. Set, every authored slot
+    /// starts unowned, is handed out from #1 in node order as peers arrive, and
+    /// comes back when its player drops — and a slot nobody owns stays out of
+    /// the script passes, because nothing is driving it. See `dedicated.rs`.
+    dedicated: bool,
     /// Per-category gizmo visibility (the ⏷ menu beside the master toggle) —
     /// tune what draws without giving up the rest.
     gizmo_filter: GizmoFilter,

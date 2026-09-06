@@ -19,15 +19,15 @@ path = "src/main.rs"
 [features]
 # The script VM, forwarded rather than chosen — exactly one, and this crate
 # never picks for whoever depends on it. `default-features = false` on the
-# `floptle-script` dependency below is what makes `--features vm-luajit` mean
-# LuaJIT instead of LuaJIT *and* Luau. See `floptle-script/src/vm.rs` and
-# ADR-0028.
+# `floptle-script` and `floptle-editor` dependencies below is what makes
+# `--features vm-luajit` mean LuaJIT instead of LuaJIT *and* Luau. See
+# `floptle-script/src/vm.rs` and ADR-0028.
 default = ["vm-luau"]
-vm-luajit = ["floptle-script/vm-luajit"]
-vm-luau = ["floptle-script/vm-luau"]
+vm-luajit = ["floptle-script/vm-luajit", "floptle-editor/vm-luajit"]
+vm-luau = ["floptle-script/vm-luau", "floptle-editor/vm-luau"]
 # Luau's code generator, forwarded so a native build can ask for it. Off by
 # default; see floptle-script's manifest for why.
-vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen"]
+vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "floptle-editor/vm-luau-codegen"]
 
 
 [dependencies]
@@ -46,6 +46,13 @@ floptle-assets = { path = "../floptle-assets" }
 floptle-script = { path = "../floptle-script", default-features = false }
 floptle-net = { path = "../floptle-net" }
 floptle-scene = { path = "../floptle-scene" }
+# **The dedicated server, and the only one.** `--server` is a shim over
+# `floptle_editor::dedicated`, the same code `floptle serve` runs — which is the
+# engine's own play/host tick with no window and no local player. This crate
+# used to carry a second, smaller server of its own; keeping the two in step was
+# nobody's job, and it silently drained no `net.*` command at all. Built without
+# the authoring half, exactly as `floptle-player` is.
+floptle-editor = { path = "../floptle-editor", default-features = false }
 
 winit = { workspace = true }
 log = { workspace = true }

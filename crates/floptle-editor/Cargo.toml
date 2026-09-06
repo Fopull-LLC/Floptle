@@ -63,14 +63,14 @@ editor-ui = [
     "dep:tokio",
     "dep:clap",
 ]
-vm-luajit = ["floptle-script/vm-luajit", "floptle-runtime/vm-luajit", "mlua/luajit", "mlua/vendored"]
-vm-luau = ["floptle-script/vm-luau", "floptle-runtime/vm-luau", "mlua/luau"]
+vm-luajit = ["floptle-script/vm-luajit", "mlua/luajit", "mlua/vendored"]
+vm-luau = ["floptle-script/vm-luau", "mlua/luau"]
 # Luau's code generator on the architectures that have one (x64/aarch64, never
 # wasm). Off by default: it is a performance lever, and the real-game bench
 # reached its verdict WITHOUT it, so the shipped default is the configuration
 # that was measured. `mlua/luau-jit` implies `mlua/luau`, so this is additive
 # over `vm-luau` and cannot be combined with `vm-luajit`.
-vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "floptle-runtime/vm-luau-codegen", "mlua/luau-jit"]
+vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "mlua/luau-jit"]
 # Off by default — matching floptle-steam's own feature, which this just
 # forwards to. See crates/floptle-editor/src/steam_boot.rs.
 steam = ["dep:floptle-steam", "floptle-steam/steam"]
@@ -152,10 +152,6 @@ egui_dock = { workspace = true, optional = true }
 ron = { workspace = true }
 serde = { workspace = true }
 floptle-net = { path = "../floptle-net" }
-# The dedicated server, for `floptle serve`. The runtime's LIBRARY half, so the
-# verb runs the same server the runtime binary does rather than a second copy of
-# it — the rule the whole command line follows (ADR-0027).
-floptle-runtime = { path = "../floptle-runtime", default-features = false }
 # Native file picker for asset import — the XDG desktop portal backend works on
 # Wayland (where winit delivers no file drops) as well as X11/Windows/macOS.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"], optional = true }

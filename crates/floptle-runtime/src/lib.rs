@@ -1,16 +1,23 @@
-//! The runtime's library face — currently just the dedicated server.
+//! The runtime's library face — currently just the dedicated server, and that
+//! is now somebody else's code.
 //!
-//! `floptle-runtime` is a binary, and the server inside it is the only piece
-//! anything else needs to call: `floptle serve` is the same server, reached
-//! from the editor's command line so there is one place to type things.
+//! `floptle-runtime --server` and `floptle serve` are the same server, and as
+//! of this release so is the *engine* under it: `floptle_editor::dedicated` is
+//! the editor's own play/host tick with no window and no local player.
 //!
-//! It is exposed as a library rather than copied for the reason the whole CLI
-//! follows — a second implementation drifts and one call cannot. `server.rs`
-//! already referenced nothing else in this crate, so this costs a file.
+//! **This crate used to carry a second, smaller server**, re-derived from that
+//! tick once and never caught up with it. It drained no `NetCmd` at all — so
+//! `net.spawn`, `net.despawn`, `net.setOwner`, `net.kick`, `net.setRelevant`
+//! and a server-originated `net.send` were silent no-ops on a dedicated server
+//! — had no lag-compensation history, passed no terrain volumes, hard-coded
+//! uniform gravity, never loaded a project's packages, and never stepped
+//! animation or nav. None of that was a bug anyone wrote; it was the cost of
+//! there being two of something. So there is one, and this is the alias that
+//! keeps the flag working.
 
 // **The dedicated server needs to LISTEN**, on QUIC or through a relay, and a
 // browser tab cannot: it can open connections, never accept them. There is also
-// nothing a browser build would do with it — a web export is a client. Same gate
-// the transport itself carries in `floptle-net`.
+// nothing a browser build would do with it — a web export is a client. Same
+// gate the transport itself carries in `floptle-net`.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod server;
+pub use floptle_editor::dedicated as server;
