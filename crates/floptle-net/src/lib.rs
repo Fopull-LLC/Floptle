@@ -43,7 +43,9 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 #[cfg(not(target_arch = "wasm32"))]
 pub use quic::{QuicClient, QuicServer};
 #[cfg(not(target_arch = "wasm32"))]
-pub use relay::{RelayClient, RelayHost, RelayServer};
+pub use relay::{
+    HostAdmission, JoinAdmission, RelayClient, RelayHost, RelayPolicy, RelayServer,
+};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};
 pub use rollback::{

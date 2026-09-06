@@ -52,7 +52,16 @@ fn tag_channel(t: u8) -> Channel {
 /// Everything that crosses a relay leg.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum RelayMsg {
-    /// Endpoint → relay: host a new lobby.
+    /// Endpoint → relay: host a new lobby, presenting nothing.
+    ///
+    /// **Kept as a unit variant on purpose.** A managed relay refuses this with
+    /// a sentence telling the developer to connect their project, and that
+    /// message is far more use than the silence a re-shaped variant would
+    /// produce: postcard indexes variants by declaration order, so widening
+    /// `Host` would make every game already in the wild fail to decode here and
+    /// hang with nothing said. [`RelayMsg::HostKeyed`] is appended at the end
+    /// instead, which old builds never send and new ones only send when the
+    /// project actually carries a key.
     Host,
     /// Endpoint → relay: join a lobby by code.
     Join { code: String },
@@ -74,6 +83,16 @@ enum RelayMsg {
     ToHost { channel: u8, seq: u64, bytes: Vec<u8> },
     /// Relay → client: the host's traffic.
     FromHost { channel: u8, seq: u64, bytes: Vec<u8> },
+    /// Endpoint → relay: host a lobby **as a registered game**, presenting the
+    /// game key from `project.ron` and the build hash if there is one.
+    ///
+    /// **Appended last, and that placement is the compatibility story.**
+    /// Postcard numbers enum variants by declaration order, so a new relay
+    /// decodes every message an old build sends exactly as before, and this one
+    /// is simply a variant old relays have never heard of. The other direction
+    /// — a new build meeting an OLD relay — is what
+    /// [`RelayHost::host_keyed`]'s fallback is for.
+    HostKeyed { key: String, build: Option<String> },
 }
 
 impl RelayMsg {
@@ -86,10 +105,81 @@ impl RelayMsg {
     }
 }
 
+/// What a relay decides about a request to host.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostAdmission {
+    /// Allow. `prefix` is prepended to the lobby code — a managed relay puts
+    /// its region letter there so a client can map a code back to a relay
+    /// without asking anybody. `None` keeps the self-hosted 5-character code.
+    Allow { prefix: Option<char> },
+    /// Refuse, with a sentence the player reads **verbatim**. It reaches them
+    /// through `Refused { reason }` → the F1 menu and `net.on("refused")`, so
+    /// it is product copy, not a diagnostic.
+    Refuse { reason: String },
+}
+
+/// What a relay decides about a request to join an existing lobby.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JoinAdmission {
+    Allow,
+    Refuse { reason: String },
+}
+
+/// The relay's admission policy — who may host, who may join, and what the
+/// lobby codes look like.
+///
+/// **`floptle-net` never makes a network call, and this trait is why.** A
+/// managed relay decides from a key snapshot it pulls on its own schedule; a
+/// self-hosted relay has no policy at all and is byte-identical to the day
+/// this file was written. Keeping the decision behind a trait is what lets
+/// both of those be true at once, and it is what makes the managed rules
+/// testable without a network: the guards below drive a policy that answers
+/// from a table.
+///
+/// The bookkeeping hooks default to doing nothing, so a policy that only cares
+/// about admission implements one method.
+pub trait RelayPolicy: Send {
+    /// A host is asking for a lobby. `key` is `None` when the endpoint sent the
+    /// keyless [`RelayMsg::Host`] — which a managed relay must refuse and a
+    /// self-hosted one must not care about.
+    fn admit_host(&mut self, key: Option<&str>, build: Option<&str>) -> HostAdmission;
+
+    /// A client is joining `code`. This is where a CCU cap bites, and it must
+    /// bite here rather than on the host: **a live session is never broken for
+    /// a cap**, so the only thing a limit can do is refuse the next arrival.
+    fn admit_join(&mut self, _code: &str) -> JoinAdmission {
+        JoinAdmission::Allow
+    }
+
+    /// A lobby opened, under the key that was admitted. The policy owns the
+    /// code → key mapping; the relay does not know what a key means.
+    fn lobby_opened(&mut self, _code: &str, _key: Option<&str>) {}
+    fn lobby_closed(&mut self, _code: &str) {}
+    fn peer_joined(&mut self, _code: &str) {}
+    fn peer_left(&mut self, _code: &str) {}
+
+    /// Called on every [`RelayServer::step`], so a policy can refresh its
+    /// snapshot or flush a usage batch without owning a thread of its own.
+    fn tick(&mut self) {}
+}
+
+/// How long a keyed host waits before trying the keyless message as well, in
+/// 5 ms polls — see [`RelayHost::host_keyed`]. Long enough that a managed
+/// relay has always answered, short enough that an older self-hosted relay
+/// still feels instant.
+const OLD_RELAY_FALLBACK_POLLS: usize = 300;
+
 /// Lobby codes: 5 characters from an unambiguous alphabet (no 0/O, 1/I).
-fn lobby_code(rng: &mut u64) -> String {
+///
+/// A managed relay prefixes its region letter, making the code six — see
+/// [`HostAdmission::Allow`]. The prefix is **not** drawn from the alphabet
+/// below; it is an operator-allocated letter and the control plane owns the
+/// registry.
+fn lobby_code(rng: &mut u64, prefix: Option<char>) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    (0..5)
+    prefix
+        .into_iter()
+        .chain((0..5)
         .map(|_| {
             let mut x = *rng;
             x ^= x << 13;
@@ -97,7 +187,7 @@ fn lobby_code(rng: &mut u64) -> String {
             x ^= x << 17;
             *rng = x;
             ALPHABET[(x >> 33) as usize % ALPHABET.len()] as char
-        })
+        }))
         .collect()
 }
 
@@ -128,6 +218,10 @@ pub struct RelayServer {
     lobbies: HashMap<String, Lobby>,
     rng: u64,
     port: u16,
+    /// The admission policy, or `None` for the open self-hostable relay —
+    /// which is the default, and which behaves exactly as it did before
+    /// managed mode existed. Every managed rule lives behind this.
+    policy: Option<Box<dyn RelayPolicy>>,
 }
 
 impl RelayServer {
@@ -140,7 +234,24 @@ impl RelayServer {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x5EED)
             | 1;
-        Ok(Self { transport, conns: HashMap::new(), lobbies: HashMap::new(), rng: seed, port })
+        Ok(Self {
+            transport,
+            conns: HashMap::new(),
+            lobbies: HashMap::new(),
+            rng: seed,
+            port,
+            policy: None,
+        })
+    }
+
+    /// Run under an admission policy — Floptle Cloud's managed mode.
+    ///
+    /// Without this the relay is the open one ADR-0022 promises: no keys, no
+    /// control plane, nothing to authorize against. That is not a fallback, it
+    /// is the product — a self-hosted relay must keep working exactly as it
+    /// does today, and there is a guard that says so.
+    pub fn set_policy(&mut self, policy: Box<dyn RelayPolicy>) {
+        self.policy = Some(policy);
     }
 
     /// The actually-bound UDP port.
@@ -156,6 +267,13 @@ impl RelayServer {
     /// Process everything that arrived; returns how many messages moved.
     /// Drive it in a loop with a short sleep (the reference binary does 1 ms).
     pub fn step(&mut self) -> usize {
+        // Before the traffic: a managed policy refreshes its key snapshot and
+        // flushes its usage batch from here, so it never needs a thread of its
+        // own and can never be halfway through a refresh while a host is being
+        // admitted.
+        if let Some(p) = self.policy.as_mut() {
+            p.tick();
+        }
         let mut moved = 0;
         for inc in self.transport.poll() {
             moved += 1;
@@ -175,21 +293,21 @@ impl RelayServer {
 
     fn dispatch(&mut self, from: PeerId, leg_channel: Channel, msg: RelayMsg) {
         match msg {
-            RelayMsg::Host => {
-                let code = loop {
-                    let c = lobby_code(&mut self.rng);
-                    if !self.lobbies.contains_key(&c) {
-                        break c;
-                    }
-                };
-                self.lobbies.insert(
-                    code.clone(),
-                    Lobby { host: from, clients: HashMap::new(), next_peer: 1 },
-                );
-                self.conns.insert(from, Role::Host { code: code.clone() });
-                self.send(from, Channel::Reliable, &RelayMsg::Hosted { code });
+            RelayMsg::Host => self.open_lobby(from, None, None),
+            RelayMsg::HostKeyed { key, build } => {
+                self.open_lobby(from, Some(&key), build.as_deref())
             }
             RelayMsg::Join { code } => {
+                // The cap is enforced here and nowhere else: a live session is
+                // never broken for a limit, so the only thing a limit can do is
+                // turn away the next arrival — with words that name the plan
+                // and where to change it.
+                if let Some(p) = self.policy.as_mut()
+                    && let JoinAdmission::Refuse { reason } = p.admit_join(&code)
+                {
+                    self.send(from, Channel::Reliable, &RelayMsg::Refused { reason });
+                    return;
+                }
                 let Some(lobby) = self.lobbies.get_mut(&code) else {
                     self.send(
                         from,
@@ -202,7 +320,10 @@ impl RelayServer {
                 lobby.next_peer += 1;
                 lobby.clients.insert(peer, from);
                 let host = lobby.host;
-                self.conns.insert(from, Role::Client { code, game_peer: peer });
+                self.conns.insert(from, Role::Client { code: code.clone(), game_peer: peer });
+                if let Some(p) = self.policy.as_mut() {
+                    p.peer_joined(&code);
+                }
                 self.send(from, Channel::Reliable, &RelayMsg::JoinOk);
                 self.send(host, Channel::Reliable, &RelayMsg::PeerJoined { peer });
             }
@@ -226,9 +347,47 @@ impl RelayServer {
         }
     }
 
+    /// The shared tail of `Host` and `HostKeyed`: ask the policy, then either
+    /// open a lobby or say why not.
+    ///
+    /// **A refusal is a message, never a silence.** The reason goes back on the
+    /// wire and reaches the player verbatim — the whole value of "connect your
+    /// project at fopull.com/cloud" is that somebody reads it.
+    fn open_lobby(&mut self, from: PeerId, key: Option<&str>, build: Option<&str>) {
+        let prefix = match self.policy.as_mut() {
+            Some(p) => match p.admit_host(key, build) {
+                HostAdmission::Allow { prefix } => prefix,
+                HostAdmission::Refuse { reason } => {
+                    self.send(from, Channel::Reliable, &RelayMsg::Refused { reason });
+                    return;
+                }
+            },
+            // No policy: the open relay. A key, if one was presented, is
+            // ignored rather than checked — a self-hosted relay has nothing to
+            // check it against and is not entitled to an opinion about it.
+            None => None,
+        };
+        let code = loop {
+            let c = lobby_code(&mut self.rng, prefix);
+            if !self.lobbies.contains_key(&c) {
+                break c;
+            }
+        };
+        self.lobbies
+            .insert(code.clone(), Lobby { host: from, clients: HashMap::new(), next_peer: 1 });
+        self.conns.insert(from, Role::Host { code: code.clone() });
+        if let Some(p) = self.policy.as_mut() {
+            p.lobby_opened(&code, key);
+        }
+        self.send(from, Channel::Reliable, &RelayMsg::Hosted { code });
+    }
+
     fn drop_conn(&mut self, c: PeerId) {
         match self.conns.remove(&c) {
             Some(Role::Host { code }) => {
+                if let Some(p) = self.policy.as_mut() {
+                    p.lobby_closed(&code);
+                }
                 // The lobby dies with its host; clients hear it as a refusal.
                 if let Some(lobby) = self.lobbies.remove(&code) {
                     for (_, conn) in lobby.clients {
@@ -241,6 +400,9 @@ impl RelayServer {
                 }
             }
             Some(Role::Client { code, game_peer }) => {
+                if let Some(p) = self.policy.as_mut() {
+                    p.peer_left(&code);
+                }
                 if let Some(lobby) = self.lobbies.get_mut(&code) {
                     lobby.clients.remove(&game_peer);
                     let host = lobby.host;
@@ -292,20 +454,76 @@ pub struct RelayHost {
     code: Option<String>,
     seq: u64,
     dedup: SeqState,
+    /// Why the relay turned this host away, if it did.
+    ///
+    /// **This used to be dropped on the floor.** A managed relay's refusals are
+    /// the product's own words — "connect your project at fopull.com/cloud",
+    /// "this game is at its 20-player limit on the free plan" — and the host
+    /// leg parsed `Refused` into `_ => {}`, so all of them arrived as a three
+    /// second wait and then "no lobby code (is a relay running there?)": a
+    /// message that is not merely unhelpful but points at the wrong thing
+    /// entirely, since the relay is plainly running and plainly answering.
+    refused: Option<String>,
 }
 
 impl RelayHost {
     /// Connect to a relay and host a lobby. Blocks briefly (≤ ~3 s) for the
     /// lobby code — one click, one code.
     pub fn host(relay_addr: &str) -> Result<(Self, String), String> {
+        Self::connect_and_host(relay_addr, RelayMsg::Host, None)
+    }
+
+    /// Host **as a registered game**, presenting the project's Floptle Cloud
+    /// key (and its build hash, when the build has one).
+    ///
+    /// A managed relay refuses a keyless host, so this is the call an exported
+    /// game makes once its project is connected. A self-hosted relay ignores
+    /// the key entirely, which is deliberate: it has nothing to check it
+    /// against and is not entitled to an opinion about it.
+    ///
+    /// **The fallback is the compatibility story in the other direction.** New
+    /// variants are appended to `RelayMsg`, so a relay older than managed mode
+    /// cannot decode `HostKeyed` and drops it — silently, because that is what
+    /// an unknown postcard variant does. Rather than let a developer who points
+    /// a connected project at their own older relay sit through a three second
+    /// timeout and a wrong diagnosis, the plain `Host` goes out after
+    /// [`OLD_RELAY_FALLBACK_POLLS`] and that relay hosts them normally. On a
+    /// managed relay the answer has always arrived long before then.
+    pub fn host_keyed(
+        relay_addr: &str,
+        key: &str,
+        build: Option<&str>,
+    ) -> Result<(Self, String), String> {
+        Self::connect_and_host(
+            relay_addr,
+            RelayMsg::HostKeyed { key: key.to_string(), build: build.map(str::to_string) },
+            Some(RelayMsg::Host),
+        )
+    }
+
+    fn connect_and_host(
+        relay_addr: &str,
+        ask: RelayMsg,
+        fallback: Option<RelayMsg>,
+    ) -> Result<(Self, String), String> {
         let mut inner = QuicClient::connect(relay_addr)?;
-        inner.send(SERVER, Channel::Reliable, &RelayMsg::Host.encode());
+        inner.send(SERVER, Channel::Reliable, &ask.encode());
         let mut me =
-            Self { inner, code: None, seq: 0, dedup: SeqState::default() };
-        for _ in 0..600 {
-            let _ = me.poll(); // stashes Hosted{code} when it lands
+            Self { inner, code: None, seq: 0, dedup: SeqState::default(), refused: None };
+        let mut fallback = fallback;
+        for i in 0..600 {
+            let _ = me.poll(); // stashes Hosted{code} / Refused{reason} when it lands
             if let Some(c) = me.code.clone() {
                 return Ok((me, c));
+            }
+            // The relay answered, and the answer was no. Its words, not ours.
+            if let Some(reason) = me.refused.take() {
+                return Err(reason);
+            }
+            if i == OLD_RELAY_FALLBACK_POLLS
+                && let Some(f) = fallback.take()
+            {
+                me.inner.send(SERVER, Channel::Reliable, &f.encode());
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -337,6 +555,15 @@ impl Transport for RelayHost {
             match inc {
                 Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
                     Some(RelayMsg::Hosted { code }) => self.code = Some(code),
+                    // Carried, not swallowed. A managed relay refuses a host
+                    // for reasons the player has to be able to act on, and
+                    // every one of them is a sentence somebody wrote for them.
+                    Some(RelayMsg::Refused { reason }) => {
+                        if self.code.is_none() {
+                            self.refused = Some(reason.clone());
+                        }
+                        out.push(Incoming::refused(SERVER, reason));
+                    }
                     Some(RelayMsg::PeerJoined { peer }) => out.push(Incoming::Connected(peer)),
                     Some(RelayMsg::PeerLeft { peer }) => out.push(Incoming::dropped(peer)),
                     Some(RelayMsg::FromPeer { peer, channel, seq, bytes })
@@ -448,15 +675,111 @@ mod tests {
     use std::sync::Arc;
 
     /// A relay stepping on a background thread until dropped.
-    struct TestRelay {
-        port: u16,
+    pub(super) struct TestRelay {
+        pub(super) port: u16,
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
+    /// A policy that answers from a table instead of a control plane — the
+    /// managed rules without the network. `floptle-relay`'s real one pulls the
+    /// same shape from a key snapshot; what is being asserted here is the
+    /// relay's behaviour given an answer, which is the half that lives in this
+    /// crate.
+    pub(super) struct TablePolicy {
+        /// key → ccu_limit. Anything absent is an unknown key.
+        keys: HashMap<String, usize>,
+        /// Live peers per lobby code, so a cap has something to count.
+        live: HashMap<String, usize>,
+        /// code → key, because the relay does not know what a key means.
+        of_lobby: HashMap<String, String>,
+    }
+
+    impl TablePolicy {
+        pub(super) fn with(key: &str, limit: usize) -> Self {
+            let mut keys = HashMap::new();
+            keys.insert(key.to_string(), limit);
+            Self { keys, live: HashMap::new(), of_lobby: HashMap::new() }
+        }
+    }
+
+    impl RelayPolicy for TablePolicy {
+        fn admit_host(&mut self, key: Option<&str>, _build: Option<&str>) -> HostAdmission {
+            let Some(key) = key.filter(|k| !k.is_empty()) else {
+                return HostAdmission::Refuse {
+                    reason: "This relay is Floptle Cloud. Connect your project to a game at \
+                             fopull.com/cloud, or self-host floptle-relay."
+                        .into(),
+                };
+            };
+            match self.keys.contains_key(key) {
+                true => HostAdmission::Allow { prefix: Some('U') },
+                false => HostAdmission::Refuse {
+                    reason: "That game key is not one this relay knows. Check project.ron, \
+                             or connect the project at fopull.com/cloud."
+                        .into(),
+                },
+            }
+        }
+
+        fn admit_join(&mut self, code: &str) -> JoinAdmission {
+            let limit = self
+                .of_lobby
+                .get(code)
+                .and_then(|k| self.keys.get(k))
+                .copied()
+                .unwrap_or(usize::MAX);
+            // The host counts against the cap as well as the clients.
+            if self.live.get(code).copied().unwrap_or(0) + 1 >= limit {
+                return JoinAdmission::Refuse {
+                    reason: format!(
+                        "Floptle Cloud: this game is at its {limit}-player limit on the free \
+                         plan. Upgrade at fopull.com/cloud."
+                    ),
+                };
+            }
+            JoinAdmission::Allow
+        }
+
+        fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
+            self.live.insert(code.to_string(), 0);
+            if let Some(k) = key {
+                self.of_lobby.insert(code.to_string(), k.to_string());
+            }
+        }
+        fn lobby_closed(&mut self, code: &str) {
+            self.live.remove(code);
+            self.of_lobby.remove(code);
+        }
+        fn peer_joined(&mut self, code: &str) {
+            *self.live.entry(code.to_string()).or_insert(0) += 1;
+        }
+        fn peer_left(&mut self, code: &str) {
+            if let Some(n) = self.live.get_mut(code) {
+                *n = n.saturating_sub(1);
+            }
+        }
+    }
+
     impl TestRelay {
-        fn start() -> Self {
+        pub(super) fn start() -> Self {
+            Self::start_with(None)
+        }
+
+        pub(super) fn managed(policy: TablePolicy) -> Self {
+            Self::start_with(Some(Box::new(policy)))
+        }
+
+        /// `127.0.0.1:<port>`, which is what every endpoint call wants.
+        pub(super) fn addr(&self) -> String {
+            format!("127.0.0.1:{}", self.port)
+        }
+
+        fn start_with(policy: Option<Box<dyn RelayPolicy>>) -> Self {
             let mut relay = RelayServer::bind(0).expect("relay bind");
+            if let Some(p) = policy {
+                relay.set_policy(p);
+            }
             let port = relay.port();
             let stop = Arc::new(AtomicBool::new(false));
             let s = stop.clone();
@@ -716,5 +1039,160 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(dead, "the lobby must die with its host");
+    }
+}
+
+/// Managed mode (`floptle/0187`, Floptle Cloud): who may host this relay, who
+/// may join, and what a refusal says.
+///
+/// These drive a **real relay over real QUIC** with a policy that answers from
+/// a table, because the thing worth asserting is what an endpoint experiences —
+/// a code, or a sentence, or (the bug that started this) three seconds of
+/// silence and a wrong diagnosis.
+#[cfg(test)]
+mod managed_tests {
+    use super::tests::*;
+    use super::*;
+
+    const KEY: &str = "fk_live_ATESTKEYTHATISNOTREAL0000000";
+
+    /// Pump both ends for a moment and return the refusal the client was given,
+    /// if it was given one. The host is polled too, so its own leg keeps
+    /// draining and a disturbed session would show up here.
+    fn settle(client: &mut RelayClient, host: &mut RelayHost) -> Option<String> {
+        let mut why = None;
+        for _ in 0..60 {
+            for inc in client.poll() {
+                if let Incoming::Disconnected(_, Some(reason)) = inc {
+                    why = Some(reason);
+                }
+            }
+            let _ = host.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        why
+    }
+
+    /// The refusal text, or a failure naming what was expected. `RelayHost` is
+    /// not `Debug` (it owns a QUIC endpoint), so `expect_err` is unavailable.
+    fn refusal(r: Result<(RelayHost, String), String>, what: &str) -> String {
+        match r {
+            Err(e) => e,
+            Ok((_, code)) => panic!("{what}, but it hosted with code {code}"),
+        }
+    }
+
+    /// **The negative control, and it is the product.** ADR-0022 promises the
+    /// relay stays open and self-hostable: a relay with no policy must behave
+    /// exactly as it did before managed mode was written — keyless hosts, five
+    /// character codes, nothing to authorize against. If this ever goes red,
+    /// managed mode has leaked into the open relay, and that is a licence
+    /// question rather than a bug.
+    #[test]
+    fn a_self_hosted_relay_still_hosts_keyless_with_a_five_character_code() {
+        let relay = TestRelay::start();
+        let (_t, code) = RelayHost::host(&relay.addr()).expect("a self-hosted relay hosts");
+        assert_eq!(code.len(), 5, "the open relay's code is unprefixed: {code}");
+    }
+
+    /// A self-hosted relay is handed a key by a Cloud-connected project and
+    /// **ignores it** rather than checking it: it has nothing to check against,
+    /// and refusing would break a developer's own relay the day they connected
+    /// their project to Cloud.
+    #[test]
+    fn a_self_hosted_relay_ignores_a_key_rather_than_refusing_it() {
+        let relay = TestRelay::start();
+        let (_t, code) =
+            RelayHost::host_keyed(&relay.addr(), KEY, None).expect("keys are not its business");
+        assert_eq!(code.len(), 5, "still the open relay's own code: {code}");
+    }
+
+    /// Ty's rule, path 1: **a game with no key cannot use a managed relay** —
+    /// and is told where to go rather than left guessing.
+    #[test]
+    fn a_managed_relay_refuses_a_keyless_host_and_says_where_to_go() {
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 20));
+        let err = refusal(RelayHost::host(&relay.addr()), "a keyless host is refused");
+        assert!(err.contains("fopull.com/cloud"), "the refusal must name the fix: {err}");
+        assert!(
+            err.contains("self-host floptle-relay"),
+            "…and the other way out, because it is a real one: {err}"
+        );
+    }
+
+    /// Ty's rule, path 2. An unknown key gets a **different** sentence to a
+    /// missing one: a developer who has not connected their project yet and a
+    /// developer whose key was revoked need different next actions, and one
+    /// message for both sends the first one hunting for a problem they do not
+    /// have.
+    #[test]
+    fn an_unknown_key_is_refused_with_different_words_to_a_missing_one() {
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 20));
+        let missing = refusal(RelayHost::host(&relay.addr()), "keyless is refused");
+        let unknown = refusal(
+            RelayHost::host_keyed(&relay.addr(), "fk_live_NOPE", None),
+            "an unknown key is refused",
+        );
+        assert!(unknown.contains("project.ron"), "point at where the key lives: {unknown}");
+        assert_ne!(missing, unknown, "two different problems must not read identically");
+    }
+
+    /// **The refusal arrives as a refusal.** This is the bug the managed work
+    /// found in the existing code: the host leg parsed `Refused` into `_ => {}`,
+    /// so every one of these sentences was dropped and the caller waited three
+    /// seconds and then reported "no lobby code (is a relay running there?)" —
+    /// which is both unhelpful and false, since the relay is plainly running
+    /// and plainly answering. Watched failing.
+    #[test]
+    fn a_refusal_reaches_the_host_instead_of_a_timeout_that_blames_the_relay() {
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 20));
+        let t0 = std::time::Instant::now();
+        let err = refusal(RelayHost::host(&relay.addr()), "refused");
+        assert!(
+            !err.contains("is a relay running there"),
+            "the timeout message means the answer was thrown away: {err}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "it answered immediately; waiting {:?} means we polled past the answer",
+            t0.elapsed()
+        );
+    }
+
+    /// A good key hosts, and the code carries the **region letter** so a client
+    /// can map it back to a relay without asking anybody — which is what keeps
+    /// the join path independent of the control plane.
+    #[test]
+    fn a_good_key_hosts_and_the_code_carries_its_region() {
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 20));
+        let (_t, code) = RelayHost::host_keyed(&relay.addr(), KEY, None).expect("hosts");
+        assert_eq!(code.len(), 6, "region letter + five: {code}");
+        assert!(code.starts_with('U'), "us-east is U: {code}");
+    }
+
+    /// The CCU cap turns away **the next arrival**, and the sentence names the
+    /// plan and where to change it. A cap that dropped a live player would be a
+    /// worse product than no cap at all.
+    #[test]
+    fn the_cap_refuses_the_next_joiner_and_never_the_live_session() {
+        // Two: the host, and one client. The second client is over.
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 2));
+        let (mut host, code) = RelayHost::host_keyed(&relay.addr(), KEY, None).expect("hosts");
+        let mut first = RelayClient::join(&relay.addr(), &code).expect("connects");
+        // `join` is non-blocking by design — the verdict arrives on `poll`,
+        // which is how a real client learns it too.
+        let admitted = settle(&mut first, &mut host);
+        assert_eq!(admitted, None, "the first joiner is under the cap: {admitted:?}");
+
+        let mut second = RelayClient::join(&relay.addr(), &code).expect("connects");
+        let msg = settle(&mut second, &mut host)
+            .expect("the 2nd client was admitted over a 2-player cap");
+        assert!(msg.contains("limit"), "say what happened: {msg}");
+        assert!(msg.contains("fopull.com/cloud"), "…and where to fix it: {msg}");
+
+        // **The live session is untouched.** Nobody was dropped to make room —
+        // a cap that evicted a player mid-game would be a worse product than
+        // no cap at all.
+        assert_eq!(settle(&mut first, &mut host), None, "the seated player was disturbed");
     }
 }
