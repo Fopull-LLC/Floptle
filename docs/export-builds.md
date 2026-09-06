@@ -314,10 +314,39 @@ time on any of it would be spending it on nothing.
 
 Started from a terminal it prints a peer-count heartbeat every 30 seconds and
 stops on Enter. Started by a service manager or a container — anywhere stdin
-isn't a TTY — the Enter watcher isn't installed at all, so it runs until the
-process is signalled. Shutdown is not graceful: clients see the connection drop
-rather than a goodbye, which is the right trade for v1 but worth knowing before
-you restart a live world.
+isn't a TTY — the Enter watcher isn't installed at all.
+
+**Stopping is graceful.** On `SIGTERM` or `SIGINT` — which is what `systemctl
+stop`, a container runtime and Ctrl-C all send — the server tells every player
+the world is going away, gives the message half a second to actually leave, and
+exits 0. They see "the server is shutting down" rather than a connection that
+dropped for no reason, which is the difference between *they are updating* and
+*it broke again*. Your game shows the reason through `net.on("kicked", fn)`.
+
+### `floptle-server`, and why it is a different binary
+
+`floptle serve` is the editor binary wearing a different hat, which is fine on
+your own machine and wrong on a server: it links the OS audio and gamepad
+libraries, and those are resolved when the process *starts*, not when something
+first wants a sound. On a minimal Linux image, which has no `libasound2`, it
+does not fail to find an audio device — it fails to start at all.
+
+`floptle-server` is the same engine and the same code with those left out. It
+needs nothing beyond the C runtime, so it runs on a stock minimal image with no
+packages installed:
+
+```
+floptle-server <project-dir> [--scene scenes/arena.ron]
+               [--port 7777 | --relay host:port] [--tick 60]
+               [--max-players 32] [--status-file /run/floptle/server.json]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--build` | the same thing as the positional, said about an exported server folder |
+| `--max-players` | refuse a join past this many players. Nobody already playing is ever dropped for it |
+| `--status-file` | write a small JSON document here every 5 seconds: `peers`, `uptime_s`, `ticks`, `tick_hz`, `scene`, `lobby_code`. Written and renamed, so a watcher never reads half a file |
+| `--game-key` | which Floptle Cloud game this process belongs to. Recorded and reported, not checked — a dedicated server is reached directly |
 
 See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
 
