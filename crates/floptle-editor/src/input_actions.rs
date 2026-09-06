@@ -114,6 +114,9 @@ impl Editor {
         // `tick_input_edges` and are drained per tick instead.
         self.raw_input.pressed.clear();
         self.raw_input.released.clear();
+        // No gamepads on a dedicated server: gilrs links libudev at load time
+        // and nobody is holding a controller.
+        #[cfg(feature = "devices")]
         self.pads.pump(&mut self.raw_input);
         // Pad edges must reach the tick domain too.
         for s in self.raw_input.pressed.iter() {

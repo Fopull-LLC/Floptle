@@ -14,16 +14,6 @@ use symphonia::core::meta::MetadataOptions;
 
 use crate::clip::Clip;
 
-/// File extensions the decoder accepts (lowercase, no dot).
-pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "ogg", "mp3", "flac"];
-
-/// True if the path looks like a loadable audio file.
-pub fn is_audio_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
 /// Decode an entire audio file into a clip. Sources with more than two
 /// channels keep their front left/right pair.
 pub fn load_clip(path: &Path) -> Result<Clip, String> {
@@ -139,7 +129,5 @@ mod tests {
         assert_eq!(clip.channels, 1);
         assert_eq!(clip.frames(), src.len());
         assert!(clip.samples.iter().any(|s| s.abs() > 0.3), "signal lost in decode");
-        assert!(is_audio_path(&path));
-        assert!(!is_audio_path(Path::new("foo.png")));
     }
 }

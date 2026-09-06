@@ -88,6 +88,17 @@ pub struct ServerArgs {
     pub tick_hz: f32,
     pub interest: Option<f64>,
     pub budget: Option<u32>,
+    /// Refuse a join past this many concurrent peers. `None` = no ceiling of
+    /// the server's own; a managed relay still applies the plan's.
+    pub max_players: Option<u32>,
+    /// Write a small JSON status document here every few seconds, for whatever
+    /// is watching the box.
+    pub status_file: Option<PathBuf>,
+    /// The Floptle Cloud game key this server belongs to. **Recorded and
+    /// reported, not checked** — a dedicated server is reached directly, so
+    /// there is nothing here for a key to authorize. It is in the status file
+    /// so an operator can tell which game a process belongs to.
+    pub game_key: Option<String>,
 }
 
 impl ServerArgs {
@@ -96,21 +107,47 @@ impl ServerArgs {
     /// listening somewhere nobody is looking.
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let i = args.iter().position(|a| a == "--server").ok_or("no --server")?;
-        let project = args
-            .get(i + 1)
-            .filter(|p| !p.starts_with("--"))
-            .map(PathBuf::from)
-            .ok_or("usage: floptle-runtime --server <project-dir> [--scene …] [--port N]")?;
+        Self::parse_argv(&args[i + 1..])
+    }
+
+    /// Parse the **`floptle-server` binary's own** argv: the project is a bare
+    /// positional (or `--build <dir>`, which is the same thing said about an
+    /// exported folder), and there is no `--server` marker because the binary
+    /// is the marker.
+    ///
+    /// One parser, three entry points — `floptle serve`, `floptle-runtime
+    /// --server` and this — so a flag cannot mean one thing in the editor's
+    /// command line and another in the binary an operator actually deploys.
+    pub fn parse_argv(argv: &[String]) -> Result<Self, String> {
         let mut out = Self {
-            project,
+            project: PathBuf::new(),
             scene: None,
             port: None,
             relay: None,
             tick_hz: 60.0,
             interest: None,
             budget: None,
+            max_players: None,
+            status_file: None,
+            game_key: None,
         };
-        out.parse_flags(&args[i + 2..])?;
+        // A leading positional is the project directory. Everything after is
+        // flags, and `--build` can name it instead.
+        let rest = match argv.first() {
+            Some(first) if !first.starts_with("--") => {
+                out.project = PathBuf::from(first);
+                &argv[1..]
+            }
+            _ => argv,
+        };
+        out.parse_flags(rest)?;
+        if out.project.as_os_str().is_empty() {
+            return Err(
+                "a dedicated server needs a project: floptle-server <project-dir> \
+                 (or --build <exported-server-folder>)"
+                    .into(),
+            );
+        }
         Ok(out)
     }
 
@@ -147,6 +184,16 @@ impl ServerArgs {
                             .map_err(|_| "--budget must be bytes per second")?,
                     )
                 }
+                "--build" => self.project = PathBuf::from(need(val, "--build")?),
+                "--max-players" => {
+                    self.max_players = Some(
+                        need(val, "--max-players")?
+                            .parse()
+                            .map_err(|_| "--max-players must be a number")?,
+                    )
+                }
+                "--status-file" => self.status_file = Some(PathBuf::from(need(val, "--status-file")?)),
+                "--game-key" => self.game_key = Some(need(val, "--game-key")?),
                 other => return Err(format!("unknown flag {other}")),
             }
             k += 2;
@@ -216,17 +263,21 @@ pub fn run(args: ServerArgs) -> i32 {
     if let Some(code) = &ed.net_lobby_code {
         println!("  LOBBY CODE {code}");
     }
-    if let (Some(radius), Some(s)) = (args.interest, ed.net_server.as_mut()) {
-        let d = floptle_net::InterestConfig::default();
-        s.set_interest(floptle_net::InterestConfig {
-            enabled: true,
-            radius,
-            budget_bytes_per_sec: args.budget.unwrap_or(d.budget_bytes_per_sec),
-            ..d
-        });
+    apply_server_opts(&mut ed, &args);
+    if let Some(max) = args.max_players {
+        println!("  at most {max} player(s); the next arrival is refused, nobody is dropped");
+    }
+    if let Some(key) = &args.game_key {
+        // Recorded and reported, not checked: a dedicated server is reached
+        // directly, so there is nothing here for a key to authorize. It says
+        // which game this process belongs to.
+        println!("  game key {} (recorded, not checked — see docs/multiplayer.md §6c)", redact(key));
+    }
+    if let Some(radius) = args.interest {
         println!(
             "  interest management on — {radius:.0} m, {} KB/s per client",
-            args.budget.unwrap_or(d.budget_bytes_per_sec) / 1024
+            args.budget.unwrap_or(floptle_net::InterestConfig::default().budget_bytes_per_sec)
+                / 1024
         );
     }
 
@@ -244,6 +295,8 @@ pub fn run(args: ServerArgs) -> i32 {
 
     let period = std::time::Duration::from_secs_f32(step);
     let mut ticks = 0u64;
+    let started = Instant::now();
+    let mut last_status = Instant::now() - STATUS_EVERY;
     let mut next = Instant::now() + period;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
         ticks += 1;
@@ -264,6 +317,13 @@ pub fn run(args: ServerArgs) -> i32 {
             println!("  tick {ticks} — {peers} peer(s) connected");
         }
 
+        if let Some(path) = &args.status_file
+            && last_status.elapsed() >= STATUS_EVERY
+        {
+            last_status = Instant::now();
+            write_status(path, &args, &ed, ticks, started);
+        }
+
         let now = Instant::now();
         if next > now {
             std::thread::sleep(next - now);
@@ -277,6 +337,52 @@ pub fn run(args: ServerArgs) -> i32 {
     }
     println!("  server stopped after {ticks} tick(s)");
     0
+}
+
+/// How often `--status-file` is rewritten.
+#[cfg(not(target_arch = "wasm32"))]
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A game key with its middle taken out, for a log line.
+///
+/// The key is public by design — it ships inside every build — so this is not
+/// secrecy, it is not filling an operator's terminal with 40 characters they
+/// cannot read anyway. The prefix is the useful part: it says which game.
+fn redact(key: &str) -> String {
+    match key.len() {
+        0..=12 => key.to_string(),
+        n => format!("{}…{}", &key[..12], &key[n - 4..]),
+    }
+}
+
+/// Write the status document `--status-file` asks for.
+///
+/// **Written to a temp file and renamed**, so whatever is watching it never
+/// reads half a document. A monitor that occasionally parses a truncated JSON
+/// file reports an outage that is not happening, which is worse than no
+/// monitoring at all.
+///
+/// Best effort throughout: a status file that cannot be written is a server
+/// that is harder to watch, never a server that stops.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_status(path: &Path, args: &ServerArgs, ed: &Editor, ticks: u64, started: Instant) {
+    let peers = ed.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
+    let doc = format!(
+        "{{\n  \"peers\": {peers},\n  \"max_players\": {},\n  \"uptime_s\": {},\n  \
+         \"ticks\": {ticks},\n  \"tick_hz\": {},\n  \"scene\": {:?},\n  \
+         \"project\": {:?},\n  \"game_key\": {},\n  \"lobby_code\": {}\n}}\n",
+        args.max_players.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
+        started.elapsed().as_secs(),
+        args.tick_hz,
+        ed.scene_rel_or_default(),
+        args.project.to_string_lossy(),
+        args.game_key.as_deref().map(|k| format!("{k:?}")).unwrap_or_else(|| "null".into()),
+        ed.net_lobby_code.as_deref().map(|c| format!("{c:?}")).unwrap_or_else(|| "null".into()),
+    );
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, doc).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// The headless engine this server is: a project, a scene, its packages, its
@@ -300,6 +406,32 @@ pub(crate) fn open(root: &Path, scene_path: &Path, tick_hz: f32) -> Editor {
     ed.open_project(root.to_path_buf());
     ed.open_scene_file(&scene_path.to_string_lossy());
     ed
+}
+
+/// Apply the command line's session options to the live session.
+///
+/// **A named function rather than four lines inside [`run`], because inside
+/// [`run`] they are reachable only by starting a real server on a real port.**
+/// A flag the command line accepts and the session never receives is the
+/// quietest bug this binary can have — nothing fails, the ceiling simply is not
+/// there — and the only way a guard can hold that is if the wiring is something
+/// a guard can call.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn apply_server_opts(ed: &mut Editor, args: &ServerArgs) {
+    let Some(s) = ed.net_server.as_mut() else { return };
+    // The operator's ceiling, if they set one. Refused at the door — a limit
+    // that removed somebody already playing would read as a crash to whoever
+    // got unlucky.
+    s.set_max_peers(args.max_players);
+    if let Some(radius) = args.interest {
+        let d = floptle_net::InterestConfig::default();
+        s.set_interest(floptle_net::InterestConfig {
+            enabled: true,
+            radius,
+            budget_bytes_per_sec: args.budget.unwrap_or(d.budget_bytes_per_sec),
+            ..d
+        });
+    }
 }
 
 /// Move whatever the tick said onto the terminal.
@@ -579,6 +711,74 @@ mod tests {
         assert!(
             ServerArgs::parse(&args(["x", "--server", "/p", "--tick", "9999"].as_ref())).is_err()
         );
+    }
+
+    /// The binary's own argv: the project is a bare positional, and there is
+    /// no `--server` marker because the binary is the marker.
+    #[test]
+    fn the_server_binary_takes_its_project_as_a_positional() {
+        let a = ServerArgs::parse_argv(&args(["/p", "--port", "7777"].as_ref())).expect("parses");
+        assert_eq!(a.project, PathBuf::from("/p"));
+        assert_eq!(a.port, Some(7777));
+    }
+
+    /// `--build` names the same thing about an exported folder, so a deploy
+    /// script does not have to know which word this invocation wants.
+    #[test]
+    fn a_build_folder_names_the_project_too() {
+        let a = ServerArgs::parse_argv(&args(["--build", "/srv/game", "--port", "1"].as_ref()))
+            .expect("parses");
+        assert_eq!(a.project, PathBuf::from("/srv/game"));
+    }
+
+    /// **No project at all is refused, and the message names both spellings.**
+    /// A server that came up on an empty path would fail later, somewhere less
+    /// obvious.
+    #[test]
+    fn a_server_with_no_project_says_so_and_names_both_flags() {
+        let e = ServerArgs::parse_argv(&args(["--port", "7777"].as_ref())).unwrap_err();
+        assert!(e.contains("--build"), "{e}");
+        assert!(e.contains("<project-dir>"), "{e}");
+    }
+
+    /// The operator flags parse, and — this is the point — they are carried
+    /// rather than accepted and dropped. A flag the command line takes and the
+    /// server ignores is worse than one it refuses.
+    #[test]
+    fn the_operator_flags_are_carried() {
+        let a = ServerArgs::parse_argv(&args(
+            [
+                "/p", "--port", "1", "--max-players", "8", "--status-file", "/run/s.json",
+                "--game-key", "fk_live_ABC",
+            ]
+            .as_ref(),
+        ))
+        .expect("parses");
+        assert_eq!(a.max_players, Some(8));
+        assert_eq!(a.status_file, Some(PathBuf::from("/run/s.json")));
+        assert_eq!(a.game_key.as_deref(), Some("fk_live_ABC"));
+    }
+
+    /// Both entry points reach the same parser, so a flag cannot mean one thing
+    /// in the editor's command line and another in the deployed binary.
+    #[test]
+    fn the_server_flag_and_the_binary_agree() {
+        let via_flag =
+            ServerArgs::parse(&args(["x", "--server", "/p", "--tick", "30"].as_ref())).unwrap();
+        let via_argv = ServerArgs::parse_argv(&args(["/p", "--tick", "30"].as_ref())).unwrap();
+        assert_eq!(via_flag.project, via_argv.project);
+        assert_eq!(via_flag.tick_hz, via_argv.tick_hz);
+    }
+
+    /// A game key is public and ships in every build, so this is legibility,
+    /// not secrecy — but the prefix has to survive, because it is the half that
+    /// says which game.
+    #[test]
+    fn a_redacted_key_keeps_the_part_that_identifies_the_game() {
+        let r = redact("fk_live_ABCDEFGHJKLMNPQRSTUVWX2345");
+        assert!(r.starts_with("fk_live_ABCD"), "{r}");
+        assert!(r.len() < 24, "it is shortened: {r}");
+        assert_eq!(redact("short"), "short", "nothing to take out of a short one");
     }
 
     #[test]
@@ -898,6 +1098,43 @@ mod server_tests {
             "the claimed slot never came alive. Server said:\n{}",
             s.console()
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`--max-players` reaches the session, not just the struct.**
+    ///
+    /// Parsing a flag and applying it are two different things, and only one of
+    /// them is what an operator asked for. This runs the same
+    /// `apply_server_opts` the real server does, so a flag that stopped being
+    /// wired fails here rather than on a box at three in the morning. Watched
+    /// failing with the wiring replaced by `None`.
+    #[test]
+    fn the_max_players_flag_reaches_the_live_session() {
+        let root = temp("maxplayers");
+        write(&root, "scripts/rules.lua", "-- nothing to do\n");
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+
+        let mut s = serve(&root, "scenes/arena.ron");
+        let args = super::ServerArgs::parse_argv(&[
+            root.to_string_lossy().into_owned(),
+            "--max-players".into(),
+            "3".into(),
+        ])
+        .expect("parses");
+        super::apply_server_opts(&mut s.ed, &args);
+        assert_eq!(
+            s.ed.net_server.as_ref().and_then(|n| n.max_peers()),
+            Some(3),
+            "the ceiling never reached the session"
+        );
+
+        // …and with no flag there is no ceiling, because capacity is the
+        // operator's call and not the engine's.
+        let bare = super::ServerArgs::parse_argv(&[root.to_string_lossy().into_owned()])
+            .expect("parses");
+        super::apply_server_opts(&mut s.ed, &bare);
+        assert_eq!(s.ed.net_server.as_ref().and_then(|n| n.max_peers()), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

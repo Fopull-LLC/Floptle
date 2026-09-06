@@ -235,6 +235,9 @@ pub struct NetSession {
     identities: HashMap<PeerId, crate::identity::Identity>,
     /// Who this server will admit, consulted before a join is accepted.
     join_policy: crate::identity::JoinPolicy,
+    /// The most peers this server will carry at once, or `None` for no ceiling
+    /// of its own. See [`NetSession::set_max_peers`].
+    max_peers: Option<u32>,
     /// How a claim becomes an identity. `AssertedOnly` by default — see
     /// [`crate::identity`] for why that is the honest default rather than a
     /// stub.
@@ -598,6 +601,7 @@ impl NetSession {
             interest_stats: HashMap::new(),
             identities: HashMap::new(),
             join_policy: crate::identity::JoinPolicy::default(),
+            max_peers: None,
             verifier: Box::new(crate::identity::AssertedOnly),
             join_log: Vec::new(),
             pending_hangup: Vec::new(),
@@ -699,6 +703,26 @@ impl NetSession {
 
     /// Server: who this server will admit. Consulted before a join is accepted,
     /// so a ban is a closed door rather than a kick you repeat forever.
+    /// Cap how many peers this server carries at once (`--max-players`).
+    ///
+    /// **Refused at the door, never enforced by dropping somebody.** A ceiling
+    /// that could remove a player who is already in would make reaching your
+    /// own limit look like a crash to whoever got unlucky — so the only thing
+    /// a full server does is turn away the next arrival, with a sentence that
+    /// says the server is full rather than leaving them to guess.
+    ///
+    /// This is the *operator's* ceiling and it is not the plan's: a managed
+    /// relay applies the subscription's CCU limit independently, and a
+    /// dedicated server is reached directly, where nobody is metering.
+    pub fn set_max_peers(&mut self, max: Option<u32>) {
+        self.max_peers = max;
+    }
+
+    /// The ceiling in force, for whoever set it to check that it arrived.
+    pub fn max_peers(&self) -> Option<u32> {
+        self.max_peers
+    }
+
     pub fn set_join_policy(&mut self, policy: crate::identity::JoinPolicy) {
         self.join_policy = policy;
     }
@@ -2341,6 +2365,18 @@ impl NetSession {
                         who.label()
                     ));
                     let refuse = Msg::Refused { reason };
+                    self.transport.send(from, Channel::Reliable, &refuse.encode());
+                    return;
+                }
+                // Full is a different answer to refused, and it comes after
+                // the policy on purpose: somebody on the deny list is told they
+                // are denied whether or not there is room.
+                if self.max_peers.is_some_and(|m| self.peers.len() as u32 >= m) {
+                    let max = self.max_peers.unwrap_or(0);
+                    self.log_join(format!("refused peer {from} ({}): server full", who.label()));
+                    let refuse = Msg::Refused {
+                        reason: format!("the server is full ({max} players)"),
+                    };
                     self.transport.send(from, Channel::Reliable, &refuse.encode());
                     return;
                 }

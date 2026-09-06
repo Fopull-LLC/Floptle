@@ -82,8 +82,33 @@ jobs:
       - name: player build (no editor-ui)
         run: |
           cargo clippy -p floptle-editor -p floptle-player \
+            --no-default-features --features floptle-editor/vm-luau,floptle-editor/devices \
+            --all-targets -- -D warnings
+
+      # **The configuration a SERVER ships**, which is the player's minus the
+      # machine's audio device and its gamepads. Its own step because it is its
+      # own risk: `cpal` links `libasound.so.2` and `gilrs` links
+      # `libudev.so.1`, both at LINK time, and `libasound2` is not on a minimal
+      # Linux server image — so a server built with them does not fail to find a
+      # sound card, it fails to start, before `main`, with a loader error about
+      # audio on a box where nobody was ever going to hear anything.
+      #
+      # The `ldd` line below is the actual guarantee. Everything else here is a
+      # compile check; that one is the deployment.
+      - name: server build (no devices)
+        run: |
+          cargo clippy -p floptle-editor -p floptle-server \
             --no-default-features --features floptle-editor/vm-luau \
             --all-targets -- -D warnings
+          cargo build -p floptle-server
+          if ldd target/debug/floptle-server | grep -qE 'libasound|libudev'; then
+            echo "::error::floptle-server links an audio or input device library."
+            echo "It will not start on a minimal server image. Check the 'devices' feature."
+            ldd target/debug/floptle-server | grep -E 'libasound|libudev'
+            exit 1
+          fi
+          echo "floptle-server needs only:"
+          ldd target/debug/floptle-server
 
       # **The browser target.** The engine library builds for
       # `wasm32-unknown-unknown` with every platform-specific dependency (QUIC,

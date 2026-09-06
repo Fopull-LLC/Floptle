@@ -1,0 +1,27 @@
+[package]
+name = "floptle-server"
+version.workspace = true
+edition.workspace = true
+description = "The dedicated server — a project's authoritative simulation, with nobody sitting at it"
+publish = false
+
+# The binary an operator deploys. A shim, like `floptle-player`: everything is
+# in `floptle-editor`'s library half, so a hosted world runs the same engine the
+# editor runs rather than a second copy of it.
+[[bin]]
+name = "floptle-server"
+path = "src/main.rs"
+
+[dependencies]
+# **No `devices`, and that is the whole reason this crate exists separately
+# from `floptle-player`.** `cpal` links `libasound.so.2` and `gilrs` links
+# `libudev.so.1`, both at LINK time, so they are hard `NEEDED` entries rather
+# than something dlopened on demand — and `libasound2` is not installed on a
+# minimal Linux server image. A server built with them does not fail to find a
+# sound card; it fails to start, before `main`, with a loader error naming a
+# sound library, on a machine where nobody was ever going to hear anything.
+#
+# `default-features = false` also drops the authoring half (egui, the dock, the
+# Inspector, the file pickers) and the default script VM, which is chosen here
+# and so cannot be smuggled in twice.
+floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau"] }

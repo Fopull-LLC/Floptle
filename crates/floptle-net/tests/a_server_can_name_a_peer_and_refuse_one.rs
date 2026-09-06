@@ -203,3 +203,62 @@ fn refusals_and_kicks_are_logged_in_words() {
     assert!(log[0].contains("unverified"), "and how much to trust it: {}", log[0]);
     assert!(server.take_join_log().is_empty(), "drained, not repeated every tick");
 }
+
+/// **A full server turns away the next arrival and never removes anybody.**
+///
+/// `--max-players` is the operator's ceiling on a dedicated server. A limit
+/// that could drop a player already in would make reaching your own capacity
+/// look like a crash to whoever got unlucky — so the only thing a full server
+/// does is refuse the next `Hello`, with a sentence saying it is full rather
+/// than leaving the player to guess at a silent failure.
+#[test]
+fn a_full_server_refuses_the_next_joiner_and_keeps_the_ones_it_has() {
+    let hub = MemoryHub::new();
+    let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0);
+    server.set_max_peers(Some(1));
+    let world = World::default();
+
+    let mut first = NetSession::client(Box::new(hub.connect()), 0);
+    for t in 1..4 {
+        server.tick_server(&world, t);
+        first.tick_client(&mut World::default());
+    }
+    assert_eq!(server.peers().len(), 1, "the first player is in");
+
+    let mut second = NetSession::client(Box::new(hub.connect()), 0);
+    let mut refused = Vec::new();
+    for t in 4..10 {
+        server.tick_server(&world, t);
+        first.tick_client(&mut World::default());
+        second.tick_client(&mut World::default());
+        refused.extend(second.take_events().into_iter().filter_map(|e| match e {
+            NetEvent::Disconnected(why) => Some(why),
+            _ => None,
+        }));
+    }
+
+    assert_eq!(server.peers().len(), 1, "nobody already in was displaced to make room");
+    assert!(
+        refused.iter().any(|r| r.contains("full") && r.contains('1')),
+        "the second player must be told the server is full, and how full: {refused:?}"
+    );
+}
+
+/// With no ceiling set — the default — a server takes whoever arrives. The cap
+/// is opt-in, because a dedicated server's capacity is the operator's call and
+/// not the engine's.
+#[test]
+fn no_ceiling_means_no_ceiling() {
+    let hub = MemoryHub::new();
+    let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0);
+    let world = World::default();
+    let mut clients: Vec<NetSession> =
+        (0..4).map(|_| NetSession::client(Box::new(hub.connect()), 0)).collect();
+    for t in 1..6 {
+        server.tick_server(&world, t);
+        for c in clients.iter_mut() {
+            c.tick_client(&mut World::default());
+        }
+    }
+    assert_eq!(server.peers().len(), 4, "four joined and none was turned away");
+}

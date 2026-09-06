@@ -15,6 +15,15 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# **An example carries no feature gate of its own**, so `--all-targets` in a
+# build without the backend would try to compile this one and fail on a missing
+# `AudioEngine` with nothing to say why. Declared, `--no-default-features` skips
+# it instead. Same reason `glyph_probe` is declared in floptle-editor.
+[[example]]
+name = "tone_probe"
+path = "examples/tone_probe.rs"
+required-features = ["backend"]
+
 [features]
 # The pure half (component/mixer/effect types + DSP) has no native deps, so
 # data-model crates (floptle-scene) can use it without dragging in the OS

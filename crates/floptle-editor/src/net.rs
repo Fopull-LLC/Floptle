@@ -563,9 +563,7 @@ impl Editor {
                     NetEvent::PeerLeft(p, why) => {
                         // Their voice goes with them, before anything else —
                         // a stream left playing is a stream that never ends.
-                        let mut v = std::mem::take(&mut self.voice);
-                        v.drop_peer(p, &mut self.audio);
-                        self.voice = v;
+                        self.voice_drop_peer(p);
                         // Their avatar leaves with them: every runtime spawn
                         // that peer owned despawns everywhere, automatically.
                         let owned = self
@@ -977,12 +975,74 @@ impl Editor {
     /// Runs whether or not a session exists, because the settings screen does:
     /// a player has to be able to pick a device and watch the level meter move
     /// before they join anything.
+    /// A departing peer's voice stream stops. **A stream left playing is a
+    /// stream that never ends.**
+    ///
+    /// These three exist as methods, in a gated pair each, for two reasons: the
+    /// `mem::take`/restore dance around the split borrow was written out four
+    /// times, and a dedicated server has no `voice` field to dance with. A
+    /// no-op on a server is the truth there — nobody is listening — rather than
+    /// a silence that hides something.
+    #[cfg(feature = "devices")]
+    fn voice_drop_peer(&mut self, peer: u64) {
+        let mut v = std::mem::take(&mut self.voice);
+        v.drop_peer(peer, &mut self.audio);
+        self.voice = v;
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn voice_drop_peer(&mut self, _peer: u64) {}
+
+    /// The conversation outlives the map: only the node attachments go, because
+    /// the nodes they named are gone.
+    #[cfg(feature = "devices")]
+    fn voice_rebind_scene(&mut self) {
+        let mut v = std::mem::take(&mut self.voice);
+        v.rebind_scene(&mut self.audio);
+        self.voice = v;
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn voice_rebind_scene(&mut self) {}
+
+    /// The session ended — close the microphone and every stream with it. A mic
+    /// left open after a failed host is the one bug in this feature nobody
+    /// would notice from inside the game.
+    #[cfg(feature = "devices")]
+    fn voice_shutdown(&mut self) {
+        let mut v = std::mem::take(&mut self.voice);
+        v.shutdown(&mut self.audio);
+        self.voice = v;
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn voice_shutdown(&mut self) {}
+
+    /// Who a game says may hear whom (`voice.setForward`), out of this tick's
+    /// voice commands.
+    ///
+    /// **A rule, not a sound**, which is why it lives here rather than in
+    /// `voice.rs`: it is the SERVER's decision and it has to be applied on a
+    /// dedicated server, which has no audio device, no microphone, and no
+    /// `voice` module compiled into it at all. Attenuating a stream every
+    /// client already received is not proximity voice — it is a volume slider a
+    /// modified client turns back up — so this half of voice is exactly the
+    /// half that must survive a headless build.
+    fn voice_forwards(cmds: &[floptle_script::VoiceCmd]) -> Vec<(u64, Option<Vec<u64>>)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                floptle_script::VoiceCmd::SetForward { peer, to } => Some((*peer, to.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn voice_tick(&mut self) {
         let cmds = self.script_host.take_voice_commands();
         // The server's say on who hears whom goes to the SESSION, not to this
         // machine's audio path — that is the whole point of it being a rule
         // rather than a volume.
-        for (peer, to) in crate::voice::VoiceChat::take_forwards(&cmds) {
+        for (peer, to) in Self::voice_forwards(&cmds) {
             if let Some(s) = self.net_server.as_mut() {
                 match to {
                     Some(list) => s.set_voice_forward(peer, list),
@@ -990,6 +1050,18 @@ impl Editor {
                 }
             }
         }
+        // Everything past here is this machine's microphone and speakers, and a
+        // dedicated server has neither.
+        #[cfg(feature = "devices")]
+        self.voice_devices_tick(cmds);
+        #[cfg(not(feature = "devices"))]
+        let _ = cmds;
+    }
+
+    /// The half of [`Self::voice_tick`] that needs a sound card: the
+    /// microphone, the encoder, the jitter buffers and the speakers.
+    #[cfg(feature = "devices")]
+    fn voice_devices_tick(&mut self, cmds: Vec<floptle_script::VoiceCmd>) {
         // Split the borrow: `apply_commands` reads the world, the rest doesn't.
         let mut voice = std::mem::take(&mut self.voice);
         voice.apply_commands(cmds, &self.world);
@@ -1258,9 +1330,7 @@ impl Editor {
             // The conversation outlives the map. Only the node attachments go —
             // the nodes they named are gone — and the game re-attaches in the
             // new scene without the stream ever having restarted.
-            let mut v = std::mem::take(&mut self.voice);
-            v.rebind_scene(&mut self.audio);
-            self.voice = v;
+            self.voice_rebind_scene();
             self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
             // A scene switch ENDS the match rather than carrying it across. The
             // state ring is indexed by node position, the slot order comes from
@@ -2353,9 +2423,7 @@ impl Editor {
                 if let Some(cs) = self.net_play_client.as_mut() {
                     cs.rebind_scene(&self.world);
                 }
-                let mut v = std::mem::take(&mut self.voice);
-                v.rebind_scene(&mut self.audio);
-                self.voice = v;
+                self.voice_rebind_scene();
                 let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
                 self.net_client_side_setup(owner, false);
             } else {
@@ -2515,9 +2583,7 @@ impl Editor {
         // session does, whatever state the session got into. A live mic left
         // open after a failed host is the one bug in this feature nobody would
         // notice from inside the game.
-        let mut v = std::mem::take(&mut self.voice);
-        v.shutdown(&mut self.audio);
-        self.voice = v;
+        self.voice_shutdown();
         if self.net_server.is_none() && self.net_client.is_none() && self.net_play_client.is_none()
         {
             return;
