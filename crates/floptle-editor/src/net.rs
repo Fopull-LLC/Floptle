@@ -2869,7 +2869,20 @@ impl Editor {
     /// noticed. Refusing here, with words, is the difference between "not yet"
     /// and a lobby nobody can join.
     fn cloud_relay_addr(&mut self, ask: &str) -> Result<String, String> {
-        let regions = Self::cloud_regions();
+        Self::pick_cloud_relay(&Self::cloud_regions(), ask)
+    }
+
+    /// [`Self::cloud_relay_addr`]'s decision, with the list handed in.
+    ///
+    /// Split from the fetch on purpose: the fetch touches the network and the
+    /// disk, and the decision is the part with rules in it — which region is
+    /// live, what a pin means, what to say when neither works. The guards drive
+    /// this against a fixture, so they test the sentences a developer will
+    /// actually read rather than testing whether fopull.com answered.
+    fn pick_cloud_relay(
+        regions: &floptle_account::Regions,
+        ask: &str,
+    ) -> Result<String, String> {
         let pinned = ask.trim().strip_prefix("cloud").and_then(|r| {
             let r = r.trim_start_matches(':').trim();
             (!r.is_empty()).then_some(r)
@@ -2910,10 +2923,17 @@ impl Editor {
 
     /// The relay a `cloud://` lobby code belongs to, from its first letter.
     fn cloud_relay_for_code(code: &str) -> Result<String, String> {
+        Self::relay_for_code(&Self::cloud_regions(), code)
+    }
+
+    /// [`Self::cloud_relay_for_code`]'s decision, with the list handed in.
+    fn relay_for_code(
+        regions: &floptle_account::Regions,
+        code: &str,
+    ) -> Result<String, String> {
         let Some(letter) = code.chars().next() else {
             return Err("net.join(\"cloud://…\"): that is not a lobby code — it is empty".into());
         };
-        let regions = Self::cloud_regions();
         match regions.by_letter(letter) {
             Some(r) => Ok(r.relay.clone()),
             None => Err(format!(
@@ -2948,6 +2968,108 @@ impl Editor {
 mod cloud_project_tests {
     use crate::Editor;
     use floptle_scene::CloudProjectSettings;
+
+    use floptle_account::{Region, Regions};
+
+    fn region(id: &str, letter: char, status: &str) -> Region {
+        Region {
+            id: id.into(),
+            letter,
+            name: format!("{id} name"),
+            relay: format!("{id}.relay.fopull.com:7788"),
+            status: status.into(),
+        }
+    }
+
+    /// Two regions, one open and one not — the shape that makes "pick the
+    /// nearest" and "refuse a planned one" distinguishable. A one-region
+    /// fixture would pass under either rule and prove neither.
+    fn two_regions() -> Regions {
+        Regions {
+            regions: vec![region("eu-central", 'E', "planned"), region("us-east", 'U', "up")],
+        }
+    }
+
+    /// `relay = "cloud"` picks a region a game may actually host on — not
+    /// simply the first one in the list. Here the planned region is first, so
+    /// a rule that took `regions[0]` would send every player at a relay nobody
+    /// has ever joined across a real network.
+    #[test]
+    fn hosting_on_cloud_never_picks_a_region_that_is_not_open() {
+        let got = Editor::pick_cloud_relay(&two_regions(), "cloud").expect("us-east is open");
+        assert_eq!(got, "us-east.relay.fopull.com:7788");
+    }
+
+    /// A developer can pin one — `relay = "cloud:eu-central"` — because testing
+    /// how a game feels from another continent should not wait on an API field.
+    #[test]
+    fn a_pinned_region_is_used_when_it_is_open() {
+        let mut r = two_regions();
+        r.regions[0].status = "up".into();
+        assert_eq!(
+            Editor::pick_cloud_relay(&r, "cloud:eu-central").unwrap(),
+            "eu-central.relay.fopull.com:7788"
+        );
+    }
+
+    /// Pinning a region that is not open yet is refused **with the reason and
+    /// the way out**, not silently redirected. Being quietly moved to another
+    /// continent is worse than being told Frankfurt is not ready.
+    #[test]
+    fn pinning_a_planned_region_says_so_rather_than_substituting_one() {
+        let e = Editor::pick_cloud_relay(&two_regions(), "cloud:eu-central").unwrap_err();
+        assert!(e.contains("not open yet"), "{e}");
+        assert!(e.contains("planned"), "the state it is actually in: {e}");
+        assert!(e.contains("relay = \"cloud\""), "and the way out: {e}");
+    }
+
+    /// A typo names what this build does know, so the next attempt is informed.
+    #[test]
+    fn an_unknown_region_lists_the_ones_that_exist() {
+        let e = Editor::pick_cloud_relay(&two_regions(), "cloud:us-west").unwrap_err();
+        assert!(e.contains("us-west"), "{e}");
+        assert!(e.contains("us-east") && e.contains("eu-central"), "names what it knows: {e}");
+    }
+
+    /// **No region open is a sentence, not a dead button.** The one thing this
+    /// must never do is fail silently — a Host that does nothing is the failure
+    /// this whole path is shaped to avoid.
+    #[test]
+    fn no_open_region_names_the_three_things_that_still_work() {
+        let all_planned =
+            Regions { regions: vec![region("us-east", 'U', "planned")] };
+        let e = Editor::pick_cloud_relay(&all_planned, "cloud").unwrap_err();
+        assert!(e.contains("port = 7777"), "hosting directly still works: {e}");
+        assert!(e.contains("floptle-relay"), "so does a self-hosted relay: {e}");
+    }
+
+    /// `net.join("cloud://UABCDE")` is one character mapped to one address out
+    /// of a list already on disk — no call to fopull.com, so a friend's code
+    /// works during an outage.
+    #[test]
+    fn a_cloud_code_resolves_from_its_first_letter_alone() {
+        assert_eq!(
+            Editor::relay_for_code(&two_regions(), "UABCDE").unwrap(),
+            "us-east.relay.fopull.com:7788"
+        );
+        // A planned region can still be JOINED — somebody is hosting there, and
+        // refusing to reach them would be refusing to fix a region by testing
+        // it. Only HOSTING is gated on `up`.
+        assert_eq!(
+            Editor::relay_for_code(&two_regions(), "EZZZZZ").unwrap(),
+            "eu-central.relay.fopull.com:7788"
+        );
+    }
+
+    /// A mistyped code gets told what a managed code looks like, rather than a
+    /// connection attempt to nowhere.
+    #[test]
+    fn a_code_with_no_region_letter_explains_the_shape() {
+        let e = Editor::relay_for_code(&two_regions(), "ZABCDE").unwrap_err();
+        assert!(e.contains("six characters"), "{e}");
+        let empty = Editor::relay_for_code(&two_regions(), "").unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+    }
 
     fn connected(key: &str) -> Option<CloudProjectSettings> {
         Some(CloudProjectSettings { game: "forgery".into(), key: key.into() })

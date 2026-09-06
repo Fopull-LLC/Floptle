@@ -589,6 +589,60 @@ code starts seeing `verified = true` and nothing else changes.
 
 ---
 
+## 6c. Floptle Cloud's managed relay
+
+A relay you self-host is one address you have to keep answering. **Floptle
+Cloud** is the same relay, run for you, and a game reaches it by name:
+
+```lua
+net.host{ relay = "cloud" }        -- the nearest open region
+net.host{ relay = "cloud:us-east" }  -- or pin one
+```
+
+Joining takes the lobby code the host was given:
+
+```lua
+net.join("cloud://UABCDE")
+```
+
+**A managed lobby code is six characters and the first one names the region.**
+That is not decoration: it is what lets a client turn a code into a relay
+address from a list it already has on disk, so a friend's code works while
+fopull.com is having a bad hour. Nothing on the join path talks to the control
+plane.
+
+### Connecting a project
+
+Hosting on the managed relay needs the project connected to a game, which puts
+a **game key** in `project.ron`:
+
+```
+cloud: (game: "forgery", key: "fk_live_…")
+```
+
+The key ships inside every build, and that is deliberate — it is the only way a
+player's copy of your game can host at all. It is not a password: it says whose
+plan a session meters against, the same way Photon's AppId does. What protects
+you is that you can rotate it, revoke it, and watch its usage graph, all in the
+portal. A managed relay refuses a host that presents no key, and says where to
+get one.
+
+### What it costs you if it is down
+
+Nothing that is already running, and nothing about joining. The relay decides
+who may host from a key list it pulls on its own schedule, so hosting does not
+wait on a network call either — during an outage it keeps enforcing the last
+limits it knew rather than either refusing everyone or opening the doors.
+
+### It is a convenience, not a capability
+
+`floptle-relay` is in this repository and always will be. Self-host it and none
+of the above applies: no keys, no control plane, no accounting, five-character
+lobby codes, exactly as it has always worked. Floptle Cloud sells not having to
+run a box (ADR-0022).
+
+---
+
 ## 7. Rehearsing a bad connection
 
 The simulated-link sliders only shape the in-editor harness. To put real latency
