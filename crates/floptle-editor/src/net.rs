@@ -131,6 +131,18 @@ impl Editor {
                     // runs inside the host call and reads it (floptle/0049).
                     self.net_input_delay = input_delay;
                     match (relay, port) {
+                        // `relay = "cloud"` is not an address, it is an ask:
+                        // put me on Floptle Cloud's nearest managed relay.
+                        // Resolved here rather than in the transport so the
+                        // Console carries the reason when it cannot be.
+                        (Some(addr), _) if addr.trim_start().starts_with("cloud") => {
+                            match self.cloud_relay_addr(&addr) {
+                                Ok(real) => self.net_host_relay(&real),
+                                Err(why) => {
+                                    self.console.push(floptle_script::LogLevel::Warn, why, None)
+                                }
+                            }
+                        }
                         (Some(addr), _) => self.net_host_relay(&addr),
                         (None, Some(p)) => self.net_host_quic(p),
                         (None, None) => self.net_start_hosting(),
@@ -261,6 +273,21 @@ impl Editor {
                     }
                 }
                 NetCmd::Join { addr } if addr.starts_with("local") => self.net_join_local(),
+                // `net.join("cloud://UABCDE")` — the code's FIRST LETTER names
+                // the region, and the region list is already on disk, so this
+                // resolves without asking fopull.com anything. That is the
+                // whole reason the join path never depends on the control
+                // plane: a player typing a friend's code gets in during an
+                // outage exactly as they would on a good day.
+                NetCmd::Join { addr } if addr.starts_with("cloud://") => {
+                    let code = addr.trim_start_matches("cloud://").trim().to_string();
+                    match Self::cloud_relay_for_code(&code) {
+                        Ok(raddr) => self.net_join_relay(&raddr, &code),
+                        Err(why) => {
+                            self.console.push(floptle_script::LogLevel::Warn, why, None)
+                        }
+                    }
+                }
                 NetCmd::Join { addr } if addr.starts_with("relay://") => {
                     let rest = addr.trim_start_matches("relay://").to_string();
                     match rest.rsplit_once('/') {
@@ -2823,6 +2850,95 @@ impl Editor {
 
     pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
         self.net_no_transport(&format!("net.join(\"relay://{relay_addr}/{code}\")"));
+    }
+}
+
+impl Editor {
+    /// Resolve `net.host{ relay = "cloud" }` to a real managed relay address.
+    ///
+    /// Accepts `"cloud"` — the nearest region this build may host on — and
+    /// `"cloud:<region-id>"`, which pins one. Pinning needs no new option key
+    /// because a relay is already a string, and a developer testing how their
+    /// game feels from Frankfurt should not have to wait for an API to grow a
+    /// field.
+    ///
+    /// **A region that is not `up` is never chosen.** `planned` is the honest
+    /// state of a region whose boxes exist but which nobody has joined across a
+    /// real network, and a client caches this list for a day — so hosting on
+    /// one would keep sending players at an unproven relay long after somebody
+    /// noticed. Refusing here, with words, is the difference between "not yet"
+    /// and a lobby nobody can join.
+    fn cloud_relay_addr(&mut self, ask: &str) -> Result<String, String> {
+        let regions = Self::cloud_regions();
+        let pinned = ask.trim().strip_prefix("cloud").and_then(|r| {
+            let r = r.trim_start_matches(':').trim();
+            (!r.is_empty()).then_some(r)
+        });
+        if let Some(id) = pinned {
+            let Some(region) = regions.by_id(id) else {
+                let known: Vec<&str> = regions.regions.iter().map(|r| r.id.as_str()).collect();
+                return Err(format!(
+                    "net.host{{ relay = \"cloud:{id}\" }}: no Floptle Cloud region called \
+                     \"{id}\". This build knows: {}. Plain `relay = \"cloud\"` picks one for you.",
+                    known.join(", ")
+                ));
+            };
+            if !region.is_live() {
+                return Err(format!(
+                    "net.host{{ relay = \"cloud:{id}\" }}: {} is not open yet (it reads \
+                     \"{}\"). Pick another region, or use `relay = \"cloud\"`.",
+                    region.name, region.status
+                ));
+            }
+            return Ok(region.relay.clone());
+        }
+        // **The nearest region, of which there is currently one.** When there
+        // are two this is where an RTT probe belongs; building one now would be
+        // an unexercised code path choosing between a list of length one, which
+        // is how a latency probe ships broken. It picks the first live region
+        // and says so plainly instead.
+        match regions.live().next() {
+            Some(r) => Ok(r.relay.clone()),
+            None => Err(
+                "net.host{ relay = \"cloud\" }: no Floptle Cloud region is open yet. Host \
+                 directly (`net.host{ port = 7777 }`), run your own relay (floptle-relay), or \
+                 see fopull.com/cloud."
+                    .into(),
+            ),
+        }
+    }
+
+    /// The relay a `cloud://` lobby code belongs to, from its first letter.
+    fn cloud_relay_for_code(code: &str) -> Result<String, String> {
+        let Some(letter) = code.chars().next() else {
+            return Err("net.join(\"cloud://…\"): that is not a lobby code — it is empty".into());
+        };
+        let regions = Self::cloud_regions();
+        match regions.by_letter(letter) {
+            Some(r) => Ok(r.relay.clone()),
+            None => Err(format!(
+                "net.join(\"cloud://{code}\"): no Floptle Cloud region uses codes starting \
+                 \"{letter}\". Check the code — a managed code is six characters and the first \
+                 one names the region."
+            )),
+        }
+    }
+
+    /// The region list: a fresh-enough disk cache, else a fetch, else what this
+    /// build shipped with. Never empty, and never a network call on the path a
+    /// player waits behind when the cache is warm.
+    fn cloud_regions() -> floptle_account::Regions {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            floptle_account::regions::resolve(
+                floptle_account::DEFAULT_BASE,
+                std::time::Duration::from_secs(3),
+            )
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            floptle_account::regions::shipped()
+        }
     }
 }
 

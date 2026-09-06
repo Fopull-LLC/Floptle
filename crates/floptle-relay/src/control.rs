@@ -99,6 +99,17 @@ pub enum ControlError {
     /// Unreachable, timed out, or `503 cloud_hosting_unavailable` — the control
     /// plane is **broken, not authoritative**. Never a verdict about a key.
     Unavailable(String),
+    /// `401`/`403`: **this relay's own credential was refused.** Not an outage
+    /// and not a verdict about anybody's key — a configuration error on this
+    /// box, and the only one here that a human has to go and fix.
+    ///
+    /// It is kept apart from `Unavailable` because the right behaviour differs.
+    /// An outage is temporary and the snapshot rides it out; a refused box
+    /// token means this relay can never authorize or report anything, so a
+    /// relay that has not managed a single successful pull is not a degraded
+    /// managed relay — it is an untracked open one wearing the flags, which is
+    /// exactly what Ty's rule exists to prevent.
+    Denied(String),
     /// It answered, and the answer was not something this relay can use.
     Malformed(String),
 }
@@ -151,6 +162,9 @@ impl HttpControl {
             Err(ureq::Error::Status(503, _)) => {
                 Err(ControlError::Unavailable("cloud_hosting_unavailable".into()))
             }
+            Err(ureq::Error::Status(s @ (401 | 403), _)) => Err(ControlError::Denied(format!(
+                "HTTP {s} — this relay's box token was refused"
+            ))),
             Err(ureq::Error::Status(s, _)) => Err(ControlError::Malformed(format!("HTTP {s}"))),
             Err(e) => Err(ControlError::Unavailable(e.to_string())),
         }

@@ -102,6 +102,10 @@ pub struct CloudPolicy {
     /// Deprecated keys already warned about, so a popular game on a rotated key
     /// does not write one journal line per player.
     warned: HashSet<String>,
+    /// The control plane refused this relay's own box token. A configuration
+    /// error, not an outage — and until a snapshot has ever landed it is the
+    /// difference between a managed relay and an untracked one.
+    denied: bool,
     tx: Sender<Done>,
     rx: Receiver<Done>,
     /// What the operator sees, updated every tick.
@@ -125,6 +129,7 @@ impl CloudPolicy {
             live: HashMap::new(),
             last_usage: Instant::now(),
             warned: HashSet::new(),
+            denied: false,
             tx,
             rx,
             status: Arc::new(Mutex::new(Status::default())),
@@ -180,6 +185,7 @@ impl CloudPolicy {
             match done {
                 Done::Pulled(Ok(snap)) => {
                     self.pull_in_flight = false;
+                    self.denied = false;
                     if snap.full {
                         let n = snap.keys.len();
                         self.say(format!("key snapshot: full resync, {n} key(s)"));
@@ -197,9 +203,21 @@ impl CloudPolicy {
                 }
                 Done::Pulled(Err(e)) => {
                     self.pull_in_flight = false;
+                    self.denied = matches!(e, ControlError::Denied(_));
                     let age =
                         self.snapshot_age_s().map(|s| s.to_string()).unwrap_or("never".into());
-                    self.say(format!("key snapshot: {e:?} — serving the last one ({age}s old)"));
+                    if self.denied {
+                        // Said every time, not once. This does not clear up on
+                        // its own and somebody has to go and re-mint the token.
+                        self.say(format!(
+                            "⚠ CONTROL PLANE REFUSED THIS RELAY'S TOKEN ({e:?}). Re-mint it \
+                             with `php artisan floptle:box-token mint --region=…` and restart."
+                        ));
+                    } else {
+                        self.say(format!(
+                            "key snapshot: {e:?} — serving the last one ({age}s old)"
+                        ));
+                    }
                 }
                 Done::Authorized(key, Ok(row)) => {
                     self.cold.remove(&key);
@@ -253,6 +271,28 @@ impl CloudPolicy {
                 ));
             }
             return HostAdmission::Allow { prefix: Some(self.letter) };
+        }
+        // **A refused box token means this relay can neither verify a key nor
+        // meter it, so an unfamiliar one is refused rather than floored.**
+        //
+        // An outage is survivable: the snapshot carries real limits through it
+        // and usage buffers until it clears. A rejected credential is not an
+        // outage — nothing will clear until a person re-mints the token — so
+        // flooring an unknown key to the free tier here would hand out exactly
+        // the untracked hosting managed mode exists to close, while the relay
+        // looked healthy. Keys the snapshot *does* carry keep hosting on the
+        // real limits already in hand; only the ones we would have to ask about
+        // stop.
+        //
+        // The sentence names the operator rather than the developer, because it
+        // is not their key that is wrong.
+        if self.denied {
+            return HostAdmission::Refuse {
+                reason: "This Floptle Cloud relay is not configured correctly and cannot \
+                         check game keys. Tell whoever runs it; nothing is wrong with your \
+                         project."
+                    .into(),
+            };
         }
         // The cold path already gave up on this one: allow, bounded.
         if self.floored.contains(key) {
@@ -663,6 +703,71 @@ mod tests {
         assert!(
             seen.iter().skip(1).all(|c| c.as_deref() == Some("c1")),
             "the cursor moved through an outage: {seen:?}"
+        );
+    }
+
+    /// **A refused box token is a configuration error, not an outage, and it
+    /// must not become free untracked hosting.**
+    ///
+    /// An outage is survivable because the snapshot carries real limits through
+    /// it. A rejected credential means there is no snapshot and never will be —
+    /// so a relay that floored every key to the free tier here would be handing
+    /// out precisely the untracked hosting managed mode exists to close, while
+    /// looking healthy. It refuses instead, and the sentence names the operator
+    /// rather than the developer, because it is not their key that is wrong.
+    #[test]
+    fn a_refused_box_token_refuses_hosts_rather_than_giving_away_free_hosting() {
+        let fake = Arc::new(Fake::default());
+        *fake.pull_err.lock().unwrap() = Some(ControlError::Denied("HTTP 401".into()));
+        let mut p = policy(fake);
+        for _ in 0..20 {
+            p.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        match p.admit_host(Some(KEY), None) {
+            HostAdmission::Refuse { reason } => {
+                assert!(reason.contains("not configured"), "{reason}");
+                assert!(
+                    reason.contains("nothing is wrong with your project"),
+                    "blame the operator, not the developer: {reason}"
+                );
+            }
+            other => panic!("a misconfigured relay must not host: {other:?}"),
+        }
+    }
+
+    /// …but a key the snapshot already carries keeps hosting through it. The
+    /// limits in hand are real and the usage buffers, so the games already
+    /// running do not stop because somebody has to re-mint a token — only the
+    /// keys this relay would have to *ask* about do.
+    #[test]
+    fn a_token_refused_after_a_good_snapshot_keeps_serving_that_snapshot() {
+        let fake = Arc::new(Fake::default());
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![row(KEY, 20)],
+            removed: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.len() == 1));
+
+        *fake.pull_err.lock().unwrap() = Some(ControlError::Denied("HTTP 401".into()));
+        due_now(&mut p);
+        for _ in 0..20 {
+            p.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            p.admit_host(Some(KEY), None),
+            HostAdmission::Allow { prefix: Some('U') },
+            "a key we hold real limits for must keep hosting while the token is fixed"
+        );
+        // …and a key we would have to ask about does not, because we cannot
+        // ask and cannot meter it.
+        assert!(
+            matches!(p.admit_host(Some(NEW), None), HostAdmission::Refuse { .. }),
+            "an unverifiable key must not be floored into free untracked hosting"
         );
     }
 
