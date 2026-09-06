@@ -2076,7 +2076,7 @@ SERVER ONLY: net.despawn(node) — remove a replicated runtime object, and the w
 
 ### `net.host`
 
-net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards); port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client; inputDelay = rollback input delay in TICKS (clamped to 6) — omit it and the host derives one from the worst peer's measured RTT (2 on a LAN, 5 across a country).
+net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards), or "cloud" for Floptle Cloud's managed relay — which needs the project connected to a game at fopull.com/cloud, and refuses a keyless host by telling you where to get one. "cloud:us-east" pins a region instead of picking the nearest. port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client; inputDelay = rollback input delay in TICKS (clamped to 6) — omit it and the host derives one from the worst peer's measured RTT (2 on a LAN, 5 across a country).
 
 ### `net.identity`
 
@@ -2100,7 +2100,7 @@ net.isServer() — true on the authoritative host.
 
 ### `net.join`
 
-net.join(addr) — join a session: "relay://relayaddr/CODE" = a lobby code through a relay (no port-forwarding), "quic://host:port" = a server directly, "local://" = the in-editor test harness.
+net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code (six characters; the first names the region, so it resolves with no call to fopull.com and works during an outage), "relay://relayaddr/CODE" = a lobby code through any relay (no port-forwarding), "quic://host:port" = a server directly, "local://" = the in-editor test harness.
 
 ### `net.joinState`
 

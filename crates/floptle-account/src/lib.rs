@@ -28,6 +28,9 @@
 
 pub mod auth;
 pub mod cloud;
+/// The managed relay regions, and the letter each one's lobby codes start
+/// with. The one Cloud call that needs no account.
+pub mod regions;
 // The browser sign-in (contract §6). Compiled everywhere so its protocol
 // tests run on the desktop; only its `fetch`/`location` layer is wasm-only.
 pub mod web_auth;
@@ -37,3 +40,4 @@ mod account;
 pub use account::{Account, Phase};
 pub use auth::{Entitlements, MemoryStore, Provider, Session, TokenStore, UserInfo};
 pub use cloud::{CloudReply, DEFAULT_BASE};
+pub use regions::{Region, Regions};
