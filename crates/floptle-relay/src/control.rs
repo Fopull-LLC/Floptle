@@ -64,6 +64,53 @@ impl KeyRow {
     }
 }
 
+/// The **cold path's** answer, which is a different shape to a snapshot row and
+/// must not be confused with one.
+///
+/// `POST /cloud/relay/authorize` answers a question about one key the caller
+/// already named, so it does not echo the key back; and it spells two fields
+/// differently to the snapshot — `status` where a row says `state`, and
+/// `over_limit` where a row says `account_over_limit`. Deserialising it
+/// straight into a [`KeyRow`] therefore fails on the missing `key` alone, and
+/// would silently read the other two as their defaults even if it did not.
+///
+/// **That failure has no symptom of its own**, which is why this type exists
+/// rather than a `#[serde(alias)]` or two: a malformed cold answer floors the
+/// key at the free tier and logs, so every key not yet in the snapshot would
+/// have been quietly capped at 20 players on a paid plan, forever, with the
+/// relay reporting nothing worse than "allowing at the free limit".
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthorizeReply {
+    #[serde(default)]
+    pub game: String,
+    #[serde(default = "active")]
+    pub status: KeyState,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub ccu_limit: u32,
+    #[serde(default)]
+    pub regions: Vec<String>,
+    #[serde(default)]
+    pub over_limit: bool,
+}
+
+impl AuthorizeReply {
+    /// The row this answer describes. The key comes from the caller, which is
+    /// the only side that ever knew it.
+    pub fn into_row(self, key: &str) -> KeyRow {
+        KeyRow {
+            key: key.to_string(),
+            game: self.game,
+            state: self.status,
+            tier: self.tier,
+            ccu_limit: self.ccu_limit,
+            regions: self.regions,
+            account_over_limit: self.over_limit,
+        }
+    }
+}
+
 /// A delta (or whole) page of the region's keys.
 #[derive(Clone, Debug, Deserialize)]
 pub struct KeySnapshot {
@@ -150,6 +197,19 @@ impl HttpControl {
         format!("{}/api/floptle/v1{tail}", self.base)
     }
 
+    /// The cold path's body → the row the policy stores.
+    ///
+    /// A named function rather than two lines inside [`HttpControl::authorize`]
+    /// because those two lines are the whole of this seam, and inside the
+    /// method they are only reachable through a live HTTPS call — which is to
+    /// say, not reachable from a test at all. Split out, the mapping is the
+    /// thing a guard can hold.
+    fn parse_authorize(body: &str, key: &str) -> Result<KeyRow, ControlError> {
+        let reply: AuthorizeReply =
+            serde_json::from_str(body).map_err(|e| ControlError::Malformed(e.to_string()))?;
+        Ok(reply.into_row(key))
+    }
+
     /// Turn a ureq outcome into our two-way split.
     ///
     /// **`503 cloud_hosting_unavailable` is `Unavailable`, not a bad
@@ -193,7 +253,7 @@ impl ControlPlane for HttpControl {
                 .set("Accept", "application/json")
                 .send_json(ureq::json!({ "key": key, "region": self.region })),
         )?;
-        serde_json::from_str(&body).map_err(|e| ControlError::Malformed(e.to_string()))
+        Self::parse_authorize(&body, key)
     }
 
     fn report_usage(&self, samples: &[UsageSample]) -> Result<(), ControlError> {
@@ -248,5 +308,117 @@ impl KeyTable {
     /// Record a cold-path answer so the next host does not pay for it again.
     pub fn adopt(&mut self, row: KeyRow) {
         self.rows.insert(row.key.clone(), row);
+    }
+}
+
+/// **The control plane's shapes, pinned against what it actually answers.**
+///
+/// This is the one seam where a mistake has no symptom on this side. Everything
+/// else in the relay fails loudly; a JSON field this file spells differently to
+/// fopull.com parses to a default, and a default here is a policy decision —
+/// `state` missing reads as `Active`, `ccu_limit` missing reads as 0 which
+/// floors to the free tier. So the bodies below are copied from
+/// `contracts/cloud-hosting.md` and from W's deployed responses rather than
+/// written to match this file, and they are the test.
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    /// The cold path, verbatim from the contract's §3.
+    ///
+    /// It carries **no `key`**, says `status` rather than `state`, and says
+    /// `over_limit` rather than `account_over_limit` — three ways for a
+    /// `KeyRow` to be the wrong type for it, one of which is fatal and two of
+    /// which are silent. Watched failing: parsed as a `KeyRow` this is a
+    /// missing-field error, and every cold lookup on the real box would have
+    /// floored to 20 players with nothing said but "allowing at the free
+    /// limit".
+    #[test]
+    fn the_authorize_reply_parses_and_is_not_a_snapshot_row() {
+        // **Every value here differs from its own serde default**, or the
+        // assertion below it cannot tell a correct field name from a missing
+        // one. The first version of this test used `"over_limit":false` and
+        // `"status":"active"` — both the defaults — and it passed cheerfully
+        // with the field renamed underneath it. Watched failing to fail, which
+        // is how that was found.
+        let body = r#"{"game":"forgery","account":"u_15","tier":"indie","ccu_limit":100,
+          "regions":["us-east"],"over_limit":true,"status":"deprecated"}"#;
+        // Through the same call the HTTPS path uses, not around it.
+        let row = HttpControl::parse_authorize(body, "fk_live_ABC").expect("the §3 shape");
+
+        assert_eq!(row.key, "fk_live_ABC", "the key comes from the caller, not the wire");
+        assert_eq!(row.game, "forgery");
+        assert_eq!(row.state, KeyState::Deprecated, "`status`, not `state` — and not the default");
+        assert_eq!(row.ccu_limit, 100, "an Indie plan is not floored to the free tier");
+        assert_eq!(row.tier, "indie");
+        assert!(row.account_over_limit, "`over_limit`, not `account_over_limit`");
+
+        // And the same body is NOT a snapshot row — if it ever becomes one,
+        // this file has two names for one thing again.
+        assert!(
+            serde_json::from_str::<KeyRow>(body).is_err(),
+            "authorize's answer must not silently parse as a snapshot row"
+        );
+    }
+
+    /// The refusal form: a bad key is a 200 with a status, never a 4xx —
+    /// because a 4xx would be indistinguishable from "the control plane is
+    /// broken", and the relay fails OPEN on the second.
+    #[test]
+    fn a_refusal_is_a_status_rather_than_an_error_code() {
+        for (body, want) in [
+            (r#"{"status":"revoked"}"#, KeyState::Revoked),
+            (r#"{"status":"unknown"}"#, KeyState::Unknown),
+        ] {
+            let row = HttpControl::parse_authorize(body, "fk_live_ABC").expect("the refusal shape");
+            assert_eq!(row.state, want);
+            assert!(!row.may_host(), "{body} must not host");
+        }
+    }
+
+    /// The snapshot, from W's §3b — the main path, and the one that carries a
+    /// `key` per row because it was not asked about any particular one.
+    #[test]
+    fn the_key_snapshot_parses_with_every_field_the_policy_reads() {
+        let body = r#"{"cursor":"eyJ2IjoxfQ","full":false,"ttl":30,
+          "keys":[{"key":"fk_live_ABC","game":"forgery","account":"u_15",
+                   "state":"active","expires_at":null,"tier":"indie","ccu_limit":100,
+                   "regions":["us-east"],"account_over_limit":false}],
+          "removed":["fk_live_GONE"]}"#;
+        let snap: KeySnapshot = serde_json::from_str(body).expect("the §3b shape");
+        assert_eq!(snap.cursor.as_deref(), Some("eyJ2IjoxfQ"));
+        assert!(!snap.full, "a delta merges; a full replaces");
+        assert_eq!(snap.removed, ["fk_live_GONE"]);
+        let row = &snap.keys[0];
+        assert_eq!(row.key, "fk_live_ABC");
+        assert_eq!(row.state, KeyState::Active);
+        assert_eq!(row.ccu_limit, 100);
+        assert_eq!(row.tier, "indie");
+        // `ttl` and `expires_at` are fields this relay does not read, and it
+        // must not refuse a body for carrying them — the control plane grows
+        // fields without asking.
+    }
+
+    /// **A revocation arrives as a state, never as an absence.** W carries a
+    /// dead key in the delta precisely so a relay holding it is told; parsing
+    /// that has to yield a row that cannot host.
+    #[test]
+    fn a_revoked_key_in_a_delta_is_carried_and_cannot_host() {
+        let body = r#"{"cursor":"c2","full":false,
+          "keys":[{"key":"fk_live_DEAD","state":"revoked","tier":"free","ccu_limit":20}],
+          "removed":[]}"#;
+        let snap: KeySnapshot = serde_json::from_str(body).expect("parses");
+        assert_eq!(snap.keys[0].state, KeyState::Revoked);
+        assert!(!snap.keys[0].may_host(), "a revoked key in the map must stop hosting");
+    }
+
+    /// A deprecated key still hosts — a build in the wild is on borrowed time,
+    /// not dead. Getting this backwards would take every shipped copy of a game
+    /// offline the moment its developer rotated a key.
+    #[test]
+    fn a_deprecated_key_still_hosts() {
+        let row: KeyRow =
+            serde_json::from_str(r#"{"key":"fk_live_OLD","state":"deprecated"}"#).expect("parses");
+        assert!(row.may_host(), "rotation has a grace window and this is it");
     }
 }
