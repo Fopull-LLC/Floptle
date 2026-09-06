@@ -1,5 +1,27 @@
 ## Just shipped
 
+**v0.85.0-rc4 "Web World"** (beta channel) — **the second beta: everything in
+rc3, plus nine fixes found by going back over the release before promoting
+it.** Four of them were real problems. A package's scripts did not load in an
+exported build, so a node with a package script on it did nothing and nothing
+was logged — export again and it works. A player who missed a run of speech
+(muted, out of a proximity list, or stalled for a second) never heard that
+speaker again for the rest of the session. `net.setRelevant` — the hook a
+hidden-role game uses to keep one player's position from another — withheld
+nothing at all unless interest management was also on, while reporting that it
+had worked; it holds either way now. And a browser that could not run your game
+showed a black page instead of the message explaining why. Alongside those:
+`Esc` releases a captured cursor in a build and a click gives it back (in a
+browser too), the package catalogue no longer refuses every package on a beta
+engine, a mistyped `allow` list is refused instead of being read as an empty
+one that admits everybody, and an account with no display name no longer
+reports its owner's **email address** as their player name. Some Hierarchy and
+Inspector work that shipped earlier in this series is written up at last:
+drag-to-edge scrolling, folders that spring open under a drag, whole-row drop
+targets that colour green or red before you let go, and a lock on the
+Inspector's name row that holds your selection while you click around. On the
+**beta** channel — switch in Hub ⏵ Settings ⏵ Channel.
+
 **v0.85.0-rc3 "Web World"** (beta channel) — **your game runs in a browser
 now, and players can talk to each other.** File ⏵ Export Game… has a Web (browser) target: it stamps
 a folder you serve, with a loading bar, a Play button and your project packed
