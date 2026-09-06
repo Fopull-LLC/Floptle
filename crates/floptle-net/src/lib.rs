@@ -45,6 +45,7 @@ pub use quic::{QuicClient, QuicServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{
     HostAdmission, JoinAdmission, RelayClient, RelayHost, RelayPolicy, RelayServer,
+    HOST_DECISION_DEADLINE,
 };
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};

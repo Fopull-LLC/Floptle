@@ -1704,6 +1704,9 @@ name = "floptle-relay"
 version = "0.85.0-rc4"
 dependencies = [
  "floptle-net",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
