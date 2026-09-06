@@ -21,7 +21,7 @@
 //! direct one.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +116,24 @@ pub enum HostAdmission {
     /// through `Refused { reason }` → the F1 menu and `net.on("refused")`, so
     /// it is product copy, not a diagnostic.
     Refuse { reason: String },
+    /// **Not yet — ask me again next step.** The relay parks the host and
+    /// re-asks until the policy decides or [`HOST_DECISION_DEADLINE`] passes.
+    ///
+    /// This exists so that a policy which has to consult something slow does
+    /// not get to stop the relay to do it. A managed relay answers almost every
+    /// host from a snapshot it already holds, but a key minted in the last
+    /// thirty seconds is not in that snapshot yet and has to be asked about —
+    /// and a relay that blocked for even a second on that would freeze the
+    /// traffic of **every other lobby on the box**, which for a game is a
+    /// disconnect. So the policy starts its lookup, says `Pending`, and answers
+    /// on a later step.
+    Pending,
 }
+
+/// How long a host may sit parked on [`HostAdmission::Pending`] before the
+/// relay gives up and refuses. Comfortably longer than the cold-path lookup it
+/// exists for, and short enough that a player is not left staring at nothing.
+pub const HOST_DECISION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// What a relay decides about a request to join an existing lobby.
 #[derive(Clone, Debug, PartialEq)]
@@ -222,6 +239,17 @@ pub struct RelayServer {
     /// which is the default, and which behaves exactly as it did before
     /// managed mode existed. Every managed rule lives behind this.
     policy: Option<Box<dyn RelayPolicy>>,
+    /// Hosts whose policy said [`HostAdmission::Pending`], with the moment they
+    /// asked. Re-asked every step; refused at [`HOST_DECISION_DEADLINE`].
+    parked: Vec<ParkedHost>,
+}
+
+/// A host waiting on a policy that has not decided yet.
+struct ParkedHost {
+    conn: PeerId,
+    key: Option<String>,
+    build: Option<String>,
+    since: Instant,
 }
 
 impl RelayServer {
@@ -241,6 +269,7 @@ impl RelayServer {
             rng: seed,
             port,
             policy: None,
+            parked: Vec::new(),
         })
     }
 
@@ -274,6 +303,7 @@ impl RelayServer {
         if let Some(p) = self.policy.as_mut() {
             p.tick();
         }
+        self.retry_parked_hosts();
         let mut moved = 0;
         for inc in self.transport.poll() {
             moved += 1;
@@ -347,6 +377,35 @@ impl RelayServer {
         }
     }
 
+    /// Re-ask the policy about every host it has not decided on yet, and give
+    /// up on the ones that have waited too long.
+    ///
+    /// The deadline refusal names the control plane rather than the developer's
+    /// key: a lookup that never came back is our problem, not theirs, and
+    /// telling somebody their key is bad when we simply could not check it is
+    /// the kind of wrong answer that costs a support ticket and a customer's
+    /// confidence.
+    fn retry_parked_hosts(&mut self) {
+        if self.parked.is_empty() {
+            return;
+        }
+        for p in std::mem::take(&mut self.parked) {
+            if p.since.elapsed() >= HOST_DECISION_DEADLINE {
+                self.send(
+                    p.conn,
+                    Channel::Reliable,
+                    &RelayMsg::Refused {
+                        reason: "Floptle Cloud could not check this game's key just now. \
+                                 Try hosting again in a moment."
+                            .into(),
+                    },
+                );
+                continue;
+            }
+            self.open_lobby(p.conn, p.key.as_deref(), p.build.as_deref());
+        }
+    }
+
     /// The shared tail of `Host` and `HostKeyed`: ask the policy, then either
     /// open a lobby or say why not.
     ///
@@ -359,6 +418,22 @@ impl RelayServer {
                 HostAdmission::Allow { prefix } => prefix,
                 HostAdmission::Refuse { reason } => {
                     self.send(from, Channel::Reliable, &RelayMsg::Refused { reason });
+                    return;
+                }
+                // Undecided: park it and ask again next step, rather than
+                // block this one. A parked host keeps its place in the queue
+                // from the moment it FIRST asked, so a slow lookup cannot be
+                // restarted forever by the retry that is waiting on it.
+                HostAdmission::Pending => {
+                    let since =
+                        self.parked_since(from).unwrap_or_else(Instant::now);
+                    self.parked.retain(|p| p.conn != from);
+                    self.parked.push(ParkedHost {
+                        conn: from,
+                        key: key.map(str::to_string),
+                        build: build.map(str::to_string),
+                        since,
+                    });
                     return;
                 }
             },
@@ -382,7 +457,16 @@ impl RelayServer {
         self.send(from, Channel::Reliable, &RelayMsg::Hosted { code });
     }
 
+    /// When this connection first asked to host, if it is already parked.
+    fn parked_since(&self, conn: PeerId) -> Option<Instant> {
+        self.parked.iter().find(|p| p.conn == conn).map(|p| p.since)
+    }
+
     fn drop_conn(&mut self, c: PeerId) {
+        // A host that hangs up while we are still deciding takes its question
+        // with it — otherwise the retry loop keeps asking about a connection
+        // that has gone, and eventually answers into a closed socket.
+        self.parked.retain(|p| p.conn != c);
         match self.conns.remove(&c) {
             Some(Role::Host { code }) => {
                 if let Some(p) = self.policy.as_mut() {
