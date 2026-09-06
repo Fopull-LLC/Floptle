@@ -525,6 +525,103 @@ mod tests {
         p.last_pull_ok = Some(Instant::now() - PULL_INTERVAL - Duration::from_secs(1));
     }
 
+    /// Seat a lobby on `key` with `limit` and fill it to `already` clients, the
+    /// way the relay does: `lobby_opened`, then one `peer_joined` per arrival.
+    fn lobby_with(fake: &Arc<Fake>, limit: u32, already: u32) -> CloudPolicy {
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![row(KEY, limit)],
+            removed: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
+        p.lobby_opened("UABCDE", Some(KEY));
+        for _ in 0..already {
+            assert_eq!(p.admit_join("UABCDE"), JoinAdmission::Allow);
+            p.peer_joined("UABCDE");
+        }
+        p
+    }
+
+    /// **The Phase 2 gate, in one test: 20 players get in and the 21st is told
+    /// why.**
+    ///
+    /// The host counts against its own cap — it is a concurrent user like any
+    /// other — so a 20-CCU key seats the host plus nineteen clients. The
+    /// off-by-one here is the whole feature: refuse one early and a paying
+    /// developer's lobby is short a player with no explanation; refuse one late
+    /// and the limit does not mean what the pricing page says.
+    #[test]
+    fn the_twenty_first_player_is_refused_and_the_twentieth_is_not() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 18);
+
+        // Nineteen clients + the host = twenty people. Still room for nobody
+        // else, but this one gets in.
+        assert_eq!(p.admit_join("UABCDE"), JoinAdmission::Allow, "the 20th player belongs inside");
+        p.peer_joined("UABCDE");
+
+        let JoinAdmission::Refuse { reason } = p.admit_join("UABCDE") else {
+            panic!("the 21st player must be refused");
+        };
+        // The sentence is product copy: it names the game, the number, the plan
+        // and where to change it. A player reads this verbatim.
+        assert!(reason.contains("forgery"), "names the game: {reason}");
+        assert!(reason.contains("20-player limit"), "names the number: {reason}");
+        assert!(reason.contains("free plan"), "names the plan: {reason}");
+        assert!(reason.contains("fopull.com/cloud"), "names the way out: {reason}");
+    }
+
+    /// **A live session is never broken for a cap.** Reaching the limit refuses
+    /// the next arrival and touches nobody who is already playing — which is
+    /// why the check lives on the join path and nowhere else. A cap that could
+    /// drop a player mid-match would make hitting your own limit a crash.
+    #[test]
+    fn a_session_at_its_cap_keeps_running() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 19);
+        assert!(matches!(p.admit_join("UABCDE"), JoinAdmission::Refuse { .. }), "full");
+
+        // Nobody already inside is dropped, swept or re-counted by being
+        // refused — the nineteen clients and their host are exactly where they
+        // were, and stay there.
+        assert_eq!(p.live.get("UABCDE").copied(), Some(19), "nobody was dropped");
+        assert!(
+            matches!(p.admit_join("UABCDE"), JoinAdmission::Refuse { .. }),
+            "and the refusal is stable rather than alternating"
+        );
+        assert_eq!(p.live.get("UABCDE").copied(), Some(19), "a refusal changes no occupancy");
+    }
+
+    /// **A cap that pooled across the account bites even when this lobby is
+    /// small.** `account_over_limit` rides the snapshot — it is the control
+    /// plane's sum across every region — so a developer running two games at
+    /// once is refused the *host*, with a sentence about the account rather
+    /// than about this lobby, which is a different problem to explain.
+    #[test]
+    fn an_account_over_its_pooled_limit_cannot_open_a_new_lobby() {
+        let fake = Arc::new(Fake::default());
+        let mut over = row(KEY, 20);
+        over.account_over_limit = true;
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![over],
+            removed: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
+
+        let HostAdmission::Refuse { reason } = p.admit_host(Some(KEY), None) else {
+            panic!("an account over its pooled limit must not open another lobby");
+        };
+        assert!(reason.contains("account"), "says it is the ACCOUNT, not this game: {reason}");
+        assert!(reason.contains("20-player"), "{reason}");
+        assert!(reason.contains("fopull.com/cloud"), "{reason}");
+    }
+
     /// **Rule 1, and the one that bites.** A key minted since the last pull is
     /// not in the snapshot — and a relay that read "not in my map" as "refuse"
     /// would fail every developer's first host of a new game, intermittently,
