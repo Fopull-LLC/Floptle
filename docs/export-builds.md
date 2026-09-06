@@ -279,15 +279,19 @@ limits that only matter for some games: the world ends when the host closes
 their laptop, and the host is also a player, with an unfair zero-latency view
 of the simulation everyone else sees over the wire.
 
-The **dedicated server** removes both. It is the same `World`, the same
-physics, the same scripts and the same session the editor hosts — minus the
-window, the GPU, the audio and the input, because nobody is sitting at it:
+The **dedicated server** removes both. It is not a smaller engine: it is the
+same `World`, the same physics, the same scripts, the same session and the same
+tick the editor runs when you press Play — minus the window, the GPU, the audio
+and the input, because nobody is sitting at it:
 
 ```
-floptle-runtime --server <project-dir> [--scene scenes/arena.ron]
-                [--port 7777 | --relay host:port] [--tick 60]
-                [--interest 150] [--budget 16384]
+floptle serve <project-dir> [--scene scenes/arena.ron]
+              [--port 7777 | --relay host:port] [--tick 60]
+              [--interest 150] [--budget 16384]
 ```
+
+`floptle-runtime --server <project-dir> …` is the older spelling of the same
+thing, with the same flags.
 
 | Flag | Meaning |
 |---|---|

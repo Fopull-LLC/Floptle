@@ -8153,19 +8153,30 @@ impl Editor {
 
     /// Move whatever the scripts said this frame into the Console.
     ///
-    /// Its own function because there are two loops that have to do it and only
-    /// one of them is a frame: `finish_input_frame` for the editor, and
-    /// `floptle run` for a headless one. When this lived inline in the frame,
-    /// a headless run collected nothing at all and reported "nothing raised"
-    /// for a project whose script was raising every step — the worst answer
-    /// available, because it is confident and wrong.
+    /// Its own function because there are **three** loops that have to do it
+    /// and only one of them is a frame: `finish_input_frame` for the editor,
+    /// `floptle run` for a headless one, and the dedicated server. When this
+    /// lived inline in the frame, a headless run collected nothing at all and
+    /// reported "nothing raised" for a project whose script was raising every
+    /// step — the worst answer available, because it is confident and wrong.
     pub(crate) fn drain_script_logs(&mut self) {
+        self.adopt_script_logs(true);
+    }
+
+    /// [`Self::drain_script_logs`] without the terminal echo, for a host that
+    /// prints the Console itself.
+    ///
+    /// The echo exists because running the editor from a terminal should not
+    /// mean opening the Console panel to see `log(...)` — but a dedicated
+    /// server's whole log IS the Console, drained to stderr every tick, and
+    /// echoing here as well would print every line a script writes twice.
+    pub(crate) fn adopt_script_logs(&mut self, echo: bool) {
         for l in self.script_host.drain_logs() {
-            // Mirrored to the terminal as well, so running from one
-            // (`cargo run`) does not mean opening the Console panel to see
-            // `log(...)` output. On **stderr**: stdout belongs to whatever the
-            // caller asked for, and a verb's `--json` document is on it.
-            eprintln!("[lua] {}", l.msg);
+            // On **stderr**: stdout belongs to whatever the caller asked for,
+            // and a verb's `--json` document is on it.
+            if echo {
+                eprintln!("[lua] {}", l.msg);
+            }
             self.console.push(l.level, l.msg, l.source);
         }
     }

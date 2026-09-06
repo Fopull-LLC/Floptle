@@ -3776,9 +3776,31 @@ impl ScriptHost {
 
     /// Drop an instance's net registrations (env rebuild or instance death).
     fn drop_net_instance(&mut self, key: &(u32, String)) {
+        self.drop_net_instance_before(key, usize::MAX);
+    }
+
+    /// [`Self::drop_net_instance`], keeping anything registered from index
+    /// `keep_from` on.
+    ///
+    /// **This is what makes a file-scope `net.on` work at all.** An env rebuild
+    /// runs the chunk first and prunes the old generation's registrations
+    /// afterwards — so a `net.on(...)` at file scope, which is the form
+    /// `docs/multiplayer.md` uses in every one of its examples, registered
+    /// itself during the build and was then deleted by the prune that followed
+    /// it. The handler never fired, nothing was logged, and the script looked
+    /// like it had simply not been reached; only a `net.on` inside `start`
+    /// survived. Pruning by position keeps the two generations apart without
+    /// having to move the prune ahead of the build, which would strip a still-
+    /// running instance's handlers whenever a hot reload failed to compile.
+    fn drop_net_instance_before(&mut self, key: &(u32, String), keep_from: usize) {
         self.synced_stores.borrow_mut().remove(key);
         let mut hs = self.net.handlers.borrow_mut();
-        hs.retain(|h| !(h.eid == key.0 && h.kind == key.1));
+        let mut i = 0;
+        hs.retain(|h| {
+            let keep = i >= keep_from || !(h.eid == key.0 && h.kind == key.1);
+            i += 1;
+            keep
+        });
     }
 
     /// Reset the animator bridge at a play-session boundary: drop the state
@@ -5364,8 +5386,11 @@ impl ScriptHost {
                 }
             };
             // Mark the current instance while top-level code runs, so a
-            // `net.on(...)` at file scope knows its owner.
+            // `net.on(...)` at file scope knows its owner — and remember where
+            // the handler list ended, so the prune below can tell the chunk's
+            // OWN registrations from the previous generation's.
             *self.net.current.borrow_mut() = Some((e.index(), name.to_string()));
+            let registered_from = self.net.handlers.borrow().len();
             let built = build_env(&self.lua, &src, name);
             *self.net.current.borrow_mut() = None;
             match built {
@@ -5382,8 +5407,11 @@ impl ScriptHost {
                     }
                     // A rebuild (hot reload) drops the old generation's net
                     // handlers + synced store + UI listeners — the fresh run
-                    // re-registers whatever it still asks for.
-                    self.drop_net_instance(&key);
+                    // re-registers whatever it still asks for. Everything the
+                    // run just registered stays: the chunk has already executed
+                    // at this point, so pruning it wholesale would delete a
+                    // file-scope `net.on` the instant it was written.
+                    self.drop_net_instance_before(&key, registered_from);
                     self.drop_ui_listeners_of(&key);
                     self.setup_synced(&env, &key);
                     let hooks = Hooks::of(&env);
@@ -6323,6 +6351,58 @@ mod host_tests {
 
         let path = resolve_script_path(&dir.join("scripts"), &[], "fighterScripts/attack");
         assert_eq!(path, dir.join("scripts/fighterScripts/attack.lua"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A `net.on(...)` written at file scope has to survive the build that
+    /// ran it.**
+    ///
+    /// `ensure_instance` runs the chunk and then prunes the previous
+    /// generation's registrations — and the prune matched by (entity, script),
+    /// which is also what the chunk had *just* registered under. So the one
+    /// form `docs/multiplayer.md` uses in every example registered itself and
+    /// was deleted a few lines later, every build. Nothing failed and nothing
+    /// was logged: the handler simply never fired, and only a `net.on` inside
+    /// `start` worked. Watched failing here before the fix.
+    #[test]
+    fn a_file_scope_net_on_handler_survives_the_build_that_registered_it() {
+        let dir = std::env::temp_dir().join(format!("floptle-net-on-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/greeter.lua"),
+            "net.on(\"playerJoined\", function(peer) log(\"welcome \" .. peer) end)\n",
+        )
+        .unwrap();
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("Greeter".into()));
+        world.insert(
+            e,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "greeter".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "the script did not load: {:?}", host.errors());
+        let _ = host.drain_logs();
+
+        host.fire_net_event(&mut world, "playerJoined", Some(7), None);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(
+            said.iter().any(|m| m == "welcome 7"),
+            "a file-scope net.on never fired — it said {said:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

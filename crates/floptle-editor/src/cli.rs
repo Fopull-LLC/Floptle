@@ -1443,8 +1443,8 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 );
                 return Outcome::Exit(2);
             }
-            match floptle_runtime::server::ServerArgs::parse(&argv) {
-                Ok(args) => Outcome::Exit(match floptle_runtime::server::run(args) {
+            match crate::dedicated::ServerArgs::parse(&argv) {
+                Ok(args) => Outcome::Exit(match crate::dedicated::run(args) {
                     // The server's "cannot serve this scene" is this command
                     // line's 1: the project is wrong, not the invocation. Its 3
                     // (could not bind, relay refused) passes through as its own
