@@ -18,8 +18,6 @@
 //! edit lands *after* the frame that requested it, so a panel cannot delete the
 //! node the Inspector is drawing halfway through drawing it.
 
-use std::path::PathBuf;
-
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::{Entity, Matter};
 
@@ -27,11 +25,6 @@ use crate::ext::{self, ExtCmd, ExtLevel, HookKind, SceneMirror, Snapshot};
 use crate::Editor;
 
 impl Editor {
-    /// This build's version, as packages declare compatibility against.
-    pub(crate) fn engine_version() -> floptle_package::Version {
-        env!("CARGO_PKG_VERSION").parse().unwrap_or_default()
-    }
-
     /// Load (or reload) the project's packages and report what happened.
     pub(crate) fn ext_reload(&mut self) {
         if self.project_root.as_os_str().is_empty() {
@@ -47,18 +40,12 @@ impl Editor {
         self.ext_mirror_rev = 0;
         self.ext.reload(&self.project_root, &Self::engine_version());
         // Two things outside the host now depend on what loaded: where a
-        // `pkg://` reference points, and where a script name may resolve.
-        crate::project::set_package_roots(
-            self.ext.report.loaded.iter().map(|l| (l.id().to_string(), l.root.clone())).collect(),
-        );
-        let script_dirs: Vec<PathBuf> = self
-            .ext
-            .report
-            .loaded
-            .iter()
-            .flat_map(|l| l.manifest.dirs_that_exist(&l.root, floptle_package::DirKind::Scripts))
-            .collect();
-        self.script_host.set_extra_script_dirs(script_dirs);
+        // `pkg://` reference points, and where a script name may resolve. A
+        // player build has no host but still needs both, so they live in
+        // `project` and this is one of two callers.
+        let loaded = std::mem::take(&mut self.ext.report.loaded);
+        self.adopt_package_dirs(&loaded);
+        self.ext.report.loaded = loaded;
         self.ext_report_problems();
         self.drain_ext_log();
     }

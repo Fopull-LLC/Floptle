@@ -444,6 +444,41 @@ fn checked_netvalue(net: &SharedNet, ctx: &str, v: &Value) -> Option<NetValue> {
 /// Install the `net` global table. `hulls`/`sim_origin`/`synced_stores` are
 /// the host's shared frame state — `net.rewind` re-poses the hulls and swaps
 /// historical `synced` values in around a lag-compensated handler.
+/// `net.host{ allow = … }` / `deny` — a LIST of account ids, and nothing else.
+///
+/// These were read with `.ok().flatten().unwrap_or_default()`, so a string, or
+/// a table written with named keys, produced an **empty list** and no message
+/// at all. An empty `allow` means "everyone may join" and an empty `deny`
+/// means "nobody is barred": one typo in the two options whose entire job is
+/// to keep people out turned both of them off, and the server came up looking
+/// exactly as it should. That is not a shape a security filter may have, so a
+/// value that is not a list is refused out loud.
+fn id_list(o: &Table, key: &str) -> mlua::Result<Vec<String>> {
+    let bad = || {
+        mlua::Error::RuntimeError(format!(
+            "net.host: `{key}` must be a list of account ids — {key} = {{ \"abc123\", \"def456\" \
+             }}. It was something else, and an empty {key} would let the server start with the \
+             filter doing nothing."
+        ))
+    };
+    match o.get::<Option<Value>>(key)? {
+        None | Some(Value::Nil) => Ok(Vec::new()),
+        Some(Value::Table(t)) => {
+            let mut out = Vec::new();
+            for v in t.clone().sequence_values::<String>() {
+                out.push(v.map_err(|_| bad())?);
+            }
+            // A table with named keys has no sequence part, so it reads as
+            // empty — the same silent failure wearing a list's brackets.
+            if out.is_empty() && t.pairs::<Value, Value>().next().is_some() {
+                return Err(bad());
+            }
+            Ok(out)
+        }
+        Some(_) => Err(bad()),
+    }
+}
+
 pub(crate) fn install_net_api(
     lua: &Lua,
     net: &SharedNet,
@@ -571,8 +606,8 @@ pub(crate) fn install_net_api(
                         o.get::<Option<String>>("interestOcclusion").ok().flatten();
                     require_identity =
                         o.get::<Option<bool>>("requireIdentity").ok().flatten().unwrap_or(false);
-                    allow = o.get::<Option<Vec<String>>>("allow").ok().flatten().unwrap_or_default();
-                    deny = o.get::<Option<Vec<String>>>("deny").ok().flatten().unwrap_or_default();
+                    allow = id_list(&o, "allow")?;
+                    deny = id_list(&o, "deny")?;
                     input_delay = o
                         .get::<Option<u32>>("inputDelay")
                         .ok()
@@ -1020,4 +1055,54 @@ pub(crate) fn build_synced_proxy(
     }
     proxy.set_metatable(Some(mt));
     Ok((proxy, store))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tbl(lua: &Lua, src: &str) -> Table {
+        lua.load(src).eval().expect("the fixture is valid Lua")
+    }
+
+    /// The shape a security filter may not have: quietly empty.
+    ///
+    /// `allow` and `deny` were read leniently, so every one of these produced
+    /// an empty list and started a server with the filter switched off and
+    /// nothing said. An empty `allow` admits everyone.
+    #[test]
+    fn a_join_filter_that_is_not_a_list_is_refused_rather_than_emptied() {
+        let lua = Lua::new();
+        for src in [
+            r#"{ allow = "abc123" }"#,                     // one id, unbracketed
+            r#"{ allow = { abc123 = true } }"#,            // named keys, not a list
+            r#"{ allow = 7 }"#,
+            r#"{ allow = true }"#,
+        ] {
+            let o = tbl(&lua, src);
+            let err = id_list(&o, "allow").expect_err(&format!("{src} must be refused"));
+            assert!(
+                err.to_string().contains("must be a list of account ids"),
+                "and say what a list looks like: {err}"
+            );
+        }
+        // `deny` is read by the same rule — the two are one option twice.
+        let o = tbl(&lua, r#"{ deny = "abc123" }"#);
+        assert!(id_list(&o, "deny").is_err());
+    }
+
+    /// …and the shapes that are fine stay fine, including absent.
+    #[test]
+    fn an_ordinary_allow_list_is_read_as_written() {
+        let lua = Lua::new();
+        let o = tbl(&lua, r#"{ allow = { "abc123", "def456" } }"#);
+        assert_eq!(id_list(&o, "allow").unwrap(), vec!["abc123", "def456"]);
+        assert_eq!(id_list(&o, "deny").unwrap(), Vec::<String>::new(), "absent is an empty list");
+        let empty = tbl(&lua, r#"{ allow = {} }"#);
+        assert_eq!(
+            id_list(&empty, "allow").unwrap(),
+            Vec::<String>::new(),
+            "an explicitly empty list is a choice, not a typo"
+        );
+    }
 }

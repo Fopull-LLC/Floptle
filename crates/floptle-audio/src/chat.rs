@@ -124,6 +124,15 @@ impl VoiceDecoder {
 const MIN_DEPTH_MS: f32 = 20.0;
 const MAX_DEPTH_MS: f32 = 60.0;
 
+/// How far ahead of the slot that is due a packet may be and still be part of
+/// the same run of speech.
+///
+/// Half a second. Beyond it, the listener missed a stretch rather than a
+/// packet: they were muted, they dropped out of a `voice.setForward` list, or
+/// the link stalled. See [`VoiceJitter::accept`] for why that distinction has
+/// to be made at all.
+const RESYNC_FRAMES: u16 = (500.0 / FRAME_MS) as u16;
+
 /// Reorders one speaker's packets and releases them on time.
 ///
 /// One of these per remote speaker, on the listening machine.
@@ -142,6 +151,14 @@ pub struct VoiceJitter {
     concealed: u64,
     /// Frames released into the ring.
     played: u64,
+    /// Has anything gone wrong since the cushion was last reviewed — a packet
+    /// too late to play, or a slot concealed?
+    ///
+    /// The lifetime counters cannot answer this, and asking them was a bug:
+    /// one hiccup in the first minute pinned the cushion at its widened value
+    /// for the rest of the session, because `concealed == 0` was never true
+    /// again.
+    trouble_since_review: bool,
 }
 
 impl VoiceJitter {
@@ -154,6 +171,7 @@ impl VoiceJitter {
             too_late: 0,
             concealed: 0,
             played: 0,
+            trouble_since_review: false,
         })
     }
 
@@ -166,9 +184,29 @@ impl VoiceJitter {
             let age = next.wrapping_sub(seq);
             if age > 0 && age < u16::MAX / 2 {
                 self.too_late += 1;
+                self.trouble_since_review = true;
                 // Arriving late repeatedly means the cushion is too thin.
                 self.widen();
                 return;
+            }
+            // **A large jump forward is a new run of speech, not a lost
+            // packet, and must not be walked to one slot at a time.**
+            //
+            // `drain_into` fills the cushion and stops, which is one or two
+            // frames per tick — the same rate packets arrive at. So a counter
+            // that has moved 3000 frames ahead can never be reached by
+            // concealing towards it: every tick conceals a slot, every tick
+            // one more packet lands, `held` grows without bound and the
+            // speaker is never heard again. Not a rare case either — it is
+            // `voice.mute` and unmute, leaving and rejoining a
+            // `voice.setForward` list (the proximity pattern the docs
+            // recommend), or any stall over a second.
+            //
+            // Start again from what is arriving now: whatever is still held
+            // belongs to a moment that has gone.
+            if seq.wrapping_sub(next) > RESYNC_FRAMES {
+                self.held.clear();
+                self.next = None;
             }
         }
         if self.held.iter().any(|(s, _)| *s == seq) {
@@ -212,6 +250,7 @@ impl VoiceJitter {
                     // turn one lost datagram into a permanent delay for the
                     // rest of the session.
                     self.concealed += 1;
+                    self.trouble_since_review = true;
                     self.decoder.decode(None)
                 }
             };
@@ -232,7 +271,7 @@ impl VoiceJitter {
         // A healthy stretch earns a smaller cushion back. Slowly: latency that
         // ratchets up on every hiccup and never comes down ends the match a
         // second behind, and a buffer that shrinks eagerly just widens again.
-        if self.concealed == 0 && self.too_late == 0 {
+        if !std::mem::take(&mut self.trouble_since_review) {
             self.depth_ms = (self.depth_ms - 0.05).max(MIN_DEPTH_MS);
         }
         released
@@ -386,6 +425,44 @@ mod tests {
             "and heard most of it: {} samples",
             heard.len()
         );
+    }
+
+    /// A listener who stops receiving for a moment — muted, dropped out of a
+    /// `voice.setForward` list, or simply stalled — comes back to find the
+    /// speaker's counter has moved on a long way without them. Walking to it
+    /// one concealed frame per tick can never catch up, because one frame per
+    /// tick is exactly the rate the packets arrive at: the buffer would
+    /// conceal for the rest of the session and the speaker would never be
+    /// heard again. A jump that large is a new run of speech, not a lost
+    /// packet, and the buffer has to resynchronise onto it.
+    #[test]
+    fn a_speaker_is_heard_again_after_the_listener_misses_a_stretch() {
+        let ring = StreamRing::new(48_000);
+        let mut j = VoiceJitter::new().unwrap();
+        let ps = packets(60);
+
+        // A little ordinary conversation first, so `next` is live.
+        for (i, p) in ps[..5].iter().enumerate() {
+            j.accept(i as u16, p);
+        }
+        play(&mut j, &ring, 5);
+        let concealed_before = j.concealed();
+
+        // A minute went past unheard. Now the speaker is back, one packet per
+        // tick, which is how a live link delivers them.
+        let mut heard = Vec::new();
+        for (k, p) in ps[5..].iter().enumerate() {
+            j.accept(3000u16.wrapping_add(k as u16), p);
+            heard.extend(play(&mut j, &ring, 1));
+        }
+
+        assert!(peak(&heard) > 0.05, "the listener heard the speaker again, not silence");
+        assert!(
+            j.concealed() - concealed_before < 10,
+            "resynchronised rather than concealing its way there: {} slots concealed",
+            j.concealed() - concealed_before
+        );
+        assert!(j.played() > 20, "and kept playing: {} frames", j.played());
     }
 
     /// A u16 sequence wraps every ~22 minutes of speech. Treating the wrap as

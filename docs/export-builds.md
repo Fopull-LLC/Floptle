@@ -16,7 +16,7 @@ half — egui, the dock, the Inspector, the asset browser, the file pickers —
 30 MB of player, and the difference is not hidden chrome, it is absent code.
 
 Running that binary IS the game: the manifest next to it names the title and
-the assets folder, and it boots straight into the game filling the window. `Esc` releases a captured cursor (it never quits);
+the assets folder, and it boots straight into the game filling the window. `Esc` releases a captured cursor and a click gives it back (it never quits — and alt-tabbing away releases it too, so a build cannot reach out of an unfocused window and take the pointer); in a browser the same two gestures work, because the browser's own `Esc` exits pointer lock;
 **F1 opens the multiplayer menu** — in a build it's the game-facing version
 (host → lobby code, join by code, direct address; the editor's simulated-link
 test tools don't ship), and a "F1 — multiplayer" hint shows for the first few

@@ -220,6 +220,51 @@ fn sight_comes_back_immediately_and_goes_away_slowly() {
     assert_eq!(relevant_to(&t, 1), 3, "four blocked frames either side of a clear one");
 }
 
+/// Where a client's own copy of `name` is standing.
+fn at(w: &World, name: &str) -> DVec3 {
+    let e = w.query::<Name>().find(|(_, n)| n.0 == name).expect("the node is in the scene").0;
+    w.get::<Transform>(e).expect("and it has a transform").translation
+}
+
+/// **A pin holds whether or not interest management is on.**
+///
+/// Pins were read inside the interest path only, so `net.setRelevant` on a
+/// server that had not also been given `net.host{ interest = … }` returned
+/// success and withheld nothing: the broadcast path below it sends one
+/// snapshot to everybody. A hidden-role game got the killer's position
+/// delivered to every survivor and was told the filter had been applied.
+///
+/// This asserts on the clients' own worlds rather than on the panel's
+/// counters, because the counters are the server's account of what it did and
+/// the question here is what the client ended up holding.
+#[test]
+fn a_pin_holds_with_interest_management_off() {
+    let mut t = table();
+    // Off — the default, and what a project that never mentions interest has.
+    t.server.set_interest(InterestConfig::default());
+    assert!(t.server.set_relevant(t.hidden, 1, Some(false)));
+
+    // Somewhere no client's copy of the killer starts, so "did this move?" has
+    // one unambiguous answer.
+    let moved_to = DVec3::new(-40.0, 3.0, 12.0);
+    t.world.get_mut::<Transform>(t.hidden).unwrap().translation = moved_to;
+    // Long enough for the clients' own smoothing to arrive, so a client that
+    // is merely still catching up is not mistaken for one being withheld.
+    run(&mut t, 90, &NothingBlocks);
+
+    let (p1, p2) = (at(&t.clients[0].1, "Killer"), at(&t.clients[1].1, "Killer"));
+    assert!(
+        p1.distance(DVec3::new(-5.0, 0.0, 0.0)) < 0.01,
+        "peer 1 was told where the killer went anyway: {p1:?}"
+    );
+    assert!(
+        p2.distance(moved_to) < 0.01,
+        "peer 2 is unpinned and must still be kept up to date: {p2:?}"
+    );
+    // The rest of the world is untouched by one pin.
+    assert!(at(&t.clients[0].1, "P2").distance(DVec3::new(7.0, 0.0, 0.0)) < 0.01);
+}
+
 /// A pin outlives neither its peer nor its node: a NetId means nothing outside
 /// the scene that issued it, and a stale pin would name a stranger.
 #[test]

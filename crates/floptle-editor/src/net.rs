@@ -960,7 +960,15 @@ impl Editor {
         let who = self.account.as_ref()?.session()?;
         Some(floptle_net::IdentityClaim {
             id: who.sub.clone(),
-            name: who.name.clone().or_else(|| who.email.clone()).unwrap_or_default(),
+            // **Never the email.** This name is sent to every other player in
+            // the match and handed to their game scripts as
+            // `net.identity(peer).name`; falling back to the account's email
+            // address published it to strangers because somebody had not
+            // filled a display name in. An account with no display name has no
+            // display name — the game shows whatever it shows for an anonymous
+            // peer, which it already has to have for a LAN player with nobody
+            // signed in.
+            name: who.name.clone().unwrap_or_default(),
             tier: who.tier.clone(),
             proof: None,
         })

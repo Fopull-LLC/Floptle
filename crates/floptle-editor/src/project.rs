@@ -1379,6 +1379,71 @@ impl Editor {
         path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into())
     }
 
+    /// This build's version, as packages declare compatibility against.
+    ///
+    /// Lives here rather than beside the extension host because a player build
+    /// compiles that host out and still has to answer this: a package's
+    /// `engine` range is checked in every build that loads packages at all.
+    pub(crate) fn engine_version() -> floptle_package::Version {
+        env!("CARGO_PKG_VERSION").parse().unwrap_or_default()
+    }
+
+    /// Point `pkg://` and script-name resolution at the packages that loaded.
+    ///
+    /// Two things outside the extension host depend on what a project's package
+    /// list resolved to: where a `pkg://` reference points (linked packages are
+    /// read where they are being written, not from `packages/<id>/`), and where
+    /// a node's script name may resolve — a package ships `scripts/*.lua` and a
+    /// node in the project refers to one by bare name.
+    pub(crate) fn adopt_package_dirs(&mut self, loaded: &[floptle_package::Loaded]) {
+        set_package_roots(loaded.iter().map(|l| (l.id().to_string(), l.root.clone())).collect());
+        let script_dirs: Vec<PathBuf> = loaded
+            .iter()
+            .flat_map(|l| l.manifest.dirs_that_exist(&l.root, floptle_package::DirKind::Scripts))
+            .collect();
+        self.script_host.set_extra_script_dirs(script_dirs);
+    }
+
+    /// Load this project's packages.
+    ///
+    /// **A player build has to do this too, and for one release it did not.**
+    /// The editor loads packages by running the extension host, which is
+    /// `editor-ui` and compiled out of `floptle-player`; the call on project
+    /// open was gated to match. But a package is not only editor Lua — it
+    /// ships `scripts/` that nodes in the shipped scene are attached to, and
+    /// those names resolve through `set_extra_script_dirs` or not at all. So
+    /// every exported game that used a package came up with those nodes silent
+    /// and nothing logged, because nothing had failed: the script was simply
+    /// not found. (`pkg://` ASSETS kept working the whole time, through the
+    /// `packages/<id>/` fallback in `resolve_pkg_ref` — which is exactly why
+    /// this reads as "scripts are broken" rather than "packages are missing".)
+    ///
+    /// A player build therefore resolves the same list the same way and adopts
+    /// the same two things; it just has no Lua state to run the editor half in.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn load_packages(&mut self) {
+        self.ext_reload();
+    }
+
+    #[cfg(not(feature = "editor-ui"))]
+    pub(crate) fn load_packages(&mut self) {
+        if self.project_root.as_os_str().is_empty() {
+            return;
+        }
+        let report = floptle_package::resolve(&self.project_root, &Self::engine_version());
+        // Same words the editor's Console gets, for the same reason: a package
+        // that was skipped is the explanation for whatever the player is about
+        // to do without it.
+        for p in &report.problems {
+            let level = match p.severity {
+                floptle_package::Severity::Error => floptle_script::LogLevel::Error,
+                floptle_package::Severity::Warning => floptle_script::LogLevel::Warn,
+            };
+            self.console.push(level, format!("📦 {}", p.message), None);
+        }
+        self.adopt_package_dirs(&report.loaded);
+    }
+
     /// Switch the editor to the project rooted at `root`, reloading everything.
     pub(crate) fn open_project(&mut self, root: PathBuf) {
         self.reset_anim_bindings();
@@ -1421,8 +1486,7 @@ impl Editor {
         // Packages last: an extension's first line may read the project's
         // settings, its scenes or its assets, and all of those have to be
         // loaded before it does.
-        #[cfg(feature = "editor-ui")]
-        self.ext_reload();
+        self.load_packages();
         // Re-scan the animation + particle registries against the NEW project
         // root. Without this they kept pointing at whatever was scanned at editor
         // startup (e.g. the workspace's `assets/`), so opening another project
@@ -2747,3 +2811,60 @@ mod script_vec3_pin_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// **Deliberately NOT `#[cfg(feature = "editor-ui")]`.** This is the one thing
+/// here whose bug lived only in the build the workspace cannot see: an export
+/// ships `floptle-player`, and a guard that compiles out of it guards nothing.
+#[cfg(test)]
+mod package_loading_tests {
+    use crate::Editor;
+
+    /// **Opening a project loads its packages' script folders, in every build.**
+    ///
+    /// The call was `#[cfg(feature = "editor-ui")]` because the thing it ran —
+    /// the extension host — is. But a package is not only editor Lua: it ships
+    /// `scripts/` that nodes in the shipped scene are attached to by bare name.
+    /// So an exported game came up with every one of those nodes silent, and
+    /// nothing logged, because nothing had failed — the name simply resolved
+    /// nowhere. `pkg://` assets kept working through their own fallback, which
+    /// is why it reads as "scripts are broken", not "packages are missing".
+    #[test]
+    fn a_projects_package_scripts_are_reachable_after_opening_it() {
+        let dir = std::env::temp_dir().join(format!("floptle-pkg-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg = dir.join("packages/com.example.tools");
+        floptle_vfs::create_dir_all(pkg.join("scripts")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+        floptle_vfs::write(dir.join("project.ron"), "()").unwrap();
+        floptle_vfs::write(dir.join("scenes/first.ron"), "(nodes: [])").unwrap();
+        floptle_vfs::write(
+            pkg.join("package.ron"),
+            r#"(id: "com.example.tools", name: "Tools", version: "1.0.0")"#,
+        )
+        .unwrap();
+        floptle_vfs::write(pkg.join("scripts/pkgTool.lua"), "return {}\n").unwrap();
+        floptle_vfs::write(
+            dir.join("packages.ron"),
+            r#"(packages: [(id: "com.example.tools", version: "1.0.0", source: Authored, enabled: true)])"#,
+        )
+        .unwrap();
+
+        let mut ed = Editor::default();
+        ed.open_project(dir.clone());
+
+        let dirs = ed.script_host.extra_script_dirs();
+        assert!(
+            dirs.iter().any(|d| d.ends_with("packages/com.example.tools/scripts")),
+            "the package's scripts folder never reached the script host: {dirs:?}"
+        );
+        // And `pkg://` knows where the package is, which is the other half of
+        // what loading a package tells the rest of the engine.
+        assert_eq!(
+            crate::project::resolve_pkg_ref(&dir, "pkg://com.example.tools/thing.png"),
+            Some(pkg.join("thing.png")),
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

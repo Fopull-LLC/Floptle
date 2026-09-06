@@ -918,6 +918,7 @@ function net.identity(peer) end
 ---distance or line of sight, `nil` hands the decision back to the two tests.
 ---The hidden-role hook: hiding something a client was already sent is a
 ---setting a modified client turns back off, so this happens on the server.
+---Holds whether or not interest management is on.
 ---@param node Node
 ---@param peer integer
 ---@param relevant boolean|nil

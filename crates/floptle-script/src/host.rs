@@ -2385,6 +2385,13 @@ impl ScriptHost {
         self.extra_script_dirs = dirs;
     }
 
+    /// Those folders, for a caller checking that a project's packages actually
+    /// reached the host — a player build loaded none for a release, and the
+    /// only symptom was a node whose script "was not found".
+    pub fn extra_script_dirs(&self) -> &[std::path::PathBuf] {
+        &self.extra_script_dirs
+    }
+
     /// Feed the running scene's name (before `run`) — what `scene.current()` reads.
     pub fn set_scene_name(&self, name: &str) {
         let mut cur = self.scene_name.borrow_mut();
