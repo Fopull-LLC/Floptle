@@ -386,8 +386,11 @@ floptle serve <project-dir> [--scene scenes/arena.ron]
               [--interest 150] [--budget 16384]
 ```
 
-(`floptle-runtime --server <project-dir> …` runs the same server, and takes the
-same flags. It is the older spelling of it.)
+For a real deployment use **`floptle-server`** instead — the same engine and the
+same code, built without the OS audio and gamepad libraries, which are resolved
+when the process starts and are not present on a minimal server image. See
+[export-builds.md](export-builds.md). (`floptle-runtime --server <project-dir> …`
+is the oldest spelling of the same thing, and takes the same flags.)
 
 **It is the engine you already know, hosting.** Same `World`, same `Sim`, same
 scripts, same session, same tick — with no window, no GPU and nobody at the

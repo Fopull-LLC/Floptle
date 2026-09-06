@@ -292,13 +292,14 @@ pub fn run(args: ServerArgs) -> i32 {
 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     install_stop_watcher(stop.clone());
+    install_signal_stop();
 
     let period = std::time::Duration::from_secs_f32(step);
     let mut ticks = 0u64;
     let started = Instant::now();
     let mut last_status = Instant::now() - STATUS_EVERY;
     let mut next = Instant::now() + period;
-    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) && !signalled() {
         ticks += 1;
         // `game_focused: false` — there is no keyboard here, so the only input
         // reaching a script is a client's replayed input, per owner.
@@ -335,8 +336,93 @@ pub fn run(args: ServerArgs) -> i32 {
             next = now + period;
         }
     }
+    say_goodbye(&mut ed, step);
     println!("  server stopped after {ticks} tick(s)");
     0
+}
+
+/// What a player sees instead of "connection lost".
+const GOODBYE: &str = "the server is shutting down";
+
+/// Tell every player the world is going away, and give the message time to
+/// leave.
+///
+/// **A restart that looks like a crash is the difference between "they are
+/// updating" and "it broke again".** Clients are told through the kick path
+/// rather than a new message — it is the one route that already carries a
+/// reason all the way to `net.on("kicked")` and the F1 menu, and it is tested.
+/// The cost is that a game which hardcodes "you were removed by a moderator"
+/// instead of showing the reason will say the wrong thing; the docs have always
+/// said to show the reason, and inventing a second nearly-identical message
+/// would leave both halves half-handled.
+///
+/// The flush matters as much as the message. A reliable send is retransmitted
+/// until it is acknowledged, and retransmission happens *in ticks* — so exiting
+/// straight after queueing it would close the socket on a message that had not
+/// left yet, which is precisely the silence this exists to replace.
+#[cfg(not(target_arch = "wasm32"))]
+fn say_goodbye(ed: &mut Editor, step: f32) {
+    let peers: Vec<floptle_net::PeerId> =
+        ed.net_server.as_ref().map(|s| s.peers().to_vec()).unwrap_or_default();
+    if peers.is_empty() {
+        return;
+    }
+    println!("  telling {} player(s) the server is stopping", peers.len());
+    if let Some(s) = ed.net_server.as_mut() {
+        for p in &peers {
+            s.kick(*p, GOODBYE);
+        }
+    }
+    let deadline = Instant::now() + std::time::Duration::from_millis(500);
+    let period = std::time::Duration::from_secs_f32(step);
+    while Instant::now() < deadline {
+        ed.play_step(step, false);
+        ed.adopt_script_logs(false);
+        drain_console(ed);
+        std::thread::sleep(period);
+    }
+}
+
+/// Set by the signal handler, read by the loop. **The only thing a handler may
+/// safely do**: no allocation, no locks, no printing — just a flag the ordinary
+/// code notices a tick later.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+extern "C" fn on_stop_signal(_sig: libc::c_int) {
+    SIGNALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Stop cleanly on SIGTERM and SIGINT.
+///
+/// **This is how a service is actually stopped.** `systemctl stop`, a container
+/// runtime, and Ctrl-C at a terminal all send one of these, and Rust's default
+/// disposition ends the process where it stands — no goodbye, and every client
+/// reporting a connection lost. The Enter watcher below only ever covered an
+/// operator sitting at a TTY, which is the one case that matters least.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn install_signal_stop() {
+    // SAFETY: `on_stop_signal` only stores into an atomic, which is
+    // async-signal-safe. Registering a handler is the documented use of this
+    // call.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_stop_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_stop_signal as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn install_signal_stop() {}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn signalled() -> bool {
+    SIGNALLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn signalled() -> bool {
+    false
 }
 
 /// How often `--status-file` is rewritten.
@@ -1097,6 +1183,61 @@ mod server_tests {
             s.console().contains("the slot is being driven"),
             "the claimed slot never came alive. Server said:\n{}",
             s.console()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A stopping server says goodbye, and the player is told rather than
+    /// dropped.**
+    ///
+    /// A restart that looks like a crash is the difference between "they are
+    /// updating" and "it broke again".
+    ///
+    /// **What this can and cannot hold.** The memory hub delivers in-process,
+    /// so removing the flush entirely leaves this green — over a real UDP link
+    /// it would not, because a reliable send is retransmitted until it is
+    /// acknowledged and retransmission happens in TICKS. Rather than claim
+    /// coverage it does not have, the guard asserts the flush *ran*: the
+    /// server's tick advanced while saying goodbye, which is the thing a queued-
+    /// and-immediately-exited version would not do. The delivery itself is
+    /// covered; the wire timing waits for the field test.
+    #[test]
+    fn a_stopping_server_says_goodbye_before_it_goes() {
+        let root = temp("goodbye");
+        write(&root, "scripts/rules.lua", "-- nothing to do\n");
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+
+        let mut s = serve(&root, "scenes/arena.ron");
+        let mut c = s.join();
+        s.pump(SETTLE, &mut [&mut c]);
+        assert_eq!(
+            s.ed.net_server.as_ref().map(|n| n.peers().len()),
+            Some(1),
+            "the player has to be in before they can be said goodbye to"
+        );
+        let _ = c.session.take_events();
+
+        let before = s.ed.game_tick_no;
+        super::say_goodbye(&mut s.ed, STEP);
+        assert!(
+            s.ed.game_tick_no > before,
+            "the goodbye was queued and the server left without ticking, so a real link \
+             would have closed on a message that never went out"
+        );
+        // The client has to tick to hear it — the goodbye is on the wire, not
+        // in the server's memory.
+        let mut heard = Vec::new();
+        for _ in 0..30 {
+            c.session.tick_client(&mut c.world);
+            heard.extend(c.session.take_events().into_iter().filter_map(|e| match e {
+                floptle_net::NetEvent::Kicked(why) => Some(why),
+                _ => None,
+            }));
+        }
+        assert!(
+            heard.iter().any(|w| w.contains("shutting down")),
+            "the player was dropped without being told why: {heard:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
