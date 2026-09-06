@@ -2371,6 +2371,41 @@ impl LightDoc {
     }
 }
 
+/// Floptle Cloud, as a project knows it: which registered game this is, and
+/// the key that proves it.
+///
+/// **The key is not a secret and is not treated as one.** It ships inside every
+/// build — that is what lets an exported game host on a managed relay at all —
+/// and the same is true of Photon's AppId and every service of this shape. What
+/// it buys is accounting, not authentication: it says which developer's plan a
+/// session meters against. Rotation, revocation and the usage graph are the
+/// controls, and they live in the portal.
+///
+/// Absent means this project is not connected to Cloud, which is the default
+/// and a perfectly good place to stay: hosting directly and hosting on a
+/// self-hosted relay both work without any of this.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct CloudProjectSettings {
+    /// The game's slug in the registry — `forgery`, say. What the portal calls
+    /// it and what `/games/{slug}` addresses.
+    #[serde(default)]
+    pub game: String,
+    /// The game key, `fk_live_…`.
+    #[serde(default)]
+    pub key: String,
+}
+
+impl CloudProjectSettings {
+    /// Is there actually a key here? A `cloud:` block with an empty key is a
+    /// project somebody started connecting and did not finish, and it must not
+    /// be presented to a relay as though it were real — an empty string is
+    /// refused as an unknown key, which reads as "your key is wrong" rather
+    /// than "you have not finished connecting".
+    pub fn is_connected(&self) -> bool {
+        !self.key.trim().is_empty()
+    }
+}
+
 /// Project-wide Steam integration settings. `None` = not a Steam build —
 /// Steam lifecycle never activates and every `steam.*` Lua call answers
 /// through `NullPlatform`. See the Steam integration plan.
@@ -2512,6 +2547,12 @@ pub struct ProjectConfigDoc {
     /// itself isn't part of the shipped bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam: Option<SteamProjectSettings>,
+    /// Floptle Cloud, if this project is connected to a game there. `None` =
+    /// it is not, which is the default and stays the default: everything about
+    /// multiplayer works without it, on a self-hosted relay or a direct
+    /// connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudProjectSettings>,
     /// The project's collision/query **layers**, by name (up to 32; "Default"
     /// is implicit and always index 0 — it need not be listed). Nodes reference
     /// these by name ([`NodeDoc::layer`]); Project Settings edits them.
@@ -2617,6 +2658,7 @@ impl ProjectConfigDoc {
             entry_scene: None,
             engine_version: None,
             steam: None,
+            cloud: None,
             layers: Vec::new(),
             no_collide: Vec::new(),
             sorting_layers: Vec::new(),

@@ -1340,9 +1340,23 @@ impl Editor {
         // read those five letters out and their friend would get "no such
         // lobby" — with the game insisting it is hosting.
         self.net_lobby_code = None;
-        let (transport, code) = match floptle_net::RelayHost::host(relay_addr) {
+        // **Present the game key if this project has one.** A managed relay
+        // refuses a keyless host — that is the whole point of it — and a
+        // self-hosted relay ignores the key, so sending it whenever we have one
+        // is right in both directions. A `cloud:` block with an empty key is a
+        // connection somebody started and did not finish, and is not a key.
+        let cloud = self.project.cloud.clone().filter(|c| c.is_connected());
+        let hosted = match &cloud {
+            Some(c) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
+            None => floptle_net::RelayHost::host(relay_addr),
+        };
+        let (transport, code) = match hosted {
             Ok(t) => t,
             Err(e) => {
+                // The relay's own words, when it had any — "connect your
+                // project at fopull.com/cloud", "this game is at its 20-player
+                // limit". Prefixing them with the call that failed keeps the
+                // Console readable without burying the sentence a player needs.
                 self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!("net.host{{relay = \"{relay_addr}\"}}: {e}"),
@@ -2809,5 +2823,63 @@ impl Editor {
 
     pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
         self.net_no_transport(&format!("net.join(\"relay://{relay_addr}/{code}\")"));
+    }
+}
+
+/// Floptle Cloud, from the engine's side: a project that is connected presents
+/// its game key when it hosts on a relay, and one that is not does not.
+#[cfg(test)]
+mod cloud_project_tests {
+    use crate::Editor;
+    use floptle_scene::CloudProjectSettings;
+
+    fn connected(key: &str) -> Option<CloudProjectSettings> {
+        Some(CloudProjectSettings { game: "forgery".into(), key: key.into() })
+    }
+
+    /// **A half-finished connection is not a key.** The Cloud tab writes the
+    /// `cloud:` block when a project is linked, and there is a moment — a game
+    /// picked, a key not yet fetched — where the block exists and the key is
+    /// empty. Presenting that to a managed relay would be refused as an
+    /// *unknown key*, which tells the developer their key is wrong when the
+    /// truth is that they have not finished connecting. Two very different
+    /// next actions.
+    #[test]
+    fn an_empty_key_is_not_a_connection() {
+        assert!(!connected("").unwrap().is_connected());
+        assert!(!connected("   ").unwrap().is_connected());
+        assert!(connected("fk_live_REAL").unwrap().is_connected());
+    }
+
+    /// The default is not connected, and stays that way. Everything about
+    /// multiplayer works without Floptle Cloud — a direct connection, a
+    /// self-hosted relay — and a project only opts in.
+    #[test]
+    fn a_project_is_not_connected_to_cloud_unless_it_says_so() {
+        let ed = Editor::default();
+        assert!(ed.project.cloud.is_none(), "no project.ron means no Cloud");
+    }
+
+    /// It round-trips through `project.ron`, which is what an exported build
+    /// reads — the key ships inside the game, because that is the only way a
+    /// player's copy can host on a managed relay at all.
+    #[test]
+    fn the_cloud_block_survives_project_ron() {
+        let doc = floptle_scene::ProjectConfigDoc {
+            cloud: connected("fk_live_REAL"),
+            ..Default::default()
+        };
+        let text = ron::ser::to_string(&doc).expect("serialises");
+        assert!(text.contains("fk_live_REAL"), "the key must ship: {text}");
+        let back: floptle_scene::ProjectConfigDoc = ron::from_str(&text).expect("parses");
+        assert_eq!(back.cloud, doc.cloud);
+    }
+
+    /// An older `project.ron` has no `cloud:` block at all and must still load.
+    #[test]
+    fn a_project_written_before_cloud_existed_still_opens() {
+        let back: floptle_scene::ProjectConfigDoc =
+            ron::from_str("(retro: true)").expect("an old project still parses");
+        assert!(back.cloud.is_none());
     }
 }
