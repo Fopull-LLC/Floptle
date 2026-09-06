@@ -965,6 +965,27 @@ pub(crate) fn export_web(
             ));
         }
     }
+    // **Clear a previous NATIVE export out of this folder.**
+    //
+    // A web build's files all live inside `game.flpk`; a native build leaves a
+    // loose `assets/` tree and a `floptle-game.ron` beside its binary. Export
+    // web over the top of a native export — the same "builds" folder, which is
+    // what people do — and those stayed. The folder is then served as a web
+    // page with the whole previous game sitting next to it as browsable raw
+    // files, downloadable by anyone who guesses a path.
+    //
+    // Only what a previous export of ours wrote, and only when its own
+    // manifest is there to say so: `assets/` in a folder with no
+    // `floptle-game.ron` is somebody else's and is left alone.
+    if floptle_vfs::is_file(out_c.join("floptle-game.ron")) {
+        let stale = out_c.join("assets");
+        if floptle_vfs::is_dir(&stale) {
+            std::fs::remove_dir_all(&stale)
+                .map_err(|e| format!("clear the previous native export's assets: {e}"))?;
+        }
+        floptle_vfs::remove_file(out_c.join("floptle-game.ron"))
+            .map_err(|e| format!("clear the previous native export's manifest: {e}"))?;
+    }
     // Staged exactly as a native build is, into a folder that is packed and
     // then removed.
     let staging = out_c.join(".staging");
@@ -1620,6 +1641,62 @@ mod tests {
         assert!(err.contains("pkg/floptle_web.js") || err.contains("has no"), "{err}");
         assert!(!floptle_vfs::exists(out2.join("game.flpk")));
         for d in [proj, tpl, out, broken, out2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// **A web export into the folder a native export used clears it out.**
+    ///
+    /// Everything a web build serves is inside `game.flpk`. A native export
+    /// into the same folder — one "builds" folder, both targets, which is what
+    /// people do — leaves a loose `assets/` tree and its manifest, and they
+    /// were still sitting there after the web export wrote its page. Upload
+    /// that folder and the previous game is browsable as raw files beside it.
+    ///
+    /// Only a previous export's leftovers, and only when its own manifest is
+    /// present to identify them.
+    #[test]
+    fn a_web_export_clears_a_native_export_out_of_the_same_folder() {
+        let proj = temp("web-over-proj");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        floptle_vfs::write(proj.join("scenes/first.ron"), "(nodes: [])").unwrap();
+        let tpl = temp("web-over-tpl");
+        floptle_vfs::create_dir_all(tpl.join("pkg")).unwrap();
+        floptle_vfs::write(tpl.join("index.html"), "<title>{{TITLE}}</title>").unwrap();
+        floptle_vfs::write(tpl.join("pkg/floptle_web.js"), "// glue").unwrap();
+        floptle_vfs::write(tpl.join(floptle_dist::WEB_TEMPLATE_MARKER), [0u8, 0x61, 0x73, 0x6d]).unwrap();
+
+        // A native export already lives here.
+        let out = temp("web-over-out");
+        floptle_vfs::create_dir_all(out.join("assets/scenes")).unwrap();
+        floptle_vfs::write(out.join("assets/scenes/secret.ron"), "(nodes: [])").unwrap();
+        floptle_vfs::write(out.join("floptle-game.ron"), "(title: \"Old\", project: \"assets\")").unwrap();
+
+        let web = target("Web (browser)");
+        web.stamp(&proj, &out, "New", &tpl.join(floptle_dist::WEB_TEMPLATE_MARKER)).unwrap();
+        assert!(
+            !floptle_vfs::exists(out.join("assets")),
+            "the previous native export's asset tree is still being served"
+        );
+        assert!(
+            !floptle_vfs::exists(out.join("floptle-game.ron")),
+            "and so is its manifest, which a web build does not use"
+        );
+        assert!(floptle_vfs::is_file(out.join("game.flpk")), "the web build itself is there");
+
+        // A folder holding an `assets/` that is NOT ours is left alone: no
+        // manifest, no claim on it.
+        let other = temp("web-over-other");
+        floptle_vfs::create_dir_all(other.join("assets")).unwrap();
+        floptle_vfs::write(other.join("assets/theirs.txt"), "mine").unwrap();
+        web.stamp(&proj, &other, "New", &tpl.join(floptle_dist::WEB_TEMPLATE_MARKER)).unwrap();
+        assert!(
+            floptle_vfs::is_file(other.join("assets/theirs.txt")),
+            "an export must not delete a folder it did not write"
+        );
+
+        for d in [proj, tpl, out, other] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

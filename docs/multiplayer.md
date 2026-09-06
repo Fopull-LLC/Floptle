@@ -492,6 +492,12 @@ Two things it cannot do, on purpose: a client is always told about **its own
 avatar** (prediction reconciles against it, so hiding it would produce a player
 who cannot see themselves) and about anything flagged *always relevant*.
 
+A pin holds **whether or not interest management is on.** With `interest` unset
+the server still sends one snapshot to everybody, minus what each client has
+been pinned away from — nothing else is culled, no radius applies, no budget is
+spent. Turning on a hidden-role filter is not a decision to opt into distance
+culling as well.
+
 Losing relevance behaves as it always has — a scene-authored node stops being
 updated and is sent in full on re-entry, never despawned. The 🌐 panel shows,
 per client, how many nodes are being withheld and by which rule, so "is my

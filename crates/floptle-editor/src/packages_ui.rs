@@ -1263,7 +1263,11 @@ fn detail_panel(
                     match &r.engine {
                         // A compatibility warning is one of the four things
                         // colour is for; a version that fits is not.
-                        Some(req) if !req.matches(engine) => {
+                        // `matches_engine`: a beta engine counts as the
+                        // release it leads up to, exactly as the installer
+                        // judges it. Two different answers here and there is
+                        // a row marked incompatible that installs fine.
+                        Some(req) if !req.matches_engine(engine) => {
                             ui.label(
                                 look::data(ui, format!("needs {}", req.as_str()))
                                     .color(crate::theme::signal::WARN),

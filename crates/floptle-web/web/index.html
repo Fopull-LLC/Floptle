@@ -34,19 +34,35 @@
   const status = s => { $('status').textContent = s; };
   const fill = f => { $('fill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; };
   const fail = why => {
+    // **Show the panel.** It is hidden the moment `play()` returns, so
+    // anything that goes wrong after that — and losing the GPU adapter is the
+    // common one, on a Linux Chrome without the WebGPU flag or a blocklisted
+    // card — wrote its explanation into a hidden element. The player got a
+    // black page that named nothing, which is exactly the failure this panel
+    // exists to prevent.
+    $('panel').hidden = false;
+    $('play').classList.remove('ready');
     status(why);
     $('bar').style.visibility = 'hidden';
     console.error(why);
   };
 
+  // `?shot=N`: photograph frame N and hand it to the harness — the browser's
+  // form of the player's `--shot`, and how a web build is verified by eye. It
+  // is also the only thing that puts this page under the harness at all.
+  const shotAt = Number(new URLSearchParams(location.search).get('shot')) || 0;
+
   // The engine's own console, and the page's way to tell the player it stopped.
-  // Under tools/web/shot.py --game, both are also POSTed to the harness; outside
-  // it the POSTs fail silently and the page is just a page.
-  const post = (path, body) => fetch(path, { method: 'POST', body }).catch(() => {});
+  // Under tools/web/shot.py --game, both are also POSTed to the harness.
+  //
+  // Only there. These used to POST unconditionally, which is a request per log
+  // line — at least twice a second — to a path no real host serves: a shipped
+  // game filled its host's access log with 404s and its own network tab with
+  // failures, all of it for a harness that was not listening.
+  const post = (path, body) =>
+    shotAt > 0 ? fetch(path, { method: 'POST', body }).catch(() => {}) : Promise.resolve();
   window.floptleLog = s => { console.log(s); post('/report', s); };
   window.floptleFatal = s => { fail('The game stopped:\n' + s); post('/report', 'FATAL ' + s); };
-  // `?shot=N`: photograph frame N and hand it to the harness — the browser's
-  // form of the player's `--shot`, and how a web build is verified by eye.
   // The picture comes from the engine's own render target, not the canvas: a
   // WebGPU canvas hands `toDataURL` a blank image outside the task that drew it.
   // wgpu reports a rejected buffer map as one fixed sentence and drops the
@@ -59,7 +75,6 @@
       return p;
     };
   }
-  const shotAt = Number(new URLSearchParams(location.search).get('shot')) || 0;
   window.floptleShotAt = () => shotAt;
   if (shotAt > 0) {
     // Under the harness, say whether this window is one the browser animates

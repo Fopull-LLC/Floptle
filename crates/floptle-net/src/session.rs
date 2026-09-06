@@ -2038,7 +2038,37 @@ impl NetSession {
         self.snap_count += 1;
         let keyframe = self.snap_count % KEYFRAME_EVERY == 1;
         if self.interest.enabled {
-            self.send_interest_snapshots(world, tick, keyframe, occl);
+            self.send_interest_snapshots(world, tick, keyframe, occl, self.interest);
+            return;
+        }
+        // **A relevance pin holds whether or not interest management is on.**
+        //
+        // Pins used to be read only inside the interest path, so a game that
+        // called `net.setRelevant` without also turning interest on got a call
+        // that returned success and did nothing: the broadcast below sent the
+        // hidden player's position to everyone, every snapshot. For the one
+        // feature whose entire purpose is that a client is never told a thing,
+        // silently not withholding it is the worst failure available.
+        //
+        // So a pinned-off node takes the per-peer path — with every OTHER test
+        // disabled, because the game asked to hide one node, not to opt into
+        // radius culling. Nothing is out of range, nothing is occluded and the
+        // budget is not a limit; the pin is the only thing that withholds.
+        if self.relevance_pins.values().any(|v| !v) {
+            let unbounded = crate::interest::InterestConfig {
+                radius: f64::INFINITY,
+                hysteresis: 0.0,
+                budget_bytes_per_sec: u32::MAX,
+                occlusion: false,
+                ..self.interest
+            };
+            self.send_interest_snapshots(
+                world,
+                tick,
+                keyframe,
+                &crate::interest::NoOcclusion,
+                unbounded,
+            );
             return;
         }
         // Broadcast: one snapshot, encoded once, identical for everyone. Below
@@ -2056,21 +2086,26 @@ impl NetSession {
     /// One snapshot per client, carrying only what that client is near enough
     /// to care about and only as much of it as its byte budget allows
     /// (`docs/multiplayer.md` §5.2, [`crate::interest`]).
+    ///
+    /// `cfg` is the settings to cull by, rather than `self.interest`, because
+    /// this path also runs with interest management OFF — to honour a
+    /// relevance pin and nothing else. See the caller.
     fn send_interest_snapshots(
         &mut self,
         world: &World,
         tick: u64,
         keyframe: bool,
         occl: &dyn crate::interest::Occluder,
+        cfg: crate::interest::InterestConfig,
     ) {
         let snaps_per_sec = if self.tick_dt > 0.0 {
             1.0 / (self.tick_dt * SNAPSHOT_EVERY as f32)
         } else {
             30.0
         };
-        let budget = self.interest.budget_per_snapshot(snaps_per_sec);
-        let (radius, hyst) = (self.interest.radius, self.interest.hysteresis);
-        let (occlusion, grace) = (self.interest.occlusion, self.interest.occlusion_grace);
+        let budget = cfg.budget_per_snapshot(snaps_per_sec);
+        let (radius, hyst) = (cfg.radius, cfg.hysteresis);
+        let (occlusion, grace) = (cfg.occlusion, cfg.occlusion_grace);
 
         // Everything replicable this tick, gathered once and reused per peer —
         // the whole point is to scale with player count, so an O(players ×

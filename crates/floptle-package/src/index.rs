@@ -173,10 +173,16 @@ impl Listing {
     /// The newest release this engine can actually run — which is not always
     /// the newest release. A catalogue row that offers a version the editor
     /// will refuse on install is a row that wastes somebody's afternoon.
+    ///
+    /// [`matches_engine`](crate::VersionReq::matches_engine), not `matches`:
+    /// the argument is the build in the developer's hands, not a candidate
+    /// being chosen from a list. Under the strict rule a beta engine matched
+    /// no `engine` bound at all, so the whole catalogue read "nothing for
+    /// Floptle 0.85.0-rc3 yet" — every row, every package.
     pub fn best_for(&self, engine: &Version) -> Option<&Release> {
         self.versions
             .iter()
-            .filter(|r| r.engine.as_ref().is_none_or(|req| req.matches(engine)))
+            .filter(|r| r.engine.as_ref().is_none_or(|req| req.matches_engine(engine)))
             .max_by(|a, b| a.version.cmp(&b.version))
     }
 

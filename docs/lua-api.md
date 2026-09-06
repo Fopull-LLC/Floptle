@@ -2176,7 +2176,7 @@ SERVER ONLY: net.setOwner(node, peer) — hand a replicated node to a player aft
 
 ### `net.setRelevant`
 
-SERVER ONLY: net.setRelevant(node, peer, true|false) — decide per client whether that client may be told about that node at all, on top of the interest radius; pass nil to hand the decision back to the radius and the line-of-sight test. This is the hidden-role hook. It has to be server-side: a client that has already been sent a position knows the position, whatever it chooses to draw, so hiding or attenuating it client-side is a setting a modified client turns back off. Needs interest management on (net.host{ interest = … }); the 🌐 panel shows how many nodes each client is being withheld, and why.
+SERVER ONLY: net.setRelevant(node, peer, true|false) — decide per client whether that client may be told about that node at all, on top of the interest radius; pass nil to hand the decision back to the radius and the line-of-sight test. This is the hidden-role hook. It has to be server-side: a client that has already been sent a position knows the position, whatever it chooses to draw, so hiding or attenuating it client-side is a setting a modified client turns back off. Holds whether or not interest management is on: with it off, every client is still sent everything EXCEPT what it has been pinned away from. The 🌐 panel shows how many nodes each client is being withheld, and why.
 
 ### `net.spawn`
 

@@ -144,6 +144,19 @@ struct Player {
     /// The active grab is a CONFINE rather than a lock (X11 has no OS-level
     /// lock), so the cursor is re-centred every frame.
     grabbed_soft: bool,
+    /// The lock state the window was last actually asked for.
+    ///
+    /// Asking is not free on the web — each ask is a `requestPointerLock`, and
+    /// one made too soon after the player pressed Escape is refused and logged
+    /// — so the ask is made when the answer changes rather than every frame.
+    grab_asked: bool,
+    /// Web only: has the browser been seen to actually grant the lock?
+    ///
+    /// The request is asynchronous, so "not locked" in the frame after asking
+    /// means "no answer yet", not "refused". Once the lock has been observed,
+    /// losing it means the player took it back.
+    #[cfg(target_arch = "wasm32")]
+    web_lock_held: bool,
     /// `--shot`: where to write the photographed frame, and which frame.
     shot: Option<PathBuf>,
     shot_at: u32,
@@ -182,6 +195,9 @@ impl Player {
             project,
             fullscreen: false,
             grabbed_soft: false,
+            grab_asked: false,
+            #[cfg(target_arch = "wasm32")]
+            web_lock_held: false,
             shot: None,
             shot_at: 60,
             frames: 0,
@@ -270,6 +286,15 @@ impl ApplicationHandler for Player {
             WindowEvent::CursorMoved { position, .. } => {
                 self.ed.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
             }
+            // Alt-tabbing away is the other way people ask for the cursor
+            // back, and the one they find on their own: the compositor drops
+            // the grab on focus loss whether the app agrees or not. Without
+            // this the frame loop simply took it again — reaching out of an
+            // unfocused window to steal the pointer off whatever the player
+            // had switched to.
+            WindowEvent::Focused(false) => {
+                self.ed.set_cursor_freed(true);
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 let i = match button {
@@ -280,6 +305,12 @@ impl ApplicationHandler for Player {
                     MouseButton::Forward => 4,
                     MouseButton::Other(_) => return,
                 };
+                // A click is how the pointer goes back to the game after
+                // Escape — and on the web it is the only thing that can, since
+                // `requestPointerLock` needs a gesture to hang off.
+                if pressed && i == 0 {
+                    self.ed.set_cursor_freed(false);
+                }
                 self.ed.track_mouse_button(i, pressed);
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -368,8 +399,37 @@ impl Player {
             return;
         }
         let Some(window) = self.ed.window.clone() else { return };
-        let want = self.ed.script_mouse_lock;
-        if want != (self.grabbed_soft || self.ed.cursor_lock_soft) || want {
+        // **The browser's own Escape.** A page cannot see the keypress that
+        // exits pointer lock — the browser consumes it deliberately, so a
+        // page cannot trap the player inside a locked cursor — which means the
+        // Escape handling in `feed_key` never runs on the web. Ask the
+        // document instead, and treat a lock that was granted and is now gone
+        // as the player asking for their pointer back.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let locked = web::pointer_locked();
+            if locked {
+                self.web_lock_held = true;
+            } else if self.web_lock_held {
+                self.web_lock_held = false;
+                self.ed.set_cursor_freed(true);
+            }
+        }
+        // What the GAME wants, minus the player having taken the pointer back
+        // with Escape. `script_mouse_lock` alone is the game's standing wish,
+        // and a first-person camera renews it every frame from `update`: read
+        // straight, it put the grab back on the frame after Escape and the key
+        // looked like it did nothing at all. A build promised that key in
+        // `docs/export-builds.md` and did not have it.
+        let want = self.ed.game_holds_cursor();
+        // Native: re-assert while the game wants the pointer, because a
+        // compositor drops a grab on focus loss without telling the app and
+        // asking again is the only way back. On the web the same loop is a
+        // `requestPointerLock` per frame, every one of them refused and logged
+        // for a full second after an Escape.
+        let reassert = !cfg!(target_arch = "wasm32");
+        if want != self.grab_asked || (want && reassert) {
+            self.grab_asked = want;
             self.grabbed_soft = crate::grab_cursor(&window, want);
             self.ed.cursor_lock_soft = self.grabbed_soft;
         }
@@ -389,6 +449,18 @@ impl Player {
     /// being re-recorded. None of them exist here, which is most of why this is
     /// short.
     fn feed_key(&mut self, code: KeyCode, pressed: bool, text: Option<&str>) {
+        // **Escape frees a script-locked cursor.** The one gesture a build must
+        // answer itself: a game that calls `setMouseLocked(true)` and then
+        // shows a menu — or crashes, or simply has a bug — has otherwise taken
+        // the player's pointer with no way to get it back short of killing the
+        // window. The editor has had this since the lock existed; the player
+        // binary shipped without it, while `docs/export-builds.md` promised it.
+        //
+        // The game still SEES the key: plenty of games open their pause menu on
+        // it, and swallowing it would break them. This only releases the grab.
+        if pressed && code == KeyCode::Escape {
+            self.ed.set_cursor_freed(true);
+        }
         // The two window chords a build answers itself.
         if pressed
             && (code == KeyCode::F11
@@ -480,6 +552,18 @@ pub mod web {
         /// `window.floptleLog(line)`: the page's transcript.
         #[wasm_bindgen(js_namespace = window, js_name = floptleLog, catch)]
         fn page_log(line: &str) -> Result<(), JsValue>;
+    }
+
+    /// Does the document hold a pointer lock right now?
+    ///
+    /// The page's own view of the grab, which is the only reliable one on the
+    /// web: the player exits pointer lock with Escape and the browser does not
+    /// deliver that keypress, so nothing else in the game ever learns it
+    /// happened.
+    pub(super) fn pointer_locked() -> bool {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .is_some_and(|d| d.pointer_lock_element().is_some())
     }
 
     /// A line to the page's transcript — what `eprintln!` cannot do here:
