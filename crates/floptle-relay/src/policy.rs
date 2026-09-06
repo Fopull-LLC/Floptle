@@ -276,14 +276,16 @@ impl RelayPolicy for CloudPolicy {
                     .into(),
             };
         };
-        // **Rule 2.** No snapshot has ever landed, so this relay knows nothing
-        // — it must ask rather than assume, whatever the key is.
-        if !self.keys.primed {
-            self.spawn_authorize(key);
-            return self.verdict(key);
-        }
         // **Rule 1.** A key the snapshot does not carry has NOT been revoked;
         // it may simply have been minted since the last pull. Ask.
+        //
+        // **Rule 2 falls out of this one rather than needing its own branch**,
+        // and that is worth saying because the first version of this had one. A
+        // relay that has never pulled holds no keys, so *every* key is absent,
+        // so every key is asked about — which is exactly the required
+        // behaviour. The separate `if !primed` arm answered identically and
+        // re-authorized keys the cold path had already settled; it was watched
+        // failing to fail, which is how it was found.
         if self.keys.get(key).is_none() && !self.floored.contains(key) {
             self.spawn_authorize(key);
         }
@@ -506,6 +508,13 @@ mod tests {
 
     /// **Rule 2.** A relay that has never reached the control plane knows
     /// nothing at all, and must not answer as though it knows a key is bad.
+    ///
+    /// It has no branch of its own — with no snapshot every key is absent, so
+    /// rule 1 carries it — but it is asserted separately because it is a
+    /// different failure in production (a whole region refusing every host on
+    /// boot, rather than one new key being turned away) and because the day
+    /// somebody makes absence mean refusal, this is the test that says a cold
+    /// start is when it hurts most.
     #[test]
     fn a_relay_with_no_snapshot_yet_asks_rather_than_refusing() {
         let fake = Arc::new(Fake::default());
