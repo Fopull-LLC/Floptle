@@ -18,4 +18,6 @@ path = "src/main.rs"
 # pickers — so none of it is compiled into a shipped game. It also drops the
 # default script VM the same way every other dependent does (ADR-0028), so the
 # VM is chosen here and cannot be smuggled in twice.
-floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau"] }
+# `devices` because somebody is sitting at this one: it is a game, so it wants
+# the audio device and the gamepads. `floptle-server` is the build that does not.
+floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau", "devices"] }

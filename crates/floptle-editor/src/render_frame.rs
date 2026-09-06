@@ -2527,7 +2527,12 @@ impl Editor {
             // it costs, `effectsDropped` is what it cut.
             let (effects, effects_dropped) = self.vfx.detached_counts();
             let (lights, lights_dropped) = self.light_counts;
+            // Nothing is playing on a build with no sound card, and zero is
+            // the honest number rather than a hidden row.
+            #[cfg(feature = "devices")]
             let voices = self.audio.live_voices();
+            #[cfg(not(feature = "devices"))]
+            let voices = 0;
             let mut prof = profile.borrow_mut();
             // Grouping every instance into draw-call buckets is a HashSet pass
             // over the whole submission — worth its cost only when collection
@@ -7433,6 +7438,7 @@ impl Editor {
             self.script_host.set_vfx_info(self.vfx.script_info(&self.world));
             // Feed sound playback state so scripts can read sound:isPlaying()/
             // :position() this frame.
+            #[cfg(feature = "devices")]
             self.script_host.set_audio_info(self.audio.script_info());
             // Feed each assembly's live compound state (`assembly.info`).
             self.feed_assembly_info();
@@ -8034,7 +8040,10 @@ impl Editor {
                         }
                     }
                 }
+                #[cfg(feature = "devices")]
                 self.audio.apply_script_commands(&self.world, &root, audio_cmds);
+                #[cfg(not(feature = "devices"))]
+                let _ = (&root, audio_cmds);
             }
             // Listener = the active camera's ears.
             let listener = floptle_core::active_camera(&self.world)
@@ -8047,11 +8056,14 @@ impl Editor {
                     }
                 })
                 .unwrap_or_default();
+            #[cfg(feature = "devices")]
             for e in self.audio.advance(&self.world, &root, listener) {
                 // EndBehavior::Destroy — the sound finished, its node goes too.
                 self.world.despawn(e);
                 self.selection.retain(|s| *s != e);
             }
+            #[cfg(not(feature = "devices"))]
+            let _ = listener;
             // `floptle/0115`: audio had no bucket at all, so a game whose mixer
             // was the expensive thing could profile every frame and never see it.
             self.profile_record(floptle_core::profile::Bucket::Audio, audio_t.ms());
@@ -10455,7 +10467,12 @@ impl Editor {
             let particles = self.vfx.live_particles();
             let (effects, effects_dropped) = self.vfx.detached_counts();
             let (lights, lights_dropped) = self.light_counts;
+            // Nothing is playing on a build with no sound card, and zero is
+            // the honest number rather than a hidden row.
+            #[cfg(feature = "devices")]
             let voices = self.audio.live_voices();
+            #[cfg(not(feature = "devices"))]
+            let voices = 0;
             let profile = self.script_host.profile().clone();
             // Same "off means off" guard as the main gather — see there.
             let draws = if profile.borrow().enabled() {

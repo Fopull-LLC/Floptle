@@ -40,7 +40,7 @@ required-features = ["editor-ui"]
 # agree or mlua links two Luas. `default-features = false` on the forwarded
 # dependencies is what makes `--features vm-luajit` mean LuaJIT instead of
 # LuaJIT *and* Luau. See `floptle-script/src/vm.rs` and ADR-0028.
-default = ["vm-luau", "editor-ui"]
+default = ["vm-luau", "editor-ui", "devices"]
 # **The authoring application.** Off, this crate is just the engine: the World,
 # the script host, the sim, the renderer and the play loop — everything a
 # shipped game runs and nothing it does not. `floptle-player` builds without
@@ -71,6 +71,20 @@ vm-luau = ["floptle-script/vm-luau", "mlua/luau"]
 # that was measured. `mlua/luau-jit` implies `mlua/luau`, so this is additive
 # over `vm-luau` and cannot be combined with `vm-luajit`.
 vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "mlua/luau-jit"]
+# **The machine's audio device and its gamepads.** On for anything a person
+# sits at; off for a dedicated server, which has neither.
+#
+# This is not a size optimisation, it is whether the binary LOADS. `cpal` links
+# `libasound.so.2` and `gilrs` links `libudev.so.1`, both at link time, so they
+# are hard `NEEDED` entries rather than something dlopened on demand — and
+# `libasound2` is not installed on a minimal Linux server image. A server built
+# with this on does not fail to find an audio device; it fails to start, before
+# `main`, with a loader error naming a sound library, on a machine where nobody
+# was ever going to hear anything.
+#
+# `winit` and `wgpu` are fine either way: they dlopen X11/Wayland/GL and cope
+# with finding none, which is why a headless build still links them.
+devices = ["floptle-audio/backend", "floptle-input/pads"]
 # Off by default — matching floptle-steam's own feature, which this just
 # forwards to. See crates/floptle-editor/src/steam_boot.rs.
 steam = ["dep:floptle-steam", "floptle-steam/steam"]
@@ -90,13 +104,21 @@ floptle-nav = { path = "../floptle-nav" }
 floptle-tiles = { path = "../floptle-tiles" }
 floptle-shader = { path = "../floptle-shader" }
 floptle-vfx = { path = "../floptle-vfx" }
-floptle-audio = { path = "../floptle-audio" }   # full backend: device output + decode
+# **`default-features = false`, and `devices` below turns it back on.** Cargo
+# features are additive, so a "headless" feature could not remove the audio
+# backend — the dependency has to arrive off and be switched on, the same shape
+# the VM features use. A dedicated server has no output device and forwards
+# voice opaquely, so it wants the pure half and nothing else.
+floptle-audio = { path = "../floptle-audio", default-features = false }
 floptle-anim = { path = "../floptle-anim" }
 floptle-physics = { path = "../floptle-physics" }
 postcard = { workspace = true }
 floptle-matter = { path = "../floptle-matter" }
 floptle-rules = { path = "../floptle-rules" }
-floptle-input = { path = "../floptle-input" }
+# Off by default here for the same reason as floptle-audio: `pads` is gilrs,
+# which links libudev at LOAD time, and nobody is holding a controller on a
+# server. See `devices`.
+floptle-input = { path = "../floptle-input", default-features = false }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
 # Files go through the engine's filesystem: std::fs on the desktop, the game's

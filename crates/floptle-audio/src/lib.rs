@@ -60,6 +60,42 @@ pub use capture::Capture;
 #[cfg(feature = "backend")]
 pub use chat::{VoiceDecoder, VoiceEncoder, VoiceJitter, FRAME_MS, FRAME_SAMPLES};
 #[cfg(feature = "backend")]
-pub use decode::{is_audio_path, load_clip, AUDIO_EXTENSIONS};
+pub use decode::load_clip;
+
+/// The audio containers this engine can open.
+///
+/// **Not behind `backend`, on purpose.** It is a list of four strings, and the
+/// question it answers — "is this file a sound?" — is one the Assets browser
+/// asks whether or not this build has an audio device. Gating it with the
+/// decoder made a dedicated server's build fail on a const array, which is a
+/// silly reason not to compile.
+pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "ogg", "mp3", "flac"];
+
+/// Does this path name a sound file? See [`AUDIO_EXTENSIONS`].
+pub fn is_audio_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 #[cfg(feature = "backend")]
 pub use engine::AudioEngine;
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Moved here with the function itself, rather than left behind in
+    /// `decode.rs` where it would have stopped compiling: a test travels with
+    /// the thing it tests. It also has to keep running in a build with **no
+    /// decoder**, which is the whole reason the function moved.
+    #[test]
+    fn a_sound_is_recognised_by_its_extension_whatever_the_case() {
+        assert!(is_audio_path(Path::new("tone.wav")));
+        assert!(is_audio_path(Path::new("music.OGG")), "case does not decide this");
+        assert!(is_audio_path(Path::new("a/b/c.flac")));
+        assert!(!is_audio_path(Path::new("foo.png")));
+        assert!(!is_audio_path(Path::new("no-extension")));
+    }
+}

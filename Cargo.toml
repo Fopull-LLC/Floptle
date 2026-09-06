@@ -40,6 +40,7 @@ members = [
     "crates/floptle-steam",    # Steamworks-backed Platform impl, behind the `steam` feature (steam plan, Phase 0)
     "crates/floptle-editor",   # egui + egui_dock authoring application (bin) + the engine (lib)
     "crates/floptle-player",   # the standalone game player — what an export ships (bin)
+    "crates/floptle-server",   # the dedicated server — the player's engine, no window, no audio (bin)
     "crates/floptle-hub",      # cross-platform launcher / version + project manager (bin)
     "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)
     "crates/floptle-proof",    # Beat 1: standalone raymarch proof slice (bin)

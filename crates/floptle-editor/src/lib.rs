@@ -66,6 +66,12 @@ mod anim_ui;
 #[cfg(feature = "editor-ui")]
 mod aseprite;
 mod assets;
+// **The machine's speakers and its microphone**, both of which a dedicated
+// server has none of. Gated with `devices` rather than stubbed: a null
+// AudioEngine that accepts `play` and does nothing is the silent-failure shape
+// this engine keeps getting bitten by, and a server that cannot compile a call
+// to it is telling the truth.
+#[cfg(feature = "devices")]
 mod audio;
 #[cfg(feature = "editor-ui")]
 mod assets_ui;
@@ -151,6 +157,7 @@ mod map_ui;
 mod matter_catalog;
 mod multi_edit;
 mod net;
+#[cfg(feature = "devices")]
 mod voice;
 mod worker;
 mod node_bounds;
@@ -2590,6 +2597,9 @@ struct Editor {
         std::collections::HashSet<floptle_input::Source>,
     ),
     /// The gamepad backend. Polled once per frame; absent hardware is fine.
+    /// Absent *hardware support* is a different thing — a dedicated server does
+    /// not compile gilrs at all, because it links libudev at load time.
+    #[cfg(feature = "devices")]
     pads: floptle_input::Pads,
     /// `input.ron`'s last-seen mtime, so an external edit hot-reloads the map
     /// exactly once (the same trick the shader and script watchers use).
@@ -2743,6 +2753,7 @@ struct Editor {
     /// Voice chat: the microphone, the encoder, and one stream per remote
     /// speaker (floptle/0180). Lives with the SESSION rather than the scene —
     /// a server switching maps must not cut a conversation off mid-sentence.
+    #[cfg(feature = "devices")]
     voice: voice::VoiceChat,
     /// A pending "test voice from a WAV" file pick (floptle/0180). Async,
     /// through `native_dialog`, because rfd's BLOCKING picker kills the editor
@@ -3212,6 +3223,7 @@ struct Editor {
     /// Particles: effect registry + live play-mode instances.
     vfx: vfx::VfxSystem,
     /// Audio: the sound engine, clip cache, play-mode voices, mixer state.
+    #[cfg(feature = "devices")]
     audio: audio::AudioSystem,
     /// `(lights handed to the shader, lights ranked out of the sixteen)`, from
     /// this frame's light split — recorded where the split already happens and

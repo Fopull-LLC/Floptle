@@ -158,15 +158,6 @@ impl VoiceChat {
         }
     }
 
-    /// Forwarding commands, for the caller to apply to the session.
-    pub fn take_forwards(cmds: &[VoiceCmd]) -> Vec<(u64, Option<Vec<u64>>)> {
-        cmds.iter()
-            .filter_map(|c| match c {
-                VoiceCmd::SetForward { peer, to } => Some((*peer, to.clone())),
-                _ => None,
-            })
-            .collect()
-    }
 
     /// Encode whatever the microphone captured. The caller ships the result.
     ///

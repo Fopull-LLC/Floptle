@@ -34,6 +34,32 @@ pub(crate) fn body_state(r: &floptle_physics::BodyReport) -> floptle_script::Bod
 }
 
 impl Editor {
+    /// Start the mixer for a play session, and stop it again at the end.
+    ///
+    /// A gated pair rather than a `#[cfg]` at each of the six call sites, and
+    /// the mixer/root locals moved in here with them — a dedicated server has
+    /// no `audio` field, because `cpal` links `libasound.so.2` at load time and
+    /// a minimal server image does not have it. Silence on a machine nobody is
+    /// listening to is not a feature that was lost.
+    #[cfg(feature = "devices")]
+    fn audio_start_play(&mut self) {
+        let mixer = self.project.mixer.clone();
+        let root = self.project_root.clone();
+        self.audio.start_play(&self.world, &root, &mixer);
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn audio_start_play(&mut self) {}
+
+    #[cfg(feature = "devices")]
+    fn audio_stop_play(&mut self) {
+        let mixer = self.project.mixer.clone();
+        self.audio.stop_play(&mixer);
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn audio_stop_play(&mut self) {}
+
     /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
     /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
     /// gravity well at the node. No GravityVolume node → ZERO gravity (a space/zero-g
@@ -734,8 +760,7 @@ impl Editor {
                 None,
             );
             // Silence the play session's sounds and revert Lua mixer tweaks.
-            let mixer = self.project.mixer.clone();
-            self.audio.stop_play(&mixer);
+            self.audio_stop_play();
             self.sim = None; // drop the physics sim; restore reverts moved transforms
             // Multiplayer sessions live inside a play session — never across Stop.
             self.net_stop("play stopped");
@@ -939,9 +964,7 @@ impl Editor {
             // Spawn play-on-start particle effects on their nodes.
             self.vfx.start_play(&self.world);
             // Fire play-on-start sounds through the project mixer.
-            let mixer = self.project.mixer.clone();
-            let root = self.project_root.clone();
-            self.audio.start_play(&self.world, &root, &mixer);
+            self.audio_start_play();
             // The project's `vec3` choice, applied HERE as well as on open: the
             // ⚙ Settings row says "takes effect on the next Play", and this is
             // what makes that sentence true rather than "on the next open".
@@ -1095,8 +1118,7 @@ impl Editor {
         self.script_host.clear_scatter();
         self.scatter_cache.clear();
         self.script_gizmos.clear();
-        let mixer = self.project.mixer.clone();
-        self.audio.stop_play(&mixer);
+        self.audio_stop_play();
         // …swap the world…
         //
         // DESPAWN IN PLACE rather than `World::new()`, so a persistent node
@@ -1186,8 +1208,7 @@ impl Editor {
         let sim = self.build_play_sim();
         self.sim = Some(sim);
         self.vfx.start_play(&self.world);
-        let root = self.project_root.clone();
-        self.audio.start_play(&self.world, &root, &mixer);
+        self.audio_start_play();
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!("⏵ scene → {}", self.scene_name),
@@ -1310,9 +1331,7 @@ impl Editor {
         }
         // Audio sources in the layer start now; the running scene's voices are
         // untouched (`start_play` is additive over live voices).
-        let mixer = self.project.mixer.clone();
-        let root = self.project_root.clone();
-        self.audio.start_play(&self.world, &root, &mixer);
+        self.audio_start_play();
         self.vfx.start_play(&self.world);
         self.console.push(
             floptle_script::LogLevel::Debug,
@@ -1435,10 +1454,8 @@ impl Editor {
         // Everything keyed by entity has to let go: physics bodies, audio
         // voices, effects, and the scripts that were running on them.
         self.rebuild_sim();
-        let mixer = self.project.mixer.clone();
-        self.audio.stop_play(&mixer);
-        let root = self.project_root.clone();
-        self.audio.start_play(&self.world, &root, &mixer);
+        self.audio_stop_play();
+        self.audio_start_play();
         self.vfx.clear_instances();
         self.vfx.start_play(&self.world);
         self.reset_anim_bindings();
