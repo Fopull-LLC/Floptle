@@ -200,7 +200,7 @@ app.vsync() → the current frame pacing as a name: "On", "Adaptive" or "Off" �
 
 ### `createNode`
 
-createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine.
+createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). It does NOT return the node: the create is queued and the node is made after this pass, so the handle arrives ONLY through the callback — `local n = createNode("Stain")` gives you something that says so the moment you touch it, rather than a nil that fails a line later. fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine.
 
 ### `defaults`
 
@@ -319,7 +319,7 @@ Where YOUR frame time goes — per subsystem and per script, readable from Lua s
 
 ### `spawn`
 
-spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). "bullet" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame — spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects.
+spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). "bullet" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame. It does NOT return the node — the spawn is queued and the node is made after this pass, so the handle only ever arrives through the callback; `local b = spawn("bullet")` then tells you so if you touch it — spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects.
 
 ```lua
 local b = spawn("Bullet", node.pos + node.forward * 1.5, function(n)

@@ -216,6 +216,57 @@ pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
 
 /// Read a colour out of a Lua table: named `r/g/b/a` first, then `[1]`..`[4]`.
 /// A missing alpha is 1 — `color(1, 0, 0)` is opaque red, not invisible red.
+/// What `createNode` and `spawn` hand back: not a node, and loud about it.
+///
+/// Both are QUEUED — the driver makes the node after this pass — so there is
+/// genuinely no handle to return at the call, which is why the handle arrives
+/// through the callback instead. Returning nothing was therefore honest and,
+/// as a failure mode, terrible: `local n = createNode("Stain")` is the obvious
+/// thing to write, and the next line fails as
+///
+/// ```text
+/// attempt to index nil with 'position'
+/// ```
+///
+/// which names Lua and not the cause. The reference entry saying "fn(n) gets
+/// its handle" only helps somebody who already suspects the return value. A
+/// shipped game carries a comment in its own source warning its future self
+/// that "the obvious `local n = createNode(…)` reads as nil forever" — a
+/// developer paid for this and wrote it down, which is the argument for fixing
+/// it here rather than in the docs.
+///
+/// So the call returns a table that raises the engine's own message on the
+/// first touch, naming the call, the field and the form that works. Read and
+/// write say the same thing, because a read comes back nil and is the quieter
+/// half. Same mechanism as the `synced` diagnostic (`floptle/0189`).
+pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result<Table> {
+    let proxy = lua.create_table()?;
+    let mt = lua.create_table()?;
+    fn explain(call: &str, name: &str, k: &Value) -> String {
+        let field = match k {
+            Value::String(s) => s.to_string_lossy().to_string(),
+            other => format!("{other:?}"),
+        };
+        format!(
+            "{call}(\"{name}\") does not return a node — the node does not exist yet (it is \
+             made after this pass), so `.{field}` has nothing to read. The handle arrives in \
+             the callback: {call}(\"{name}\", function(n) n.{field} = ... end). See scripting.md."
+        )
+    }
+    for key in ["__index", "__newindex"] {
+        let (call, name) = (call.to_string(), name.to_string());
+        // One closure shape for both, so the two can never drift into saying
+        // different things about the same mistake.
+        let f = lua.create_function(move |_, args: mlua::MultiValue| -> mlua::Result<Value> {
+            let k = args.get(1).cloned().unwrap_or(Value::Nil);
+            Err(mlua::Error::runtime(explain(&call, &name, &k)))
+        })?;
+        mt.set(key, f)?;
+    }
+    proxy.set_metatable(Some(mt));
+    Ok(proxy)
+}
+
 pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
     let get = |named: &str, i: usize| -> f64 {
         t.raw_get::<Option<f64>>(named)
