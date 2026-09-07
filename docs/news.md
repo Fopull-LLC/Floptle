@@ -23,6 +23,9 @@ for wobble and per-glyph reveals. A crowd wandering around one place can hold a
 that used to name Lua now name the cause: touching `synced` without a
 `replicated` table, and the very tempting `local n = createNode("Stain")`, which
 cannot return a node and now says so instead of failing as a nil a line later.
+The managed relay also ships as a prebuilt Linux x86_64 binary with its checksum
+beside it — it links only the C runtime, so it starts on a server with nothing
+installed — and `floptle-relay --help` prints its flag table instead of refusing.
 On the **beta** channel — switch in Hub ⏵ Settings ⏵ Channel.
 
 **v0.85.0-rc5 "Web World"** (beta channel) — **a dedicated server, and two

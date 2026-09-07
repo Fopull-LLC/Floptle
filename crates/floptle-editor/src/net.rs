@@ -701,7 +701,7 @@ impl Editor {
             return;
         }
         let hub = floptle_net::MemoryHub::new();
-        // **Impairment reaches the loopback harness too** (`floptle/0190`).
+        // **Impairment reaches the loopback harness too** (`floptle/0193`).
         // `net_impair_wrap` was applied at the two REAL tails — QUIC and the
         // relay — so `FLOPTLE_NET_IMPAIR` did nothing at all to an in-process
         // session. That was invisible while the harness was only reachable from

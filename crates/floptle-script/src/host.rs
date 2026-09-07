@@ -3770,7 +3770,7 @@ impl ScriptHost {
             // No `replicated` table: `synced` has no vars, which is correct and
             // common (transform-only replication). Bind a proxy that says so on
             // the first touch rather than leaving nil for Lua to trip over —
-            // `floptle/0189`, and the docs on the proxy itself.
+            // `floptle/0192`, and the docs on the proxy itself.
             if let Ok(proxy) = crate::net_api::build_undeclared_synced_proxy(&self.lua, &key.1) {
                 let _ = env.set("synced", proxy);
             }
@@ -6498,7 +6498,7 @@ mod host_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The counter-example that made `floptle/0189` take forty minutes, kept.
+    /// The counter-example that made `floptle/0192` take forty minutes, kept.
     ///
     /// `door` declares `replicated` and `barrel` does not. They sat in the same
     /// generated scene, on nodes given identical `net` blocks by the same

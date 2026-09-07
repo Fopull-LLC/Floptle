@@ -226,7 +226,7 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 /// GUI or by two machines: a client's mirror, targeted RPCs reaching the peer
 /// they named and only that peer, late joiners receiving current `synced`
 /// values, and — the one that matters most — interest management, whose whole
-/// promise is about what a client is NOT sent (`floptle/0190`).
+/// promise is about what a client is NOT sent (`floptle/0193`).
 ///
 /// These are owned by the RUN LOOP rather than by the Editor, deliberately: the
 /// Editor holds exactly one ghost and one Lua VM, and N of either is a design
@@ -355,7 +355,7 @@ pub(crate) struct Options {
     /// loopback hub, so it is the only way to test the wire itself. It also
     /// gets the ghosts' missing half for free — the run's own Lua IS the
     /// client's, so `net.isServer()` answers false and the project's own
-    /// scripts do the asserting (`floptle/0190`).
+    /// scripts do the asserting (`floptle/0193`).
     pub(crate) join: Option<String>,
 }
 
@@ -949,7 +949,7 @@ mod alloc_window_tests {
 mod tests {
     use super::*;
 
-    /// `floptle/0190`: `run` could HOST a real session and nothing could JOIN
+    /// `floptle/0193`: `run` could HOST a real session and nothing could JOIN
     /// it, so everything that is only true across the wire was untestable
     /// except by a person clicking in a GUI or by two machines.
     ///
@@ -1026,7 +1026,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **The acceptance test `floptle/0190` was written to make possible**, and
+    /// **The acceptance test `floptle/0193` was written to make possible**, and
     /// the one that says the number above measures what it claims to.
     ///
     /// `net.setRelevant(node, peer, false)` is `floptle/0182`'s whole promise —
