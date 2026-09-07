@@ -695,7 +695,7 @@ impl NetSession {
     /// filter as though it were doing nothing. This counts nodes with at least
     /// one snapshot sample, which is what `net.setRelevant(node, peer, false)`
     /// takes away and therefore the number a relevancy test has to read
-    /// (`floptle/0190`, verifying `floptle/0182`).
+    /// (`floptle/0193`, verifying `floptle/0182`).
     ///
     /// It is a client-side measure and answers 0 on a server.
     pub fn nodes_receiving(&self) -> usize {

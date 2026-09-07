@@ -1074,7 +1074,7 @@ pub(crate) fn build_synced_proxy(
 /// `net.role()` answers `"server"`, and the sibling script in the same
 /// generated scene replicates happily. The missing half lives in a different
 /// file from the one that looks wrong, so the error sends you into the netcode.
-/// It cost about forty minutes of a Forgery session (`floptle/0189`), most of
+/// It cost about forty minutes of a Forgery session (`floptle/0192`), most of
 /// it spent disproving good hypotheses the message was equally compatible with.
 ///
 /// So the value is a table that raises the *engine's* message on the first

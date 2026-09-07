@@ -74,6 +74,33 @@ jobs:
           cargo build --release -p floptle-player --target ${{ matrix.rust }}
           cargo build --release -p floptle-hub --target ${{ matrix.rust }}
 
+      # The managed relay, x86_64 Linux only — the shape the us-east box
+      # actually is (an Always Free E2.1.Micro, not the Ampere A1 the plan
+      # assumed), and building on a 954 MB box is not a fallback. Shipped as a
+      # BARE BINARY beside its checksum rather than inside a bundle: the install
+      # is four lines on a minimal image with nothing on it, and a tarball would
+      # only add a step. It links floptle-net and ureq and nothing windowing, so
+      # it needs no libraries the box does not have.
+      - name: Build the managed relay (linux-x86_64)
+        if: matrix.target == 'linux-x86_64'
+        run: cargo build --release -p floptle-relay --target ${{ matrix.rust }}
+
+      - name: Package the relay
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          R="floptle-relay-$VER-linux-x86_64"
+          cp "target/${{ matrix.rust }}/release/floptle-relay" "$R"
+          chmod +x "$R"
+          sha256sum "$R" > "$R.sha256"
+          echo "relay sha256: $(cut -d' ' -f1 < "$R.sha256")"
+          # Proof it runs on a box with nothing installed, and that this is the
+          # MANAGED binary rather than the July open relay — which parsed
+          # --help as a port number, and is how the two are told apart.
+          ldd "$R" || true
+          ./"$R" --help | head -3
+
       # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
       # archive root, matching floptle_hub::install::unpack. The HUB ships as its own
       # small archive beside it — the thing a new user downloads first (the Hub then
@@ -140,6 +167,7 @@ jobs:
             floptle-hub-*.zip
             fragment-*.json
             hub-fragment-*.json
+            floptle-relay-*
           if-no-files-found: error
 
   # The browser template: the wasm module, its JS glue and the player page —
@@ -310,7 +338,11 @@ jobs:
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
           shopt -s nullglob
-          BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
+          # The relay ships as a bare binary + checksum, so it is not caught by
+          # the bundle globs above (`floptle/0191`).
+          BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
+                   artifacts/*/floptle-relay-*-linux-x86_64 \
+                   artifacts/*/floptle-relay-*-linux-x86_64.sha256)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$REPO"
 
@@ -327,7 +359,11 @@ jobs:
           export GH_TOKEN="$RELEASES_TOKEN"
           TAG="$GITHUB_REF_NAME"
           shopt -s nullglob
-          BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
+          # The relay ships as a bare binary + checksum, so it is not caught by
+          # the bundle globs above (`floptle/0191`).
+          BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
+                   artifacts/*/floptle-relay-*-linux-x86_64 \
+                   artifacts/*/floptle-relay-*-linux-x86_64.sha256)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to

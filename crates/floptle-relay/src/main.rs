@@ -42,6 +42,35 @@ impl Args {
         }
     }
 
+    /// What `--help` prints. A const so the test can hold it to naming every
+    /// flag the parser accepts — a help table that has fallen behind the parser
+    /// is worse than none, because it is believed.
+    const HELP: &'static str = "\
+floptle-relay — the rendezvous relay: hosts get a lobby code, clients join with
+it, traffic forwards both ways, and nobody port-forwards.
+
+USAGE
+  floptle-relay [PORT]                     the open relay (default port 7788)
+  floptle-relay --control <url> --region <id> --letter <c> --token <t>
+                                           managed mode (Floptle Cloud)
+
+FLAGS
+  PORT                  UDP port to listen on. Bare positional. Default 7788.
+  --control <url>       control-plane base URL. Managed mode.
+  --region <id>         region id this box serves. Default us-east.
+  --letter <c>          one character, prefixed to every lobby code it issues.
+                        Default U.
+  --token <t>           this box's token. Prefer --token-file.
+  --token-file <path>   read the token from a file, so it is not in a command
+                        line every `ps` on the box can read.
+  --help, -h            this table.
+
+Without --control and --token this is the open relay and nothing else: no keys,
+no control plane, no accounting. Managed mode is additive and opt-in, and the
+two flags must be given together — a relay that came up open because its token
+was missing is the untracked path that refuses to start instead.
+";
+
     fn parse(argv: &[String]) -> Result<Self, String> {
         let mut out = Self {
             port: 7788,
@@ -88,6 +117,14 @@ impl Args {
                         .map_err(|e| format!("--token-file {p}: {e}"))?;
                     out.token = Some(t.trim().to_string());
                     i += 2;
+                }
+                // Printed and exit 0, rather than refused as an unknown flag
+                // or — as the July binary did — parsed as a PORT NUMBER, which
+                // is how the two builds were told apart on the box
+                // (`floptle/0191`).
+                "--help" | "-h" => {
+                    print!("{}", Self::HELP);
+                    std::process::exit(0);
                 }
                 other if other.starts_with("--") => {
                     return Err(format!("unknown flag {other}"));
@@ -198,6 +235,90 @@ mod arg_tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// **The help table cannot fall behind the parser** (`floptle/0191`).
+    ///
+    /// A flag table that is out of date is worse than none, because it is
+    /// believed — and this one is what an operator reads to tell a managed
+    /// binary from the open one before installing it on a live box. The list
+    /// comes off this file's OWN match arms rather than a second hand-written
+    /// list, so adding a flag and not documenting it fails here.
+    #[test]
+    fn every_flag_the_parser_takes_is_in_the_help_table() {
+        let src = include_str!("main.rs");
+        // The parser's arms, as written: `"--flag" => {` and `"--a" | "-b" =>`.
+        let mut flags: Vec<&str> = Vec::new();
+        for line in src.lines().map(str::trim) {
+            if !line.ends_with("=> {") {
+                continue;
+            }
+            for piece in line.trim_end_matches("=> {").split('|') {
+                let f = piece.trim().trim_matches('"');
+                if f.starts_with('-') {
+                    flags.push(f);
+                }
+            }
+        }
+        flags.sort_unstable();
+        flags.dedup();
+        assert!(
+            flags.len() >= 6,
+            "the scrape found {flags:?} — it has stopped seeing the match arms, so this \
+             guard is measuring nothing"
+        );
+        // The flags the table actually LISTS: the leading token of a row, not
+        // any mention anywhere. A plain `contains` passes on a flag named only
+        // in passing — `--token`'s row says "Prefer --token-file", which
+        // documented `--token-file` by accident — and every short flag is a
+        // prefix of some longer one, so both directions were satisfiable
+        // without the row existing.
+        let listed: std::collections::HashSet<&str> = Args::HELP
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('-'))
+            // The flag COLUMN — everything before the two-space gutter that
+            // starts the description — so a row spelling two names (`--help,
+            // -h`) lists both.
+            .flat_map(|l| {
+                l.split("  ")
+                    .next()
+                    .unwrap_or("")
+                    .split([',', ' '])
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|t| t.starts_with('-'))
+            .collect();
+        let missing: Vec<&&str> = flags.iter().filter(|f| !listed.contains(**f)).collect();
+        assert!(
+            missing.is_empty(),
+            "flags the parser takes with no row in the --help table: {missing:?} (the table \
+             lists {listed:?})"
+        );
+    }
+
+    /// …and the other direction: `--help` is a flag, not a port.
+    ///
+    /// The July open relay on the live box parsed `--help` as a positional PORT
+    /// NUMBER, which is how the two builds were told apart. A managed binary
+    /// has to answer it, so the check an operator runs before installing means
+    /// something.
+    #[test]
+    fn help_is_not_parsed_as_a_port() {
+        // It exits the process, so the parser is not called with it here; what
+        // is asserted is that it is not treated as a positional, which is what
+        // the port arm would do.
+        assert!(Args::HELP.contains("--help"), "the table names itself");
+        assert!(
+            Args::parse(&args(&["--nope"])).is_err(),
+            "an unknown flag is still refused rather than read as a port"
+        );
+        assert_eq!(
+            Args::parse(&args(&["7788"])).unwrap().port,
+            7788,
+            "and a real positional port still is one"
+        );
     }
 
     #[test]

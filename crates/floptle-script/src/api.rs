@@ -238,7 +238,7 @@ pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
 /// So the call returns a table that raises the engine's own message on the
 /// first touch, naming the call, the field and the form that works. Read and
 /// write say the same thing, because a read comes back nil and is the quieter
-/// half. Same mechanism as the `synced` diagnostic (`floptle/0189`).
+/// half. Same mechanism as the `synced` diagnostic (`floptle/0192`).
 pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result<Table> {
     let proxy = lua.create_table()?;
     let mt = lua.create_table()?;

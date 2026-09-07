@@ -413,16 +413,22 @@ impl RelayPolicy for CloudPolicy {
                 e.0 += self.live.get(code).copied().unwrap_or(0) + 1; // + the host
                 e.1 += 1;
             }
-            if !by_key.is_empty() {
-                let samples: Vec<UsageSample> = by_key
-                    .into_iter()
-                    .map(|(key, (ccu, lobbies))| UsageSample { key, ccu, lobbies })
-                    .collect();
-                let c = self.control.clone();
-                std::thread::spawn(move || {
-                    let _ = c.report_usage(&samples);
-                });
-            }
+            // **Posted even when it is empty** — this is the relay's heartbeat
+            // as well as its meter (`floptle/0191`). A region's health is
+            // derived from how long ago its box token was last seen, and a
+            // relay that only reported when it had lobbies went silent exactly
+            // when it was idle: a quiet region and a dead one looked identical,
+            // and the quiet one would have been marked degraded. An empty
+            // report every interval costs one small POST every ten seconds and
+            // makes "last seen" mean what it says.
+            let samples: Vec<UsageSample> = by_key
+                .into_iter()
+                .map(|(key, (ccu, lobbies))| UsageSample { key, ccu, lobbies })
+                .collect();
+            let c = self.control.clone();
+            std::thread::spawn(move || {
+                let _ = c.report_usage(&samples);
+            });
         }
     }
 }
@@ -925,5 +931,38 @@ mod tests {
         assert_eq!(posts[0].len(), 1, "one row per key");
         assert_eq!(posts[0][0].key, KEY);
         assert_eq!(posts[0][0].lobbies, 1);
+    }
+
+    /// **An idle relay still checks in** (`floptle/0191`).
+    ///
+    /// A region's health is derived from how long ago its box token was last
+    /// seen. The usage post used to be skipped when there was nothing to
+    /// report, so a relay went silent exactly when it was idle — and a quiet
+    /// region became indistinguishable from a dead one. The empty report is the
+    /// heartbeat: one small POST every interval, and "last seen" means what it
+    /// says.
+    #[test]
+    fn a_relay_with_no_lobbies_still_reports_so_a_quiet_region_is_not_a_dead_one() {
+        let fake = Arc::new(Fake::default());
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![row(KEY, 20)],
+            removed: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.len() == 1));
+        // No lobby has ever been opened on this relay.
+        p.last_usage = Instant::now() - USAGE_INTERVAL - Duration::from_millis(1);
+        p.tick();
+        for _ in 0..40 {
+            if !fake.usage_posts.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let posts = fake.usage_posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "an idle relay must still check in, got {posts:?}");
+        assert!(posts[0].is_empty(), "…and it has nothing to meter: {posts:?}");
     }
 }
