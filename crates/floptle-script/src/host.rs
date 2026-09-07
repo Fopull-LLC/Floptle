@@ -1686,8 +1686,9 @@ impl ScriptHost {
                         Value::Table(t) => t.raw_get::<u32>("__id").ok(),
                         _ => None,
                     };
+                    let handle = crate::api::deferred_handle(lua, "spawn", &name)?;
                     q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent });
-                    Ok(())
+                    Ok(handle)
                 },
             ) {
                 let _ = lua.globals().set("spawn", f);
@@ -1725,8 +1726,9 @@ impl ScriptHost {
                             }
                         }
                     }
+                    let handle = crate::api::deferred_handle(lua, "createNode", &name)?;
                     q.borrow_mut().push(crate::CreateRequest { name, parent, cb });
-                    Ok(())
+                    Ok(handle)
                 },
             ) {
                 let _ = lua.globals().set("createNode", f);
@@ -6412,6 +6414,86 @@ mod host_tests {
             said.iter().any(|m| m == "welcome 7"),
             "a file-scope net.on never fired — it said {said:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `createNode` and `spawn` are QUEUED, so neither can return a node — and
+    /// returning nothing made `local n = createNode("Stain")`, which is the
+    /// obvious thing to write, fail one line later as `attempt to index nil
+    /// with 'position'`.
+    ///
+    /// A shipped game carries a comment in its own source warning its future
+    /// self that "the obvious `local n = createNode(…)` reads as nil forever".
+    /// A developer paid for that and wrote it down; this is the engine paying
+    /// instead.
+    #[test]
+    fn a_queued_create_hands_back_something_that_says_why_it_is_not_a_node() {
+        let dir = std::env::temp_dir().join(format!("floptle-deferred-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/maker.lua"),
+            "function start()\n\
+             \x20 local n = createNode(\"Stain\")\n\
+             \x20 n.position = vec3(1, 2, 3)\n\
+             end\n",
+        )
+        .unwrap();
+        // A read is the quieter half — it came back nil and did nothing at all.
+        floptle_vfs::write(
+            dir.join("scripts/reader.lua"),
+            "function start()\n\
+             \x20 local b = spawn(\"bullet\")\n\
+             \x20 local _ = b.vx\n\
+             end\n",
+        )
+        .unwrap();
+
+        let mut world = World::default();
+        for kind in ["maker", "reader"] {
+            let e = world.spawn();
+            world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(kind.into()));
+            world.insert(
+                e,
+                floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                    kind: kind.into(),
+                    enabled: true,
+                    params: Vec::new(),
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+        }
+
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let errs: Vec<String> = host.errors().iter().map(|e| e.to_string()).collect();
+        let said = errs.join("\n");
+
+        for (kind, call, field) in
+            [("maker", "createNode", "position"), ("reader", "spawn", "vx")]
+        {
+            let msg = errs
+                .iter()
+                .find(|e| e.contains(kind))
+                .unwrap_or_else(|| panic!("{kind} raised nothing: {said}"));
+            assert!(
+                !msg.contains("index nil"),
+                "{kind} still fails in Lua's words rather than the engine's: {msg}"
+            );
+            assert!(msg.contains("does not return a node"), "{kind}: {msg}");
+            // The working line, handed back ready to copy — the field included,
+            // because a message that says "use the callback" without showing it
+            // is the doc sentence that was already there and did not land.
+            assert!(
+                msg.contains(&format!("function(n) n.{field} = ...")),
+                "{kind} must show the form that works, with the field in it: {msg}"
+            );
+            assert!(msg.contains(call), "{kind} must name the call it came from: {msg}");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
