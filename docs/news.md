@@ -1,5 +1,30 @@
 ## Just shipped
 
+**v0.85.0-rc6 "Web World"** (beta channel) — **the things you could not
+previously check.** `floptle run` could already host a real multiplayer session
+with no window and no GPU, but nothing could join it, so everything only true
+across the wire needed a second machine or a person clicking in the editor.
+`--ghosts 2` now joins that many headless clients and reports how many
+replicated nodes each one was *actually sent* — which is what finally makes
+`net.setRelevant` checkable, since the cheat-resistance of a hidden-role game is
+defined by what a client is not sent. `--join` puts your own scripts on the
+client side of a real connection, and the bad-link simulator reaches all of it.
+`floptle shot --after 30s` plays a project before photographing it, so a game
+that builds its planet, terrain and buildings from scripts is no longer
+screenshotted as an empty room — and it is photographed through the camera the
+*game* chose. A single node with Collidable and Trigger on a thousand-triangle
+mesh could stall a fifth of your frames by 57 ms while thirty identical props
+beside it cost nothing; triggers reject by bounds now, so that flag is usable
+again. Text can carry more than one colour: `setTextSpans` tints the bound key
+inside the sentence telling you to press it without splitting the line into
+hand-placed pieces, and `setGlyphOffsets` moves individual letters after layout
+for wobble and per-glyph reveals. A crowd wandering around one place can hold a
+`nav.sampler` instead of re-measuring the level on every draw. And three errors
+that used to name Lua now name the cause: touching `synced` without a
+`replicated` table, and the very tempting `local n = createNode("Stain")`, which
+cannot return a node and now says so instead of failing as a nil a line later.
+On the **beta** channel — switch in Hub ⏵ Settings ⏵ Channel.
+
 **v0.85.0-rc5 "Web World"** (beta channel) — **a dedicated server, and two
 multiplayer bugs that broke the path the documentation tells you to take.**
 `net.on` written at the top of a script — the form every example uses — never
