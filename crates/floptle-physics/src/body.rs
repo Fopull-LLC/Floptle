@@ -211,6 +211,27 @@ impl Body {
     /// 1 point (sphere), the 2 end-sphere centers (capsule), or the 8 corners + center
     /// (box, sampled as zero-radius points). The depenetration loop pushes each point that
     /// has sunk inside a collider back out along the collider normal.
+    /// A sphere around `pos` that contains every sample center this body would
+    /// probe, **plus** the tolerance those probes are compared against.
+    ///
+    /// That is exactly the reject a sensor pass needs: `sample_centers` is
+    /// tested as `shape.distance(c) < radius`, and a shape's distance from
+    /// outside its own bounding sphere is at least `|c − bc| − br`. So a
+    /// collider whose bound is further than this from `pos` cannot produce a
+    /// single overlapping center, and the whole body can be skipped without
+    /// calling `distance` once (`floptle/0171`).
+    ///
+    /// Conservative on purpose — it over-covers rather than clipping, so the
+    /// reject can never lose a touch event that the exact test would have found.
+    pub(crate) fn bound_sphere(&self) -> (Vec3, f32) {
+        let (centers, n, radius) = self.sample_centers();
+        let reach = centers[..n]
+            .iter()
+            .map(|c| (*c - self.pos).length())
+            .fold(0.0f32, f32::max);
+        (self.pos, reach + radius)
+    }
+
     pub(crate) fn sample_centers(&self) -> ([Vec3; 9], usize, f32) {
         let mut a = [self.pos; 9];
         match self.shape {

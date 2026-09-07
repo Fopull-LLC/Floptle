@@ -216,6 +216,97 @@ fn a_hook_that_raises_is_reported_once_and_stops_being_called() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// `floptle/0173`: a 2D level's analysis is a jump-arc question, and the package
+/// API could not say what gravity was — so the editor's own 2D extractor sent
+/// `-9.81` and flagged it a guess.
+///
+/// The three cases assert the thing that makes the guess *wrong* rather than
+/// merely unverified: an empty scene is **zero** gravity, not `-9.81`, because
+/// gravity here comes entirely from `GravityVolume` nodes. A test that only
+/// checked the `Down` case would pass against a hardcoded default.
+#[test]
+fn a_package_reads_the_scenes_real_gravity() {
+    let proj = temp("gravity");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        ed.onUpdate(function()
+            local g = scene.gravity()
+            ed.log(("%.3f %s"):format(g.y, tostring(g.uniform)))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+
+    let read = |host: &mut ExtHost, w: &floptle_core::World| -> String {
+        host.begin_frame(
+            Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+            SceneMirror::build(w, &|_, _| None, &|_, _| None),
+        );
+        host.fire(HookKind::Update);
+        host.take_log().first().map(|l| l.msg.clone()).unwrap_or_default()
+    };
+
+    // No GravityVolume: a space level. ZERO, and the engine default would lie.
+    let empty = floptle_core::World::new();
+    assert_eq!(
+        read(&mut host, &empty),
+        "0.000 true",
+        "a scene with no GravityVolume has no gravity — reporting -9.81 here is \
+         exactly the guess this binding replaces"
+    );
+
+    // A Down volume: its own strength, not the engine's constant.
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Gravity".into()));
+    w.insert(e, floptle_core::transform::Transform::IDENTITY);
+    w.insert(
+        e,
+        floptle_core::Matter::GravityVolume {
+            mode: floptle_core::GravityMode::Down,
+            strength: 3.5,
+            radius: 100.0,
+        },
+    );
+    assert_eq!(
+        read(&mut host, &w),
+        "-3.500 true",
+        "the volume's own strength, and a level with only Down volumes is uniform"
+    );
+
+    // A Radial volume is a well: the answer stops being one number, and
+    // `uniform` has to say so or a package will assume it is.
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Planet".into()));
+    w.insert(
+        e,
+        floptle_core::transform::Transform::from_translation(
+            floptle_core::math::DVec3::new(0.0, -50.0, 0.0),
+        ),
+    );
+    w.insert(
+        e,
+        floptle_core::Matter::GravityVolume {
+            mode: floptle_core::GravityMode::Radial,
+            strength: 9.0,
+            radius: 100.0,
+        },
+    );
+    let said = read(&mut host, &w);
+    assert!(
+        said.ends_with("false"),
+        "a radial well is not uniform, and a package told otherwise will read one \
+         point and call it the level: {said}"
+    );
+    assert!(said.starts_with('-'), "and it still pulls toward the planet: {said}");
+
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn scene_reads_come_from_the_mirror_and_edits_become_commands() {
     let proj = temp("scene");

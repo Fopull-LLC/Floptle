@@ -103,6 +103,20 @@ pub(crate) struct SceneMirror {
     /// path. A tileset describes tile TYPES, not per-instance cells, so
     /// unlike the grids it costs nothing worth avoiding to clone fresh.
     pub(crate) tilesets: HashMap<String, floptle_tiles::TileSet>,
+    /// The scene's gravity, as the sim would build it — `floptle/0173`.
+    ///
+    /// A package that analyses a 2D level is mostly asking about **jumping**,
+    /// and every one of those questions is a gravity times a jump impulse. The
+    /// package API had no way to ask, so the editor's own 2D extractor sent the
+    /// engine's `-9.81` default and flagged it as a guess. That default is not
+    /// even the right guess here: a scene with **no** `GravityVolume` has ZERO
+    /// gravity (a space level), and one with a `Down` volume has whatever
+    /// strength that volume was given.
+    ///
+    /// Built from the same `Editor::build_gravity_field` the play loop uses, in
+    /// world coordinates (origin 0), so the value a package reads is the value
+    /// bodies actually fall by rather than a second implementation of it.
+    pub(crate) gravity: floptle_physics::GravityField,
 }
 
 impl SceneMirror {
@@ -142,6 +156,8 @@ impl SceneMirror {
         extent_of: &dyn Fn(Entity, &Matter) -> Option<[f32; 3]>,
     ) -> Self {
         let mut mirror = SceneMirror::default();
+        // World frame (origin 0): a package's positions are world positions.
+        mirror.gravity = crate::Editor::build_gravity_field(world, DVec3::ZERO);
         let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
 
         for (e, name) in world.query::<floptle_core::Name>() {

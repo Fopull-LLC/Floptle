@@ -308,6 +308,31 @@ one.
 | `scene.info(id)` | everything about one node — see below |
 | `scene.bounds(id)` | `{ min, max, center, radius }` in world space |
 | `scene.raycast(origin, dir [, maxDist])` | `{ node, point, normal, distance }`, or `nil` |
+| `scene.gravity([at])` | `{ x, y, z, uniform }` — the acceleration bodies fall by |
+
+`scene.gravity([at])` answers the one question a jump model is made of. It is
+the acceleration the sim would actually apply, not a constant: gravity in this
+engine comes entirely from the scene's `GravityVolume` nodes (plus any
+`CelestialBody`), so a scene with **no** gravity volume has *zero* gravity — a
+space level — and one with a `Down` volume has whatever strength that volume was
+given. Guessing `-9.81` is wrong in both directions.
+
+`at` is a world point and defaults to the origin. Pass one whenever `uniform` is
+`false`: a `Radial` volume is a planet well and a `CelestialBody` is a real µ/r²
+source, so "the level's gravity" is not a single vector in those scenes and the
+value you get is the value *there*. When `uniform` is `true` the answer is the
+whole answer and `at` does not matter.
+
+```lua
+local g = scene.gravity()
+if g.uniform then
+  print(("gravity %.2f m/s²"):format(-g.y))
+else
+  print("this scene has wells — sample at the player: ", scene.gravity(p).y)
+end
+```
+
+Read-only, like `nav` and `tilemap` — nothing here sets gravity.
 
 `scene.info(id)` returns `{ id, name, kind, parent, children, pos, worldPos, rot,
 scale, radius, extents, ui, tags, layer, visible, scripts, asset }`. `pos` is local; `worldPos`

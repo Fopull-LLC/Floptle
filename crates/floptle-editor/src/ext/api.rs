@@ -1412,6 +1412,43 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
         let shared = shared.clone();
         t.set("roots", lua.create_function(move |_, ()| Ok(shared.scene.borrow().roots.clone()))?)?;
     }
+    // The scene's gravity — `floptle/0173`. A 2D level's analysis is mostly a
+    // question about jumping, and every one of those is gravity times a jump
+    // impulse; nothing under `scene.*`, `ed.*` or `nav.*` could answer it, so
+    // the 2D extractor sent the engine default and marked it a guess.
+    //
+    // Sampled at a point, because gravity in this engine genuinely varies: a
+    // `GravityVolume` in `Radial` mode is a planet well, and a `CelestialBody`
+    // adds a real µ/r² source. `uniform` says whether the answer is the whole
+    // answer or only the answer *there* — a package that assumes one number
+    // for the level is making exactly the guess this replaces.
+    {
+        let shared = shared.clone();
+        t.set(
+            "gravity",
+            lua.create_function(move |lua, at: Option<Table>| {
+                let p = match &at {
+                    Some(t) => floptle_core::math::Vec3::new(
+                        t.get::<Option<f32>>("x")?.unwrap_or(0.0),
+                        t.get::<Option<f32>>("y")?.unwrap_or(0.0),
+                        t.get::<Option<f32>>("z")?.unwrap_or(0.0),
+                    ),
+                    None => floptle_core::math::Vec3::ZERO,
+                };
+                let scene = shared.scene.borrow();
+                // No colliders: the `SdfSurface` tier is never built from a
+                // scene (only `Uniform`, `Point` and `InvSq` are), so an empty
+                // slice is exact rather than an approximation.
+                let g = scene.gravity.accel_at(p, &[]);
+                let uniform = scene.gravity.sources.iter().all(|s| {
+                    matches!(s, floptle_physics::GravitySource::Uniform(_))
+                });
+                let out = xyz(lua, [g.x as f64, g.y as f64, g.z as f64])?;
+                out.set("uniform", uniform)?;
+                Ok(out)
+            })?,
+        )?;
+    }
     {
         let shared = shared.clone();
         t.set(
