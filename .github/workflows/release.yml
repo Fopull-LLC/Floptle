@@ -99,7 +99,12 @@ jobs:
           # MANAGED binary rather than the July open relay — which parsed
           # --help as a port number, and is how the two are told apart.
           ldd "$R" || true
-          ./"$R" --help | head -3
+          # To a FILE, not through `head`. GitHub runs these with `pipefail`,
+          # and a `head` that closes the pipe early makes the writer fail — so
+          # the day this table outgrows the pipe buffer, the step would start
+          # failing for a reason that has nothing to do with the build.
+          ./"$R" --help > relay-help.txt
+          head -3 relay-help.txt
 
       # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
       # archive root, matching floptle_hub::install::unpack. The HUB ships as its own
