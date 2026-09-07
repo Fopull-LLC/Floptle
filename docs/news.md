@@ -12,7 +12,7 @@ client side of a real connection, and the bad-link simulator reaches all of it.
 `floptle shot --after 30s` plays a project before photographing it, so a game
 that builds its planet, terrain and buildings from scripts is no longer
 screenshotted as an empty room — and it is photographed through the camera the
-*game* chose. A single node with Collidable and Trigger on a thousand-triangle
+*game* chose. A single node with a Collider and its trigger switch on, over a thousand-triangle
 mesh could stall a fifth of your frames by 57 ms while thirty identical props
 beside it cost nothing; triggers reject by bounds now, so that flag is usable
 again. Text can carry more than one colour: `setTextSpans` tints the bound key
