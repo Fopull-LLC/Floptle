@@ -287,12 +287,11 @@ fn pump_ghosts(ed: &mut crate::Editor, ghosts: &mut Vec<Ghost>, want: usize) {
     // into the ghost's own world and rebind its NetIds. Without this a ghost
     // holds stale ids after `scene.load` and silently discards every snapshot,
     // which makes a working server look like a broken one.
-    for i in 0..ghosts.len() {
-        let Some(scene) = ghosts[i].session.take_scene_switch() else { continue };
+    for (i, g) in ghosts.iter_mut().enumerate() {
+        let Some(scene) = g.session.take_scene_switch() else { continue };
         let loaded = ed.resolve_scene_request(&scene).and_then(|p| floptle_scene::load(&p).ok());
         match loaded {
             Some(doc) => {
-                let g = &mut ghosts[i];
                 g.world = floptle_core::World::default();
                 floptle_scene::spawn_into(&doc, &mut g.world);
                 g.session.rebind_scene(&g.world);
@@ -565,8 +564,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         steps,
         asked,
         simulated,
-        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed },
-        &ghosts,
+        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed, ghosts: &ghosts },
         json,
     )
 }
@@ -691,6 +689,10 @@ struct Measured<'a> {
     by_script: &'a [(String, f64)],
     /// `--seed`, when given — echoed so a report says which run it describes.
     seed: Option<u32>,
+    /// The headless clients `--ghosts` stood up, and what each was sent.
+    /// Empty when none were asked for — the report then says nothing about
+    /// clients at all, rather than reporting zero of them.
+    ghosts: &'a [Ghost],
 }
 
 /// How many scripts the text report names under `--alloc`. The JSON carries
@@ -704,10 +706,9 @@ fn report(
     asked: u32,
     simulated: f32,
     measured: Measured<'_>,
-    ghosts: &[Ghost],
     json: bool,
 ) -> i32 {
-    let Measured { clock, allocated, by_script, seed } = measured;
+    let Measured { clock, allocated, by_script, seed, ghosts } = measured;
     use floptle_script::LogLevel;
     let all = || opened.iter().map(|e| ("open", e)).chain(console.entries.iter().map(|e| ("play", e)));
     let errors = all().filter(|(_, e)| e.level == LogLevel::Error).count();

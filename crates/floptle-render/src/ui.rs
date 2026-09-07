@@ -1622,7 +1622,8 @@ impl Ui {
             // Break, truncate and measure the lines up front. Everything below
             // rasterizes glyphs (`&mut self`), so the measuring closure — which
             // borrows `self` immutably — has to be finished with by then.
-            let (lines, widths): (Vec<String>, Vec<f32>) = {
+            #[allow(clippy::type_complexity)]
+            let (lines, widths, glyph_src): (Vec<String>, Vec<f32>, Vec<Vec<Option<usize>>>) = {
                 // Measured at the size the glyphs will actually be rasterized
                 // at when the layer snaps (`floptle/0120`) — a run measured at
                 // `size * scale` and drawn at a snapped `px` would wrap in
@@ -1642,21 +1643,56 @@ impl Ui {
                 } else {
                     t.text.split('\n').map(str::to_string).collect()
                 };
+                // **Taken BEFORE any ellipsis.** An ellipsis truncates
+                // characters that were typed and appends one that was not, so a
+                // map derived afterwards would be looking for source characters
+                // that are no longer on the line — and, past a truncated line,
+                // would find nothing at all for the rest of the run. Trimmed
+                // alongside below instead (`floptle/0172`).
+                let mut glyph_src = floptle_ui::text::source_indices(&t.text, &lines);
+                // One line's worth of it, after `ellipsize` has eaten some of
+                // the end: keep the indices that survived and mark the appended
+                // `…` as belonging to no source character.
+                let trim = |src: &mut Vec<Option<usize>>, drawn: &str| {
+                    let kept = drawn.chars().count().saturating_sub(1);
+                    if kept < src.len() {
+                        src.truncate(kept);
+                        src.push(None);
+                    }
+                };
                 if t.max_lines > 0 && lines.len() > t.max_lines as usize {
                     lines.truncate(t.max_lines as usize);
+                    glyph_src.truncate(t.max_lines as usize);
                     // The cut is only honest if the last surviving line says so.
                     if t.overflow == Overflow::Ellipsis
                         && let Some(last) = lines.last_mut()
                     {
                         *last = floptle_ui::text::ellipsize(last, rect_px[2], &advance);
+                        if let Some(src) = glyph_src.last_mut() {
+                            trim(src, last);
+                        }
                     }
                 } else if t.overflow == Overflow::Ellipsis && !t.wrap {
-                    for line in &mut lines {
+                    for (line, src) in lines.iter_mut().zip(glyph_src.iter_mut()) {
                         *line = floptle_ui::text::ellipsize(line, rect_px[2], &advance);
+                        trim(src, line);
                     }
                 }
                 let widths = lines.iter().map(|l| advance(l)).collect();
-                (lines, widths)
+                (lines, widths, glyph_src)
+            };
+            // Per DRAWN character, the colour a span puts on it — `None` keeps
+            // the run's own. Flattened once here rather than searched per glyph.
+            let span_color: Vec<Option<[f32; 4]>> = if t.spans.is_empty() {
+                Vec::new()
+            } else {
+                let mut v = Vec::with_capacity(t.text.chars().count());
+                for sp in &t.spans {
+                    for _ in 0..sp.len {
+                        v.push(sp.color);
+                    }
+                }
+                v
             };
 
             let (ascent, descent) = self.fonts[fid]
@@ -1681,9 +1717,14 @@ impl Ui {
             // glyphs again, so they cost quads rather than pipelines. The
             // stroke's eight offsets are what a true SDF outline would
             // approximate anyway at UI sizes.
-            let mut passes: Vec<([f32; 2], [f32; 4])> = Vec::new();
+            //
+            // The third element says whether spans may recolour this pass. Only
+            // the run itself: a shadow and an outline are each ONE colour by
+            // definition, and tinting them per word would turn a legibility
+            // outline into a second, blurrier copy of the coloured text.
+            let mut passes: Vec<([f32; 2], [f32; 4], bool)> = Vec::new();
             if let Some(sh) = t.shadow {
-                passes.push(([sh.offset[0] * scale, sh.offset[1] * scale], sh.color));
+                passes.push(([sh.offset[0] * scale, sh.offset[1] * scale], sh.color, false));
             }
             if let Some(st) = t.stroke
                 && st.width > 0.0
@@ -1694,10 +1735,10 @@ impl Ui {
                     [-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7],
                 ];
                 for d in DIRS {
-                    passes.push(([d[0] * w, d[1] * w], st.color));
+                    passes.push(([d[0] * w, d[1] * w], st.color, false));
                 }
             }
-            passes.push(([0.0, 0.0], t.color));
+            passes.push(([0.0, 0.0], t.color, true));
 
             // Drawn after the glyphs, so a caret sitting on a wide character
             // is still visible.
@@ -1766,15 +1807,37 @@ impl Ui {
                 }
             }
 
-            for (shift, color) in passes {
+            for (shift, color, spanned) in passes {
                 let mut baseline = top + ascent + shift[1];
-                for (line, &run_w) in lines.iter().zip(&widths) {
+                for ((line, &run_w), src) in lines.iter().zip(&widths).zip(&glyph_src) {
                     let mut pen_x = shift[0] + field_shift + align_x(t.align, rect_px, run_w);
-                    for c in line.chars() {
+                    for (ci, c) in line.chars().enumerate() {
+                        // Which character of the AUTHORED string this glyph is,
+                        // which is what both spans and offsets are indexed by.
+                        // `None` is the appended ellipsis — it belongs to no
+                        // authored character, so it takes neither.
+                        let si = src.get(ci).copied().flatten();
+                        let color = match (spanned, si) {
+                            (true, Some(i)) => {
+                                span_color.get(i).copied().flatten().unwrap_or(color)
+                            }
+                            _ => color,
+                        };
+                        // Applied AFTER layout, so a displaced glyph never
+                        // re-wraps its line and never moves its neighbours —
+                        // `pen_x` advances by the metrics either way.
+                        let nudge = si
+                            .and_then(|i| t.glyph_offsets.get(i))
+                            .map(|o| [o[0] * scale, o[1] * scale])
+                            .unwrap_or([0.0, 0.0]);
                         let g = self.glyph(gpu, fid, c, px);
                         if g.size[0] > 0.0 {
-                            let rect =
-                                [pen_x + g.offset[0], baseline + g.offset[1], g.size[0], g.size[1]];
+                            let rect = [
+                                pen_x + g.offset[0] + nudge[0],
+                                baseline + g.offset[1] + nudge[1],
+                                g.size[0],
+                                g.size[1],
+                            ];
                             push(
                                 instances,
                                 batches,
@@ -2083,6 +2146,133 @@ fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `floptle/0172`: a text run carried one colour for the whole string, so
+    /// a game could not put a proper noun in the speaker's colour or tint the
+    /// key inside the sentence telling you to press it. The only workaround was
+    /// to split the line into sibling elements laid out by hand, which re-wraps
+    /// wrong at every resolution and is impossible for text revealed a glyph at
+    /// a time.
+    ///
+    /// **The assertion that matters is the first one.** Spans style; they must
+    /// never lay out. If a span boundary became a break opportunity, the
+    /// sibling-element workaround would have been reproduced inside the engine
+    /// — text that reflows when a word changes colour — and it would only show
+    /// up at some window widths.
+    #[test]
+    fn a_coloured_word_changes_the_colour_and_nothing_else() {
+        let gpu = Gpu::headless_hdr(64, 64);
+        // A device that cannot build the pipeline has nothing to say about
+        // where these glyphs landed — the same skip-gracefully idiom the other
+        // GPU tests in this workspace use.
+        let failed = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let sink = failed.clone();
+        gpu.device.on_uncaptured_error(std::sync::Arc::new(move |_| {
+            if let Ok(mut f) = sink.lock() {
+                *f = true;
+            }
+        }));
+        let mut r = Ui::new(&gpu);
+
+        const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+        const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+        // Narrow enough that this wraps several times — the whole question is
+        // whether it wraps the SAME way with a span in it.
+        let base = floptle_ui::TextRun {
+            rect: [0.0, 0.0, 90.0, 200.0],
+            text: "press the red button now".into(),
+            size: 16.0,
+            color: WHITE,
+            wrap: true,
+            ..Default::default()
+        };
+
+        let pack = |r: &mut Ui, run: floptle_ui::TextRun| -> Vec<UiInstance> {
+            let list = floptle_ui::DrawList { texts: vec![run], ..Default::default() };
+            let (mut inst, mut batches) = (Vec::new(), Vec::new());
+            r.pack(
+                &gpu,
+                &list,
+                [0.0, 0.0],
+                1.0,
+                &mut |_| None,
+                &|_| None,
+                &mut |_, _| None,
+                &mut inst,
+                &mut batches,
+            );
+            inst
+        };
+
+        let plain = pack(&mut r, base.clone());
+        if *failed.lock().unwrap() || plain.is_empty() {
+            return; // no usable device, or no glyphs — nothing to assert about
+        }
+
+        // "press the " is 10 characters; "red" is the next 3.
+        let spanned = pack(
+            &mut r,
+            floptle_ui::TextRun {
+                spans: vec![
+                    floptle_ui::TextSpan { len: 10, color: None },
+                    floptle_ui::TextSpan { len: 3, color: Some(RED) },
+                ],
+                ..base.clone()
+            },
+        );
+
+        assert_eq!(
+            plain.len(),
+            spanned.len(),
+            "a span changed how many glyphs were drawn — it has reached the layout"
+        );
+        for (a, b) in plain.iter().zip(&spanned) {
+            assert_eq!(
+                a.rect, b.rect,
+                "a two-colour run must wrap and sit exactly where the same string in one \
+                 colour does — a span boundary is not a line-break opportunity"
+            );
+        }
+        // …and it did actually recolour something, or the test above passes on
+        // a `spans` field that is ignored entirely.
+        let reds = spanned.iter().filter(|i| i.color == RED).count();
+        assert_eq!(reds, 3, "exactly the three characters of \"red\" should be red");
+        assert!(
+            plain.iter().all(|i| i.color != RED),
+            "the fixture is wrong — nothing was red before"
+        );
+
+        // ---- per-glyph offsets: the half spans alone cannot do -------------
+        //
+        // Displacing a glyph must move that glyph and NOTHING else: not its
+        // neighbours, and not the line it is in. A hook that re-flowed the run
+        // would make every wobble a re-wrap.
+        let nudged = pack(
+            &mut r,
+            floptle_ui::TextRun {
+                // The 11th character — the "r" of "red".
+                glyph_offsets: {
+                    let mut v = vec![[0.0, 0.0]; 10];
+                    v.push([0.0, -5.0]);
+                    v
+                },
+                ..base.clone()
+            },
+        );
+        assert_eq!(nudged.len(), plain.len(), "an offset must not add or drop a glyph");
+        let moved: Vec<usize> = plain
+            .iter()
+            .zip(&nudged)
+            .enumerate()
+            .filter(|(_, (a, b))| a.rect != b.rect)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(moved.len(), 1, "exactly one glyph should have moved, not {}", moved.len());
+        let (a, b) = (plain[moved[0]].rect, nudged[moved[0]].rect);
+        assert_eq!(b[0], a[0], "and only on the axis it was pushed");
+        assert!((b[1] - (a[1] - 5.0)).abs() < 1e-3, "by the amount it was pushed: {a:?} {b:?}");
+    }
 
     /// `floptle/0124`: an unnamed font is the PROJECT's, not the embedded one.
     ///

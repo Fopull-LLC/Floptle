@@ -2145,6 +2145,20 @@ pub(crate) fn apply_rich_sets(
                     *oh = Matter::clamp_ortho_height(v);
                 }
             }
+            // Both write the ELEMENT's text spec, creating it if the element
+            // has none yet — the same shape `node.text = ...` uses, so setting
+            // a colour on a label that has not been given words yet is a no-op
+            // rather than an error.
+            RichSet::TextSpans(spans) => {
+                if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(e) {
+                    spec.text.get_or_insert_with(Default::default).spans = spans;
+                }
+            }
+            RichSet::GlyphOffsets(offsets) => {
+                if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(e) {
+                    spec.text.get_or_insert_with(Default::default).glyph_offsets = offsets;
+                }
+            }
             RichSet::MatterPrimitive(shape, color) => {
                 world.insert(
                     e,
@@ -5150,6 +5164,105 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     }
                     q.borrow_mut()
                         .push((e, crate::RichSet::MatterPointLight { color, intensity, range }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            // node:setTextSpans{ {len =, color =}, … } — colour stretches of
+            // this element's text (`floptle/0172`).
+            //
+            // A run carried ONE colour for the whole string, so a keyword tinted
+            // to match the key it names, or a proper noun in the speaker's
+            // colour, meant splitting the line into sibling elements laid out by
+            // hand — which re-wraps wrong at every resolution and cannot be
+            // revealed a glyph at a time.
+            //
+            // `len` is CHARACTERS of the authored string, not bytes: "the fifth
+            // character" and "the fifth byte" disagree the moment anyone types
+            // anything but ASCII, and in bytes this would fail in front of
+            // whoever was writing the dialogue.
+            let q = q.clone();
+            methods.set(
+                "setTextSpans",
+                lua.create_function(move |_, (this, list): (Table, Table)| {
+                    use crate::opts::{check_keys, opt_num};
+                    const CALL: &str = "node:setTextSpans";
+                    let e: u32 = this.raw_get("__id")?;
+                    let mut spans = Vec::new();
+                    for (i, v) in list.sequence_values::<Value>().enumerate() {
+                        let Value::Table(t) = v? else {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: entry {} is not a table — each span is \
+                                 {{ len = n, color = {{r, g, b}} }}",
+                                i + 1
+                            )));
+                        };
+                        check_keys(&t, &["len", "color"], CALL)?;
+                        // Required, and refused rather than defaulted: a span
+                        // with no length is a colour with nothing to paint, and
+                        // silently skipping it would slide every later span.
+                        let len = opt_num(&t, CALL, "len", 0.0, u32::MAX as f64)?.ok_or_else(
+                            || {
+                                mlua::Error::runtime(format!(
+                                    "{CALL}: span {} has no `len` — every span says how many \
+                                     characters it covers, or the ones after it land in the \
+                                     wrong place",
+                                    i + 1
+                                ))
+                            },
+                        )? as u32;
+                        let color = match t.get::<Value>("color")? {
+                            Value::Nil => None,
+                            Value::Table(c) => Some(crate::api::read_color(&c).map_err(|e| {
+                                mlua::Error::runtime(format!("{CALL}: span {}: {e}", i + 1))
+                            })?),
+                            other => {
+                                return Err(mlua::Error::runtime(format!(
+                                    "{CALL}: span {}: `color` is {}, not a colour",
+                                    i + 1,
+                                    other.type_name()
+                                )));
+                            }
+                        };
+                        spans.push(floptle_ui::TextSpan {
+                            len,
+                            color,
+                        });
+                    }
+                    q.borrow_mut().push((e, crate::RichSet::TextSpans(spans)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            // node:setGlyphOffsets{ vec2(…), … } — displace characters at draw
+            // time (`floptle/0172`).
+            //
+            // The half spans cannot do. Glyph positions are computed inside the
+            // renderer and never surfaced, so a game could not move one letter
+            // at any price. This applies AFTER layout: a displaced glyph never
+            // re-wraps its line and never moves its neighbours, which is what
+            // makes wobble, jitter and per-glyph reveal the game's own to write
+            // rather than a catalogue of named effects the engine maintains.
+            let q = q.clone();
+            methods.set(
+                "setGlyphOffsets",
+                lua.create_function(move |_, (this, list): (Table, Table)| {
+                    const CALL: &str = "node:setGlyphOffsets";
+                    let e: u32 = this.raw_get("__id")?;
+                    let mut offsets = Vec::new();
+                    for (i, v) in list.sequence_values::<Value>().enumerate() {
+                        let p = crate::vec3_of(&v?).ok_or_else(|| {
+                            mlua::Error::runtime(format!(
+                                "{CALL}: entry {} is not a vec2 — one offset per character, \
+                                 in design units",
+                                i + 1
+                            ))
+                        })?;
+                        offsets.push([p.x as f32, p.y as f32]);
+                    }
+                    q.borrow_mut().push((e, crate::RichSet::GlyphOffsets(offsets)));
                     Ok(())
                 })?,
             )?;

@@ -243,13 +243,52 @@ event weaving) is specified in
 [`./camera-and-dialogue.md`](./camera-and-dialogue.md), which consumes input via
 an [`./input.md`](./input.md) context.
 
+## Styling part of a line
+
+A `TextSpec` carries one colour for the whole string, which is a fine default and
+the wrong floor: the moment a game writes prose at the player it wants a proper
+noun in the speaker's colour, the bound key highlighted inside the sentence that
+tells you to press it, or an item name in its rarity. Doing that with sibling
+elements laid out by hand re-wraps wrong at every resolution, breaks the moment
+the string is translated, and is impossible for text revealed a glyph at a time.
+
+**`spans`** colours stretches of a run — `{ len, color }` entries running end to
+end from the start, `len` in **characters** of the authored string. Characters no
+span reaches keep the element's own colour, and a span with no `color` is how a
+gap between two coloured words is spelled.
+
+**Spans style; they never lay out.** Wrapping, alignment, `max_lines` and
+ellipsis are all computed across the whole string exactly as before, so a
+two-colour run wraps identically to the same string in one colour — a span
+boundary is not a line-break opportunity a plain string would not have had. That
+is also why a span cannot change `size` or `font`: those *would* move the text,
+and a field that quietly did nothing would be worse than its absence.
+
+**`glyph_offsets`** is the half spans cannot do: a draw-time displacement per
+character, applied *after* layout, so a moved glyph never re-wraps its line and
+never shifts its neighbours. Glyph positions are computed inside the renderer and
+never surfaced, so before this a game could not move one letter at any price.
+It is offsets rather than named effects on purpose — which characters move, by
+how much and on what phase belongs in the game's own script, and the engine only
+agrees to displace a glyph it has already positioned.
+
+The authored string stays the authored string through both, so a caller can
+still measure it, hash it, or count its characters — a reveal animation counts
+*characters*, and nothing here shifts those indices.
+
+From a script: `node:setTextSpans{…}` and `node:setGlyphOffsets{…}`.
+
+---
+
 ## Out of scope
 
 - **A full CSS/flexbox layout engine** — anchor + pivot + offset + Stack/Flow is
   the whole layout model on purpose. Complex grids are nested Stacks/Flows.
 - **Data-binding / reactive frameworks** — scripts push values
   (`set_text`/`set_value`); we don't ship observable bindings or templating.
-- **Rich text markup / inline-styled spans** beyond a single Style per Text, and
-  a full **text-input/IME** stack — added only if a game needs them, not at launch.
+- A full **text-input/IME** stack — added only if a game needs it, not at launch.
+- **Rich text markup** — a parser and an escape rule for `<c=#ff4444>…</c>`.
+  Colour along a run is real now (see below); a markup *language* on top of it
+  is a separate question, and one a string table would have opinions about.
 - **Immediate-mode game UI** — `floptle-ui` is retained (nodes); use egui only in
   the editor (ADR-0004).

@@ -333,6 +333,62 @@ pub struct TextSpec {
     /// Case transform applied at draw time; the authored string is untouched.
     #[serde(default, skip_serializing_if = "is_as_is")]
     pub case: Case,
+    /// Per-stretch colour overrides along the run — see [`TextSpan`].
+    ///
+    /// Empty is exactly today's behaviour: one colour for the whole string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<TextSpan>,
+    /// A draw-time displacement per character, in design units.
+    ///
+    /// **The half that spans alone cannot do.** Glyph positions are computed
+    /// inside the renderer and never surface, so a game could not move one
+    /// letter at any price — no wobble, no jitter, no per-glyph reveal. This is
+    /// applied AFTER layout, so displacing a glyph never re-wraps the line it
+    /// is in and never moves its neighbours.
+    ///
+    /// Indexed by character of the authored string, shorter is fine (the rest
+    /// are still), and empty costs nothing. The engine only agrees to move a
+    /// glyph it has already positioned: which characters move, by how much and
+    /// on what phase stays in the game's own script, which is what keeps this a
+    /// general-purpose hook rather than a catalogue of named effects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glyph_offsets: Vec<[f32; 2]>,
+}
+
+/// One stretch of a text run with its own colour.
+///
+/// `TextSpec` used to carry exactly one colour for the entire string, which is
+/// a fine default and the wrong floor: the moment a game writes prose at the
+/// player it wants a proper noun in the speaker's colour, a keyword tinted to
+/// match the key it names, an item name in its rarity. The only way to do that
+/// was to split the line into sibling elements and lay them out by hand, which
+/// re-wraps wrong at every resolution, breaks the moment the string is
+/// translated, and is impossible for text revealed a glyph at a time
+/// (`floptle/0172`).
+///
+/// **Spans style; they never lay out.** Wrapping, alignment, `max_lines` and
+/// ellipsis are all computed across the whole string exactly as before, so a
+/// span boundary is not a line-break opportunity a plain string would not have
+/// had — a two-colour run wraps identically to the same string in one colour,
+/// and a test says so. That is also why a span cannot change `size` or `font`:
+/// those WOULD change the layout, and a field that quietly did nothing would be
+/// worse than its absence.
+///
+/// **`len` is CHARACTERS, not bytes.** This is text a human authored, and "the
+/// fifth character" and "the fifth byte" disagree the moment anyone types
+/// anything but ASCII — in bytes it would panic on a slice boundary in front of
+/// whoever was writing the dialogue.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextSpan {
+    /// How many characters of the authored string this span covers, starting
+    /// where the previous span ended. Characters the spans do not reach keep
+    /// the run's own `color`.
+    pub len: u32,
+    /// The colour for those characters, or `None` to leave them at the run's.
+    /// A span that overrides nothing is legal and is how a gap between two
+    /// coloured words is spelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 4]>,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -367,6 +423,8 @@ impl Default for TextSpec {
             max_lines: 0,
             overflow: Overflow::Show,
             case: Case::AsIs,
+            spans: Vec::new(),
+            glyph_offsets: Vec::new(),
         }
     }
 }
@@ -1708,6 +1766,11 @@ pub struct TextRun {
     /// place that can turn a character index into an x position — which is why
     /// this rides the run rather than arriving as pre-computed quads.
     pub caret: Option<Caret>,
+    /// Per-stretch colours, in characters of [`Self::text`] — the string as
+    /// DRAWN, so the case transform has already been folded through them.
+    pub spans: Vec<TextSpan>,
+    /// Per-character draw-time displacement, design units, same indexing.
+    pub glyph_offsets: Vec<[f32; 2]>,
 }
 
 /// A text caret and selection, in CHARACTER indices into [`TextRun::text`]
@@ -1746,6 +1809,8 @@ impl Default for TextRun {
             overflow: Overflow::Show,
             xform: Xform::default(),
             caret: None,
+            spans: Vec::new(),
+            glyph_offsets: Vec::new(),
         }
     }
 }
@@ -2247,11 +2312,47 @@ pub fn draw_list_with(
                     overflow: t.overflow,
                     xform,
                     caret,
+                    // Re-expressed against the drawn string: `shown` has had
+                    // the case transform applied, and a transform can change a
+                    // character count (ß uppercases to SS), so carrying the
+                    // authored lengths through would slide every colour after
+                    // it by one.
+                    spans: resolve_spans(&t.text, t.case, &t.spans),
+                    glyph_offsets: t.glyph_offsets.clone(),
                 });
             }
         }
     }
     dl
+}
+
+/// Re-express authored spans against the string as it will be DRAWN.
+///
+/// The authored string is what a caller measures, hashes and counts characters
+/// of, so spans are authored against it; the renderer draws the case-transformed
+/// one. `AsIs` — every dialogue line in practice — the two are the same string
+/// and this is a clone. Otherwise each span is transformed on its own and keeps
+/// the length its own transform produced, so a transform that changes a
+/// character count cannot slide every colour after it along the line.
+///
+/// Transforming per span rather than whole-string means `Title` decides word
+/// starts within a span. A span boundary mid-word is the only case that differs,
+/// and getting the colours right there matters more than the capital does.
+fn resolve_spans(authored: &str, case: Case, spans: &[TextSpan]) -> Vec<TextSpan> {
+    if spans.is_empty() || case == Case::AsIs {
+        return spans.to_vec();
+    }
+    let chars: Vec<char> = authored.chars().collect();
+    let mut at = 0usize;
+    spans
+        .iter()
+        .map(|sp| {
+            let end = (at + sp.len as usize).min(chars.len());
+            let piece: String = chars[at.min(chars.len())..end].iter().collect();
+            at = end;
+            TextSpan { len: case.apply(&piece).chars().count() as u32, color: sp.color }
+        })
+        .collect()
 }
 
 /// Expand a rect by `d` on every side.
@@ -3159,6 +3260,37 @@ mod tests {
         assert!(t.stroke.is_none());
     }
 
+    /// `floptle/0172`: spans round-trip, and an old scene stays an old scene.
+    ///
+    /// The absence half is checked by `unused_extras_do_not_serialize`, which
+    /// names both new fields — this is the other direction: a run that DOES
+    /// carry them has to survive a save and a load, or the colours are a
+    /// runtime-only trick that a designer cannot author.
+    #[test]
+    fn spans_and_glyph_offsets_round_trip() {
+        let t = TextSpec {
+            text: "press the red button".into(),
+            spans: vec![
+                TextSpan { len: 10, color: None },
+                TextSpan { len: 3, color: Some([1.0, 0.0, 0.0, 1.0]) },
+            ],
+            glyph_offsets: vec![[0.0, 0.0], [1.5, -2.0]],
+            ..Default::default()
+        };
+        let back: TextSpec = ron::from_str(&ron::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+        // The authored string is the authored string — a caller still measures,
+        // hashes and counts characters of it, and a reveal animation counts
+        // CHARACTERS, so nothing may have been folded into it.
+        assert_eq!(back.text, "press the red button");
+
+        // A scene written before any of this loads with neither.
+        let old: TextSpec =
+            ron::from_str(r#"(text: "hi", size: 16.0, color: (1,1,1,1), align: Center, valign: Center, fit: false)"#)
+                .unwrap();
+        assert!(old.spans.is_empty() && old.glyph_offsets.is_empty());
+    }
+
     /// Untouched extras must not appear in saved scenes, or every save churns
     /// the whole file and the diff stops being reviewable.
     ///
@@ -3181,7 +3313,7 @@ mod tests {
             "rotation", "scale", "pivot",
             // TextSpec
             "stroke", "shadow", "tracking", "line_height", "wrap", "max_lines", "overflow",
-            "case",
+            "case", "spans", "glyph_offsets",
             // ImageSpec. `tint` is pre-existing and always written, so it is
             // checked separately below where no image can supply it; the image
             // fit is matched by its value because TextSpec has a `fit` too.

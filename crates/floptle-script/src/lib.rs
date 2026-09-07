@@ -1445,6 +1445,13 @@ pub enum RichSet {
     /// name was checked at the call, where a misspelling can still name a line
     /// (`floptle/0082`).
     MatterPrimitive(floptle_core::Shape, [f64; 3]),
+    /// `node:setTextSpans{...}` — per-stretch colours along this element's text
+    /// (`floptle/0172`). An empty list clears them back to one colour.
+    TextSpans(Vec<floptle_ui::TextSpan>),
+    /// `node:setGlyphOffsets{...}` — a draw-time displacement per character.
+    /// Empty clears. Applied after layout, so it moves glyphs and never
+    /// re-wraps the line they are in.
+    GlyphOffsets(Vec<[f32; 2]>),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap {
         cols: u32,

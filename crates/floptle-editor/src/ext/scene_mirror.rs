@@ -155,9 +155,11 @@ impl SceneMirror {
         radius_of: &dyn Fn(Entity, &Matter) -> Option<f32>,
         extent_of: &dyn Fn(Entity, &Matter) -> Option<[f32; 3]>,
     ) -> Self {
-        let mut mirror = SceneMirror::default();
-        // World frame (origin 0): a package's positions are world positions.
-        mirror.gravity = crate::Editor::build_gravity_field(world, DVec3::ZERO);
+        let mut mirror = SceneMirror {
+            // World frame (origin 0): a package's positions are world positions.
+            gravity: crate::Editor::build_gravity_field(world, DVec3::ZERO),
+            ..Default::default()
+        };
         let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
 
         for (e, name) in world.query::<floptle_core::Name>() {
