@@ -557,6 +557,11 @@ local who = net.identity(peer)   -- { id, name, tier, verified }
 which is what lets a returning player be recognised, a ban outlive a reconnect,
 and a statistic be attributed to somebody.
 
+`tier` is `"unknown"` when that peer's own client could not reach fopull.com to
+ask what plan it is on. The engine fails soft to the free tier's limits either
+way, but it will not report a guess as an answer — so gate anything that matters
+on a tier you were **told**, rather than on "not free".
+
 **Anonymous play is a normal state.** A LAN or friends game with nobody signed
 in works exactly as it always has; such a peer has no `id` and `verified` is
 `false`. A server that wants an account says so:

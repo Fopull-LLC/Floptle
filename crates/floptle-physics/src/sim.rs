@@ -1992,7 +1992,7 @@ mod runtime_body_tests {
         );
         assert!(
             tri.bounds().is_some(),
-            "a TriMeshCollider owns a fixed triangle list, so its extent is known at              build time — leaving it unbounded is what made it an always-candidate"
+            "a TriMeshCollider owns a fixed triangle list, so its extent is known at build time — leaving it unbounded is what made it an always-candidate"
         );
 
         // 64 bodies parked together, and a 1-unit trigger at the origin.

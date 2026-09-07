@@ -30,6 +30,7 @@ linked here, it isn't finished — a test enforces that.
 | Write a shader | [subsystems/shaders.md](subsystems/shaders.md) |
 | Go multiplayer | [multiplayer.md](multiplayer.md) |
 | Ship a build | [export-builds.md](export-builds.md) |
+| Run a Floptle Cloud region box | [fleet-agent.md](fleet-agent.md) |
 | Ship it to a **browser** | [export-builds.md](export-builds.md#web-builds), and [web-export.md](web-export.md) for the story |
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Install a package, or write one to share | [packages.md](packages.md) |

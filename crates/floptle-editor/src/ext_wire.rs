@@ -879,6 +879,8 @@ fn known_doc_fields() -> &'static [&'static str] {
             material,
             object_materials,
             tint,
+            tint_rim,
+            tint_ambient,
             rigidbody,
             celestial,
             mesh_collider,
@@ -915,7 +917,8 @@ fn known_doc_fields() -> &'static [&'static str] {
             camera_2d,
         } = d;
         let _ = (
-            name, transform, matter, scripts, material, object_materials, tint, rigidbody, celestial,
+            name, transform, matter, scripts, material, object_materials, tint, tint_rim,
+            tint_ambient, rigidbody, celestial,
             mesh_collider, disabled, paint, tex_paint, terrain_gen, collidable, trigger,
             nav_exclude, visible, cast_shadow, anim_controller, particles, id, parent_id, parent,
             attachment, net, ui_layer, ui, audio, layer, tags, sorting, sort_mode, parallax, lit_2d,
@@ -931,6 +934,15 @@ fn known_doc_fields() -> &'static [&'static str] {
         "material",
         "object_materials",
         "tint",
+        // A Tint's three fields are three keys and ONE component: `tint` is the
+        // multiply, `tint_rim` the additive edge `(r, g, b, strength)`, and
+        // `tint_ambient` the ambient multiplier. They were bound `: _` above
+        // when they were added, which silenced the exhaustive destructure
+        // WITHOUT doing what that check exists to make you do — so a package
+        // writing `tint_rim` was told it "is not a node property", which was
+        // both wrong and the exact error the check is here to prevent.
+        "tint_rim",
+        "tint_ambient",
         "rigidbody",
         "celestial",
         "mesh_collider",
@@ -981,7 +993,8 @@ fn check_doc_keys(obj: &serde_json::Map<String, serde_json::Value>) -> Result<()
         return Err(match near {
             Some(k) => format!("{key:?} is not a node property — did you mean {k:?}?"),
             None => format!(
-                "{key:?} is not a node property. See docs/editor-scripting.md, or                  scene.info(id) for what a node carries"
+                "{key:?} is not a node property. See docs/editor-scripting.md, or \
+                 scene.info(id) for what a node carries"
             ),
         });
     }

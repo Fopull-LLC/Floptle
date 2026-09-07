@@ -132,11 +132,14 @@ impl Editor {
         let tex_paint = self.world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         // The tint travels with the node — duplicating a ghosted preview or a
         // team-coloured prop copies what makes it look that way.
-        let tint = self
-            .world
-            .get::<floptle_core::Tint>(e)
-            .filter(|t| !t.is_identity())
+        let t = self.world.get::<floptle_core::Tint>(e).filter(|t| !t.is_identity());
+        let tint = t
+            .filter(|t| t.color != [1.0, 1.0, 1.0] || t.alpha < 1.0)
             .map(|t| [t.color[0], t.color[1], t.color[2], t.alpha]);
+        let tint_rim = t
+            .filter(|t| t.rim_strength != 0.0)
+            .map(|t| [t.rim[0], t.rim[1], t.rim[2], t.rim_strength]);
+        let tint_ambient = t.filter(|t| t.ambient != 1.0).map(|t| t.ambient);
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let trigger = self.world.get::<floptle_core::Trigger>(e).is_some();
         let nav_exclude = self.world.get::<floptle_core::NavMeshExclude>(e).is_some();
@@ -212,6 +215,8 @@ impl Editor {
             material,
             object_materials,
             tint,
+            tint_rim,
+            tint_ambient,
             rigidbody,
             celestial,
             disabled,
@@ -310,9 +315,19 @@ impl Editor {
                 ),
             );
         }
-        if let Some(t) = node.tint {
-            self.world
-                .insert(e, floptle_core::Tint { color: [t[0], t[1], t[2]], alpha: t[3] });
+        if node.tint.is_some() || node.tint_rim.is_some() || node.tint_ambient.is_some() {
+            let t = node.tint.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let r = node.tint_rim.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            self.world.insert(
+                e,
+                floptle_core::Tint {
+                    color: [t[0], t[1], t[2]],
+                    alpha: t[3],
+                    rim: [r[0], r[1], r[2]],
+                    rim_strength: r[3],
+                    ambient: node.tint_ambient.unwrap_or(1.0),
+                },
+            );
         }
         if let Some(rb) = &node.rigidbody {
             self.world.insert(e, rb.to_rigidbody());
@@ -425,6 +440,8 @@ impl Editor {
             material,
             object_materials,
             tint,
+            tint_rim,
+            tint_ambient,
             rigidbody,
             celestial,
             mesh_collider,
@@ -572,6 +589,8 @@ impl Editor {
             material: None,
             object_materials: Default::default(),
             tint: None,
+            tint_rim: None,
+            tint_ambient: None,
             rigidbody: None,
             celestial: None,
             disabled: false,
@@ -682,6 +701,8 @@ impl Editor {
                 material: None,
                 object_materials: Default::default(),
                 tint: None,
+                tint_rim: None,
+                tint_ambient: None,
                 rigidbody: None,
                 celestial: None,
                 disabled: false,

@@ -881,6 +881,10 @@ struct EditorTabViewer<'a> {
     /// the tab offers to turn it on rather than silently greying out.
     map_tool_on: bool,
     map_playing: bool,
+    /// `(lights the shader was given, lights ranked out of the sixteen)` as of
+    /// the last frame, so a light's own Inspector can say where the scene stands
+    /// against the cap instead of only naming it (`floptle/0116`).
+    light_counts: (usize, usize),
     /// The Map tool's keybinds — every hint in the UI reads its chord from
     /// here, so a rebind can never leave the labels lying.
     map_hud_open: &'a mut bool,
@@ -1553,6 +1557,7 @@ pub fn run() {
                     Path::new(out),
                     plat,
                     &title,
+                    None,
                 ));
             }
             "--play" => player_mode = true,

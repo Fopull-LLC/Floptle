@@ -175,6 +175,85 @@ jobs:
             floptle-relay-*
           if-no-files-found: error
 
+  # The ARM box's half of the dedicated-server story (`floptle/0197`).
+  #
+  # `floptle-dist::PLATFORMS` has never carried a linux-aarch64, because nothing
+  # ran an engine on ARM Linux until Floptle Cloud's fleet box did. This is
+  # deliberately NOT a new platform: adding one would put linux-aarch64 in the
+  # Hub's install list and the export dialog, and neither of those wants it. It
+  # is two bare binaries, published beside the relay's, the way `floptle/0191`
+  # settled for an artifact that is not a game bundle.
+  #
+  #   floptle-server  the engine a fleet box runs a project bundle with. The
+  #                   version pinned in a bundle's manifest is which one the
+  #                   agent downloads, so every release has to publish one or a
+  #                   deployment on that version can never start.
+  #   floptle-fleet   the agent itself: polls /desired, runs one server per
+  #                   deployment, reports to /status.
+  fleet:
+    name: bundle linux-aarch64 (server + fleet agent)
+    needs: gate
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # `floptle-server` is a shim over the editor library, so the build needs
+      # the same headers the linux-x86_64 bundle does — even though the binary
+      # links none of them at run time (rc5 verified libc/libm/libgcc_s/libstdc++
+      # on the real box). wgpu and winit dlopen; the ALSA and udev packages are
+      # here because their -sys build scripts look for a .pc file and panic
+      # without one.
+      - name: Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev \
+            libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release -p floptle-server -p floptle-fleet
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          for BIN in floptle-server floptle-fleet; do
+            OUT="$BIN-$VER-linux-aarch64"
+            cp "target/release/$BIN" "$OUT"
+            chmod +x "$OUT"
+            sha256sum "$OUT" > "$OUT.sha256"
+            echo "$BIN sha256: $(cut -d' ' -f1 < "$OUT.sha256")"
+            # Proof it runs on a box with nothing installed. The agent verifies
+            # the PUBLISHED checksum before it will execute an engine, so a
+            # missing .sha256 here is a deployment that can never start.
+            ldd "$OUT" || true
+          done
+          # `--help` exits 0 and prints a table. This is how an operator tells a
+          # current binary from one already on a box — the July relay read
+          # `--help` as a port number, and `floptle-server` had no help path at
+          # all until this release. To a FILE, not through `head`: these steps
+          # run with `pipefail` and a `head` that closes the pipe early makes the
+          # writer fail for a reason that has nothing to do with the build.
+          ./"floptle-fleet-$VER-linux-aarch64" --help > fleet-help.txt
+          head -3 fleet-help.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux-aarch64
+          path: |
+            floptle-server-*-linux-aarch64
+            floptle-server-*-linux-aarch64.sha256
+            floptle-fleet-*-linux-aarch64
+            floptle-fleet-*-linux-aarch64.sha256
+          if-no-files-found: error
+
   # The browser template: the wasm module, its JS glue and the player page —
   # what File ⏵ Export Game… → Web (browser) downloads for this version, under
   # the `web` artifact key beside the platform bundles. Built the way
@@ -233,7 +312,7 @@ jobs:
 
   release:
     name: publish
-    needs: [build, web]
+    needs: [build, web, fleet]
     runs-on: ubuntu-latest
     # Distribution is PUBLIC (Fopull-LLC/Floptle-releases): the Hub's default
     # manifest URL points there and anyone can download — the engine source
@@ -347,7 +426,11 @@ jobs:
           # the bundle globs above (`floptle/0191`).
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
                    artifacts/*/floptle-relay-*-linux-x86_64 \
-                   artifacts/*/floptle-relay-*-linux-x86_64.sha256)
+                   artifacts/*/floptle-relay-*-linux-x86_64.sha256 \
+                   artifacts/*/floptle-server-*-linux-aarch64 \
+                   artifacts/*/floptle-server-*-linux-aarch64.sha256 \
+                   artifacts/*/floptle-fleet-*-linux-aarch64 \
+                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$REPO"
 
@@ -368,7 +451,11 @@ jobs:
           # the bundle globs above (`floptle/0191`).
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
                    artifacts/*/floptle-relay-*-linux-x86_64 \
-                   artifacts/*/floptle-relay-*-linux-x86_64.sha256)
+                   artifacts/*/floptle-relay-*-linux-x86_64.sha256 \
+                   artifacts/*/floptle-server-*-linux-aarch64 \
+                   artifacts/*/floptle-server-*-linux-aarch64.sha256 \
+                   artifacts/*/floptle-fleet-*-linux-aarch64 \
+                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to

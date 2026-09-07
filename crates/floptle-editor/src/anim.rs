@@ -382,7 +382,9 @@ impl AnimSystem {
         for (k, doc) in std::mem::take(&mut self.clips) {
             if kept.iter().any(|(seen, _)| *seen == k) {
                 self.load_errors.push(format!(
-                    "two animation files claim the key {k} — one of them is being ignored.                      Rename one: a .anim.ron and a .spriteanim.ron of the same name in the                      same folder cannot both be {k}."
+                    "two animation files claim the key {k} — one of them is being \
+                     ignored. Rename one: a .anim.ron and a .spriteanim.ron of the \
+                     same name in the same folder cannot both be {k}."
                 ));
                 self.sprite_keys.remove(&k);
                 continue;

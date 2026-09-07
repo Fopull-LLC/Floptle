@@ -125,7 +125,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
 ---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
 ---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.
----@field setTint fun(self: Node, color?: Color, alpha?: number) A colour MULTIPLIED over everything this node draws — its own textures and each part's own colour are kept. The easy \"same model, but red\": a hit flash, a team colour, a ghosted preview. `node:setTint()` with nothing clears it. Different from a Material, which REPLACES the model's own materials.
+---@field setTint fun(self: Node, color?: Color|table, alpha?: number) A colour MULTIPLIED over everything this node draws — its own textures and each part's own colour are kept. The easy \"same model, but red\": a hit flash, a team colour, a ghosted preview. The table form `node:setTint{ color =, alpha =, rim =, rimStrength =, ambient = }` adds the two knobs a multiply cannot do — an ADDITIVE rim and an ambient lift — and fields you leave out keep their value. `node:setTint()` with nothing clears it. Different from a Material, which REPLACES the model's own materials.
 ---@field material fun(self: Node, name?: string): MaterialHandle Read and change a material with code. With no name: this node's own Material, which on a MODEL covers every part of it. With a name from `node:materials()` — an object like `Torso#2` or a material like `Clothing` — just that part of the model, creating the override on first write.
 ---@field materials fun(self: Node): ModelSlot[] What this model's parts are CALLED, so a script can address one: `{object=, material=, textured=, overridden=}` per slot. Empty on a node that is not an imported model.
 ---@field sprite fun(self: Node): SpriteHandle Read and change how this ONE sprite draws: `node:sprite().flipX = true`. Fields: flipX, flipY, cell, ppu, size, pivotX, pivotY — each readable and assignable. Raises on a node that is not a Sprite (a batch node wants node:sprites(), plural).
@@ -765,6 +765,12 @@ function net.role() end
 function net.isServer() end
 ---@return boolean
 function net.isClient() end
+---True on a server with nobody sitting at it (`floptle serve`), as opposed to a
+---player hosting the game they are in. Both answer `net.isServer()` the same.
+---A dedicated server must not take a seat in its own lobby or be waited on to
+---press Ready.
+---@return boolean
+function net.isDedicated() end
 ---Connected client peer ids (server).
 ---@return integer[]
 function net.peers() end

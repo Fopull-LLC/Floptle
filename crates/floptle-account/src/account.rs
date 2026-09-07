@@ -356,9 +356,26 @@ impl Account {
         };
         // The plan is decoration — a sign-in that worked must not be reported as
         // a failure because the entitlements endpoint had a bad minute.
+        //
+        // **But a bad minute is not a downgrade** (`floptle/0189`). This used to
+        // substitute `Entitlements::default()`, whose empty tier `from_parts`
+        // writes down as "free", so an outage and a real free account produced
+        // byte-identical sessions. Two things are different now: the fallback
+        // says `unknown` so a caller can tell, and a plan we were told about
+        // EARLIER beats a plan we are guessing at — "your tier as of last time"
+        // is a better answer than "free" for every purpose a client has, and the
+        // stored session is where it already is.
         let ent = provider.entitlements(&tokens.access_token).unwrap_or_else(|e| {
-            log::warn!("could not read the account plan: {e}");
-            Entitlements::default()
+            match self.store.load().filter(|prev| prev.sub == who.sub && prev.plan_known()) {
+                Some(prev) => {
+                    log::warn!("could not read the account plan ({e}); using the last known one");
+                    Entitlements { tier: prev.tier }
+                }
+                None => {
+                    log::warn!("could not read the account plan: {e}");
+                    Entitlements::unknown()
+                }
+            }
         });
         let session = Session::from_parts(tokens, who, ent);
         if let Err(e) = self.store.save(&session) {
@@ -535,6 +552,8 @@ mod tests {
     struct FakeProvider {
         polls_until_grant: Mutex<u32>,
         refresh_result: bool,
+        /// False = `/entitlements` is having a bad minute (`floptle/0189`).
+        entitlements_ok: bool,
     }
     impl Provider for FakeProvider {
         fn start_device(&self, challenge: &str) -> Result<DeviceCode, String> {
@@ -575,7 +594,11 @@ mod tests {
             Ok(UserInfo { sub: "u-1".into(), email: Some("ty@fopull.com".into()), name: Some("Ty".into()) })
         }
         fn entitlements(&self, _t: &str) -> Result<Entitlements, String> {
-            Ok(Entitlements { tier: "free".into() })
+            if self.entitlements_ok {
+                Ok(Entitlements { tier: "free".into() })
+            } else {
+                Err("502 from the gateway".into())
+            }
         }
     }
 
@@ -587,6 +610,22 @@ mod tests {
                 Box::new(FakeProvider {
                     polls_until_grant: Mutex::new(polls),
                     refresh_result: refresh_ok,
+                    entitlements_ok: true,
+                }) as Box<dyn Provider + Send>
+            }),
+        )
+    }
+
+    /// An `Account` whose `/entitlements` is down, everything else working.
+    fn account_no_entitlements(store: Arc<MemStore>) -> Account {
+        Account::with(
+            "https://fopull.com",
+            store,
+            Arc::new(move |_| {
+                Box::new(FakeProvider {
+                    polls_until_grant: Mutex::new(0),
+                    refresh_result: true,
+                    entitlements_ok: false,
                 }) as Box<dyn Provider + Send>
             }),
         )
@@ -602,6 +641,77 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// **A bad minute on `/entitlements` is not a downgrade** (`floptle/0189`),
+    /// and where a plan is already on record, that beats guessing.
+    ///
+    /// Two halves, and the second is the one worth having. The first says an
+    /// unreachable endpoint no longer writes down `"free"`. The second says that
+    /// a client which was TOLD `"studio"` an hour ago keeps saying `"studio"` —
+    /// "your plan as of last time" is a better answer than "free" for every
+    /// purpose a client has, and the stored session already holds it.
+    #[test]
+    fn an_unreachable_plan_endpoint_is_not_a_downgrade() {
+        // Nothing on record: the plan is unknown, and NOT free.
+        let store = Arc::new(MemStore::default());
+        let a = account_no_entitlements(store.clone());
+        a.sign_in();
+        assert!(until(|| a.phase() == Phase::SignedIn), "a plan outage must not fail a sign-in");
+        let s = a.session().expect("signed in anyway");
+        assert!(!s.plan_known(), "we could not ask, so we do not know");
+        assert_ne!(s.tier, "free", "an outage must not read as a free account");
+        assert_eq!(s.effective_tier(), "free", "…and it still fails soft");
+
+        // Now with a plan on record for the SAME account. It is carried forward.
+        let store = Arc::new(MemStore::default());
+        store
+            .save(&Session {
+                sub: "u-1".into(),
+                name: None,
+                email: None,
+                tier: "studio".into(),
+                access_token: "old".into(),
+                refresh_token: None,
+            })
+            .unwrap();
+        let a = account_no_entitlements(store.clone());
+        a.sign_in();
+        assert!(until(|| a.phase() == Phase::SignedIn), "never signed in");
+        let s = a.session().expect("a session");
+        assert_eq!(s.tier, "studio", "the last plan we were TOLD beats a guess");
+        assert!(s.plan_known());
+        // The tokens are the new ones — carrying the plan forward must not carry
+        // a dead access token forward with it.
+        assert_eq!(s.access_token, "at");
+    }
+
+    /// …and a stored plan belonging to somebody ELSE is never carried forward.
+    ///
+    /// The keyring entry is shared between the Hub and every game, so the
+    /// session sitting in it can perfectly well be the previous person to sign
+    /// in on this machine. Handing their tier to the account now signing in
+    /// would be worse than the bug this fixes.
+    #[test]
+    fn another_accounts_stored_plan_is_never_carried_forward() {
+        let store = Arc::new(MemStore::default());
+        store
+            .save(&Session {
+                sub: "somebody-else".into(),
+                name: None,
+                email: None,
+                tier: "studio".into(),
+                access_token: "old".into(),
+                refresh_token: None,
+            })
+            .unwrap();
+        let a = account_no_entitlements(store.clone());
+        a.sign_in();
+        assert!(until(|| a.phase() == Phase::SignedIn), "never signed in");
+        let s = a.session().expect("a session");
+        assert_eq!(s.sub, "u-1", "this is a different account");
+        assert!(!s.plan_known(), "so their plan tells us nothing about it");
+        assert_ne!(s.tier, "studio");
     }
 
     #[test]

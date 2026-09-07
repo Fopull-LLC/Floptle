@@ -61,6 +61,11 @@ fn export_platforms() -> Vec<String> {
     let mut v = vec!["host".to_string()];
     v.extend(floptle_dist::PLATFORMS.iter().map(|s| (*s).to_string()));
     v.push(floptle_dist::WEB_PLATFORM.to_string());
+    // Not a platform in the sense the others are — a server bundle carries no
+    // binary at all, because the fleet box runs its own engine against it
+    // (`floptle/0197`). It sits in this list because it is the same question a
+    // developer is answering: what am I stamping this for.
+    v.push(crate::export::SERVER_PLATFORM.to_string());
     v
 }
 
@@ -250,7 +255,12 @@ pub(crate) const VERBS: &[Verb] = &[
         name: "export",
         summary: "stamp a runnable build and exit",
         detail: "Runs the same code the File ▸ Export Game… dialog runs, so a scripted build \
-                 gets exactly the editor's behaviour. No window and no GPU.",
+                 gets exactly the editor's behaviour. No window and no GPU.\n\n\
+                 PLATFORM `server` stamps a DEDICATED-SERVER BUNDLE instead of a game: the \
+                 project with everything nobody on a server can see or hear left out, plus a \
+                 manifest pinning the engine version and the scene to host. It carries no \
+                 binary — a fleet box runs its own `floptle serve` against it — and it is \
+                 refused, with the reason, for a project that cannot run headless.",
         args: &[
             Arg {
                 name: "PROJECT",
@@ -270,6 +280,12 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Text,
                 required: false,
                 help: "the game's title (default: the project directory's name)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "which scene a `server` bundle hosts (default: the project's entry scene)",
             },
         ],
         needs_gpu: false,
@@ -1277,7 +1293,14 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let out = path(a, "OUT").expect("required");
             let platform = text(a, "PLATFORM").expect("required");
             let title = text(a, "title").unwrap_or_else(|| default_title(&project));
-            Outcome::Exit(crate::export::headless_export(&project, &out, &platform, &title))
+            let scene = text(a, "scene");
+            Outcome::Exit(crate::export::headless_export(
+                &project,
+                &out,
+                &platform,
+                &title,
+                scene.as_deref(),
+            ))
         }
         Some(("migrate", a)) => {
             let dir = path(a, "DIR").expect("required");

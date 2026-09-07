@@ -697,7 +697,8 @@ impl EditorTabViewer<'_> {
             if ui
                 .button(label)
                 .on_hover_text(
-                    "a disabled node doesn't draw, doesn't collide and its scripts                      don't run — and neither do anything under it",
+                    "a disabled node doesn't draw, doesn't collide and its scripts \
+                     don't run — and neither do anything under it",
                 )
                 .clicked()
             {

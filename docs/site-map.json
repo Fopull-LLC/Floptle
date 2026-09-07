@@ -5,6 +5,8 @@
 
   "//maintenance": "A page's title and its one-line summary come from the page itself — the H1 and the first sentence — so adding a doc is not two jobs. What you must do is CLASSIFY it: `every_doc_is_classified` fails until a new file is listed here or in `internal`, and names the file. That failure is the point. Silence would mean a new guide never reaches the site, or an internal note quietly does.",
 
+  "//test": "THE TEST A PAGE HAS TO PASS TO BE PUBLISHED: it helps somebody USE the engine, and it is TRUE TODAY. Both halves, and the second is the one that goes stale on its own — a page can be written to help and then quietly stop being true while nobody edits it. Things that fail it: design records, north stars, work plans, anything that opens by saying it is superseded or is not the current state, and anything whose subject has not been built. `no_published_page_disclaims_itself` in tests/docs_index.rs enforces as much of this as a machine can read — it fails a published page carrying the phrases those documents open with. It cannot tell whether a page is still true, so that half stays a person's job; when you make one internal, say WHICH half it failed in the line below.",
+
   "sections": [
     {
       "id": "start",
@@ -66,7 +68,6 @@
         "subsystems/scene-and-nodes.md",
         "subsystems/editor.md",
         "subsystems/physics.md",
-        "subsystems/physics-slices.md",
         "subsystems/navigation.md",
         "subsystems/deformable-matter.md",
         "subsystems/materials-and-textures.md",
@@ -89,16 +90,7 @@
         "subsystems/field-interaction.md",
         "subsystems/world-rules.md",
         "subsystems/time.md",
-        "subsystems/camera-and-dialogue.md",
-        "subsystems/networking-future.md"
-      ]
-    },
-    {
-      "id": "why",
-      "title": "Why it is built this way",
-      "blurb": "The north star every feature is measured against.",
-      "pages": [
-        "VISION.md"
+        "subsystems/camera-and-dialogue.md"
       ]
     }
   ],
@@ -110,7 +102,12 @@
     "news.md": "reaches the site through the releases manifest's `news`, not as a docs page",
     "releases/": "every version's notes already reach the site through the releases manifest, which carries them in full; re-publishing them as docs pages would be the same text at a second URL",
     "adr/": "the two architecture decision records the shipped code cites by name, published so `// ADR-0028` in a source file resolves to something. Not on the site: two of the twenty-eight decisions on record would read as an incomplete set, and a docs site is a finished surface",
+    "fleet-agent.md": "an operator's runbook for a Floptle Cloud region box — minting a box token, the systemd unit, what to read when a deployment will not start. It helps somebody RUN the service, not use the engine, and the audience is Fopull LLC plus anyone self-hosting a region; the page a game developer wants is multiplayer.md, which is published",
     "subsystems/README.md": "folder index — the section heading covers it",
-    "tutorials/README.md": "folder index — the section heading covers it"
+    "tutorials/README.md": "folder index — the section heading covers it",
+
+    "VISION.md": "fails BOTH halves of the test above (`floptle/0190`). It is written to persuade a contributor rather than to help a user — it opens by telling the reader every decision in the repo should trace back to it — and it is out of date in the direction that undersells the engine: §7 still sets conditions for Floptle BECOMING a product it has met (three platforms, a paid cloud service, a shipped game), and §5 still calls networking `future` while fopull.com sells hosting for it. Kept in the repo, where the north star belongs; off the site, where a reader arriving from a search would be told the engine is not a product yet",
+    "subsystems/networking-future.md": "a design record whose first two paragraphs disclaim the rest of it — everything in it has shipped and its §7 stance was superseded by ADR-0022. Valuable in the repo as the record of why the seams are where they are; published, it is a click spent to be told that multiplayer.md is the page. multiplayer.md is that page and is published",
+    "subsystems/physics-slices.md": "a work plan, not documentation: slices ticked off as they landed, ordered by what is unit-testable versus what needs playtesting. Good project management, and it fails the first half of the test — it helps somebody BUILD the physics, not use it. physics.md is the page a user wants and is published"
   }
 }

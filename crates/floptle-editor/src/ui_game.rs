@@ -2269,7 +2269,7 @@ impl Editor {
         c |= ui
             .checkbox(&mut spec.button, "button (clickable)")
             .on_hover_text(
-                "the pointer can hover/press/click this element — its scripts get                  hoverStart / hoverEnd / pressed / released / clicked hooks.",
+                "the pointer can hover/press/click this element — its scripts get hoverStart / hoverEnd / pressed / released / clicked hooks.",
             )
             .changed();
         ui.horizontal(|ui| {
@@ -2525,7 +2525,7 @@ impl Editor {
                 c |= ui
                     .checkbox(&mut t.fit, "fit")
                     .on_hover_text(
-                        "dynamic sizing: the text scales to fill the element's rect                          (largest size that fits) — size is ignored",
+                        "dynamic sizing: the text scales to fill the element's rect (largest size that fits) — size is ignored",
                     )
                     .changed();
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut t.color).changed();
@@ -2850,7 +2850,7 @@ impl Editor {
         if ui
             .checkbox(&mut has, "slider")
             .on_hover_text(
-                "value-driven bar (health, progress…): child elements marked as                  Fill scale with the value, Handle children ride its position —                  the parts stay ordinary elements you retexture and arrange freely",
+                "value-driven bar (health, progress…): child elements marked as Fill scale with the value, Handle children ride its position — the parts stay ordinary elements you retexture and arrange freely",
             )
             .changed()
         {
@@ -2878,7 +2878,7 @@ impl Editor {
                 c |= ui
                     .checkbox(&mut s.interact, "draggable")
                     .on_hover_text(
-                        "the player can click/drag the track to set the value (settings                          sliders); off = display-only (health bars)",
+                        "the player can click/drag the track to set the value (settings sliders); off = display-only (health bars)",
                     )
                     .changed();
             });
@@ -2914,7 +2914,7 @@ impl Editor {
                     })
                     .response
                     .on_hover_text(
-                        "fill scales with the parent slider's value; handle rides its                          position — its authored size is the full-value size",
+                        "fill scales with the parent slider's value; handle rides its position — its authored size is the full-value size",
                     );
             });
         }
@@ -3009,7 +3009,7 @@ impl Editor {
         if ui
             .checkbox(&mut has, "scroll view")
             .on_hover_text(
-                "children keep their authored layout but scroll vertically with the                  wheel (clipped to this element's rect) — put more content inside                  than fits and it just works; scripts read/write UiElement.scrollY",
+                "children keep their authored layout but scroll vertically with the wheel (clipped to this element's rect) — put more content inside than fits and it just works; scripts read/write UiElement.scrollY",
             )
             .changed()
         {
@@ -3082,7 +3082,7 @@ impl Editor {
         if ui
             .checkbox(&mut has, "mask")
             .on_hover_text(
-                "clip the chosen elements (and everything inside them) to this                  element's rounded rect — pick targets by node name below",
+                "clip the chosen elements (and everything inside them) to this element's rounded rect — pick targets by node name below",
             )
             .changed()
         {

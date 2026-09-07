@@ -227,7 +227,7 @@ fn every_field_a_scene_render_binds_is_set_up_in_one_place() {
     }
     assert!(
         bound.len() >= 6,
-        "only found {bound:?} in the scene draw's bind tuple, which is fewer than the six          it has always taken — this test has stopped reading what it thinks it is reading"
+        "only found {bound:?} in the scene draw's bind tuple, which is fewer than the six it has always taken — this test has stopped reading what it thinks it is reading"
     );
 
     // `src/lib.rs`, not `src/main.rs`: the crate root moved to the library
@@ -240,7 +240,7 @@ fn every_field_a_scene_render_binds_is_set_up_in_one_place() {
     )
     .expect("read lib.rs");
     let start = setup.find("fn init_gpu_side").expect(
-        "`init_gpu_side` is gone — it is the one place both the window and the headless          verbs set the device up, and without it they can drift again",
+        "`init_gpu_side` is gone — it is the one place both the window and the headless verbs set the device up, and without it they can drift again",
     );
     let end = setup[start..].find("\n    }\n").map(|i| i + start).unwrap_or(setup.len());
     let init = &setup[start..end];

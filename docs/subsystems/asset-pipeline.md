@@ -176,15 +176,19 @@ project dir ─▶ walk deps from entry scene ─▶ strip editor data
             ─▶ pack assets + RON ─▶ link with floptle-runtime ─▶ platform bundle
 ```
 
-## 5. Temporary OoT test textures
+## 5. Placeholder test textures
 
-Per ADR-0010: Ocarina of Time textures
-are **local-only placeholders** under `assets/textures/_oot_temp/`, which is
-**git-ignored**. They are never committed (keeps history clean for the future OSS
-release) and are **replaced with original Fopull art before any release**
-(a gate before any release). The engine must never hard-depend on
-those files — built-in defaults ([`./materials-and-textures.md`](./materials-and-textures.md) §4)
-cover real content. A "drop test textures here" note lives in `assets/textures/README.md`.
+Third-party textures used while building test content are **local-only
+placeholders**, under a git-ignored folder. They are never committed — this
+repository is public, so nothing whose licence does not permit it goes into its
+history — and nothing that ships is built on them: placeholders are replaced with
+original Fopull art before a release, and that is a gate on the release rather
+than a habit.
+
+The rule that makes this safe is that the engine never hard-depends on any of
+them. Built-in defaults ([`./materials-and-textures.md`](./materials-and-textures.md) §4)
+cover real content, so a checkout with no placeholders in it renders correctly.
+`assets/textures/README.md` says where to put your own.
 
 ## 6. Editor UX — the Asset Browser
 

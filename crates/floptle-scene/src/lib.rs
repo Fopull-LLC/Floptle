@@ -88,6 +88,19 @@ pub struct NodeDoc {
     /// written before this said, so their bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tint: Option<[f32; 4]>,
+    /// The same Tint's ADDITIVE fresnel edge: `(r, g, b, strength)`.
+    ///
+    /// Its own field rather than four more numbers on `tint`, because `tint` is
+    /// a fixed-width 4-tuple that hundreds of scenes already spell exactly that
+    /// way — widening it would rewrite every one of them, and a scene that only
+    /// tints a colour still writes the byte-identical line it always did. Both
+    /// fields land on the ONE [`floptle_core::Tint`] component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint_rim: Option<[f32; 4]>,
+    /// The same Tint's ambient multiplier — see [`floptle_core::Tint::ambient`].
+    /// `None` = 1.0, the room's own ambient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint_ambient: Option<f32>,
     /// A physics rigidbody on this node (`None` = not a physics body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rigidbody: Option<RigidBodyDoc>,
@@ -3618,10 +3631,21 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
             ),
         );
     }
-    if let Some(t) = node.tint {
+    // The three fields are three lines in the file and ONE component in the
+    // world, so a node carrying only a rim (or only an ambient lift, which is
+    // what a character wants) still gets a Tint.
+    if node.tint.is_some() || node.tint_rim.is_some() || node.tint_ambient.is_some() {
+        let t = node.tint.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        let r = node.tint_rim.unwrap_or([0.0, 0.0, 0.0, 0.0]);
         world.insert(
             e,
-            floptle_core::Tint { color: [t[0], t[1], t[2]], alpha: t[3] },
+            floptle_core::Tint {
+                color: [t[0], t[1], t[2]],
+                alpha: t[3],
+                rim: [r[0], r[1], r[2]],
+                rim_strength: r[3],
+                ambient: node.tint_ambient.unwrap_or(1.0),
+            },
         );
     }
     if let Some(rb) = &node.rigidbody {
@@ -3903,11 +3927,17 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .unwrap_or_default();
         // Written only when it does something: the identity is "no tint", the
         // same value as its absence, and storing it would put a line into every
-        // scene that never used one.
-        let tint = world
-            .get::<floptle_core::Tint>(e)
-            .filter(|t| !t.is_identity())
+        // scene that never used one. Each of the three lanes is skipped on the
+        // same rule INDEPENDENTLY, so a node that only lifts its ambient does
+        // not gain a `tint: Some((1, 1, 1, 1))` line that says nothing.
+        let t = world.get::<floptle_core::Tint>(e).filter(|t| !t.is_identity());
+        let tint = t
+            .filter(|t| t.color != [1.0, 1.0, 1.0] || t.alpha < 1.0)
             .map(|t| [t.color[0], t.color[1], t.color[2], t.alpha]);
+        let tint_rim = t
+            .filter(|t| t.rim_strength != 0.0)
+            .map(|t| [t.rim[0], t.rim[1], t.rim[2], t.rim_strength]);
+        let tint_ambient = t.filter(|t| t.ambient != 1.0).map(|t| t.ambient);
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let celestial =
             world.get::<floptle_core::CelestialBody>(e).map(CelestialBodyDoc::from_body);
@@ -3999,6 +4029,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             material,
             object_materials,
             tint,
+            tint_rim,
+            tint_ambient,
             rigidbody,
             celestial,
             mesh_collider,
@@ -4567,6 +4599,8 @@ mod tests {
                     matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.4, 0.3] },
                     object_materials: Default::default(),
                     tint: None,
+                    tint_rim: None,
+                    tint_ambient: None,
                     scripts: vec![ScriptDoc {
                         kind: "pulsate".into(),
                         enabled: true,
@@ -4712,6 +4746,8 @@ mod tests {
                     matter: MatterDoc::Blob { scale: 1.3 },
                     object_materials: Default::default(),
                     tint: None,
+                    tint_rim: None,
+                    tint_ambient: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -4758,6 +4794,8 @@ mod tests {
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None },
                     object_materials: Default::default(),
                     tint: None,
+                    tint_rim: None,
+                    tint_ambient: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -4801,6 +4839,8 @@ mod tests {
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT },
                     object_materials: Default::default(),
                     tint: None,
+                    tint_rim: None,
+                    tint_ambient: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -5000,6 +5040,87 @@ mod tests {
         assert!(screen_shaders[1].params.is_empty());
         // …and the ORDER is the list's meaning, so it must not be a set.
         assert!(screen_shaders[0].shader.ends_with("inkOutline.flsl"));
+    }
+
+    /// **A Tint's additive lanes survive a save and a load**, and an old scene
+    /// that only ever wrote a colour still means exactly what it meant.
+    ///
+    /// The compat half is the point: `tint` is a fixed-width 4-tuple that
+    /// hundreds of authored scenes already spell, so the rim and the ambient
+    /// arrived as their OWN fields. If they had widened `tint` instead, every
+    /// one of those scenes would fail to parse — and this test is what says so.
+    #[test]
+    fn a_tints_additive_lanes_round_trip_and_old_scenes_still_load() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Name("Fighter".into()));
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Empty);
+        // Every lane set to something that differs from BOTH the default and
+        // the other lanes, so a mix-up cannot pass.
+        let authored = floptle_core::Tint {
+            color: [0.92, 0.13, 0.15],
+            alpha: 0.75,
+            rim: [0.11, 0.42, 0.98],
+            rim_strength: 1.3,
+            ambient: 1.6,
+        };
+        world.insert(e, authored);
+
+        let ron = to_ron(&to_doc("fight", &world)).expect("serializes");
+        assert!(ron.contains("tint_rim"), "the rim is written:\n{ron}");
+        assert!(ron.contains("tint_ambient"), "the ambient is written:\n{ron}");
+
+        let mut round = World::new();
+        spawn_into(&from_ron(&ron).expect("parses"), &mut round);
+        let got = round
+            .query::<floptle_core::Tint>()
+            .map(|(_, t)| *t)
+            .next()
+            .expect("the tint survives");
+        assert_eq!(got, authored, "every lane round trips");
+
+        // **The old spelling.** A scene written before any of this existed —
+        // one `tint` 4-tuple and nothing else — still loads, and lands on the
+        // lanes that leave the surface otherwise untouched.
+        let old = ron
+            .lines()
+            .filter(|l| !l.contains("tint_rim") && !l.contains("tint_ambient"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut back = World::new();
+        spawn_into(&from_ron(&old).expect("an old scene still parses"), &mut back);
+        let got = back.query::<floptle_core::Tint>().map(|(_, t)| *t).next().expect("a tint");
+        assert_eq!(got.color, [0.92, 0.13, 0.15], "its colour is what it always was");
+        assert_eq!(got.alpha, 0.75);
+        assert_eq!(got.rim_strength, 0.0, "and it asks for no rim");
+        assert_eq!(got.ambient, 1.0, "and the room's own ambient");
+    }
+
+    /// A node that lifts ONLY its ambient — the character case — still gets a
+    /// Tint, and does not gain a `tint: Some((1, 1, 1, 1))` line saying nothing.
+    #[test]
+    fn an_ambient_only_tint_needs_no_colour_line() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Name("Sae".into()));
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Empty);
+        world.insert(e, floptle_core::Tint { ambient: 1.6, ..Default::default() });
+
+        let ron = to_ron(&to_doc("fight", &world)).expect("serializes");
+        assert!(ron.contains("tint_ambient"), "the lift is written:\n{ron}");
+        assert!(!ron.contains("tint: Some"), "and nothing else is:\n{ron}");
+
+        let mut round = World::new();
+        spawn_into(&from_ron(&ron).expect("parses"), &mut round);
+        let got = round
+            .query::<floptle_core::Tint>()
+            .map(|(_, t)| *t)
+            .next()
+            .expect("an ambient-only Tint is still a Tint");
+        assert_eq!(got.ambient, 1.6);
+        assert_eq!(got.color, [1.0, 1.0, 1.0], "its colour lane is the identity");
     }
 
     /// A light probe volume survives World → RON → World, and a hand-written one

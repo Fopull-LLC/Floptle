@@ -544,6 +544,51 @@ pub(crate) const NEVER_SHIPS: &[&str] = &[
     "py", "pyc", "pyo",
 ];
 
+/// **What a DEDICATED SERVER never reads**, on top of [`NEVER_SHIPS`]
+/// (`floptle/0197`).
+///
+/// A server bundle is the same project with everything nobody can see or hear
+/// taken out of it. There is no window, no GPU, no audio device and no player
+/// on the box: `floptle serve` steps scripts, physics, animation and nav, and
+/// touches a texture, a sound or a font at no point in any of that.
+///
+/// **What is NOT here is the interesting half.** Models stay, because a mesh
+/// collider is a mesh and a skeleton is in the `.glb`; `.ron` of every kind
+/// stays; scripts, prefabs, navmeshes, animation clips and controllers stay;
+/// anything texty stays, because a script can read its own data files through
+/// `assets.getContents` and this list does not get to guess which. The rule is
+/// the same one `NEVER_SHIPS` follows: leave out only what there is provably no
+/// loader for on this machine.
+///
+/// A `.glb`'s own embedded textures are not reached by an extension list, and
+/// on a model-heavy project they are most of what is left. Re-encoding one to
+/// drop its images is a real piece of work and it is not this; if a bundle ever
+/// comes near the 256 MB ceiling, that is the next lever and not a bigger list.
+#[cfg(feature = "editor-ui")]
+pub(crate) const NEVER_SERVES: &[&str] = &[
+    // Pictures. Every one of these is sampled by a GPU that is not here.
+    "png", "jpg", "jpeg", "tga", "bmp", "gif", "webp", "dds", "ktx", "ktx2", "hdr", "exr",
+    // Sound, and the projects that make it.
+    "ogg", "wav", "mp3", "flac", "aiff", "aif", "m4a", "opus",
+    // Type. Nothing measures a glyph with nobody looking at it.
+    "ttf", "otf", "ttc", "woff", "woff2",
+    // Video.
+    "mp4", "webm", "mkv", "mov", "avi",
+    // Shaders are compiled against a device this box does not have. A `.flsl`
+    // is texty and a script CAN read one, but nothing on a server compiles it.
+    "flsl",
+];
+
+/// Whether a FILE belongs in a **server** bundle.
+#[cfg(feature = "editor-ui")]
+fn serves_file(path: &Path) -> bool {
+    ships_file(path)
+        && !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| NEVER_SERVES.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// Whether a project entry should ship, by NAME (dot-entries, and the runtime
 /// dirs at the project root).
 #[cfg(feature = "editor-ui")]
@@ -574,6 +619,22 @@ pub(crate) struct Skipped {
 /// records what [`ships_file`] refused.
 #[cfg(feature = "editor-ui")]
 fn copy_tree(src: &Path, dst: &Path, at_root: bool, skipped: &mut Skipped) -> std::io::Result<u64> {
+    copy_tree_with(src, dst, at_root, skipped, &ships_file)
+}
+
+/// [`copy_tree`], with the per-file rule handed in: a player build keeps
+/// everything a runtime can load ([`ships_file`]) and a server bundle keeps the
+/// subset a HEADLESS one can ([`serves_file`]). One walk, so the two cannot
+/// drift in how they treat dot-entries, runtime dirs or nesting — only in the
+/// one question they actually answer differently.
+#[cfg(feature = "editor-ui")]
+fn copy_tree_with(
+    src: &Path,
+    dst: &Path,
+    at_root: bool,
+    skipped: &mut Skipped,
+    keep: &dyn Fn(&Path) -> bool,
+) -> std::io::Result<u64> {
     floptle_vfs::create_dir_all(dst)?;
     let mut n = 0;
     for entry in floptle_vfs::read_dir(src)? {
@@ -584,9 +645,9 @@ fn copy_tree(src: &Path, dst: &Path, at_root: bool, skipped: &mut Skipped) -> st
         let from = entry.path();
         let to = dst.join(&name);
         if entry.is_dir() {
-            n += copy_tree(&from, &to, false, skipped)?;
+            n += copy_tree_with(&from, &to, false, skipped, keep)?;
         } else {
-            if !ships_file(&from) {
+            if !keep(&from) {
                 skipped.files += 1;
                 skipped.bytes += floptle_vfs::size(&from).unwrap_or(0);
                 continue;
@@ -939,6 +1000,174 @@ pub(crate) fn export_game_with(
     Ok((msg, out_c))
 }
 
+/// **A dedicated-server bundle** (`floptle/0197`): the project a fleet box runs,
+/// and nothing else.
+///
+/// ## Why there is no binary in it
+///
+/// The obvious shape for "a server build" is a server executable, and it is the
+/// wrong one. The boxes are aarch64 and almost no developer machine is, so a
+/// binary means a cross-compile step — which is where "one command" dies, and
+/// which is also the only place in this pipeline a malicious upload could live.
+/// A **bundle the box's own `floptle serve` executes** keeps the trust boundary
+/// exactly where it already is (the engine runs untrusted Lua by design) and
+/// leaves the fleet agent one binary it can verify. So this writes a project and
+/// a manifest naming the engine version to run it with, and the box supplies the
+/// engine.
+///
+/// ## What it refuses
+///
+/// A project that cannot run headless is refused HERE, at the developer's
+/// machine with the reason in front of them, rather than as a deployment that
+/// goes `failed` on a box they cannot see. A `Rollback` scene is the big one and
+/// it is not a gap: every peer simulates a rollback match, so it is hosted by a
+/// player, and a dedicated server has nothing to drive.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn export_server(
+    project_root: &Path,
+    out: &Path,
+    title: &str,
+    scene: Option<&str>,
+) -> Result<(String, PathBuf), String> {
+    // **EVERY REFUSAL BEFORE ANYTHING IS CREATED.** `prepare_out` makes the
+    // output directory, so validating after it leaves a bundle-shaped folder
+    // behind for a project that was refused — the same trap the native path
+    // learned about its binary ("a failed export must never leave a
+    // runnable-looking exe"), one level up.
+    let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
+    let cfg = floptle_scene::load_project(&proj.join("project.ron"));
+
+    // WHICH SCENE this server hosts. `--scene` wins; otherwise the project's
+    // entry scene, which is the only other defensible answer. Named in the
+    // manifest either way, because a bundle that does not say what it runs
+    // makes the fleet agent guess.
+    let want = scene.map(str::to_string).or_else(|| cfg.entry_scene.clone()).ok_or_else(|| {
+        "this project has no entry scene, so there is nothing for a server to host — \
+         pass the scene to serve, or set one in Edit ⏵ Project Settings"
+            .to_string()
+    })?;
+    let scene_path = resolve_entry_scene(&proj, &want)
+        .ok_or_else(|| format!("the scene to serve ({want}) doesn't exist in this project"))?;
+
+    // **Refused at the developer's machine, not on the box.** The same rule
+    // `floptle serve` applies when it opens a scene — shared so a bundle can
+    // never pass here and be refused there.
+    let doc = floptle_scene::from_ron(
+        &floptle_vfs::read_to_string(&scene_path).map_err(|e| format!("read {want}: {e}"))?,
+    )
+    .map_err(|e| format!("read {want}: {e}"))?;
+    crate::dedicated::check_servable(&doc, &scene_path)?;
+
+    // Only now does anything land on disk.
+    let (_, out_c) = prepare_out(project_root, out)?;
+
+    // **A bundle is UPLOADED, so anything left in this folder rides with it.**
+    // Export a server bundle over a native export — the same "builds" folder,
+    // which is what people use — and the native build's `floptle-game.ron` sat
+    // there beside ours: a manifest the fleet box does not read, in an artifact
+    // measured against a 256 MB ceiling. The web target learned the same lesson
+    // in rc4; it is sharper here because this one is shipped somewhere.
+    //
+    // Only a manifest one of OUR exports wrote, and nothing else in the folder:
+    // a bundle must not go deleting files it cannot account for.
+    for manifest in ["floptle-game.ron", "floptle-server.ron"] {
+        let p = out_c.join(manifest);
+        if floptle_vfs::is_file(&p) {
+            floptle_vfs::remove_file(&p)
+                .map_err(|e| format!("clear the previous export's {manifest}: {e}"))?;
+        }
+    }
+
+    // `assets/` is the bundle's own, exactly as it is for a native build: it is
+    // written here, so a previous one is replaced rather than merged with — two
+    // projects in one tree is a worse artifact than either. A stale FILE of
+    // that name (the old broken-export shape) would otherwise stop the copy
+    // with "File exists" instead of being replaced.
+    let ship = out_c.join("assets");
+    if floptle_vfs::is_dir(&ship) {
+        std::fs::remove_dir_all(&ship).map_err(|e| format!("clear old bundle: {e}"))?;
+    } else if floptle_vfs::exists(&ship) {
+        floptle_vfs::remove_file(&ship).map_err(|e| format!("clear old bundle: {e}"))?;
+    }
+    let mut skipped = Skipped::default();
+    let files = copy_tree_with(&proj, &ship, true, &mut skipped, &serves_file)
+        .map_err(|e| format!("copy project: {e}"))?;
+    let linked = ship_linked_packages(&proj, &ship)?;
+    let port = make_portable(&ship, &proj);
+
+    let rel = scene_path
+        .strip_prefix(&proj)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| want.clone());
+    let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
+    let manifest = format!(
+        "(\n    \
+         // A dedicated-server bundle. The box runs its OWN `floptle serve` of\n    \
+         // `engine_version` against `project`, so nothing here is a binary.\n    \
+         title: {title:?},\n    \
+         project: \"assets\",\n    \
+         scene: {rel:?},\n    \
+         engine_version: {engine:?},\n    \
+         game: {:?},\n\
+         )\n",
+        cfg.cloud.as_ref().map(|c| c.game.clone()).unwrap_or_default(),
+    );
+    floptle_vfs::write(out_c.join("floptle-server.ron"), manifest)
+        .map_err(|e| format!("write manifest: {e}"))?;
+
+    let bytes = dir_bytes(&ship) + 1024;
+    let mut msg = format!(
+        "bundled {files} file(s) ({}) to {} — serves {rel} on engine {engine}",
+        human_bytes(bytes),
+        out_c.display()
+    );
+    if skipped.files > 0 {
+        msg.push_str(&format!(
+            "\n  left out {} file(s) ({}) a headless server never reads",
+            skipped.files,
+            human_bytes(skipped.bytes)
+        ));
+    }
+    if linked > 0 {
+        msg.push_str(&format!("\n  materialised {linked} linked package(s)"));
+    }
+    if port.rewritten > 0 {
+        msg.push_str(&format!("\n  made {} file(s) portable", port.rewritten));
+    }
+    // The ceiling is the contract's (§4, 256 MB). Said as a warning rather than
+    // a refusal: the file is still correct and an operator may well have raised
+    // the cap by the time it is uploaded.
+    if bytes > SERVER_BUNDLE_MAX {
+        msg.push_str(&format!(
+            "\n  WARNING: {} is over the {} upload ceiling — the models are usually what is \
+             left; see NEVER_SERVES",
+            human_bytes(bytes),
+            human_bytes(SERVER_BUNDLE_MAX)
+        ));
+    }
+    Ok((msg, out_c))
+}
+
+/// The contract's upload ceiling for one server bundle (§4).
+#[cfg(feature = "editor-ui")]
+pub(crate) const SERVER_BUNDLE_MAX: u64 = 256 * 1024 * 1024;
+
+#[cfg(feature = "editor-ui")]
+fn dir_bytes(p: &Path) -> u64 {
+    let Ok(rd) = floptle_vfs::read_dir(p) else { return 0 };
+    rd.into_iter()
+        .map(|e| {
+            let path = e.path();
+            if e.is_dir() { dir_bytes(&path) } else { floptle_vfs::size(&path).unwrap_or(0) }
+        })
+        .sum()
+}
+
+#[cfg(feature = "editor-ui")]
+fn human_bytes(b: u64) -> String {
+    if b >= 1024 * 1024 { format!("{:.1} MB", b as f64 / 1048576.0) } else { format!("{b} B") }
+}
+
 /// Stamp a browser build: the staged project packed into one bundle the page
 /// fetches (`game.flpk`), beside the web template — the page with the game's
 /// title in it, the JS glue, and the wasm module.
@@ -1102,15 +1331,40 @@ fn web_template_from_checkout() -> Option<PathBuf> {
     floptle_vfs::is_file(&marker).then_some(marker)
 }
 
+/// The PLATFORM that means "a dedicated-server bundle" rather than a build for
+/// a machine — see [`export_server`], which is what it dispatches to.
+#[cfg(feature = "editor-ui")]
+pub(crate) const SERVER_PLATFORM: &str = "server";
+
 /// Headless `--export <PROJECT> <OUT> <PLATFORM>`: stamp a build without a
 /// window or a GPU. Same code the dialog drives — the template resolution just
 /// blocks instead of being polled — so CI and scripts get exactly the editor's
 /// behaviour, and this path is what makes the feature verifiable end to end.
 ///
-/// `PLATFORM` is a release artifact key (`windows-x86_64`, `macos-aarch64`, …)
-/// or `host` for this machine.
+/// `PLATFORM` is a release artifact key (`windows-x86_64`, `macos-aarch64`, …),
+/// `host` for this machine, or [`SERVER_PLATFORM`] for a server bundle.
 #[cfg(feature = "editor-ui")]
-pub(crate) fn headless_export(project: &Path, out: &Path, platform: &str, title: &str) -> i32 {
+pub(crate) fn headless_export(
+    project: &Path,
+    out: &Path,
+    platform: &str,
+    title: &str,
+    scene: Option<&str>,
+) -> i32 {
+    // A server bundle is not a platform build and shares none of the machinery
+    // below it: no template to resolve, no binary to copy, no cross toolchain.
+    if platform == SERVER_PLATFORM {
+        return match export_server(project, out, title, scene) {
+            Ok((msg, _)) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("export failed: {e}");
+                1
+            }
+        };
+    }
     let version = crate::distribution_version();
     let target = if platform == "host" {
         &EXPORT_TARGETS[0]
@@ -1533,6 +1787,138 @@ mod tests {
 
     fn target(label: &str) -> &'static ExportTarget {
         EXPORT_TARGETS.iter().find(|t| t.label == label).expect("target exists")
+    }
+
+    /// **A server bundle must not upload a previous export.**
+    ///
+    /// A bundle goes to a fleet box against a 256 MB ceiling, so a native
+    /// export left in the same folder — the same "builds" folder, which is what
+    /// people use — rides along as a renamed engine binary plus a second whole
+    /// copy of the project, counted by nobody. The web target learned this in
+    /// rc4; the reason is sharper here because this one is uploaded.
+    ///
+    /// The other half is the one to be careful about: a bundle must not go
+    /// deleting files it cannot account for. `assets/` is its own name and is
+    /// replaced; anything else in the folder survives.
+    #[test]
+    fn a_server_bundle_clears_a_previous_export_but_not_a_strangers_folder() {
+        let proj = temp("srv-over-proj");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), "(entry_scene: Some(\"first\"))").unwrap();
+        floptle_vfs::write(
+            proj.join("scenes/first.ron"),
+            "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
+        )
+        .unwrap();
+
+        // A native export already lives in the output folder.
+        let out = temp("srv-over-out");
+        floptle_vfs::create_dir_all(out.join("assets/scenes")).unwrap();
+        floptle_vfs::write(out.join("assets/scenes/stale.ron"), "(nodes: [])").unwrap();
+        floptle_vfs::write(out.join("floptle-game.ron"), "(title: \"Old\", project: \"assets\")")
+            .unwrap();
+
+        export_server(&proj, &out, "Arena", None).expect("bundles");
+        assert!(
+            !floptle_vfs::exists(out.join("floptle-game.ron")),
+            "the previous export's manifest would be uploaded to a server that ignores it"
+        );
+        assert!(
+            !floptle_vfs::exists(out.join("assets/scenes/stale.ron")),
+            "and its whole project tree with it"
+        );
+        assert!(floptle_vfs::is_file(out.join("floptle-server.ron")), "the bundle is written");
+        assert!(floptle_vfs::is_file(out.join("assets/scenes/first.ron")), "with the project");
+
+        // A folder that is not one of our exports keeps everything we cannot
+        // account for. `assets/` is the bundle's own name and is replaced —
+        // two projects in one tree is a worse artifact than either — but
+        // nothing else in the folder is ours to touch.
+        let out2 = temp("srv-over-strangers");
+        floptle_vfs::create_dir_all(out2.join("notes")).unwrap();
+        floptle_vfs::write(out2.join("notes/deploy.txt"), "not ours").unwrap();
+        floptle_vfs::write(out2.join("README.md"), "not ours either").unwrap();
+        export_server(&proj, &out2, "Arena", None).expect("bundles");
+        assert!(floptle_vfs::is_file(out2.join("notes/deploy.txt")), "a stranger's folder");
+        assert!(floptle_vfs::is_file(out2.join("README.md")), "a stranger's file");
+    }
+
+    /// A project with no entry scene is refused with a sentence, and the
+    /// sentence is not full of holes.
+    ///
+    /// The run of spaces is worth asserting on: this message was written with a
+    /// line continuation that got collapsed, so it reached the developer as
+    /// "…nothing for a server to host —          pass the scene to serve".
+    #[test]
+    fn a_project_with_no_entry_scene_is_refused_readably() {
+        let proj = temp("srv-no-entry");
+        floptle_vfs::create_dir_all(&proj).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        let out = temp("srv-no-entry-out");
+        let e = export_server(&proj, &out, "Arena", None).expect_err("nothing to host");
+        assert!(e.contains("entry scene"), "{e}");
+        assert!(!e.contains("   "), "the message has a hole in it: {e:?}");
+        assert!(
+            !floptle_vfs::exists(out.join("floptle-server.ron")),
+            "a refused export must leave nothing bundle-shaped behind"
+        );
+    }
+
+    /// **A server bundle keeps what a headless run reads and drops what it
+    /// cannot.**
+    ///
+    /// The interesting assertions are the KEEPS. Dropping a `.png` is the easy
+    /// half and the obvious list; the way this goes wrong is somebody widening
+    /// the list until a server stops having the mesh its colliders are made of,
+    /// the clips it steps, or the data file a script reads — none of which
+    /// looks like a rendering asset and all of which a server needs.
+    #[test]
+    fn a_server_bundle_drops_only_what_a_headless_run_cannot_read() {
+        // Dropped: nothing on a box can see, hear or render any of these.
+        for gone in [
+            "textures/skin.png", "ui/font.ttf", "audio/music/battle.ogg",
+            "sky.hdr", "shaders/water.flsl", "cutscene.mp4",
+        ] {
+            assert!(!serves_file(Path::new(gone)), "{gone} should not be in a server bundle");
+        }
+        // Kept, and each for its own reason:
+        for keep in [
+            // a mesh collider IS a mesh, and a skeleton lives in the .glb
+            "models/Sae.glb",
+            // scenes, prefabs, controllers, navmeshes — all `.ron`
+            "scenes/mp.ron", "prefabs/Crate.prefab.ron", "animation_controllers/Sae.actl.ron",
+            // the simulation itself
+            "scripts/game/matchDirector.lua",
+            // a script can read its own data through `assets.getContents`, and
+            // this list does not get to guess which texty file that is
+            "data/levels.json", "movelist.lua", "notes.txt",
+        ] {
+            assert!(serves_file(Path::new(keep)), "{keep} MUST be in a server bundle");
+        }
+        // …and `NEVER_SHIPS` still applies on top: an authoring input is no
+        // more loadable on a server than it was in a game.
+        assert!(!serves_file(Path::new("models/Sae.blend")));
+    }
+
+    /// The extension test is case-insensitive, because a `.PNG` off a Windows
+    /// asset pack is the same 4 MB nobody on a server will look at.
+    #[test]
+    fn the_server_strip_does_not_care_about_case() {
+        assert!(!serves_file(Path::new("art/Sky.PNG")));
+        assert!(!serves_file(Path::new("audio/Theme.OGG")));
+    }
+
+    /// `server` is offered as a platform, and it is NOT one of the binary
+    /// targets — nothing in `EXPORT_TARGETS` answers to it, because a bundle
+    /// carries no binary at all.
+    #[test]
+    fn server_is_a_platform_but_not_a_binary_target() {
+        assert!(
+            EXPORT_TARGETS.iter().all(|t| t.template_key() != Some(SERVER_PLATFORM)),
+            "a server bundle has no engine template to resolve"
+        );
+        assert_ne!(SERVER_PLATFORM, floptle_dist::WEB_PLATFORM);
+        assert!(!floptle_dist::PLATFORMS.contains(&SERVER_PLATFORM));
     }
 
     /// A typed export folder resolves PREDICTABLY: absolute stays put, relative

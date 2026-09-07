@@ -9,8 +9,8 @@
 > [`./renderer.md`](./renderer.md), and materials in
 > [`./materials-and-textures.md`](./materials-and-textures.md).
 
-> **STATUS (2026-07-15): text core SHIPPED — phases 1–4 of the shader plan**,
-> which supersedes this pre-spec's integration details. What's live:
+> **STATUS (2026-07-15): text core SHIPPED — phases 1–4 of the shader plan.**
+> What's live:
 > `floptle-shader` (IR arena + checker, round-trippable `.flsl` parse/print,
 > WGSL transpile, naga validation with `.flsl` line mapping, stdlib v1);
 > **Fragment stage** — `Material.shader` names a `.flsl`, one pipeline per
@@ -23,9 +23,9 @@
 > generated from `uniform`/`texture` declarations; mtime hot reload with
 > last-good-pipeline fallback; `.flsl` syntax highlighting, live squiggles and
 > a stdlib Docs section in the Scripting tab; `◈ New Shader` in Assets.
-> Divergences from this pre-spec: stdlib identifiers are **camelCase**, the
-> stage is named `sdf` (not raymarch), and the `Vertex`/light stages are still
-> reserved (proposal §9). Probes: `shader_probe`, `field_shape_probe`.
+> Two names below differ from what shipped: stdlib identifiers are
+> **camelCase**, and the stage is named `sdf` rather than raymarch. The
+> `Vertex` and light stages are reserved and not built. Probes: `shader_probe`, `field_shape_probe`.
 >
 > **`stage post` is live** (v0.44): full-screen passes over the finished frame,
 > carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
@@ -99,8 +99,8 @@
 > shading normal toward the viewer via `facing_normal`; probe:
 > `flsl_prepass_probe`).
 
-This is Floptle's biggest lever for visuals nobody else can make (see
-[VISION](../VISION.md) §4.2). We *own the representation*, so we can add
+This is Floptle's biggest lever for visuals nobody else can make. We *own the
+representation*, so we can add
 non-standard nodes — raymarch/SDF warps, feedback, impossible color transport —
 that drive the otherworldly look. We start with a usable subset and grow the
 stdlib.

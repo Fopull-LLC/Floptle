@@ -245,6 +245,11 @@ fn probe(
                 if drop <= 0.0 || -dy > drop || gap > drop_span {
                     continue;
                 }
+                // A drop has to be a FALL, and a fall needs the way down to be
+                // open. See `floored`.
+                if floored(field, grid, i, dx, dz, k, from.y, grid.cells[j].y, step) {
+                    continue;
+                }
                 LinkKind::Drop
             } else {
                 if jump <= 0.0 || gap > jump || gap <= 0.0 {
@@ -293,6 +298,55 @@ fn crosses_a_carve(volumes: &[AreaVolume], from: [f32; 3], to: [f32; 3]) -> bool
         ];
         volumes.iter().any(|v| v.blocks && v.contains(at))
     })
+}
+
+/// Whether there is a floor between a ledge and the ground below it — the thing
+/// a character would have to fall THROUGH to make this drop.
+///
+/// **This is the difference between a ledge and a skirting board.** A ledge is
+/// any cell the flood fill stopped at, and erosion makes one of those out of
+/// every wall, every doorframe and every armchair in the level: the cell beside
+/// it is not walkable because the agent's radius does not fit there, not
+/// because the floor ends. Look one column further out and there IS ground —
+/// the room below — and without this the bake calls that a drop and hands the
+/// router a hole through the ceiling. One two-storey house baked 3,170 drops,
+/// 1,980 of them a single cell across and up to ten metres straight down: a
+/// creature with `canDrop` walks up to the sofa and falls into the kitchen,
+/// which is not a route, it is a bug the level cannot be authored out of.
+///
+/// The question is asked of the **landing's** column, because that is where the
+/// floor in the way has to be: the surface the ledge is standing on, still
+/// there over the landing. Anything whose top is meaningfully above the landing
+/// and whose foot is no higher than the ledge is in the way of the fall. A real
+/// cliff has nothing there — its top stops at the edge — so real drops survive,
+/// and so does stepping off a platform onto ground that runs on underneath it.
+#[allow(clippy::too_many_arguments)]
+fn floored(
+    field: &Heightfield,
+    grid: &WalkableGrid,
+    i: usize,
+    dx: i32,
+    dz: i32,
+    k: i32,
+    from_y: f32,
+    to_y: f32,
+    step: f32,
+) -> bool {
+    let c = grid.cells[i];
+    let (nx, nz) = (c.x as i32 + dx * k, c.z as i32 + dz * k);
+    if nx < 0 || nz < 0 {
+        return false;
+    }
+    let Some(col) = field.column(nx as usize, nz as usize) else {
+        return false;
+    };
+    // Ground has no thickness, so a floor's `base` IS its top: the test on the
+    // foot has to be inclusive or the commonest case in the level — the ledge's
+    // own floor, at exactly the ledge's height — reads as being above it.
+    const EPS: f32 = 1e-3;
+    col.surfaces
+        .iter()
+        .any(|s| s.y > to_y + step && s.base <= from_y + EPS)
 }
 
 /// Whether the column `k` out from `i` has something in it tall enough to be in
@@ -407,6 +461,59 @@ mod tests {
         let there = mesh.path([1.0, 0.0, 2.0], [7.0, 0.0, 2.0]).unwrap();
         let back = mesh.path([7.0, 0.0, 2.0], [1.0, 0.0, 2.0]).unwrap();
         assert!(there.complete && back.complete, "both ways");
+    }
+
+    /// **The report this exists for.** Two storeys and a piece of furniture on
+    /// the upper one: the mesh is eroded around the furniture, so the cells
+    /// beside it are a "ledge" in the flood fill's sense — and the column one
+    /// cell further out has ground in it, three metres down, in the room below.
+    /// Nothing here is a way down. A creature that took one would be walking
+    /// through the floor.
+    ///
+    /// The balcony edge in the same bake is a real ledge and has to survive,
+    /// which is the half that makes the assertion mean something.
+    #[test]
+    fn a_ledge_the_floor_still_covers_is_not_a_drop() {
+        let s = NavSettings { max_drop: 5.0, max_jump: 0.0, ..tester() };
+        // Ground floor, and a smaller upper floor over the middle of it: the
+        // upper floor's rim is a balcony, and the drop off it is honest.
+        let mut tris = slab(0.0, 0.0, 8.0, 8.0, 0.0);
+        tris.extend(slab(2.0, 2.0, 4.0, 4.0, 3.0));
+        // A wardrobe standing in the middle of the upper floor.
+        let (x0, x1, z0, z1) = (3.8, 4.2, 3.8, 4.2);
+        for (a, b) in [
+            ([x0, z0], [x1, z0]),
+            ([x1, z0], [x1, z1]),
+            ([x1, z1], [x0, z1]),
+            ([x0, z1], [x0, z0]),
+        ] {
+            tris.push(Tri::new([a[0], 3.0, a[1]], [b[0], 3.0, b[1]], [a[0], 4.5, a[1]]));
+            tris.push(Tri::new([b[0], 3.0, b[1]], [b[0], 4.5, b[1]], [a[0], 4.5, a[1]]));
+        }
+        tris.extend(slab(x0, z0, x1 - x0, z1 - z0, 4.5)); // its top
+
+        let mesh = bake(&tris, &s).expect("both floors are walkable");
+        let drops: Vec<_> =
+            mesh.off_links.iter().filter(|l| l.kind == LinkKind::Drop).collect();
+
+        // Nothing may land underneath the upper floor: to get there from up
+        // there you would have to pass through it.
+        let under: Vec<_> = drops
+            .iter()
+            .filter(|l| {
+                l.from[1] > 1.5
+                    && (2.0..6.0).contains(&l.to[0])
+                    && (2.0..6.0).contains(&l.to[2])
+            })
+            .collect();
+        assert!(under.is_empty(), "no drop may go through the floor: {under:?}");
+
+        // ...and the balcony rim still has ways down, or this test would pass
+        // by generating nothing at all.
+        assert!(
+            drops.iter().any(|l| l.from[1] > 1.5),
+            "the balcony edge is a real ledge and must still be linked"
+        );
     }
 
     /// A wall is not a gap. The same two floors with something solid between

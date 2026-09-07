@@ -82,8 +82,8 @@ localizes *time* per body. Same shape, different axis.
 ## 3. Determinism — non-negotiable
 
 The master clock stays in charge. We are not building per-object wall-clock timers;
-those drift and would wreck both replay and the future networking goal
-([`./networking-future.md`](./networking-future.md)). The **global fixed step is the
+those drift and would wreck both replay and [networking](../multiplayer.md), where
+every peer has to step the same way. The **global fixed step is the
 authoritative master clock**; warped entities only ever *drain* whole sub-steps from
 their accumulator. Five invariants make the whole thing replayable bit-for-bit:
 

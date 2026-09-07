@@ -9,7 +9,7 @@ and simulates with **zero jitter and zero developer work**.
 > (`Transform` lives in `floptle-core`), the GPU upload path
 > [`./renderer.md`](./renderer.md), the SDF sim [`./physics.md`](./physics.md), and
 > the gravity-aligned player frame [`./gravity-and-density.md`](./gravity-and-density.md).
-> Future peers-share-a-space: [`./networking-future.md`](./networking-future.md).
+> Peers sharing a space: [`../multiplayer.md`](../multiplayer.md).
 
 The headline: **the developer writes ordinary world-space code.** You place a node at
 `(0, 0, 0)` or at a coordinate twelve light-years out; you read and set
@@ -269,10 +269,11 @@ keeps a stable up-vector for the camera and controller. Origin-anchoring and
 gravity-alignment are the same frame — one rebase keeps both the position *and* the
 orientation reference local.
 
-**Networking (deferred).** A future [`floptle-net`](./networking-future.md) must have
-peers **agree on `world_offset` and the frame tree** so everyone shares one space;
-since the authoritative sim is already `f64` + frames + deterministic fixed-step, the
-seam is clean. Out of scope now — noted so we don't paint over it.
+**Networking.** Peers must **agree on `world_offset` and the frame tree** so that
+everyone shares one space. Because the authoritative sim was already `f64` + frames
++ deterministic fixed-step, the seam was clean when
+[`floptle-net`](../multiplayer.md) came to use it — which is the whole reason this
+page said not to paint over it.
 
 ## 5. Performance & correctness
 
