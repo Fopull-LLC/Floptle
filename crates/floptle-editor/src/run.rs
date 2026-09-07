@@ -110,7 +110,11 @@ impl AllocWindow {
 }
 
 /// `--frames` and `--seconds` mean the same thing at the same rate.
-const DT: f32 = 1.0 / 60.0;
+///
+/// Shared with `shot --after`, so the two verbs step the world at one rate and a
+/// picture taken after thirty seconds is thirty seconds of the same simulation
+/// `run` would have reported (`floptle/0170`).
+pub(crate) const DT: f32 = 1.0 / 60.0;
 
 /// How long to run for.
 pub(crate) enum Span {
