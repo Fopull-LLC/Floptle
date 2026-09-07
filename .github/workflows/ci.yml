@@ -234,6 +234,67 @@ jobs:
       - name: test (steam feature on)
         run: cargo test -p floptle-services -p floptle-steam --features floptle-steam/steam
 
+  fleet:
+    # **The aarch64 artifacts, proven on every push rather than at a tag.**
+    #
+    # Floptle Cloud's region box is an Oracle A1 — 64-bit ARM Linux — and
+    # `floptle_dist::PLATFORMS` deliberately does not list `linux-aarch64`,
+    # because putting it there would offer it in the Hub's install list and the
+    # export dialog. So the fleet agent and the engine it runs are published by
+    # `release.yml` as bare binaries, and NOTHING ELSE in this repository builds
+    # for that target.
+    #
+    # That is exactly the shape the wasm lint job exists for: a target nothing
+    # compiles is a target that rots, and here it would rot invisibly until a
+    # release — where the publish job depends on it, so the failure costs a tag
+    # rather than a red tick. Checking it here means the ARM runner label, the
+    # arm64 build dependencies and the two binaries are all known-good before
+    # anybody types `git tag`.
+    #
+    # `--all-targets` so the agent's own tests compile too; they run on x86 in
+    # `gate` and nothing about them is architecture-specific.
+    name: aarch64 (fleet agent + server)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # `floptle-server` is a shim over the editor library, so it needs the same
+      # headers the main gate does even though the binary links none of them at
+      # run time — wgpu and winit dlopen, and the ALSA and udev -sys build
+      # scripts panic without a .pc file to find.
+      - name: Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (zero warnings, aarch64)
+        run: cargo clippy -p floptle-fleet -p floptle-server --all-targets -- -D warnings
+
+      - name: the agent runs, and says so
+        run: |
+          set -euo pipefail
+          cargo build --release -p floptle-fleet
+          file target/release/floptle-fleet
+          # `--help` exits 0 and prints a table. This is how an operator tells a
+          # current binary from one already on a box, and it is the one thing
+          # about the agent that a box's owner touches before anything works.
+          ./target/release/floptle-fleet --help > fleet-help.txt
+          head -3 fleet-help.txt
+          # And it refuses to start with no token rather than polling an
+          # endpoint that will turn it away every ten seconds forever.
+          if ./target/release/floptle-fleet --region us-east --once; then
+            echo "::error::the agent started with no box token"
+            exit 1
+          fi
+
   luajit:
     # The OTHER script VM, built and tested on every push (ADR-0028).
     #
