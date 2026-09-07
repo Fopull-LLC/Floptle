@@ -458,8 +458,13 @@ pub(crate) const VERBS: &[Verb] = &[
                  lands in the file is what the editor would show.\n\n\
                  It looks through the scene's ACTIVE camera, or one named with --camera. A \
                  scene with no camera has no view and says so rather than inventing an angle.\n\n\
-                 The scene is not played: nothing has moved and no `start` has run. That is \
-                 the right frame for \"what did my edit do\"; use `run` for what happens next.\n\n\
+                 **Which frame you get.** By default the scene is not played: nothing has \
+                 moved and no `start` has run, which is the right frame for \"what did my \
+                 edit do\". With --after it is played first, and you get the frame a player \
+                 would be looking at — the only useful one for a game that BUILDS ITS WORLD \
+                 at runtime, whose scene file is a generator and a camera and whose \
+                 unplayed picture is therefore an empty room. `run` plays a project and \
+                 reports numbers; it writes no picture.\n\n\
                  The project's post-processing is applied — bloom, vignette, ambient \
                  occlusion, posterise, colour grading, depth of field, its own `stage post` \
                  shaders, and the retro presentation at its own resolution. Motion blur is \
@@ -488,6 +493,23 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Text,
                 required: false,
                 help: "WxH in pixels, or one number for a square (default: 960x540)",
+            },
+            Arg {
+                name: "--after",
+                value: Value::Text,
+                required: false,
+                help: "play the project for this long before drawing — `30s`, `1.5s` or a \
+                       bare number of seconds, or `900f` for frames. Time is fixed and off \
+                       the wall clock, so two runs give the same picture; a game that \
+                       switches its own active camera is photographed through the one the \
+                       GAME chose",
+            },
+            Arg {
+                name: "--seed",
+                value: Value::Text,
+                required: false,
+                help: "pin the game's randomness, so a project that generates its world \
+                       produces the same picture twice (only meaningful with --after)",
             },
             Arg {
                 name: "--out",
@@ -633,7 +655,9 @@ pub(crate) const VERBS: &[Verb] = &[
                  Nothing draws and nothing is pressed: models are not registered (physics is \
                  unaffected — a mesh collider reads its triangles from the file), and every \
                  key reads as up. \"No errors\" means nothing raised, not that the game is \
-                 good.",
+                 good.\n\n\
+                 **This verb writes no picture.** For the frame a player would be looking \
+                 at, `shot --after 30s` plays the project the same way and then draws it.",
         args: &[
             Arg {
                 name: "PROJECT",
@@ -1272,15 +1296,42 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             };
             let out = path(a, "out")
                 .unwrap_or_else(|| crate::shot::default_out(&project, scene.as_deref()));
-            Outcome::Exit(crate::shot::run(
-                &project,
-                scene.as_deref(),
-                text(a, "camera").as_deref(),
+            // Parsed here rather than by clap, so a bad value reads as a usage
+            // error naming the flag — the same reason `run` parses its own span.
+            let after = match text(a, "after").as_deref().map(crate::shot::parse_after) {
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(t)) => Some(t),
+                None => None,
+            };
+            let seed = match text(a, "seed").as_deref().map(str::parse::<u32>) {
+                Some(Err(_)) => {
+                    eprintln!("--seed wants a whole number");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(n)) => Some(n),
+                None => None,
+            };
+            if seed.is_some() && after.is_none() {
+                eprintln!(
+                    "--seed pins the randomness of a session that is played, and this shot \
+                     is of the unplayed scene — add --after, or drop --seed"
+                );
+                return Outcome::Exit(2);
+            }
+            Outcome::Exit(crate::shot::run(crate::shot::Args {
+                root: &project,
+                scene: scene.as_deref(),
+                camera: text(a, "camera").as_deref(),
                 size,
-                &out,
-                a.get_flag("json"),
-                a.get_flag("timing"),
-            ))
+                out: &out,
+                json: a.get_flag("json"),
+                timing: a.get_flag("timing"),
+                after,
+                seed,
+            }))
         }
         Some(("vfx", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));

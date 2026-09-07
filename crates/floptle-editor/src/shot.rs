@@ -43,6 +43,7 @@
 
 use std::path::{Path, PathBuf};
 
+use floptle_core::math::DVec3;
 use floptle_core::Matter;
 use floptle_render::{Gpu, Projection, RenderCamera};
 
@@ -80,16 +81,97 @@ fn find_camera(
     best
 }
 
+/// Play an already-opened project for `seconds`, and leave it playing.
+///
+/// `None` means it never entered Play at all. Otherwise the answer is `play_t`
+/// — the clock the SCRIPTS read, not `steps × DT`, because a step is not a
+/// promise that anything moved: a session held at the Play-start terrain hold
+/// steps happily with `dt = 0`, and reporting the span that was asked for is
+/// how `run` once published sixty seconds of simulation it had not done
+/// (`floptle/0157`).
+///
+/// It deliberately does **not** stop afterwards. `toggle_play` restores the
+/// scene to how it was authored, which would undo the entire point: the picture
+/// is of the live session.
+fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> {
+    // How long this is allowed to spend waiting on the background terrain
+    // threads, in TOTAL — the same budget `shot` already gives its pre-render
+    // settle, for the same reason: a world that never finishes streaming must
+    // end in a picture and a warning rather than in a hang.
+    const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+    let deadline = floptle_core::time::Instant::now() + STREAM_BUDGET;
+
+    // **Load the world around the view before pressing Play.** Play holds the
+    // fixed tick until the ground exists, and a held session is a PAUSED one:
+    // it steps happily with `dt = 0`, so scripts see no time pass and nothing
+    // moves. Outside Play residency anchors on the editor camera, so settling
+    // here is what puts terrain under the session before it starts.
+    ed.settle_world_streaming(anchor, STREAM_BUDGET);
+
+    ed.toggle_play();
+    if !ed.playing {
+        return None;
+    }
+    // Rounded and never zero: `--after 0.001` asking for no simulation at all
+    // would be a confusing way to spell `shot`.
+    let steps = ((seconds / crate::run::DT).round() as i64).clamp(1, u32::MAX as i64) as u32;
+    for _ in 0..steps {
+        // In the loop for the reason `run` documents at length: without it the
+        // Play-start terrain hold never lifts, and a held session is a PAUSED
+        // one — no fixed tick, so no rails, no physics, and a `dt` of zero
+        // handed to every script.
+        ed.pump_world_streaming();
+        // **A headless loop has no wall clock, and the terrain workers need
+        // one.** A windowed frame takes about sixteen milliseconds, which is
+        // when the background threads get their work done; these steps run back
+        // to back in microseconds, so a world that streams during Play — a
+        // planet the ship is approaching — never finishes, the hold never lifts
+        // and the whole span is stepped without being simulated. Giving the
+        // threads the time they need is the difference between a picture of the
+        // game and a picture of the loading screen.
+        while ed.terrain_worker_busy() && floptle_core::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            ed.pump_world_streaming();
+        }
+        ed.play_step(crate::run::DT, true);
+        ed.drain_script_logs();
+        // A script that asked to quit has said the session is over, and stepping
+        // past it would photograph a world nobody is in.
+        if !ed.playing {
+            break;
+        }
+    }
+    Some(ed.play_t)
+}
+
+/// What the verb was asked for. A struct rather than eight positional
+/// arguments, the same shape `vfx_shot::Args` uses and for the same reason.
+pub(crate) struct Args<'a> {
+    pub(crate) root: &'a Path,
+    pub(crate) scene: Option<&'a str>,
+    pub(crate) camera: Option<&'a str>,
+    pub(crate) size: (u32, u32),
+    pub(crate) out: &'a Path,
+    pub(crate) json: bool,
+    pub(crate) timing: bool,
+    /// `--after`: play the project for this many seconds BEFORE drawing.
+    ///
+    /// `None` is the authored frame — nothing has moved and no `start` has run,
+    /// which is the right answer to "what did my edit do". `Some` is the frame a
+    /// player would be looking at, which for a game that BUILDS ITS WORLD AT
+    /// RUNTIME is the only one worth photographing: the solar project's scene
+    /// file holds a generator, a camera and some UI, so every shot of it was a
+    /// bare sphere under a black sky — a true picture of the file and a picture
+    /// of nothing anybody plays (`floptle/0170`).
+    pub(crate) after: Option<f32>,
+    /// `--seed`: pin the game's randomness, so a project that generates its
+    /// world produces the same picture twice.
+    pub(crate) seed: Option<u32>,
+}
+
 /// Run the verb. Returns the process exit code.
-pub(crate) fn run(
-    root: &Path,
-    scene: Option<&str>,
-    camera: Option<&str>,
-    size: (u32, u32),
-    out: &Path,
-    json: bool,
-    timing: bool,
-) -> i32 {
+pub(crate) fn run(args: Args) -> i32 {
+    let Args { root, scene, camera, size, out, json, timing, after, seed } = args;
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -170,6 +252,46 @@ pub(crate) fn run(
     // effect absent from a picture whose whole promise is being the editor's.
     ed.refresh_gi();
 
+    // **`--after`: play the world, then photograph it.**
+    //
+    // `run` has the played world and writes no picture; `shot` writes a picture
+    // and has no played world. Neither half was missing — they were just not
+    // joined, and a game that builds its world on the first frames of play could
+    // therefore not be looked at at all. That matters more than a missing
+    // convenience: this project's own working rule is to verify anything visual
+    // by rendering a PNG and looking at it, and a runtime-generated game could
+    // not follow it (`floptle/0170`).
+    //
+    // The same fixed `DT` `run` steps by, off the wall clock, so two runs of one
+    // project produce the same picture. `pump_world_streaming` is in the loop
+    // for the reason `run` documents at length: without it the Play-start
+    // terrain hold never lifts, and a held session is a PAUSED one that steps
+    // happily with `dt = 0` — it would report the span and simulate none of it.
+    if let Some(seconds) = after {
+        if let Some(seed) = seed {
+            ed.script_host.set_seed(seed);
+        }
+        // Anchored on the camera the FILE names, which is the only presence
+        // the world has before anything has run.
+        let anchor = find_camera(&ed, camera)
+            .map(|(e, ..)| floptle_core::world_transform(&ed.world, e).translation)
+            .unwrap_or(DVec3::ZERO);
+        let Some(played) = play_for(&mut ed, seconds, anchor) else {
+            eprintln!("the project did not enter play mode, so there is nothing to photograph");
+            return 1;
+        };
+        // The clock the scripts themselves read, so the line cannot disagree
+        // with them about how much of the span actually ran.
+        if !json {
+            eprintln!("played {played:.2}s before drawing");
+        }
+    }
+
+    // **After the play span, deliberately.** A game that switches its own active
+    // camera during play must be photographed through the one the GAME chose,
+    // not the one the file did — for a runtime-built world that is the whole
+    // point, since the camera that takes over does so on the first frame.
+    // `--camera` still names one and still wins.
     let Some((e, fov_y, cull_mask, ortho, ortho_height)) = find_camera(&ed, camera) else {
         match camera {
             Some(name) => eprintln!("this scene has no camera called {name}"),
@@ -494,6 +616,36 @@ fn max_side() -> u32 {
 /// a GitHub issue about having asked for a big picture. That is the same shape
 /// as `inspect | head` panicking on SIGPIPE: a mistake in the command line
 /// reported as a defect in the engine.
+/// `--after`: how long to play before drawing, in seconds.
+///
+/// `30s`, `1.5s` or a bare `30` are seconds; `900f` is frames, converted at the
+/// same fixed rate `run` steps by. Frames are offered because a game tuned to
+/// the tick thinks in them, and "the 900th frame" is a more exact thing to ask
+/// for than "fifteen seconds" when a step is what moved.
+///
+/// **Every rejected value is rejected loudly.** A float that is not a number is
+/// the shape that costs a session: `nan` passes any comparison written against
+/// it and casts to 0, so the verb would play nothing and exit 0 with a picture
+/// of the unplayed scene — a confident wrong answer, which is the failure this
+/// verb set was built to refuse.
+pub(crate) fn parse_after(s: &str) -> Result<f32, String> {
+    let t = s.trim();
+    let (num, frames) = match t.strip_suffix(['f', 'F']) {
+        Some(n) => (n, true),
+        None => (t.strip_suffix(['s', 'S']).unwrap_or(t), false),
+    };
+    let n: f32 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("--after wants a span like 30s, 1.5s or 900f — not {s:?}"))?;
+    if !n.is_finite() || n <= 0.0 {
+        return Err(format!(
+            "--after {s:?} is not a length of time to play for; ask for something above zero"
+        ));
+    }
+    Ok(if frames { n * crate::run::DT } else { n })
+}
+
 pub(crate) fn parse_size(s: &str) -> Result<(u32, u32), String> {
     let bad = || format!("--size wants WxH (say 960x540), not {s:?}");
     let (w, h) = match s.split_once(['x', 'X']) {
@@ -528,6 +680,128 @@ pub(crate) fn default_out(root: &Path, scene: Option<&str>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_span_to_play_is_seconds_or_frames_and_never_a_quiet_zero() {
+        assert_eq!(parse_after("30"), Ok(30.0), "a bare number is seconds");
+        assert_eq!(parse_after("30s"), Ok(30.0));
+        assert_eq!(parse_after("1.5S"), Ok(1.5));
+        assert_eq!(parse_after(" 30s "), Ok(30.0));
+        // Frames, at the same rate `run` steps by.
+        assert_eq!(parse_after("60f"), Ok(1.0), "60 frames is a second");
+        // 900 × (1/60) does not land exactly on 15 in f32, and pretending it
+        // does is how a parser test starts asserting the float's rounding.
+        assert!((parse_after("900F").unwrap() - 15.0).abs() < 1e-3);
+
+        // **The values that would otherwise be a confident wrong answer.**
+        // `nan` passes every comparison written against it and casts to 0, so
+        // the verb would play nothing, photograph the unplayed scene and exit 0
+        // — a picture of an empty room presented as a picture of the game.
+        for bad in ["nan", "inf", "-inf", "-5", "0", "0s", "soon", "", "30ms"] {
+            assert!(parse_after(bad).is_err(), "--after {bad:?} must be refused, not guessed");
+        }
+        assert!(
+            parse_after("soon").unwrap_err().contains("30s"),
+            "and the refusal has to show what a span looks like"
+        );
+    }
+
+    /// `floptle/0170`: `run` had the played world and wrote no picture; `shot`
+    /// wrote a picture and had no played world. This is the join.
+    ///
+    /// The fixture is the case that made the card: a project whose scene file
+    /// holds a camera and a generator, and whose world does not exist until it
+    /// has run. Photographed as authored it is an empty room — a true picture
+    /// of the file and a picture of nothing anybody plays.
+    ///
+    /// No GPU here on purpose. `shot::run` installs an uncaptured-error handler
+    /// that EXITS the process, which on a machine with only an OpenGL adapter
+    /// (CI has one) would take the whole test binary down with it. What is
+    /// under test is the join — play first, then look — and that needs no
+    /// renderer.
+    #[test]
+    fn playing_first_is_what_makes_a_generated_world_photographable() {
+        let d = std::env::temp_dir().join(format!(
+            "flshot-after-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        // Naming the entry scene matters: opening a project that names none
+        // builds the starter scene, and the fixture would then be testing the
+        // crate-and-ball demo rather than this one.
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
+        )
+        .unwrap();
+        // The generator: the world it makes does not exist in the file at all,
+        // and it hands the view to a camera of its own on the first frame —
+        // which is exactly what the reporting project's `planet_camera` does.
+        std::fs::write(
+            d.join("scripts/gen.lua"),
+            "function start()\n\
+             \x20 createNode(\"Rock\")\n\
+             \x20 createNode(\"Chosen\", function(c)\n\
+             \x20   c.position = vec3(0, 2, 9)\n\
+             \x20   c:setCamera{ fovY = 1.0, active = true }\n\
+             \x20 end)\n\
+             end\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            "(name: \"s\", nodes: [\
+               (name: \"Authored\", matter: Camera(active: true)), \
+               (name: \"Gen\", scripts: [(kind: \"gen\")])\
+             ])",
+        )
+        .unwrap();
+
+        let mut ed = crate::Editor::default();
+        ed.open_project(d.clone());
+        ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
+
+        // As authored: the generated world is simply not there.
+        assert!(
+            ed.world.query::<floptle_core::Name>().all(|(_, n)| n.0 != "Rock"),
+            "the fixture is wrong — the rock must not exist before anything runs"
+        );
+        let (authored, ..) = find_camera(&ed, None).expect("the file's own camera");
+
+        let played =
+            play_for(&mut ed, 0.25, DVec3::ZERO).expect("the project must enter play mode");
+        assert!(played > 0.0, "the span has to actually simulate — a held session steps at dt=0");
+
+        // …and after playing it is, which is the whole card.
+        assert!(
+            ed.world.query::<floptle_core::Name>().any(|(_, n)| n.0 == "Rock"),
+            "the world a script builds must exist by the time the picture is taken"
+        );
+
+        // The camera the GAME chose, not the one the file did.
+        let (chosen, ..) = find_camera(&ed, None).expect("a camera after play");
+        assert_ne!(
+            chosen, authored,
+            "a game that takes over the view must be photographed through its own camera"
+        );
+        assert_eq!(
+            ed.world.get::<floptle_core::Name>(chosen).map(|n| n.0.clone()),
+            Some("Chosen".into())
+        );
+
+        // …unless --camera names one, which still wins outright.
+        let (named, ..) = find_camera(&ed, Some("Authored")).expect("--camera still selects");
+        assert_eq!(named, authored);
+
+        // Still playing: stopping would restore the scene and throw away the
+        // world that was just built.
+        assert!(ed.playing, "the session must be live when the picture is taken");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_size_is_wide_by_high_or_a_single_square() {
