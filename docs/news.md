@@ -19,7 +19,7 @@ again. Text can carry more than one colour: `setTextSpans` tints the bound key
 inside the sentence telling you to press it without splitting the line into
 hand-placed pieces, and `setGlyphOffsets` moves individual letters after layout
 for wobble and per-glyph reveals. A crowd wandering around one place can hold a
-`nav.sampler` instead of re-measuring the level on every draw. And three errors
+`nav.sampler` instead of re-measuring the level on every draw. And the errors
 that used to name Lua now name the cause: touching `synced` without a
 `replicated` table, and the very tempting `local n = createNode("Stain")`, which
 cannot return a node and now says so instead of failing as a nil a line later.
