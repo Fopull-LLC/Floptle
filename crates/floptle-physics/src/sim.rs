@@ -1114,14 +1114,32 @@ impl Sim {
             );
         }
         // 2. Trigger (sensor) overlap — the solver skips these, so test here.
+        //
+        // **Reject by bound before touching the narrow phase.** This pass is
+        // hand-rolled and so bypasses the solver's own broadphase: it used to
+        // run body × sample-center × `col.distance` with nothing but a layer
+        // mask in front of it. For a `TriMeshCollider` that is 125 spatial-hash
+        // lookups per center per body per tick, at any distance — one trigger on
+        // a 1,037-triangle mesh put a ~57 ms stall on 20% of frames while the
+        // scene's other 29 mesh props were free (`floptle/0171`). The mesh was
+        // never the problem; the missing reject was.
         for col in self.world.colliders.iter().filter(|c| c.sensor) {
             let Some(b_eid) = col.eid else { continue };
+            let col_bound = col.bounds();
             for (bi, body) in self.world.bodies.iter().enumerate() {
                 let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
                 if !body.active
                     || (self.world.matrix[body.layer as usize] >> col.layer) & 1 == 0
                 {
                     continue;
+                }
+                // `None` = a shape with no useful bound (an infinite plane, a
+                // terrain field): always a candidate, exactly as before.
+                if let Some((bc, br)) = col_bound {
+                    let (pc, pr) = body.bound_sphere();
+                    if (bc - pc).length() > br + pr {
+                        continue;
+                    }
                 }
                 let (centers, n_c, radius) = body.sample_centers();
                 for &c in &centers[..n_c] {
@@ -1149,10 +1167,18 @@ impl Sim {
                 continue;
             }
             let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
+            let (pc, pr) = body.bound_sphere();
             for col in self.world.colliders.iter().filter(|c| !c.sensor) {
                 let Some(b_eid) = col.eid else { continue };
                 if (self.world.matrix[body.layer as usize] >> col.layer) & 1 == 0 {
                     continue;
+                }
+                // Same reject as §2, the other way round: one sensor body against
+                // every static collider in the world (`floptle/0171`).
+                if let Some((bc, br)) = col.bounds() {
+                    if (bc - pc).length() > br + pr {
+                        continue;
+                    }
                 }
                 let (centers, n_c, radius) = body.sample_centers();
                 for &c in &centers[..n_c] {
@@ -1920,6 +1946,101 @@ impl Sim {
 #[cfg(test)]
 mod runtime_body_tests {
     use super::*;
+
+    /// One trigger on a 1,037-triangle mesh put a **~57 ms stall on 20% of
+    /// frames**; removing only `trigger: true` took the same scene to zero slow
+    /// frames out of 300 (`floptle/0171`). The geometry was never the problem —
+    /// 29 other mesh props in that scene were free — and neither was the
+    /// animation, which ablated without moving the number.
+    ///
+    /// The sensor pass is hand-rolled, so it bypasses the solver's broadphase:
+    /// it ran body × sample-center × `col.distance` behind nothing but a layer
+    /// mask, and a `TriMeshCollider::distance` is 125 spatial-hash lookups at
+    /// any range.
+    ///
+    /// This asserts the reject **by counting `distance` calls**, not by timing:
+    /// a duration guard on this machine would be a ratio against runner speed,
+    /// and the property that actually matters is exact — a distant body must
+    /// cost the narrow phase *nothing*.
+    #[test]
+    fn a_distant_body_never_reaches_a_triggers_narrow_phase() {
+        use crate::shapes::{BoxShape, CollisionShape};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        /// A box that reports its bound honestly and counts every exact query,
+        /// standing in for the trimesh whose `distance` is 125 hash lookups.
+        struct Counting(BoxShape, Arc<AtomicUsize>);
+        impl CollisionShape for Counting {
+            fn distance(&self, p: Vec3) -> f32 {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0.distance(p)
+            }
+            fn normal(&self, p: Vec3) -> Vec3 {
+                self.0.normal(p)
+            }
+            fn bounds(&self) -> Option<(Vec3, f32)> {
+                self.0.bounds()
+            }
+        }
+
+        // The real thing, first: the trimesh must actually offer a bound, or
+        // every reject below is dead code in production.
+        let tri = crate::shapes::TriMeshCollider::new(
+            &[Vec3::ZERO, Vec3::X, Vec3::Z],
+            &[0, 1, 2],
+        );
+        assert!(
+            tri.bounds().is_some(),
+            "a TriMeshCollider owns a fixed triangle list, so its extent is known at              build time — leaving it unbounded is what made it an always-candidate"
+        );
+
+        // 64 bodies parked together, and a 1-unit trigger at the origin.
+        fn bodies_at(body_at: DVec3) -> World {
+            let mut ecs = World::default();
+            for i in 0..64 {
+                let e = ecs.spawn();
+                ecs.insert(e, Transform::from_translation(body_at + DVec3::new(i as f64, 0.0, 0.0)));
+                ecs.insert(e, RigidBody { gravity: false, ..Default::default() });
+            }
+            ecs
+        }
+
+        let count_for = |body_at: DVec3| -> usize {
+            let ecs = bodies_at(body_at);
+            let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+            let hits = Arc::new(AtomicUsize::new(0));
+            let shape = Counting(
+                BoxShape::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY),
+                hits.clone(),
+            );
+            sim.world.add_collider_tagged(
+                DVec3::ZERO,
+                Box::new(shape),
+                0,
+                Some(9_999),
+                true, // a TRIGGER — this is the whole subject
+            );
+            sim.step_tick(1.0 / 60.0, None);
+            hits.load(Ordering::Relaxed)
+        };
+
+        // 64 bodies 200 units from a 1-unit trigger: not one exact query.
+        assert_eq!(
+            count_for(DVec3::new(200.0, 0.0, 0.0)),
+            0,
+            "a body outside the trigger's bound must be rejected before the narrow \
+             phase — this is the 57 ms"
+        );
+
+        // …and the fixture can tell the difference. Without this the assert
+        // above passes just as well on a sensor pass that was deleted.
+        assert!(
+            count_for(DVec3::new(0.0, 0.0, 0.0)) > 0,
+            "a body ON the trigger must still be tested exactly, or the reject has \
+             simply switched triggers off"
+        );
+    }
 
     fn world_with_bodies(n: usize) -> (World, Vec<Entity>) {
         let mut w = World::default();

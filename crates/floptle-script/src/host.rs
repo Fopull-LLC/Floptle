@@ -3764,7 +3764,16 @@ impl ScriptHost {
     /// Build the `synced` proxy for an instance whose script declares
     /// `replicated = { ... }` (called on every env (re)build).
     fn setup_synced(&mut self, env: &Table, key: &(u32, String)) {
-        let Ok(Some(declared)) = env.raw_get::<Option<Table>>("replicated") else { return };
+        let Ok(Some(declared)) = env.raw_get::<Option<Table>>("replicated") else {
+            // No `replicated` table: `synced` has no vars, which is correct and
+            // common (transform-only replication). Bind a proxy that says so on
+            // the first touch rather than leaving nil for Lua to trip over —
+            // `floptle/0189`, and the docs on the proxy itself.
+            if let Ok(proxy) = crate::net_api::build_undeclared_synced_proxy(&self.lua, &key.1) {
+                let _ = env.set("synced", proxy);
+            }
+            return;
+        };
         match crate::net_api::build_synced_proxy(&self.lua, &self.net, &declared, &key.1) {
             Ok((proxy, store)) => {
                 let _ = env.set("synced", proxy);
@@ -6403,6 +6412,103 @@ mod host_tests {
             said.iter().any(|m| m == "welcome 7"),
             "a file-scope net.on never fired — it said {said:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The counter-example that made `floptle/0189` take forty minutes, kept.
+    ///
+    /// `door` declares `replicated` and `barrel` does not. They sat in the same
+    /// generated scene, on nodes given identical `net` blocks by the same
+    /// generator, in the same session — and behaved differently with nothing
+    /// distinguishing them: the barrel's first `synced` write raised
+    /// `attempt to index nil with 'hx'`, which names Lua and not the cause.
+    ///
+    /// Both halves are asserted here because either alone passes while the
+    /// other is broken: bind the diagnostic proxy to *every* script and the
+    /// door stops replicating; bind it to none and the barrel is nil again.
+    #[test]
+    fn a_synced_touch_without_a_replicated_table_names_the_cause() {
+        let dir = std::env::temp_dir().join(format!("floptle-synced-0189-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        // Declares `replicated` — the sibling that worked all along.
+        floptle_vfs::write(
+            dir.join("scripts/door.lua"),
+            "replicated = { hx = 0 }
+function update() synced.hx = synced.hx + 1 end
+",
+        )
+        .unwrap();
+        // Does not — the one whose failure named nothing.
+        floptle_vfs::write(
+            dir.join("scripts/barrel.lua"),
+            "function update() synced.hx = 1 end
+",
+        )
+        .unwrap();
+        // …and a read is the worse half: it came back nil and failed silently.
+        floptle_vfs::write(
+            dir.join("scripts/mirror.lua"),
+            "function update() local _ = synced.state end
+",
+        )
+        .unwrap();
+
+        let mut world = World::default();
+        for kind in ["door", "barrel", "mirror"] {
+            let e = world.spawn();
+            world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(kind.into()));
+            world.insert(
+                e,
+                floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                    kind: kind.into(),
+                    enabled: true,
+                    params: Vec::new(),
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+        }
+
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+
+        let errs: Vec<String> = host.errors().iter().map(|e| e.to_string()).collect();
+        let said = errs.join("\n");
+
+        // The door replicates, exactly as before.
+        assert!(
+            !said.contains("door"),
+            "a script that DOES declare `replicated` must be untouched by this: {said}"
+        );
+        assert_eq!(
+            host.collect_synced().len(),
+            1,
+            "and it is still the one script collecting synced vars"
+        );
+
+        // The barrel's write, and the mirror's read, both name the cause.
+        for kind in ["barrel", "mirror"] {
+            let msg = errs
+                .iter()
+                .find(|e| e.contains(kind))
+                .unwrap_or_else(|| panic!("{kind} raised nothing at all: {said}"));
+            assert!(
+                !msg.contains("index nil"),
+                "{kind} still fails in Lua's words rather than the engine's: {msg}"
+            );
+            assert!(
+                msg.contains("declares no `replicated` table"),
+                "{kind} must name the cause: {msg}"
+            );
+            assert!(msg.contains("scripting.md"), "…and where to read about it: {msg}");
+        }
+        // The var that was touched is named, so the fix can be copied out.
+        assert!(said.contains("hx"), "the write names its var: {said}");
+        assert!(said.contains("state"), "the read names its var too: {said}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

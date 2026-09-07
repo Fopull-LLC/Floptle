@@ -1057,6 +1057,68 @@ pub(crate) fn build_synced_proxy(
     Ok((proxy, store))
 }
 
+/// The `synced` a script gets when it declares **no** `replicated` table.
+///
+/// Not declaring one is legitimate and common — a `Networked` node that
+/// replicates only its transform has no synced vars at all — so this is not a
+/// load-time warning. But leaving `synced` nil meant the first touch of it
+/// raised in Lua's words and nobody else's:
+///
+/// ```text
+/// forgery/barrel: runtime error: [string "forgery/barrel"]:830:
+///     attempt to index nil with 'hx'
+/// ```
+///
+/// Nothing in that names the cause, and every other signal says replication is
+/// on: the node carries a `Networked` component, the session is live,
+/// `net.role()` answers `"server"`, and the sibling script in the same
+/// generated scene replicates happily. The missing half lives in a different
+/// file from the one that looks wrong, so the error sends you into the netcode.
+/// It cost about forty minutes of a Forgery session (`floptle/0189`), most of
+/// it spent disproving good hypotheses the message was equally compatible with.
+///
+/// So the value is a table that raises the *engine's* message on the first
+/// read or write, naming the script and the var that was touched. **Read and
+/// write say the same thing on purpose**: a read comes back nil today and is
+/// the worse half — a client mirror reading `synced.state` fails silently and
+/// simply never updates.
+pub(crate) fn build_undeclared_synced_proxy(lua: &Lua, kind: &str) -> mlua::Result<Table> {
+    let proxy = lua.create_table()?;
+    let mt = lua.create_table()?;
+    fn explain(kind: &str, k: &Value) -> String {
+        let name = match k {
+            Value::String(s) => s.to_string_lossy().to_string(),
+            other => format!("{other:?}"),
+        };
+        format!(
+            "{kind}: synced.{name} — this script declares no `replicated` table, so it has \
+             no synced vars. Add `replicated = {{ {name} = <initial value> }}` at the top of \
+             {kind} (scripting.md §16). A Networked node replicates its transform without \
+             one; synced vars are the other half."
+        )
+    }
+    {
+        let kind = kind.to_string();
+        mt.set(
+            "__index",
+            lua.create_function(move |_, (_, k): (Table, Value)| -> mlua::Result<Value> {
+                Err(mlua::Error::runtime(explain(&kind, &k)))
+            })?,
+        )?;
+    }
+    {
+        let kind = kind.to_string();
+        mt.set(
+            "__newindex",
+            lua.create_function(move |_, (_, k, _v): (Table, Value, Value)| -> mlua::Result<()> {
+                Err(mlua::Error::runtime(explain(&kind, &k)))
+            })?,
+        )?;
+    }
+    proxy.set_metatable(Some(mt));
+    Ok(proxy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
