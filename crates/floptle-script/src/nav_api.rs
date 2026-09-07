@@ -969,6 +969,49 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
         let _ = t.set("random", f);
     }
 
+    // nav.sampler([near, radius]) -> handle | nil
+    //
+    // The neighbourhood gathered ONCE, for many draws — `s:point(u, v)`.
+    //
+    // `nav.random` re-gathers, re-sorts and re-measures every polygon its window
+    // covers on every single call, so its cost grows with the window: a game
+    // reported 0.014 ms at r=8 rising to 0.71 ms at r=80, which made a dozen
+    // agents redrawing a destination in one frame a 4 ms frame, and it had to
+    // cache around the engine (`floptle/0177`). A squad wanders around the same
+    // place, so the gather is the part worth holding.
+    //
+    // It is a SNAPSHOT of the mesh at the moment it was made. `nav.splice`
+    // re-baking part of the level does not reach a sampler already built —
+    // rebuild it when the ground changes.
+    let m = mesh.clone();
+    if let Ok(f) = lua.create_function(move |lua, (near, radius): (Option<Value>, Option<f64>)| {
+        let sampler = {
+            let guard = m.borrow();
+            let Some(mesh) = guard.as_ref() else { return Ok(Value::Nil) };
+            let within = near
+                .as_ref()
+                .and_then(|n| local_of(mesh, n))
+                .map(|c| (c, radius.unwrap_or(10.0) as f32));
+            std::rc::Rc::new(mesh.sampler(within))
+        };
+        let handle = lua.create_table()?;
+        // A window with nothing walkable in it answers nil forever, which
+        // otherwise reads as bad luck for the rest of the session.
+        handle.set("count", sampler.len())?;
+        let m2 = m.clone();
+        handle.set(
+            "point",
+            lua.create_function(move |_, (_this, u, v): (Value, f64, f64)| {
+                let guard = m2.borrow();
+                let Some(mesh) = guard.as_ref() else { return Ok(None) };
+                Ok(sampler.point(u as f32, v as f32).map(|p| world_vec(mesh, p)))
+            })?,
+        )?;
+        Ok(Value::Table(handle))
+    }) {
+        let _ = t.set("sampler", f);
+    }
+
     // nav.settings() -> table
     //
     // The character the mesh was baked for. A script that wants to move a body

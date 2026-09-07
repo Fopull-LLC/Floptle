@@ -787,6 +787,11 @@ impl NavMesh {
 
     /// …only on ground this character would stand on, so a patrol point picked
     /// for something that will not swim is never in the lake.
+    ///
+    /// One-shot: it gathers the neighbourhood, draws once and throws the gather
+    /// away. When the same place is drawn from repeatedly — a squad wandering
+    /// around one point, which is the ordinary case — hold a
+    /// [`NavMesh::sampler`] instead and pay the gather once.
     pub fn random_point_with(
         &self,
         near: Option<([f32; 3], f32)>,
@@ -794,13 +799,77 @@ impl NavMesh {
         v: f32,
         filter: &QueryFilter,
     ) -> Option<[f32; 3]> {
-        let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+        // Thread-local so a one-shot draw still allocates nothing, and the SAME
+        // gather-and-pick code as the held sampler, so the two cannot disagree
+        // about where a given `u` lands.
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<RandomSampler> =
+                std::cell::RefCell::new(RandomSampler::default());
+        }
+        SCRATCH.with(|s| {
+            let mut s = s.borrow_mut();
+            self.gather_into(&mut s, near, filter);
+            s.point(u, v)
+        })
+    }
+
+    /// A neighbourhood gathered **once**, to be drawn from many times.
+    ///
+    /// `nav.random` is the per-frame "wander somewhere near me" query, and a
+    /// dozen agents redrawing a destination in one frame is ordinary. Its cost
+    /// grew with the window because every call re-gathered, re-sorted and
+    /// re-measured every polygon the window touched: a game reported 0.014 ms at
+    /// r=8 rising to 0.71 ms at r=80, so a 37 m window at ~0.28 ms a draw made a
+    /// dozen draws 4 ms in one frame, and the project had to cache around it
+    /// (`floptle/0177`).
+    ///
+    /// A squad wanders around the same place, so the gather is the part worth
+    /// keeping. Held across calls, each draw is a binary search over the
+    /// cumulative areas — it does not walk the neighbourhood at all.
+    ///
+    /// **It is a snapshot.** `splice` re-baking part of the mesh does not reach
+    /// a sampler already built; draw from a stale one and you may get a point on
+    /// ground that has since been carved away. Rebuild it when the mesh
+    /// changes — which for a wander sampler is rare, and is the whole reason
+    /// this is a handle you hold rather than a cache the mesh keeps for you.
+    pub fn sampler(&self, near: Option<([f32; 3], f32)>) -> RandomSampler {
+        self.sampler_with(near, &QueryFilter::default())
+    }
+
+    /// [`Self::sampler`], restricted to ground this character would stand on.
+    pub fn sampler_with(
+        &self,
+        near: Option<([f32; 3], f32)>,
+        filter: &QueryFilter,
+    ) -> RandomSampler {
+        let mut s = RandomSampler::default();
+        self.gather_into(&mut s, near, filter);
+        s
+    }
+
+    /// The gather both paths share: clip every eligible polygon to the window,
+    /// measure the part that survives, and total as it goes.
+    fn gather_into(
+        &self,
+        out: &mut RandomSampler,
+        near: Option<([f32; 3], f32)>,
+        filter: &QueryFilter,
+    ) {
+        out.parts.clear();
+        out.total = 0.0;
         // The window to sample inside, in plan. Unbounded when nothing was asked.
+        //
+        // The neighbourhood is a **square** of side `2 * radius`, not a circle.
+        // Sampling a circle uniformly means rejecting and re-drawing, and
+        // re-drawing means a random stream this deliberately does not have — the
+        // caller supplies `u` and `v` precisely so a rollback re-simulates to
+        // the same destination. A square is the shape two numbers can fill in
+        // one pass, so a square is what it is, said here rather than
+        // approximated silently.
         let window = near.map(|(c, r)| {
             let r = r.abs();
             ([c[0] - r, c[2] - r], [c[0] + r, c[2] + r])
         });
-        // Each eligible polygon, cut down to the part of it inside the window.
         let clip = |p: &Poly| -> Option<([f32; 2], [f32; 2])> {
             if !filter.passable(p.area) {
                 return None;
@@ -815,89 +884,119 @@ impl NavMesh {
             }
             Some((lo, hi))
         };
-        // **Scratch that lives between calls, and one pass instead of three.**
-        //
-        // This is the per-frame query — "wander somewhere near me", a dozen
-        // agents at a time — and it used to allocate three vectors on every one
-        // of them (the index list, the clipped parts, their areas) and walk the
-        // neighbourhood three times over. The cost went up with the window: a
-        // 37 m radius measured 0.28 ms a draw, so a dozen draws was 4 ms in one
-        // frame, and a game had to cache around it.
-        //
         // The sort and the dedup stay. A polygon spanning several buckets is
-        // handed back once per bucket, and the pick walks the list accumulating
-        // area — so the ORDER decides which polygon a given `u` lands on. Left
-        // in bucket order, the same seed would pick different points depending
-        // on the grid, and this engine rolls back and re-simulates. Determinism
-        // is the whole reason the caller supplies `u` and `v` in the first
-        // place; it would be a strange thing to buy frame time with.
-        /// One eligible polygon, clipped to the window: which one, the box left
-        /// of it, and that box's area.
-        type Part = (u32, [f32; 2], [f32; 2], f32);
+        // handed back once per bucket, and the draw walks the cumulative areas —
+        // so the ORDER decides which polygon a given `u` lands on. Left in
+        // bucket order, the same seed would pick different points depending on
+        // the grid, and this engine rolls back and re-simulates. Determinism is
+        // the whole reason the caller supplies `u` and `v`; it would be a
+        // strange thing to buy frame time with.
         thread_local! {
             static IDX: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-            static PARTS: std::cell::RefCell<Vec<Part>> =
-                const { std::cell::RefCell::new(Vec::new()) };
         }
-        let picked = PARTS.with(|parts| {
-            let mut parts = parts.borrow_mut();
-            parts.clear();
-            // One pass: clip, measure and total, together.
-            let mut total = 0.0f32;
-            let mut take = |i: usize| {
-                let p = &self.polys[i];
-                if let Some((lo, hi)) = clip(p) {
-                    let area = ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(1e-6);
-                    total += area;
-                    parts.push((i as u32, lo, hi, area));
+        let take = |i: usize, out: &mut RandomSampler| {
+            let p = &self.polys[i];
+            if let Some((lo, hi)) = clip(p) {
+                // Weighted by the area actually available, not by the whole
+                // polygon's: a room the window clips a corner off must not win
+                // as if all of it counted.
+                let area = ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(1e-6);
+                out.total += area;
+                out.parts.push(Part { lo, hi, area, cum: out.total, y: p.centre[1] });
+            }
+        };
+        match window {
+            // A windowed ask must not walk the whole level to answer, so the
+            // index hands back just the neighbourhood.
+            Some((wlo, whi)) => IDX.with(|idx| {
+                let mut idx = idx.borrow_mut();
+                idx.clear();
+                self.index().for_each_in(wlo, whi, |i| idx.push(i as u32));
+                idx.sort_unstable();
+                idx.dedup();
+                for i in idx.iter() {
+                    take(*i as usize, out);
                 }
-            };
-            match window {
-                // A windowed ask must not walk the whole level to answer, so the
-                // index hands back just the neighbourhood.
-                Some((wlo, whi)) => IDX.with(|idx| {
-                    let mut idx = idx.borrow_mut();
-                    idx.clear();
-                    self.index().for_each_in(wlo, whi, |i| idx.push(i as u32));
-                    idx.sort_unstable();
-                    idx.dedup();
-                    for i in idx.iter() {
-                        take(*i as usize);
-                    }
-                }),
-                None => {
-                    for i in 0..self.polys.len() {
-                        take(i);
-                    }
+            }),
+            None => {
+                for i in 0..self.polys.len() {
+                    take(i, out);
                 }
             }
-            if parts.is_empty() {
-                return None;
-            }
-            // Weighted by the area actually available, not by the whole
-            // polygon's: a room the window clips a corner off must not win as if
-            // all of it counted.
-            let mut want = u * total;
-            let mut pick = parts.len() - 1;
-            for (i, (_, _, _, a)) in parts.iter().enumerate() {
-                if want <= *a {
-                    pick = i;
-                    break;
-                }
-                want -= a;
-            }
-            let (pi, lo, hi, area) = parts[pick];
-            // `v` places the point in one axis; the leftover of `u` places it in
-            // the other, so one polygon does not always get the same line across
-            // it.
-            let frac = (want / area).clamp(0.0, 1.0);
-            Some((pi as usize, lo, hi, frac))
-        });
-        let (pi, lo, hi, frac) = picked?;
-        let p = &self.polys[pi];
-        Some([lo[0] + (hi[0] - lo[0]) * frac, p.centre[1], lo[1] + (hi[1] - lo[1]) * v])
+        }
     }
 }
+
+/// One eligible polygon, clipped to the sampling window: the box left of it,
+/// that box's area, the running total through it, and the height to place a
+/// point at.
+///
+/// The polygon index is deliberately **not** kept: a sampler is a snapshot, and
+/// holding an index into a mesh that `splice` may have re-baked underneath it is
+/// how a stale handle turns into a wrong answer rather than an obvious one.
+#[derive(Clone, Copy)]
+struct Part {
+    lo: [f32; 2],
+    hi: [f32; 2],
+    area: f32,
+    /// Cumulative area through this part inclusive — what a draw binary
+    /// searches, so a draw costs `log k` rather than the `k` an accumulate-and-
+    /// subtract walk did.
+    cum: f32,
+    y: f32,
+}
+
+/// A gathered neighbourhood that answers many draws — see [`NavMesh::sampler`].
+#[derive(Default)]
+pub struct RandomSampler {
+    parts: Vec<Part>,
+    total: f32,
+}
+
+impl RandomSampler {
+    /// How many polygon parts the window covers. Mostly of interest to a caller
+    /// deciding whether its window is sane — an empty sampler answers `None`
+    /// forever, which otherwise looks like bad luck.
+    pub fn len(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// Nothing walkable in the window: every draw will answer `None`.
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// A point on the walkable surface, weighted by area so a big room stays
+    /// likelier than a corridor.
+    ///
+    /// `u` and `v` are two uniform numbers in `0..1` supplied by the CALLER
+    /// rather than drawn here — this engine rolls back and re-simulates, so a
+    /// wander destination has to come from the same seeded stream as everything
+    /// else the tick decided. A navmesh that reached for its own randomness
+    /// would desync every rollback that touched it.
+    pub fn point(&self, u: f32, v: f32) -> Option<[f32; 3]> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+        let want = u * self.total;
+        // First part whose cumulative area reaches `want`. `partition_point` is
+        // the binary search; clamping covers `u == 1.0` and the rounding at the
+        // very top of the range, where `want` can land a hair past the total.
+        let pick = self.parts.partition_point(|p| p.cum < want).min(self.parts.len() - 1);
+        let part = self.parts[pick];
+        let before = part.cum - part.area;
+        // `v` places the point in one axis; the leftover of `u` places it in the
+        // other, so one polygon does not always get the same line across it.
+        let frac = ((want - before) / part.area).clamp(0.0, 1.0);
+        Some([
+            part.lo[0] + (part.hi[0] - part.lo[0]) * frac,
+            part.y,
+            part.lo[1] + (part.hi[1] - part.lo[1]) * v,
+        ])
+    }
+}
+
 
 /// The best cell in one column to add to a rectangle, or `None` if there is not
 /// one that fits.
@@ -1291,6 +1390,48 @@ mod tests {
         let back = mesh.links[b].iter().find(|l| l.to == a).unwrap();
         assert_eq!(there.left, back.right);
         assert_eq!(there.right, back.left);
+    }
+
+    /// `floptle/0177`: the held sampler and the one-shot draw must not drift.
+    ///
+    /// They share a gather and a pick precisely so that they cannot, and this is
+    /// what says so. A second implementation of the weighting would be the
+    /// obvious way to write the sampler and would be wrong in a way nothing
+    /// would notice: both would keep returning plausible points on the mesh,
+    /// and only a rollback would disagree with itself.
+    #[test]
+    fn a_held_sampler_answers_exactly_what_the_one_shot_draw_does() {
+        let mesh = bake(&slab(0.0, 0.0, 20.0, 20.0, 0.0), &open(0.5));
+        let near = Some(([10.0, 0.0, 10.0], 6.0));
+        let sampler = mesh.sampler(near);
+        assert!(!sampler.is_empty(), "the window has floor in it");
+        for i in 0..200 {
+            let u = (i % 97) as f32 / 97.0;
+            let v = (i % 89) as f32 / 89.0;
+            assert_eq!(
+                sampler.point(u, v),
+                mesh.random_point(near, u, v),
+                "sampler and one-shot disagree at u={u}, v={v}"
+            );
+        }
+        // Deterministic, which is the whole reason `u`/`v` come from the caller.
+        assert_eq!(sampler.point(0.37, 0.62), sampler.point(0.37, 0.62));
+
+        // A window with no floor under it answers None rather than a point
+        // somewhere else — and says so up front, so a caller is not left
+        // reading a permanent nil as bad luck.
+        let empty = mesh.sampler(Some(([500.0, 0.0, 500.0], 1.0)));
+        assert!(empty.is_empty());
+        assert_eq!(empty.point(0.5, 0.5), None);
+
+        // Area weighting survives the cumulative form: a draw sweeping `u`
+        // across `0..1` must land across the whole window rather than piling
+        // into whichever polygon happens to be first.
+        let spread: Vec<f32> =
+            (0..50).filter_map(|i| sampler.point(i as f32 / 50.0, 0.5)).map(|p| p[0]).collect();
+        let lo = spread.iter().copied().fold(f32::MAX, f32::min);
+        let hi = spread.iter().copied().fold(f32::MIN, f32::max);
+        assert!(hi - lo > 6.0, "u must sweep the window, not one polygon: {lo}..{hi}");
     }
 
     #[test]
