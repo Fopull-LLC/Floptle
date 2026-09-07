@@ -2656,7 +2656,7 @@ impl EditorTabViewer<'_> {
                                     crate::responsive::para(
                                         ui,
                                         egui::RichText::new(
-                                            "no texture yet — give this node a Material with one,                                              and the sheet's cols/rows in its import settings",
+                                            "no texture yet — give this node a Material with one, and the sheet's cols/rows in its import settings",
                                         )
                                         .weak()
                                         .small(),
@@ -3028,6 +3028,32 @@ impl EditorTabViewer<'_> {
                                 let aimed = floptle_core::is_spot(*spot_angle);
                                 ui.label(if aimed { "spot light" } else { "light" });
                                 ui.small("position and facing come from the transform below");
+                                // **Where this scene stands against the cap**
+                                // (`floptle/0116`). Naming the sixteen is the
+                                // easy half and it is the half that does not
+                                // help: "twelve, plus whatever the room has" is
+                                // exactly the arithmetic that crosses it, and a
+                                // number that only appears in the notes is one
+                                // nobody reads at the moment it matters. The
+                                // live count is the half that does.
+                                {
+                                    let (msg, warn) = light_slot_line(self.light_counts);
+                                    let r = if warn {
+                                        ui.colored_label(egui::Color32::from_rgb(220, 170, 90), msg)
+                                    } else {
+                                        ui.small(msg)
+                                    };
+                                    r.on_hover_text(
+                                        "sixteen lights reach the shader at once, across the \
+                                         whole scene — 3D and 2D together. Past that the ones \
+                                         contributing most at the camera win and the rest are \
+                                         simply not drawn, which reads as \"my seventeenth \
+                                         torch does nothing\".\n\nA light at intensity 0 gives \
+                                         its slot back, which is how you pool them. The same \
+                                         two numbers are perf.counts().lights and \
+                                         .lightsDropped.",
+                                    );
+                                }
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("color");
                                     cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
@@ -5181,10 +5207,15 @@ impl EditorTabViewer<'_> {
                                 let t = floptle_core::Tint {
                                     color: [v[0], v[1], v[2]],
                                     alpha: v[3],
+                                    // The additive lanes are edited on their own
+                                    // rows below; the swatch owns the multiply
+                                    // half and nothing else.
+                                    ..cur
                                 };
-                                // White at full opacity is no tint: the node goes
-                                // back to carrying none rather than carrying one
-                                // that does nothing.
+                                // White at full opacity, no rim and the room's
+                                // own ambient is no tint: the node goes back to
+                                // carrying none rather than one that does
+                                // nothing.
                                 if t.is_identity() {
                                     world.remove::<floptle_core::Tint>(e);
                                 } else {
@@ -5193,6 +5224,64 @@ impl EditorTabViewer<'_> {
                                 cmd.inspector_changed = true;
                             }
                         });
+                        // **The two lanes that ADD light.** A multiply can only
+                        // take light away, which is why a team colour on a
+                        // mid-toned model reads as a slightly warm grey and why
+                        // this component kept losing the job to a Material. See
+                        // `floptle_core::Tint`.
+                        {
+                            let mut next = cur;
+                            let mut rim = [cur.rim[0], cur.rim[1], cur.rim[2], 1.0];
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("◐ rim").on_hover_text(
+                                    "an ADDITIVE fresnel edge in its own colour, over \
+                                     whatever this node already draws.\n\nIt adds light, \
+                                     so it reads on a dark costume and a bright one — \
+                                     which is what actually tells two team-coloured \
+                                     models apart in motion. Strength 0 is no rim, and \
+                                     leaves the node's own material's rim alone.",
+                                );
+                                if ui.color_edit_button_rgba_unmultiplied(&mut rim).changed() {
+                                    next.rim = [rim[0], rim[1], rim[2]];
+                                    // Picking a colour for a rim nobody has
+                                    // turned on means turning it on: a swatch
+                                    // that visibly does nothing is a control
+                                    // that looks broken.
+                                    if next.rim_strength == 0.0 {
+                                        next.rim_strength = 1.0;
+                                    }
+                                }
+                                ui.add(
+                                    egui::DragValue::new(&mut next.rim_strength)
+                                        .speed(0.02)
+                                        .range(0.0..=8.0)
+                                        .prefix("×"),
+                                );
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("◐ ambient").on_hover_text(
+                                    "multiplies this node's share of the scene's ambient \
+                                     light. 1 is the room's own.\n\nAbove 1 lifts the \
+                                     model out of the room's shadow — what a Material \
+                                     carrying nothing but `ambient` was always for, \
+                                     without costing the model its textures.",
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut next.ambient)
+                                        .speed(0.02)
+                                        .range(0.0..=8.0)
+                                        .prefix("×"),
+                                );
+                            });
+                            if next != cur {
+                                if next.is_identity() {
+                                    world.remove::<floptle_core::Tint>(e);
+                                } else {
+                                    world.insert(e, next);
+                                }
+                                cmd.inspector_changed = true;
+                            }
+                        }
                     }
                     if world.get::<Material>(e).is_none() {
                         ui.horizontal_wrapped(|ui| {
@@ -7220,9 +7309,56 @@ fn node_has_component(
     }
 }
 
+/// What a light's Inspector says about the sixteen shader slots, and whether it
+/// says it as a warning (`floptle/0116`).
+///
+/// A free function because the decision is the part worth testing and the
+/// `ui.small` around it is not. The complaint the card carries is that the cap
+/// was invisible — naming the sixteen in a hover was the half that does not
+/// help, because "twelve, plus whatever the room has" is exactly the arithmetic
+/// that crosses it. So the assertion worth being able to make is "does this
+/// actually carry the LIVE count, and does its tone change when something was
+/// cut", and that is what this shape allows.
+fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
+    if dropped > 0 {
+        (
+            format!("⚠ {live} of 16 light slots used — {dropped} more wanted one and was cut"),
+            true,
+        )
+    } else {
+        (format!("{live} of 16 light slots used"), false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A cap the scene can see** (`floptle/0116`).
+    ///
+    /// The load-bearing assertion is that the LIVE count is in the string. The
+    /// original state of this was a hover naming sixteen and nothing else, which
+    /// is a number nobody reads at the moment it matters — so a version of this
+    /// that only said "16" would be the bug, and asserting on the live number is
+    /// what distinguishes them.
+    #[test]
+    fn a_lights_inspector_says_where_the_scene_stands_against_the_cap() {
+        // Room to spare: the count is stated, plainly.
+        let (msg, warn) = light_slot_line((9, 0));
+        assert!(msg.contains('9'), "the LIVE count is the half that matters: {msg}");
+        assert!(msg.contains("16"), "…and the cap is the other half: {msg}");
+        assert!(!warn, "nothing was cut, so nothing is being warned about");
+
+        // Over it: the tone changes AND the number that was cut is named.
+        let (msg, warn) = light_slot_line((16, 3));
+        assert!(warn, "a cut look must not be reported in the same voice as a fine one");
+        assert!(msg.contains('3'), "how many were cut is the actionable number: {msg}");
+
+        // A scene with no lights placed reads as empty, not as broken.
+        let (msg, warn) = light_slot_line((0, 0));
+        assert!(msg.starts_with('0'), "{msg}");
+        assert!(!warn);
+    }
 
     /// Collect every string egui painted this frame (the settings-UI idiom): a
     /// headless pass that renders zero widgets would otherwise "pass".

@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
-- [networking — net.*, synced](#networking--net-synced) — 35
+- [networking — net.*, synced](#networking--net-synced) — 36
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
 - [pathfinding — nav.*](#pathfinding--nav) — 26
@@ -997,6 +997,10 @@ len is CHARACTERS of the authored string, not bytes, and spans run end to end fr
 
 node:setTint(color [, alpha]) — a colour MULTIPLIED over everything this node draws, keeping its own textures and each part's own colour. The easy "same model, but red": a hit flash, a team colour, a highlighted selection, a building ghosted while it is placed, a body fading out (that is what the alpha is for). node:setTint() with no argument clears it.
 
+node:setTint{ color =, alpha =, rim =, rimStrength =, ambient = } sets the rest. A multiply can only take light AWAY, which is why a team colour on a mid-toned model arrives as a slightly warm grey — so a tint also carries the two knobs that ADD light: `rim` is an additive fresnel edge in its own colour (what actually tells two team-coloured fighters apart in motion), and `ambient` multiplies this node's share of the scene's ambient, lifting a character out of the room's shadow. A table is read as a colour unless it carries one of those names, so setTint{1, 0.5, 0.2} is still a colour.
+
+Every field is optional and the ones you leave out KEEP their value, so a hit flash that rewrites the colour each frame does not cost the model its rim or its ambient lift. node:setTint() with nothing takes the whole tint away.
+
 Not a Material. A Material says what a thing is MADE OF and supersedes the materials a model was imported with; a tint leaves all of that alone. Reachable as a component too — node:getcomponent("Tint").color = color(1, 0.3, 0.3) — so an animation clip can key a flash.
 
 ### `node:sound`
@@ -1740,7 +1744,7 @@ account.inFlight() — how many account calls are still waiting on a reply (cap 
 
 ### `account.player`
 
-account.player() — { id, name, email, tier } once signed in, else nil. There is deliberately no way to read the access token: a shipped game's Lua is readable, so anything a script can hold a player can read out of the file.
+account.player() — { id, name, email, tier } once signed in, else nil. `tier` is "unknown" when fopull.com could not be reached to ask what the plan is — the engine fails soft to the free tier's limits but will not report a guess as the answer, so gate a paid feature on a tier you were TOLD rather than on "not free". There is deliberately no way to read the access token: a shipped game's Lua is readable, so anything a script can hold a player can read out of the file.
 
 ### `account.post`
 
@@ -2098,6 +2102,8 @@ net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interest
 
 net.identity(peer) — who a connected peer is: { id, name, tier, verified }. `id` is the account's stable subject, the same across sessions and machines; an anonymous peer (a LAN game with nobody signed in) has no `id`, which is a normal state and not an error. READ `verified` BEFORE ACTING ON `id`: it is false for everyone today, because the engine carries what a client says about itself and has no way to check it with the provider yet — so a ban list or a statistic keyed on an unverified id is keyed on a string the client chose. See docs/multiplayer.md, "Running a public server".
 
+`tier` is the plan the account is on, or "unknown" when that peer's client could not reach fopull.com to ask. A named tier is one the server confirmed; "unknown" is the engine refusing to guess, which it used to do by reporting "free" — so a peer that reads as free really is free.
+
 ### `net.inputDelay`
 
 net.inputDelay() — the session's FIXED input delay in ticks. Never changes mid-match, because how the game feels must not.
@@ -2105,6 +2111,12 @@ net.inputDelay() — the session's FIXED input delay in ticks. Never changes mid
 ### `net.isClient`
 
 net.isClient() — true on a connected client.
+
+### `net.isDedicated`
+
+net.isDedicated() — true on a server with NOBODY SITTING AT IT: `floptle serve` / `floptle-server`, as opposed to a player hosting the game they are in. Both answer net.isServer() the same way, and for the simulation that is right — it does not care who started it.
+
+This is the one thing that differs, and a game cannot work it out for itself. A dedicated server must not take a seat in its own lobby, deal itself a character, count toward "enough players to start", or be waited on to press Ready — and a lobby that treats it as a player can never begin a match, because the empty chair never readies.
 
 ### `net.isMine`
 

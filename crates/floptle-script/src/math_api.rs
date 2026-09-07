@@ -428,7 +428,7 @@ pub(crate) fn vec3_of(v: &Value) -> Option<glam::DVec3> {
     }
 }
 
-fn num_of(v: &Value) -> Option<f64> {
+pub(crate) fn num_of(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => Some(*n),
         Value::Integer(i) => Some(*i as f64),

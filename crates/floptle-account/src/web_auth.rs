@@ -668,10 +668,13 @@ pub mod browser {
         let who: crate::auth::UserInfo = serde_json::from_str(&body)
             .map_err(|e| format!("could not read the account: {e}"))?;
         // Entitlements are allowed to fail soft: not knowing the tier is a
-        // signed-in player on the free tier, not a failed sign-in.
+        // signed-in player, not a failed sign-in. What it is NOT is a player on
+        // the free tier — `floptle/0189`. A page has no keyring to read a last
+        // known plan out of, so `unknown` is the whole of the fallback here.
         let ent = match get_bearer(&client.entitlements_url(), &tokens.access_token).await {
-            Ok((s, b)) if (200..300).contains(&s) => serde_json::from_str(&b).unwrap_or_default(),
-            _ => crate::auth::Entitlements::default(),
+            Ok((s, b)) if (200..300).contains(&s) => serde_json::from_str(&b)
+                .unwrap_or_else(|_| crate::auth::Entitlements::unknown()),
+            _ => crate::auth::Entitlements::unknown(),
         };
         Ok(Session::from_parts(tokens, who, ent))
     }

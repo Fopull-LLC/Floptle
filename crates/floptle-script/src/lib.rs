@@ -1528,7 +1528,21 @@ pub enum RichSet {
     /// what a thing is MADE OF and replaces the model's own materials, while a
     /// tint leaves all of that alone and multiplies over the result. Flashing a
     /// character red must not cost it its textures.
-    NodeTint { color: [f32; 3], alpha: f32, clear: bool },
+    ///
+    /// Every lane is an `Option` and `None` means "leave this one as it was",
+    /// because the lanes are independent and set at different times: a fighter
+    /// asks for its ambient lift once when it spawns and rewrites its colour on
+    /// every hit flash, and a `setTint(red)` that silently dropped the ambient
+    /// would put the character back in the dark for the length of the flash.
+    /// `clear` is the one thing that takes the whole component away.
+    NodeTint {
+        color: Option<[f32; 3]>,
+        alpha: Option<f32>,
+        rim: Option<[f32; 3]>,
+        rim_strength: Option<f32>,
+        ambient: Option<f32>,
+        clear: bool,
+    },
     /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
     /// the layers a light reaches, and whether this node blocks light
     /// (`floptle/0113`).
@@ -2202,7 +2216,7 @@ mod tests {
         // than to carrying a white one nobody asked for.
         let e2 = world.spawn();
         world.insert(e2, Transform::IDENTITY);
-        world.insert(e2, Tint { color: [1.0, 0.0, 0.0], alpha: 0.5 });
+        world.insert(e2, Tint { color: [1.0, 0.0, 0.0], alpha: 0.5, ..Default::default() });
         world.insert(
             e2,
             Scripts(vec![floptle_core::ScriptInst {
@@ -2216,6 +2230,253 @@ mod tests {
         write_script(&dir, "clearer", "function start(node)\n  node:setTint()\nend\n");
         host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
         assert!(world.get::<Tint>(e2).is_none(), "setTint() with nothing clears it");
+    }
+
+    /// **A colour write must not cost the node its ambient lift.**
+    ///
+    /// The lanes of a Tint are set at different times and by different code: a
+    /// character asks for its rim and its ambient once when it is dressed, and
+    /// rewrites its COLOUR on every hit flash. If `setTint(red)` replaced the
+    /// whole component the character would drop back into the dark, untinted by
+    /// its rim, for exactly as long as the flash lasted — a bug that would read
+    /// as "the flash looks wrong" and never as "the merge is missing".
+    #[test]
+    fn a_colour_write_keeps_the_rim_and_the_ambient() {
+        let dir = std::env::temp_dir().join(format!("floptle-tint2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Dressed once, then flashed — the order the fighter actually does it.
+        write_script(
+            &dir,
+            "fighter",
+            concat!(
+                "function start(node)\n",
+                "  node:setTint{ ambient = 1.6, rim = color(0.1, 0.4, 1.0), rimStrength = 1.3 }\n",
+                "  node:setTint(color(0.92, 0.13, 0.15))\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/sae.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "fighter".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+
+        let t = world.get::<floptle_core::Tint>(e).copied().expect("the fighter is tinted");
+        assert_eq!(t.color, [0.92, 0.13, 0.15], "the flash colour landed");
+        // The three the SECOND call never mentioned.
+        assert_eq!(t.ambient, 1.6, "and the ambient lift survived it");
+        assert_eq!(t.rim, [0.1, 0.4, 1.0], "and so did the rim colour");
+        assert_eq!(t.rim_strength, 1.3, "and its strength");
+    }
+
+    /// **`setTint{ alpha = 0.5 }` must fade a model, not black it out.**
+    ///
+    /// The table form is decided BY NAME: a table carrying one of the option
+    /// keys is options, anything else is a colour. `alpha` is an option key —
+    /// the docs list it as one — and leaving it out of that test is not a
+    /// no-op. `read_color` defaults a missing r/g/b to ZERO, so
+    /// `{ alpha = 0.5 }` read as a colour is the colour BLACK at full opacity:
+    /// the model goes dark and its fade never happens, with nothing logged.
+    ///
+    /// That is the same failure that has now bitten this API twice — a table
+    /// the engine did not recognise as options, read as a colour, arriving as
+    /// black. The assertion is on the colour lane, because "did the alpha
+    /// land" alone would pass against a version that also blacked the model.
+    #[test]
+    fn an_alpha_only_tint_fades_the_model_instead_of_blacking_it() {
+        let dir = std::env::temp_dir().join(format!("floptle-tint3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "fader",
+            concat!(
+                "function start(node)\n",
+                "  node:setTint{ alpha = 0.5 }\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/sae.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "fader".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+
+        let t = world.get::<floptle_core::Tint>(e).copied().expect("a tint was set");
+        assert_eq!(t.alpha, 0.5, "the fade is what was asked for");
+        assert_eq!(
+            t.color,
+            [1.0, 1.0, 1.0],
+            "and the model keeps its own colours — a table read as a colour arrives BLACK"
+        );
+    }
+
+    /// **An option that is present and wrong is an ERROR, not a skip.**
+    ///
+    /// The options table used to read each field through a pattern that fell
+    /// through on any shape it did not expect — `if let Ok(Value::Table(ct))`.
+    /// So `rim = vec3(1,0,0)` set no rim and said nothing, while the same vec3
+    /// passed positionally is a documented spelling of a colour. Two silent
+    /// failures in one call shape, in the API whose whole history is silent
+    /// failures.
+    ///
+    /// Now a colour field takes every spelling the rest of the API takes, and
+    /// anything else raises with the field's name in it.
+    #[test]
+    fn a_tint_option_of_the_wrong_shape_is_loud() {
+        let dir = std::env::temp_dir().join(format!("floptle-tint4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A vec3 is a colour here, exactly as it is positionally.
+        write_script(
+            &dir,
+            "vecrim",
+            concat!(
+                "function start(node)\n",
+                "  node:setTint{ rim = vec3(1, 0.5, 0.25) }\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/sae.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "vecrim".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let t = world.get::<floptle_core::Tint>(e).copied().expect("a vec3 rim is a rim");
+        assert_eq!(t.rim[0], 1.0, "a vec3 is a colour here too");
+        assert!(t.rim_strength > 0.0, "and asking for one turns it on");
+
+        // …and something that is not a colour at all names the field.
+        write_script(
+            &dir,
+            "badrim",
+            "function start(node)\n  node:setTint{ rim = \"red\" }\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/sae.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "badrim".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let said = host.drain_logs().iter().map(|l| l.msg.clone()).collect::<Vec<_>>().join("\n");
+        assert!(
+            said.contains("rim"),
+            "a wrong rim must name the field rather than doing nothing: {said}"
+        );
+        assert!(
+            world.get::<floptle_core::Tint>(e).is_none(),
+            "and it must not have half-applied"
+        );
+    }
+
+    /// **`net.isDedicated()` answers the state, both ways.**
+    ///
+    /// The other half of `dedicated.rs`'s wiring guard: that one proves a
+    /// dedicated server sets the flag, this proves the binding reports it — and
+    /// crucially that it reports FALSE for a player who is hosting. A version
+    /// that returned `net.isServer()` would pass a test that only checked the
+    /// true case, and it would be the original bug exactly: a hosting player
+    /// told they are a dedicated server drops out of their own lobby.
+    #[test]
+    fn is_dedicated_is_true_only_for_a_server_with_nobody_at_it() {
+        let dir = std::env::temp_dir().join(format!("floptle-isded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "probe",
+            "function update(node)\n\
+             \x20 print(tostring(net.isServer()) .. \",\" .. tostring(net.isDedicated()))\n\
+             end\n",
+        );
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "probe".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+
+        let saw = |host: &mut ScriptHost, world: &mut World| -> String {
+            host.run(world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+            host.drain_logs().iter().map(|l| l.msg.clone()).collect::<Vec<_>>().join("\n")
+        };
+
+        // A player hosting the game they are in: the server, and NOT dedicated.
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            dedicated: false,
+            ..Default::default()
+        });
+        let out = saw(&mut host, &mut world);
+        assert!(
+            out.contains("true,false"),
+            "a hosting player must not be told they are a dedicated server: {out}"
+        );
+
+        // A server with nobody at it: both true.
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            dedicated: true,
+            ..Default::default()
+        });
+        let out = saw(&mut host, &mut world);
+        assert!(out.contains("true,true"), "a dedicated server is still the server: {out}");
+
+        // And offline is neither.
+        host.set_net_state(NetState::default());
+        let out = saw(&mut host, &mut world);
+        assert!(out.contains("false,false"), "offline is not a dedicated server: {out}");
     }
 
     /// **A clothing system, in script.** `node:materials()` says what the parts

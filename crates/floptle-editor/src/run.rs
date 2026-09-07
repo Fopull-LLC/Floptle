@@ -421,11 +421,18 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     if let Some(addr) = join.as_deref() {
         ed.net_join_quic(addr);
         if ed.net_play_client.is_none() {
+            // **THE REASON IS ON THE CONSOLE, NOT IN THE SCRIPT LOG.** This used
+            // to drain the script host and then say "the reason is in the log
+            // above" — but nothing a script wrote is what failed. `net_join_quic`
+            // reports its refusals (a transport that would not connect, a peer
+            // already in a session) by pushing a Console entry, which
+            // `drain_script_logs` does not touch. So the one message a person
+            // gets when a join fails was a pointer at an empty log.
             ed.drain_script_logs();
-            eprintln!(
-                "could not join {addr} — is a `floptle serve` listening there? (the reason is \
-                 in the log above)"
-            );
+            for e in &ed.console.entries {
+                eprintln!("  {}", e.msg);
+            }
+            eprintln!("could not join {addr} — is a `floptle serve` listening there?");
             return 1;
         }
     }

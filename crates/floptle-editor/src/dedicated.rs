@@ -298,12 +298,15 @@ pub fn run(args: ServerArgs) -> i32 {
     let mut ticks = 0u64;
     let started = Instant::now();
     let mut last_status = Instant::now() - STATUS_EVERY;
+    let mut ticks_ms = TickWindow::default();
     let mut next = Instant::now() + period;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) && !signalled() {
         ticks += 1;
         // `game_focused: false` — there is no keyboard here, so the only input
         // reaching a script is a client's replayed input, per owner.
+        let tick_began = Instant::now();
         ed.play_step(step, false);
+        ticks_ms.push(tick_began.elapsed().as_secs_f32() * 1000.0);
         // **The tick does not print anything.** Every host drains the script
         // host itself — the windowed frame, `floptle run`, and this. A server
         // that skipped it would run a game whose scripts were raising every
@@ -322,7 +325,7 @@ pub fn run(args: ServerArgs) -> i32 {
             && last_status.elapsed() >= STATUS_EVERY
         {
             last_status = Instant::now();
-            write_status(path, &args, &ed, ticks, started);
+            write_status(path, &args, &ed, ticks, started, &ticks_ms);
         }
 
         let now = Instant::now();
@@ -425,6 +428,53 @@ fn signalled() -> bool {
     false
 }
 
+/// A rolling window of tick durations, so the status file can carry a p95.
+///
+/// **The p95 rather than the mean is the point.** A server whose average tick
+/// is 4 ms and whose worst one in twenty is 40 ms is a server players describe
+/// as stuttering, and a mean hides that completely. The fleet agent ships this
+/// number to the control plane (`floptle/0199` §3) and it is what a developer
+/// looks at when a match "felt bad" — so it has to be the statistic that can
+/// actually say so.
+///
+/// One window of the last `CAP` ticks: at 60 Hz that is the last ten seconds,
+/// which matches how often the status file is rewritten.
+#[derive(Default)]
+pub(crate) struct TickWindow {
+    ms: Vec<f32>,
+    at: usize,
+}
+
+impl TickWindow {
+    const CAP: usize = 600;
+
+    pub(crate) fn push(&mut self, ms: f32) {
+        if self.ms.len() < Self::CAP {
+            self.ms.push(ms);
+        } else {
+            self.ms[self.at] = ms;
+            self.at = (self.at + 1) % Self::CAP;
+        }
+    }
+
+    /// The 95th percentile of the window, or `None` before there is one.
+    ///
+    /// `None` rather than 0.0 while the window is empty: a zero would be
+    /// reported as a perfect tick time, which is the wrong thing to say about a
+    /// server that has not run yet.
+    pub(crate) fn p95(&self) -> Option<f32> {
+        if self.ms.is_empty() {
+            return None;
+        }
+        let mut v = self.ms.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // The index of the 95th percentile, clamped so a one-sample window
+        // answers with its one sample rather than reading off the end.
+        let i = ((v.len() as f32 * 0.95).ceil() as usize).saturating_sub(1).min(v.len() - 1);
+        Some(v[i])
+    }
+}
+
 /// How often `--status-file` is rewritten.
 #[cfg(not(target_arch = "wasm32"))]
 const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -451,12 +501,20 @@ fn redact(key: &str) -> String {
 /// Best effort throughout: a status file that cannot be written is a server
 /// that is harder to watch, never a server that stops.
 #[cfg(not(target_arch = "wasm32"))]
-fn write_status(path: &Path, args: &ServerArgs, ed: &Editor, ticks: u64, started: Instant) {
+fn write_status(
+    path: &Path,
+    args: &ServerArgs,
+    ed: &Editor,
+    ticks: u64,
+    started: Instant,
+    ticks_ms: &TickWindow,
+) {
     let peers = ed.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
     let doc = format!(
         "{{\n  \"peers\": {peers},\n  \"max_players\": {},\n  \"uptime_s\": {},\n  \
          \"ticks\": {ticks},\n  \"tick_hz\": {},\n  \"scene\": {:?},\n  \
-         \"project\": {:?},\n  \"game_key\": {},\n  \"lobby_code\": {}\n}}\n",
+         \"project\": {:?},\n  \"game_key\": {},\n  \"lobby_code\": {},\n  \
+         \"tick_p95_ms\": {}\n}}\n",
         args.max_players.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
         started.elapsed().as_secs(),
         args.tick_hz,
@@ -464,6 +522,9 @@ fn write_status(path: &Path, args: &ServerArgs, ed: &Editor, ticks: u64, started
         args.project.to_string_lossy(),
         args.game_key.as_deref().map(|k| format!("{k:?}")).unwrap_or_else(|| "null".into()),
         ed.net_lobby_code.as_deref().map(|c| format!("{c:?}")).unwrap_or_else(|| "null".into()),
+        // `null` rather than 0 before the window has a sample: a zero would be
+        // read as a perfect tick time on a server that has not run one yet.
+        ticks_ms.p95().map(|v| format!("{v:.3}")).unwrap_or_else(|| "null".into()),
     );
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, doc).is_ok() {
@@ -551,7 +612,7 @@ fn drain_console(ed: &mut Editor) {
 
 /// Refuse a scene this server could not usefully host, and say which of the two
 /// reasons it is.
-fn check_servable(doc: &floptle_scene::SceneDoc, scene_path: &Path) -> Result<(), String> {
+pub(crate) fn check_servable(doc: &floptle_scene::SceneDoc, scene_path: &Path) -> Result<(), String> {
     if doc.nodes.iter().any(|n| n.net.as_ref().is_some_and(|r| r.rollback)) {
         return Err(format!(
             "{} has Rollback nodes. A rollback match is simulated by every peer, so it is \
@@ -889,6 +950,66 @@ mod server_tests {
     use floptle_net::MemoryHub;
 
     /// The gameplay tick these tests run at. Real time never enters into it —
+    /// **The p95 is the statistic that can say "it stutters".**
+    ///
+    /// A mean cannot: a server whose ticks are 4 ms with one in ten at 40 ms is
+    /// one players describe as stuttering, and its mean is a healthy-looking
+    /// 7.6 ms. The fleet agent ships this number to the control plane
+    /// (`floptle/0199` §3) and it is what a developer looks at when a match
+    /// "felt bad", so it has to be the statistic that can actually say so.
+    ///
+    /// Note what p95 does NOT promise, because the first version of this test
+    /// asserted it and was wrong: at exactly one bad tick in twenty, five per
+    /// cent of ticks are worse than the answer, so the 95th percentile is the
+    /// last GOOD one. That is p95 behaving correctly. To show, a stutter has to
+    /// be more than five per cent of ticks — which is also the threshold at
+    /// which a player notices it.
+    #[test]
+    fn the_tick_p95_reports_the_bad_ticks_rather_than_averaging_them_off() {
+        let mut w = TickWindow::default();
+        assert_eq!(w.p95(), None, "a server that has not ticked has no tick time, not zero");
+
+        // One in ten bad: comfortably above the percentile's own threshold.
+        for _ in 0..18 {
+            w.push(4.0);
+        }
+        w.push(40.0);
+        w.push(40.0);
+        let p95 = w.p95().expect("a sample");
+        assert_eq!(p95, 40.0, "two ticks in twenty at 40 ms must show");
+        let mean: f32 = 4.0f32.mul_add(18.0, 80.0) / 20.0;
+        assert!(p95 > mean, "the mean is {mean:.1} ms and reads as healthy");
+
+        // A single sample answers with itself rather than reading off the end.
+        let mut one = TickWindow::default();
+        one.push(7.5);
+        assert_eq!(one.p95(), Some(7.5));
+
+        // A server that is genuinely fine reports that it is fine.
+        let mut good = TickWindow::default();
+        for _ in 0..100 {
+            good.push(3.0);
+        }
+        assert_eq!(good.p95(), Some(3.0));
+    }
+
+    /// The window is bounded, so a server up for a week does not grow a vector
+    /// of six hundred thousand floats.
+    #[test]
+    fn the_tick_window_stays_bounded_and_keeps_the_recent_ticks() {
+        let mut w = TickWindow::default();
+        for _ in 0..(TickWindow::CAP * 3) {
+            w.push(100.0);
+        }
+        assert_eq!(w.ms.len(), TickWindow::CAP);
+        // Now the recent past is fast: the number has to follow it down, or a
+        // server that recovered would look broken forever.
+        for _ in 0..TickWindow::CAP {
+            w.push(2.0);
+        }
+        assert_eq!(w.p95(), Some(2.0), "the window forgot the old ticks");
+    }
+
     /// `play_step(STEP)` with `game_tick.step == STEP` advances exactly one.
     const STEP: f32 = 1.0 / 60.0;
 
@@ -1102,6 +1223,55 @@ mod server_tests {
             told,
             vec!["the lobby is closed".to_string()],
             "the client was dropped without being told why"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A dedicated server says so, through the binding a game actually
+    /// calls.**
+    ///
+    /// This is the one session fact a game cannot work out for itself, and the
+    /// bug it exists for was expensive: Forgery's `hello()` ran on any machine
+    /// answering `net.isServer()`, so a deployed box entered its own roster as
+    /// "Player", was dealt a character, and counted toward `min_players` — and
+    /// because `canBegin` requires every entry to be ready, **a match on a
+    /// dedicated server could never start**, with nothing saying why.
+    ///
+    /// The whole wiring is `dedicated: true` on the Editor `open` builds and
+    /// `self.dedicated` in one `NetState`. Either line could be dropped by a
+    /// refactor and turn the bug back on with the same silent symptom, so the
+    /// assertion runs a real script through the real binding rather than
+    /// reading the field. `net.isServer()` is asserted alongside it because the
+    /// two must not be confused: a dedicated server is emphatically still the
+    /// server.
+    #[test]
+    fn a_dedicated_server_says_so_through_the_binding_a_game_calls() {
+        let root = temp("isdedicated");
+        write(
+            &root,
+            "scripts/rules.lua",
+            "local said = false\n\
+             function update(node)\n\
+             \x20 if not said then\n\
+             \x20   said = true\n\
+             \x20   print(\"server=\" .. tostring(net.isServer())\n\
+             \x20     .. \" dedicated=\" .. tostring(net.isDedicated()))\n\
+             \x20 end\n\
+             end\n",
+        );
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+
+        let mut s = serve(&root, "scenes/arena.ron");
+        s.pump(SETTLE, &mut []);
+        assert!(
+            s.ed.dedicated,
+            "the Editor `dedicated::open` built does not know it is a dedicated server"
+        );
+        let said = s.console();
+        assert!(
+            said.contains("server=true dedicated=true"),
+            "a dedicated server did not report itself as one. Server said:\n{said}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -89,10 +89,56 @@ pub struct UserInfo {
     pub name: Option<String>,
 }
 
+/// What the account is entitled to, as `/entitlements` answers it.
+///
+/// ## "we could not ask" is not a tier (`floptle/0189`)
+///
+/// This endpoint is allowed to fail soft — a developer whose network blinked
+/// must not be locked out of their own editor — and for a long time the way it
+/// failed soft was to substitute [`Entitlements::default`], whose empty `tier`
+/// [`Session::from_parts`] then wrote down as `"free"`. That made an outage
+/// **indistinguishable from a downgrade**: a paying Studio developer saw
+/// free-tier limits presented as fact, with nothing anywhere saying the number
+/// had been guessed.
+///
+/// It was cosmetic while the free tier was `max_ccu: 0`, because falling back to
+/// it looked broken enough to notice. It stopped being cosmetic on 2026-09-06,
+/// when free gained a real 20-CCU allowance and Floptle Cloud became something
+/// people pay for: the fallback now looks like a working plan that is simply
+/// smaller, which is a billing complaint rather than an outage report.
+///
+/// So the failure has its own value, [`UNKNOWN`](Self::UNKNOWN), and every path
+/// that could not ask uses [`unknown`](Self::unknown) rather than the default.
+/// Nothing is blocked by it — [`Session::effective_tier`] still enforces `free`
+/// — but a caller that wants to say so can now tell the two apart, and the Hub
+/// does.
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Entitlements {
     #[serde(default)]
     pub tier: String,
+}
+
+impl Entitlements {
+    /// The tier that means **we could not ask**, as opposed to any tier the
+    /// server might actually name.
+    ///
+    /// A string rather than a new enum variant because `tier` is persisted in
+    /// the session, is on the wire to other peers (`net.identity(peer).tier`),
+    /// and is read by Lua — widening the type would reach all three for a state
+    /// every one of them wants to render as a word anyway. `"unknown"` is not a
+    /// tier fopull.com sells, so it cannot collide with a real answer.
+    pub const UNKNOWN: &'static str = "unknown";
+
+    /// The entitlements of an account whose plan could not be read.
+    pub fn unknown() -> Self {
+        Self { tier: Self::UNKNOWN.into() }
+    }
+
+    /// Did the server actually tell us this? False for [`UNKNOWN`](Self::UNKNOWN)
+    /// and for an empty tier.
+    pub fn is_known(&self) -> bool {
+        !self.tier.is_empty() && self.tier != Self::UNKNOWN
+    }
 }
 
 // Native transport only — the browser build has no ureq call to parse for.
@@ -396,6 +442,26 @@ impl Session {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
         }
+    }
+
+    /// **Did the server actually say what this plan is?**
+    ///
+    /// False when `/entitlements` could not be reached — see [`Entitlements`].
+    /// Anything that RENDERS a plan should ask this first; anything that
+    /// ENFORCES one should use [`effective_tier`](Self::effective_tier), which
+    /// keeps failing soft.
+    pub fn plan_known(&self) -> bool {
+        !self.tier.is_empty() && self.tier != Entitlements::UNKNOWN
+    }
+
+    /// The tier to **enforce** against, which is `free` when the plan is
+    /// unknown.
+    ///
+    /// This is the half that must not change behaviour: failing soft was always
+    /// the right instinct, and 0189 was never a request to start locking people
+    /// out. The fix is that the guess is now labelled, not that it is refused.
+    pub fn effective_tier(&self) -> &str {
+        if self.plan_known() { self.tier.as_str() } else { "free" }
     }
 
     /// A human label for the account (email, else the subject id, else a generic fallback).
@@ -833,6 +899,57 @@ mod tests {
         assert!(!is_fopull_host("https://fopull.com@evil.com/"));
         assert!(is_local_host("http://localhost:8000"));
         assert!(is_local_host("http://127.0.0.1:8000/oauth/device"));
+    }
+
+    /// **An outage and a downgrade must not produce the same session**
+    /// (`floptle/0189`).
+    ///
+    /// The values here are chosen so a regression cannot pass: `"free"` is a
+    /// real tier the server sells, so asserting `tier != "free"` on the unknown
+    /// case is asserting against the exact string the bug produced. And
+    /// `effective_tier` is asserted to STILL be `"free"`, because the fix was
+    /// never to start locking anybody out — a developer whose network blinked
+    /// keeps working, they just are not told a guess as though it were fact.
+    #[test]
+    fn a_plan_we_could_not_read_is_not_the_free_plan() {
+        let tok = || Tokens { access_token: "a".into(), refresh_token: None, scope: None };
+        let who = || UserInfo { sub: "u1".into(), email: None, name: None };
+
+        // The server ANSWERED, and it said free.
+        let said_free =
+            Session::from_parts(tok(), who(), Entitlements { tier: "free".into() });
+        assert_eq!(said_free.tier, "free");
+        assert!(said_free.plan_known(), "a tier the server named is known");
+
+        // We could not ASK. Same limits, different fact.
+        let could_not_ask = Session::from_parts(tok(), who(), Entitlements::unknown());
+        assert!(!could_not_ask.plan_known(), "an unreachable endpoint is not an answer");
+        assert_ne!(
+            could_not_ask.tier, "free",
+            "this is the bug: an outage used to be byte-identical to a free account"
+        );
+        assert_ne!(
+            could_not_ask.tier, said_free.tier,
+            "the two sessions must be distinguishable at all"
+        );
+
+        // …and failing soft is untouched: both enforce against free.
+        assert_eq!(could_not_ask.effective_tier(), "free");
+        assert_eq!(said_free.effective_tier(), "free");
+        // A paid plan enforces as itself.
+        let paid = Session::from_parts(tok(), who(), Entitlements { tier: "studio".into() });
+        assert_eq!(paid.effective_tier(), "studio");
+        assert!(paid.plan_known());
+    }
+
+    /// `unknown` is a state, not a tier: `is_known` has to refuse the empty
+    /// string too, because `Entitlements::default()` is what every fail-soft
+    /// path used to reach for and an empty tier is what it carries.
+    #[test]
+    fn an_empty_tier_is_not_a_known_plan() {
+        assert!(!Entitlements::default().is_known());
+        assert!(!Entitlements::unknown().is_known());
+        assert!(Entitlements { tier: "indie".into() }.is_known());
     }
 
     #[test]

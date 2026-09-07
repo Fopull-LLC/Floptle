@@ -2135,7 +2135,7 @@ mod shape_query_tests {
         let (full_scan, n_scan) = run(false);
         assert_eq!(
             with_index, full_scan,
-            "the indexed run rested at {with_index:?} and the full scan at {full_scan:?} —              a broadphase that changes the simulation is not a broadphase"
+            "the indexed run rested at {with_index:?} and the full scan at {full_scan:?} — a broadphase that changes the simulation is not a broadphase"
         );
         assert_eq!(n_index, n_scan, "…and it found the same number of contacts");
         assert!(with_index.y > 0.0, "the body should be resting ON the floor, not through it");

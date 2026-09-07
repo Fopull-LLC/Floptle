@@ -1110,6 +1110,39 @@ node:setTint()                             -- back to normal
 It needs no Material and does not create one. In the Inspector it is the **◐
 tint** swatch; white at full opacity is "no tint" and removes it.
 
+#### When a multiply is not enough
+
+A multiply can only take light **away**, and that is the whole reason a team
+colour so often ends up as a Material instead. Multiply a mid-toned, ambient-lit
+character by a saturated "crimson" and what arrives is a slightly warm grey: the
+eye reads lightness long before it reads hue, so the one thing the tint exists to
+say — *which player is this* — is the thing it says worst.
+
+So a tint also carries the two knobs that **add** light, in a table form:
+
+```lua
+node:setTint{ rim = teamColor, rimStrength = 1.3 }  -- an additive fresnel edge
+node:setTint{ ambient = 1.6 }                        -- lift it out of the room's shadow
+```
+
+`rim` is an additive edge in its own colour. Because it adds rather than
+multiplies, it reads on a dark costume and a bright one, against any stage, and
+from across a room where the body fill is half in shadow — which is what actually
+tells two fighters apart in motion. `ambient` multiplies this node's share of the
+scene's ambient light, so a character can sit brighter than the room it is
+standing in. That last one is what a Material carrying nothing but `ambient: 1.6`
+was always being used for, and using a Material for it costs the model every
+texture it was imported with.
+
+**Fields you leave out keep their value.** The lanes are set at different times —
+a character asks for its rim and its ambient once when it is dressed and rewrites
+its *colour* on every hit flash — so `setTint(red)` after `setTint{ ambient = 1.6 }`
+leaves the lift alone. Only `setTint()` with nothing takes the whole tint away.
+
+A table is read as a colour unless it carries one of those names, so
+`setTint{1, 0.5, 0.2}` is still a colour and every call that already exists keeps
+working.
+
 Because it is a component, an animation clip can key it — a flash is a tint
 faded back to white over a fifth of a second — and a script can read it back:
 
@@ -1122,6 +1155,7 @@ if t then t.alpha = t.alpha - dt end       -- fade the whole model out
 |---|---|
 | this whole model is one material | a **Material** on the node |
 | this model, but tinted | `node:setTint(color)` |
+| this model, but it READS across the room | `node:setTint{ rim =, ambient = }` |
 | this one part looks different | `node:material("<name>")` |
 
 ### Getting a model's own textures out
@@ -2060,7 +2094,7 @@ defines it.
 Any node with a **Particle System** component exposes a particle handle, so
 scripts can fire and stop effects on cue — muzzle flashes, footstep dust,
 thruster plumes, pickups. See `docs/subsystems/particles-vfx.md` for authoring
-effects on the ❋ Particles timeline.
+effects on the ✱ Particles timeline.
 
 ```lua
 function update(node, dt)
@@ -2108,7 +2142,7 @@ end
 
 `spawnEffect(key, x, y, z)` — `key` is the effect asset (project-relative, no
 `.vfx.ron`); the position is world space. Author it as a **one-shot** effect on
-the ❋ Particles timeline so it ends cleanly. That's the whole loop: design it on
+the ✱ Particles timeline so it ends cleanly. That's the whole loop: design it on
 the timeline → `spawnEffect` it from gameplay.
 
 ## 11. Audio: `audio.play`, `node:sound()` & the mixer

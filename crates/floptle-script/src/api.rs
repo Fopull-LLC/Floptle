@@ -399,7 +399,14 @@ pub fn apply_component_color(
             if field != "color" && field != "tint" {
                 return;
             }
-            let t = floptle_core::Tint { color: [v[0], v[1], v[2]], alpha: v[3] };
+            // The colour lanes only — the rim and the ambient lift keep
+            // whatever they were, for the reason on `RichSet::NodeTint`.
+            let cur = world.get::<floptle_core::Tint>(ent).copied().unwrap_or_default();
+            let t = floptle_core::Tint {
+                color: [v[0], v[1], v[2]],
+                alpha: v[3],
+                ..cur
+            };
             if t.is_identity() {
                 world.remove::<floptle_core::Tint>(ent);
             } else {
@@ -2283,8 +2290,18 @@ pub(crate) fn apply_rich_sets(
                 m.apply(&set);
                 world.insert(e, m.matter());
             }
-            RichSet::NodeTint { color, alpha, clear } => {
-                let t = floptle_core::Tint { color, alpha };
+            RichSet::NodeTint { color, alpha, rim, rim_strength, ambient, clear } => {
+                // Merged onto whatever is already there, lane by lane — see the
+                // note on the variant for why a colour write must not cost this
+                // node its ambient lift.
+                let cur = world.get::<floptle_core::Tint>(e).copied().unwrap_or_default();
+                let t = floptle_core::Tint {
+                    color: color.unwrap_or(cur.color),
+                    alpha: alpha.unwrap_or(cur.alpha),
+                    rim: rim.unwrap_or(cur.rim),
+                    rim_strength: rim_strength.unwrap_or(cur.rim_strength),
+                    ambient: ambient.unwrap_or(cur.ambient),
+                };
                 // Clearing and setting the identity are the same act, and both
                 // mean "no tint" — so neither leaves a component behind.
                 if clear || t.is_identity() {
@@ -4576,41 +4593,126 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         methods.set("getcomponent", f.clone())?;
         methods.set("getComponent", f)?;
     }
-    // node:setTint(color [, alpha]) / node:setTint() — a colour multiplied over
-    // everything this node draws, its own textures and its parts' own colours
-    // included. The easy "same model, but red".
+    // node:setTint(color [, alpha]) / node:setTint{ ... } / node:setTint() — the
+    // modifiers over everything this node draws, its own textures and its parts'
+    // own colours included. The easy "same model, but red" — and, in the table
+    // form, the additive rim and ambient lift that a multiply alone cannot do.
     {
         let q = shared.rich_sets.clone();
         methods.set(
             "setTint",
             lua.create_function(move |_, (this, c, a): (Table, Value, Option<f32>)| {
                 let e: u32 = this.raw_get("__id")?;
-                // No argument clears it. `node:setTint()` reads as "no tint",
-                // and a caller turning a highlight off should not have to know
-                // that white is the identity.
-                let (color, clear) = match &c {
-                    Value::Nil => ([1.0; 3], true),
-                    // Any spelling of a colour the rest of the API takes: a
-                    // `color(...)`, `{r=,g=,b=}`, `{1,0.5,0.2}`, or a vec3.
+                let mut set = crate::RichSet::NodeTint {
+                    color: None,
+                    alpha: a,
+                    rim: None,
+                    rim_strength: None,
+                    ambient: None,
+                    clear: false,
+                };
+                let crate::RichSet::NodeTint {
+                    color, alpha, rim, rim_strength, ambient, clear,
+                } = &mut set
+                else {
+                    unreachable!()
+                };
+                match &c {
+                    // No argument clears it. `node:setTint()` reads as "no
+                    // tint", and a caller turning a highlight off should not
+                    // have to know that white is the identity.
+                    Value::Nil => *clear = true,
                     Value::Table(t) => {
-                        let c = read_color(t)?;
-                        ([c[0], c[1], c[2]], false)
+                        // **A COLOUR OR AN OPTIONS TABLE, decided BY NAME.** A
+                        // colour is `{1,0.5,0.2}` or `{r=,g=,b=}` and never
+                        // carries any of these names, so their presence is the
+                        // whole test — a positional list stays a colour and
+                        // keeps working exactly as it did.
+                        //
+                        // **`alpha` has to be in this list**, and leaving it out
+                        // was not a no-op: `read_color` defaults a missing r/g/b
+                        // to ZERO, so `setTint{ alpha = 0.5 }` read as a colour
+                        // is BLACK at full opacity — the model goes dark, the
+                        // fade never happens, and nothing is logged. It cannot
+                        // collide with a colour, because a `color(...)` table
+                        // carries `r/g/b/a` and `[1]..[4]` and never `alpha`.
+                        let opts = ["color", "alpha", "rim", "rimStrength", "ambient"]
+                            .iter()
+                            .any(|k| t.contains_key(*k).unwrap_or(false));
+                        if opts {
+                            // Each field is read STRICTLY: present and wrong is
+                            // an error naming the field, never a silent skip.
+                            // A field that quietly does nothing is the failure
+                            // this whole API keeps being bitten by.
+                            let colour_at = |key: &str| -> mlua::Result<Option<[f32; 3]>> {
+                                match t.get::<Value>(key) {
+                                    Ok(Value::Nil) | Err(_) => Ok(None),
+                                    Ok(Value::Table(ct)) => {
+                                        let v = read_color(&ct)?;
+                                        Ok(Some([v[0], v[1], v[2]]))
+                                    }
+                                    // `vec3` is a colour everywhere else this
+                                    // API takes one, so it is one here too.
+                                    Ok(other) => match crate::math_api::vec3_of(&other) {
+                                        Some(v) => {
+                                            Ok(Some([v.x as f32, v.y as f32, v.z as f32]))
+                                        }
+                                        None => Err(mlua::Error::runtime(format!(
+                                            "node:setTint{{ {key} = … }} takes a colour: \
+                                             color(r,g,b), {{r,g,b}}, {{1,0.5,0.2}} or vec3"
+                                        ))),
+                                    },
+                                }
+                            };
+                            let number_at = |key: &str| -> mlua::Result<Option<f32>> {
+                                match t.get::<Value>(key) {
+                                    Ok(Value::Nil) | Err(_) => Ok(None),
+                                    Ok(v) => match crate::math_api::num_of(&v) {
+                                        Some(n) => Ok(Some(n as f32)),
+                                        None => Err(mlua::Error::runtime(format!(
+                                            "node:setTint{{ {key} = … }} takes a number"
+                                        ))),
+                                    },
+                                }
+                            };
+                            *color = colour_at("color")?;
+                            if let Some(r) = colour_at("rim")? {
+                                *rim = Some(r);
+                                // A rim with no strength named is a rim you
+                                // asked for: default it ON rather than writing
+                                // a colour at strength 0, which would look like
+                                // the call did nothing.
+                                *rim_strength = Some(1.0);
+                            }
+                            if let Some(s) = number_at("rimStrength")? {
+                                *rim_strength = Some(s);
+                            }
+                            *ambient = number_at("ambient")?;
+                            if let Some(v) = number_at("alpha")? {
+                                *alpha = Some(v);
+                            }
+                        } else {
+                            // Any spelling of a colour the rest of the API
+                            // takes: `color(...)`, `{r=,g=,b=}`, `{1,0.5,0.2}`.
+                            let v = read_color(t)?;
+                            *color = Some([v[0], v[1], v[2]]);
+                            *alpha = Some(a.unwrap_or(1.0));
+                        }
                     }
                     other => {
                         let v = crate::math_api::vec3_of(other).ok_or_else(|| {
                             mlua::Error::runtime(
                                 "node:setTint(color [, alpha]): a colour takes color(r,g,b), \
-                                 {r,g,b}, {1,0.5,0.2} or vec3 — and node:setTint() with \
-                                 nothing clears it",
+                                 {r,g,b}, {1,0.5,0.2} or vec3; node:setTint{ color =, alpha =, \
+                                 rim =, rimStrength =, ambient = } sets the rest — and \
+                                 node:setTint() with nothing clears it",
                             )
                         })?;
-                        ([v.x as f32, v.y as f32, v.z as f32], false)
+                        *color = Some([v.x as f32, v.y as f32, v.z as f32]);
+                        *alpha = Some(a.unwrap_or(1.0));
                     }
-                };
-                q.borrow_mut().push((
-                    e,
-                    crate::RichSet::NodeTint { color, alpha: a.unwrap_or(1.0), clear },
-                ));
+                }
+                q.borrow_mut().push((e, set));
                 Ok(())
             })?,
         )?;

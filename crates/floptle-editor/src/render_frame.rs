@@ -3616,7 +3616,7 @@ impl Editor {
                         if ui
                             .button("🖼 Image editor")
                             .on_hover_text(
-                                "draw a texture in the engine — pixels, paint and vectors,                                  with the mesh updating as you paint",
+                                "draw a texture in the engine — pixels, paint and vectors, with the mesh updating as you paint",
                             )
                             .clicked()
                         {
@@ -4532,6 +4532,7 @@ impl Editor {
                 map_bevel,
                 map_tool_on,
                 map_playing,
+                light_counts: self.light_counts,
                 map_hud_open,
                 map_keys,
                 map_rebind,
@@ -4948,9 +4949,9 @@ impl Editor {
                     .default_width(360.0)
                     .show(ui.ctx(), |ui| {
                         ui.label(format!(
-                            "'{scene_name_now}' has an AUTOSAVE newer than its saved file                              (written {age}) — usually the editor closed with unsaved                              changes. Restore it?"
+                            "'{scene_name_now}' has an AUTOSAVE newer than its saved file (written {age}) — usually the editor closed with unsaved changes. Restore it?"
                         ));
-                        ui.small("Restoring loads the autosaved version (still unsaved —                                   Ctrl+S to keep it). Discard deletes the autosave.");
+                        ui.small("Restoring loads the autosaved version (still unsaved — Ctrl+S to keep it). Discard deletes the autosave.");
                         ui.horizontal(|ui| {
                             if ui.button("♻ Restore autosave").clicked() {
                                 cmd.autosave_action = Some(true);
@@ -10856,7 +10857,7 @@ impl Editor {
                 self.console.push(
                     floptle_script::LogLevel::Error,
                     format!(
-                        "nothing can be drawn: this renderer was never given {missing}.                          Everything a scene render needs is set up in `Editor::init_gpu_side`."
+                        "nothing can be drawn: this renderer was never given {missing}. Everything a scene render needs is set up in `Editor::init_gpu_side`."
                     ),
                     None,
                 );
@@ -10948,14 +10949,26 @@ pub(crate) fn apply_node_tint(
     flat2d: &mut [(MeshId, Option<TexId>, floptle_render::Light2dInstance)],
 ) {
     let Some(t) = tint.filter(|t| !t.is_identity()) else { return };
-    for (_, _, raw) in &mut instances[from.0..] {
+    // The one place that knows WHICH LANES a tint's rim and ambient live in:
+    // `params` is (shininess, rim strength, unlit, ambient) and `rim` is
+    // (r, g, b, packed tiling flags) — so only `rim[..3]` may be written, and
+    // `rim[3]` must survive, or a tinted node loses its texture tiling.
+    fn tint_instance(t: &floptle_core::Tint, raw: &mut InstanceRaw) {
         t.apply(&mut raw.color);
+        let (rim, strength) =
+            t.rim_over([raw.rim[0], raw.rim[1], raw.rim[2]], raw.params[1]);
+        raw.rim[..3].copy_from_slice(&rim);
+        raw.params[1] = strength;
+        raw.params[3] = t.ambient_over(raw.params[3]);
+    }
+    for (_, _, raw) in &mut instances[from.0..] {
+        tint_instance(t, raw);
     }
     for (_, _, _, raw) in &mut flsl_draws[from.1..] {
-        t.apply(&mut raw.color);
+        tint_instance(t, raw);
     }
     for d in &mut skin_draws[from.2..] {
-        t.apply(&mut d.instance.color);
+        tint_instance(t, &mut d.instance);
     }
     for (_, _, lit) in &mut flat2d[from.3..] {
         t.apply(&mut lit.tint);
@@ -11605,6 +11618,96 @@ mod fifo_pacing_tests {
     fn nothing_to_compare_against_says_nothing() {
         assert_eq!(fifo_pacing_multiple(50.0, 0.3, 0.0), None);
         assert_eq!(fifo_pacing_multiple(0.0, 0.3, 16.68), None);
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::apply_node_tint;
+    use floptle_core::Tint;
+    use floptle_core::math::Mat4;
+    use floptle_render::{MaterialParams, MeshId, SkinDraw};
+
+    /// A part as a model imports one: textured, no rim, the room's own ambient.
+    fn imported() -> MaterialParams {
+        MaterialParams {
+            color: [1.0, 1.0, 1.0],
+            emissive: [0.0; 3],
+            emissive_strength: 0.0,
+            specular: [1.0; 3],
+            shininess: 15.0,
+            specular_strength: 0.0,
+            rim: [0.0; 3],
+            rim_strength: 0.0,
+            unlit: false,
+            ambient: 1.0,
+            alpha: 1.0,
+            tile_mode: 0,
+            tile: [0.0; 4],
+            tile_rotation: 0.0,
+            paint_base: 0,
+            terrain_paint_base: 0,
+            paint_modulate: false,
+            terrain_splat: false,
+            ext_index: 0,
+        }
+    }
+
+    /// **A tint's rim and ambient reach the lanes the shader reads.**
+    ///
+    /// `raster.wgsl` reads the rim strength out of `params.y` and the ambient
+    /// multiplier out of `params.w`, and the rim's colour out of `rim.xyz`. Those
+    /// four lanes are the whole contract between this function and the GPU, and
+    /// nothing else in the engine asserts it — a tint that wrote the wrong index
+    /// would simply have no effect, which is exactly how it would be reported
+    /// ("the rim does nothing") and exactly what a picture cannot tell you.
+    #[test]
+    fn a_tints_rim_and_ambient_reach_the_instance_lanes() {
+        let mat = imported();
+        let mut inst = vec![(
+            MeshId(1),
+            None,
+            floptle_render::instance_of_mat(Mat4::IDENTITY, &mat),
+        )];
+        // The fighters are GPU-skinned, so this is the path that actually
+        // matters for a character — and it is its own list.
+        let mut skins = vec![SkinDraw {
+            mesh: MeshId(1),
+            tex: None,
+            instance: floptle_render::instance_of_mat(Mat4::IDENTITY, &mat),
+            pose: 0,
+        }];
+        let tiling_before = inst[0].2.rim[3];
+
+        let t = Tint {
+            color: [0.92, 0.13, 0.15],
+            alpha: 1.0,
+            rim: [1.0, 0.14, 0.16],
+            rim_strength: 1.3,
+            ambient: 1.6,
+        };
+        apply_node_tint(
+            Some(&t),
+            (0, 0, 0, 0),
+            &mut inst,
+            &mut [],
+            &mut skins,
+            &mut [],
+        );
+
+        for (what, raw) in [("unskinned", &inst[0].2), ("skinned", &skins[0].instance)] {
+            assert_eq!(&raw.rim[..3], &[1.0, 0.14, 0.16], "{what}: the rim's colour");
+            assert_eq!(raw.params[1], 1.3, "{what}: params.y is the rim STRENGTH");
+            assert_eq!(raw.params[3], 1.6, "{what}: params.w is the ambient multiplier");
+            assert_eq!(raw.color[0], 0.92, "{what}: and the colour still multiplies");
+            // params.z packs unlit + the paint base; params.x is shininess.
+            assert_eq!(raw.params[0], 15.0, "{what}: shininess is not a tint's business");
+        }
+        assert_eq!(
+            inst[0].2.rim[3], tiling_before,
+            "rim.w is the packed TILING flags, not part of the rim — a tinted node \
+             must not lose its texture tiling"
+        );
     }
 }
 

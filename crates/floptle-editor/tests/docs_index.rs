@@ -302,6 +302,100 @@ fn published_pages_only_link_to_published_pages() {
     );
 }
 
+/// **A published page may not disclaim itself.**
+///
+/// `floptle/0190`: three pages written for the people BUILDING the engine were
+/// classified as documentation for the people USING it, and the website
+/// publishes whatever the feed calls published. Ty found one of them on
+/// fopull.com — a north star telling a prospective user that the engine was not
+/// a product yet, four conditions after it had become one.
+///
+/// The rule those three failed is in `site-map.json` under `//test`:
+/// **published = it helps somebody use the engine, and it is true today.** No
+/// machine can check the second half. What a machine CAN check is that a page
+/// does not say so itself — and every one of these documents announces what it
+/// is in its own opening lines, because an honest author writing a design
+/// record labels it as one. So the phrases below are not a style rule; they are
+/// the self-identification a superseded document reliably carries.
+///
+/// It found a fourth on the day it was written: `subsystems/particles-vfx.md`
+/// was published, said in its own second line that it was "the original design
+/// record until it is rewritten", and documented a `groups: Vec<ParticleGroup>`
+/// asset model — against a shipped `ParticleEffect` that has `tracks` and no
+/// `ParticleGroup` type at all. A reader following it would have written a file
+/// the engine cannot parse. That is the failure mode this guards: not tone, but
+/// a product site describing an engine that does not exist.
+///
+/// Two honest ways to pass. Rewrite the page so it is true and drop the
+/// disclaimer, or classify it `internal` with the reason — never by deleting the
+/// sentence and leaving the page stale, which is the one move that makes things
+/// worse.
+#[test]
+fn no_published_page_disclaims_itself() {
+    let root = repo().join("docs");
+    let map = std::fs::read_to_string(root.join("site-map.json")).expect("docs/site-map.json");
+    let split = map.find("\"internal\"").expect("site-map.json has an `internal` block");
+    let published: Vec<String> = map[..split]
+        .split('"')
+        .filter(|s| s.ends_with(".md") && !s.contains(char::is_whitespace))
+        .map(|s| s.to_owned())
+        .collect();
+    assert!(published.len() > 50, "only {} published pages parsed", published.len());
+
+    // What a document that is not documentation says about itself, in its own
+    // words. Lower-cased before matching, so a heading does not slip past.
+    const DISCLAIMS: &[&str] = &[
+        "design record",
+        "not the current state",
+        "superseded by",
+        "superseded in part",
+        "north star",
+        "(this commit)",
+        "pre-spec",
+        "design proposal",
+        "until it is rewritten",
+    ];
+
+    let mut found: Vec<String> = Vec::new();
+    for page in &published {
+        let body = std::fs::read_to_string(root.join(page)).unwrap_or_default();
+        // Fenced blocks are exempt: a diagram is allowed to mark a branch
+        // `(future)` and a struct listing is allowed to quote anything. This
+        // test is about what the PAGE says, not about what its code samples do.
+        let prose: String = {
+            let mut out = String::new();
+            let mut fenced = false;
+            for line in body.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if !fenced {
+                    out.push_str(&line.to_lowercase());
+                    out.push('\n');
+                }
+            }
+            out
+        };
+        for phrase in DISCLAIMS {
+            if prose.contains(phrase) {
+                found.push(format!("{page} — says \"{phrase}\""));
+            }
+        }
+    }
+    found.sort();
+    assert!(
+        found.is_empty(),
+        "{} PUBLISHED page(s) describe themselves as something other than documentation, \
+         so fopull.com is serving working material as a guide:\n  {}\n\nEither make the page \
+         true and drop the disclaimer, or classify it `internal` in docs/site-map.json with \
+         the reason. Do not just delete the sentence — a stale page that no longer admits it \
+         is stale is worse than one that does.",
+        found.len(),
+        found.join("\n  ")
+    );
+}
+
 /// The `(target)` of every `[text](target)` in a Markdown body.
 ///
 /// Deliberately skips fenced code blocks — a snippet demonstrating link syntax

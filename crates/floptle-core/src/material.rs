@@ -160,6 +160,35 @@ impl Retro {
 /// White at full alpha is the identity, so a fresh one changes nothing — and a
 /// Tint that has been put back to the identity is dropped rather than stored,
 /// which keeps it out of scenes that do not use it.
+///
+/// ## Why it is not only a multiply
+///
+/// A multiply can only take light AWAY, and that is the whole reason this
+/// component kept losing to [`Material`] for the job it was written for. Give a
+/// character a team colour on a mid-toned, ambient-lit model and a "crimson"
+/// arrives as a slightly warm grey: the eye reads lightness long before hue, so
+/// the one thing the tint exists to say — WHICH PLAYER IS THIS — is the thing
+/// it says worst. The way out was always a Material, which says it perfectly
+/// and costs the model every texture it was imported with.
+///
+/// So a Tint also carries the two knobs that ADD light rather than removing it,
+/// and neither of them replaces anything:
+///
+///   * [`rim`](Self::rim) — an additive fresnel edge in its own colour. It adds,
+///     so it reads on a dark costume and a bright one, against any stage, and
+///     from across a room where the body fill is half in shadow.
+///   * [`ambient`](Self::ambient) — a multiplier on this node's ambient term, so
+///     a character can sit brighter than the room it is standing in without
+///     being handed a new material to do it.
+///
+/// **The rim lane is singular.** One instance carries one rim colour and one
+/// strength, so a Tint's rim SUPERSEDES a Material's rather than blending with
+/// it — two rims of different colours are not a thing the lane can hold. That is
+/// the one place this component replaces instead of modifying, and it is stated
+/// here because a rule nobody can predict is worse than either answer. In
+/// practice nothing collides: an imported glTF has no rim at all (the engine's
+/// rim is not a glTF concept), so the only way to meet this is to author both on
+/// purpose.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tint {
     /// Multiplied into the surface's colour, after everything else has decided
@@ -168,26 +197,79 @@ pub struct Tint {
     /// …and into its opacity, so fading a whole model out is one number rather
     /// than one per material.
     pub alpha: f32,
+    /// An additive fresnel edge, in its own colour — see the note above on why
+    /// a multiply alone could not do this component's main job. Black (the
+    /// default) with `rim_strength` 0 is no rim.
+    pub rim: [f32; 3],
+    /// How strong that edge is. 0 = none, and the rim lane is left alone
+    /// entirely, so a node that does not ask for one keeps whatever its own
+    /// material had.
+    pub rim_strength: f32,
+    /// Multiplier on this node's ambient term. 1.0 changes nothing; above 1
+    /// lifts the surface out of the room's shadow, which is what a Material
+    /// with nothing but `ambient: 1.6` on it was always being used for.
+    pub ambient: f32,
 }
 
 impl Default for Tint {
     fn default() -> Self {
-        Self { color: [1.0, 1.0, 1.0], alpha: 1.0 }
+        Self {
+            color: [1.0, 1.0, 1.0],
+            alpha: 1.0,
+            rim: [0.0, 0.0, 0.0],
+            rim_strength: 0.0,
+            ambient: 1.0,
+        }
     }
 }
 
 impl Tint {
-    /// Does this tint do nothing? White at full opacity multiplies to itself.
+    /// Does this tint do nothing? White at full opacity, no rim and the room's
+    /// own ambient — every lane at the value that leaves the surface as it was.
     pub fn is_identity(&self) -> bool {
-        self.color == [1.0, 1.0, 1.0] && self.alpha >= 1.0
+        self.color == [1.0, 1.0, 1.0]
+            && self.alpha >= 1.0
+            && self.rim_strength == 0.0
+            && self.ambient == 1.0
     }
 
     /// Apply it to a colour + alpha, in place.
+    ///
+    /// The colour half only — this is what the paths that carry nothing BUT a
+    /// colour get (the 2D lighting G-buffer's tint lane, for one). The lanes
+    /// that need a rim or an ambient use [`apply_light`] alongside it.
     pub fn apply(&self, rgba: &mut [f32; 4]) {
         rgba[0] *= self.color[0];
         rgba[1] *= self.color[1];
         rgba[2] *= self.color[2];
         rgba[3] *= self.alpha;
+    }
+
+    /// This tint's rim over the one a surface already had.
+    ///
+    /// Returns rather than writing through a reference because the renderer
+    /// keeps a rim's colour and its strength in two lanes of two DIFFERENT
+    /// arrays — and `floptle-core` sits under the renderer and should not know
+    /// that anyway. The caller does the assigning.
+    ///
+    /// A `rim_strength` of 0 gives the surface's own rim back untouched rather
+    /// than black: "I did not ask for a rim" and "I asked for no rim" have to
+    /// stay different, or every tinted node would quietly strip the rim off its
+    /// own material. Above 0 this one wins outright — the lane is singular, as
+    /// the note on the struct explains.
+    pub fn rim_over(&self, rim: [f32; 3], strength: f32) -> ([f32; 3], f32) {
+        if self.rim_strength > 0.0 {
+            (self.rim, self.rim_strength)
+        } else {
+            (rim, strength)
+        }
+    }
+
+    /// This tint's ambient multiplier over the one a surface already had. A
+    /// multiply, so a node's own `ambient` and a tint's compose rather than one
+    /// silently discarding the other.
+    pub fn ambient_over(&self, ambient: f32) -> f32 {
+        ambient * self.ambient
     }
 }
 
@@ -512,6 +594,61 @@ impl Material {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The identity has to mean every lane.**
+    ///
+    /// `is_identity` gates two different things — whether a Tint is written to
+    /// a scene at all, and whether `apply_node_tint` bothers to walk this
+    /// node's instances — so a lane it does not know about is a lane that is
+    /// silently dropped on save and never reaches the GPU.
+    #[test]
+    fn identity_covers_the_additive_lanes() {
+        assert!(Tint::default().is_identity());
+
+        // Each lane ALONE is enough to make it not the identity. Values chosen
+        // to differ from the default in the direction a caller would set them.
+        let rim = Tint { rim: [0.2, 0.6, 1.0], rim_strength: 1.3, ..Tint::default() };
+        assert!(!rim.is_identity(), "a rim is not nothing");
+
+        let amb = Tint { ambient: 1.6, ..Tint::default() };
+        assert!(!amb.is_identity(), "an ambient lift is not nothing");
+
+        // …and a rim COLOUR at zero strength still is: that is the state a node
+        // is in when somebody dialled the strength back to 0, and it must not
+        // keep a Tint alive that does nothing.
+        let off = Tint { rim: [0.2, 0.6, 1.0], rim_strength: 0.0, ..Tint::default() };
+        assert!(off.is_identity(), "a rim colour at strength 0 is no rim");
+    }
+
+    /// **A tint with no rim must not STRIP the surface's own.**
+    ///
+    /// "I did not ask for a rim" and "I asked for no rim" are different, and
+    /// the first one is what every existing tinted node in every existing scene
+    /// is saying.
+    #[test]
+    fn a_rimless_tint_leaves_the_surface_rim_alone() {
+        let own = ([0.9, 0.8, 0.1], 0.7);
+
+        let plain = Tint { color: [1.0, 0.2, 0.2], ..Tint::default() };
+        assert_eq!(
+            plain.rim_over(own.0, own.1),
+            own,
+            "a colour-only tint gives the surface's own rim back untouched"
+        );
+
+        // Above zero it wins outright — the lane is singular.
+        let rimmed = Tint { rim: [0.1, 0.4, 1.0], rim_strength: 1.3, ..Tint::default() };
+        assert_eq!(rimmed.rim_over(own.0, own.1), ([0.1, 0.4, 1.0], 1.3));
+    }
+
+    /// Ambient COMPOSES rather than replaces, so a node whose own material
+    /// already lifts its ambient and a tint that also does end up brighter than
+    /// either — not at whichever one happened to be applied last.
+    #[test]
+    fn ambient_multiplies_over_the_surfaces_own() {
+        assert_eq!(Tint::default().ambient_over(1.6), 1.6, "no tint changes nothing");
+        assert_eq!(Tint { ambient: 2.0, ..Tint::default() }.ambient_over(1.6), 3.2);
+    }
 
     fn sheet(cols: u32, rows: u32, cell: u32) -> Material {
         Material { sheet_cols: cols, sheet_rows: rows, cell, ..Material::default() }

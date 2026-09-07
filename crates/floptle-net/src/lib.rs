@@ -307,6 +307,8 @@ mod tests {
             material: None,
             object_materials: Default::default(),
             tint: None,
+                    tint_rim: None,
+                    tint_ambient: None,
             rigidbody: None,
             celestial: None,
             mesh_collider: false,

@@ -166,13 +166,45 @@ fn now_unix() -> u64 {
 }
 
 /// Read the cached list, if there is one and it is still fresh.
+///
+/// **A list with no live region in it is never fresh enough**, however recently
+/// it was written. The cache exists so that the path a game actually takes —
+/// host on a region that is open — never waits on fopull.com. A list that would
+/// refuse every host is not that path: it is the answer that ends in
+/// `net.host{ relay = "cloud" }` failing, and one 3-second request is cheap
+/// against that.
+///
+/// This is the **flag day** bug, and it is not hypothetical. `us-east` was
+/// `planned` until the control plane derived it `up`; every client that had
+/// asked in the preceding 24 hours held a `planned` list, kept returning it
+/// without asking again, and refused to host with "no Floptle Cloud region is
+/// open yet" — naming, as the reason a developer could not go online, a fact
+/// that had stopped being true. It heals itself only by expiry, so the window
+/// is a full [`CACHE_TTL`] wide and re-launching does not shorten it.
+///
+/// Caching the negative is what made that possible, so the negative is what
+/// stops being cached. When nothing is open anywhere the cost is one refused
+/// fetch per `net.host` — not per frame, and not per launch.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn cached() -> Option<Regions> {
     let path = cache_path()?;
     let text = std::fs::read_to_string(path).ok()?;
     let c: Cached = serde_json::from_str(&text).ok()?;
-    let age = now_unix().saturating_sub(c.fetched_unix);
-    (age < CACHE_TTL.as_secs() && !c.regions.regions.is_empty()).then_some(c.regions)
+    is_usable(&c, now_unix()).then_some(c.regions)
+}
+
+/// [`cached`]'s decision, with the clock handed in.
+///
+/// Split from the read for the reason `pick_cloud_relay` is split from its
+/// fetch: the read touches the disk and this is the part with rules in it, so
+/// the guards drive the rules against a value instead of against a file in
+/// whatever state the machine running the tests happens to have.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_usable(c: &Cached, now: u64) -> bool {
+    let age = now.saturating_sub(c.fetched_unix);
+    age < CACHE_TTL.as_secs()
+        && !c.regions.regions.is_empty()
+        && c.regions.live().next().is_some()
 }
 
 /// Write a freshly-fetched list to the cache. Best effort: a cache that cannot
@@ -324,10 +356,50 @@ mod tests {
     /// A stale cache is ignored rather than served, and a fresh one is trusted.
     #[test]
     fn a_cache_older_than_a_day_is_not_used() {
-        let fresh = Cached { fetched_unix: now_unix(), regions: list() };
-        let stale = Cached { fetched_unix: now_unix() - CACHE_TTL.as_secs() - 1, regions: list() };
-        let age_ok = |c: &Cached| now_unix().saturating_sub(c.fetched_unix) < CACHE_TTL.as_secs();
-        assert!(age_ok(&fresh));
-        assert!(!age_ok(&stale));
+        let now = now_unix();
+        // Through `is_usable` — the function `cached` actually calls. The old
+        // version of this test re-implemented the age comparison inline, so it
+        // asserted that a subtraction works and would have stayed green through
+        // any change to the rule it was named after.
+        assert!(is_usable(&Cached { fetched_unix: now, regions: list() }, now));
+        assert!(!is_usable(
+            &Cached { fetched_unix: now - CACHE_TTL.as_secs() - 1, regions: list() },
+            now
+        ));
+    }
+
+    /// **A cached list with nothing open is never used, however fresh it is.**
+    ///
+    /// The flag day: `us-east` was `planned` and became `up`. A client that had
+    /// asked in the previous 24 hours kept answering out of its own cache and
+    /// refused every `net.host{ relay = "cloud" }` with "no Floptle Cloud
+    /// region is open yet" — a sentence that had stopped being true, for up to
+    /// a full day, with re-launching no help because the cache does not care
+    /// how many times it is read.
+    ///
+    /// Caching the negative is what made that possible, so the negative is the
+    /// thing that stops being cached.
+    #[test]
+    fn a_cache_with_no_open_region_is_refetched_however_fresh() {
+        let now = now_unix();
+        let planned_only = Regions {
+            regions: vec![Region {
+                id: "us-east".into(),
+                letter: 'U',
+                name: "US East".into(),
+                relay: "us-east.relay.fopull.com:7788".into(),
+                status: "planned".into(),
+            }],
+        };
+        assert!(
+            !is_usable(&Cached { fetched_unix: now, regions: planned_only }, now),
+            "a brand-new list that would refuse every host is not worth keeping"
+        );
+        // …and the hot path is untouched: a list WITH a live region still
+        // answers from disk, which is the whole reason this cache exists.
+        assert!(
+            is_usable(&Cached { fetched_unix: now, regions: list() }, now),
+            "one live region and the cache still answers without a fetch"
+        );
     }
 }

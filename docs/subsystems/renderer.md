@@ -7,7 +7,7 @@
 > [`./materials-and-textures.md`](./materials-and-textures.md), and SDF physics in
 > [`./physics.md`](./physics.md).
 
-The job here is the [VISION](../VISION.md) reaction — *"I've never seen anything
+The job here is one reaction — *"I've never seen anything
 like this, it's from another dimension"* — surreal, dreamlike, and willing to
 break the laws of light and geometry. We render fractals as math, fly the camera
 *inside* them, morph their geometry in real time, and run a post stack that

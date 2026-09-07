@@ -107,6 +107,39 @@ pub(crate) struct HiddenServer {
     pub anim: crate::anim::AnimSystem,
 }
 
+/// Why a second session is refused, or `None` when there is nothing to refuse.
+///
+/// Split out from [`Editor::refuse_second_session`] so the decision can be
+/// asserted without standing up a session: the failure this exists to fix was a
+/// SILENT one, and a message that stopped being produced would leave no trace
+/// in any other test.
+pub(crate) fn second_session_reason(hosting: bool, is_client: bool) -> Option<&'static str> {
+    if hosting {
+        Some(
+            "this peer is already HOSTING — something called net.host first (a scene that \
+             opens straight into a lobby usually has). Call net.leave() to end it",
+        )
+    } else if is_client {
+        Some("this peer is already a CLIENT in a session — call net.leave() first")
+    } else {
+        None
+    }
+}
+
+/// The address half of `net.join`, with the scheme off if it was spelled.
+///
+/// **`quic://host:port` AND `host:port`, because both are spelled in public.**
+/// `net.join` takes the URL form and strips the scheme before it gets here;
+/// `floptle run --join` hands its argument straight in, and the help text and
+/// every error message use the URL form. So a person who copied the spelling out
+/// of the help got `quic://quic://127.0.0.1:30040` and a DNS failure naming a
+/// hostname they never typed. Accepting both here is what makes the two callers
+/// agree, rather than each caller remembering.
+pub(crate) fn quic_addr(addr: &str) -> &str {
+    addr.strip_prefix("quic://").unwrap_or(addr)
+}
+
+
 impl Editor {
     /// Once per gameplay tick, after physics (`docs/multiplayer.md` §9):
     /// drain Lua session commands, advance the hub clock, run the server and
@@ -661,6 +694,8 @@ impl Editor {
             let identities = Self::mirror_identities(s);
             NetState {
                 role: NetRoleState::Server,
+                // The one session fact a game cannot infer: is anybody here.
+                dedicated: self.dedicated,
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
@@ -1372,6 +1407,32 @@ impl Editor {
         self.script_host.fire_scene_loaded(&mut self.world, &name, false);
     }
 
+    /// **Already in a session — and say which, rather than doing nothing.**
+    ///
+    /// Every way into a session (`net.host` over QUIC or a relay, `net.join`
+    /// over either, and the in-editor client) refuses while one is already
+    /// running, which is correct: a second one must not tear down the first.
+    /// What was wrong was refusing in silence. Five call sites each returned
+    /// with no console entry, so a script that called `net.host` twice, or a
+    /// scene that hosted on open and then tried to join, got a no-op it could
+    /// not distinguish from success — `net.role()` reads the same either way.
+    ///
+    /// `floptle run --join` is where that surfaced: it reports "could not join
+    /// … (the reason is in the log above)" whenever no client appeared, so the
+    /// silent path printed a message whose entire content was a pointer at an
+    /// empty log.
+    ///
+    /// Returns true when the caller should stop.
+    fn refuse_second_session(&mut self, what: &str) -> bool {
+        let Some(being) =
+            second_session_reason(self.net_server.is_some(), self.net_play_client.is_some())
+        else {
+            return false;
+        };
+        self.console.push(floptle_script::LogLevel::Warn, format!("{what}: ignored, {being}."), None);
+        true
+    }
+
     /// Host a REAL session on a UDP port (QUIC): other machines running the
     /// same project join with `net.join("quic://<ip>:port")`. The play world
     /// is the authoritative server — and scene-authored Predicted nodes belong
@@ -1387,7 +1448,7 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() || self.net_play_client.is_some() {
+        if self.refuse_second_session(&format!("net.host{{ port = {port} }}")) {
             return;
         }
         // A browser build has no UDP socket to bind. Said out loud, because a
@@ -1440,7 +1501,7 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() || self.net_play_client.is_some() {
+        if self.refuse_second_session(&format!("net.host{{ relay = \"{relay_addr}\" }}")) {
             return;
         }
         // Drop any previous code BEFORE trying, so a failed host can never
@@ -1585,6 +1646,8 @@ impl Editor {
     /// "Test as remote player", minus the hidden server.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_join_quic(&mut self, addr: &str) {
+        // Both spellings — see `quic_addr`.
+        let addr = quic_addr(addr);
         if !self.playing {
             self.console.push(
                 floptle_script::LogLevel::Warn,
@@ -1593,7 +1656,7 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() || self.net_play_client.is_some() {
+        if self.refuse_second_session(&format!("net.join(\"quic://{addr}\")")) {
             return;
         }
         #[cfg(target_arch = "wasm32")]
@@ -1634,7 +1697,7 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() || self.net_play_client.is_some() {
+        if self.refuse_second_session(&format!("net.join(\"relay://{relay_addr}/{code}\")")) {
             return;
         }
         let transport = match floptle_net::RelayClient::join(relay_addr, code) {
@@ -1684,7 +1747,7 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() || self.net_play_client.is_some() {
+        if self.refuse_second_session("joining the in-editor session") {
             return;
         }
         // The hidden server world: the scene as it stands right now.
@@ -1844,6 +1907,8 @@ impl Editor {
         crate::input_actions::apply_net_input_to(&hs.host, &inp);
         hs.host.set_net_state(NetState {
             role: NetRoleState::Server,
+            // The in-editor harness has somebody sitting at it, by definition.
+            dedicated: false,
             peers: hs.session.peers().to_vec(),
             rtt_ms: hs.session.stats(hs.peer).rtt_ms,
             my_peer: None,
@@ -2468,6 +2533,8 @@ impl Editor {
         };
         self.script_host.set_net_state(NetState {
             role: NetRoleState::Client,
+            // A client is somebody's machine, always.
+            dedicated: false,
             peers: Vec::new(),
             rtt_ms: rtt,
             my_peer,
@@ -2775,6 +2842,55 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+
+    /// **A refused second session says which one you are already in.**
+    ///
+    /// Refusing is correct — a second session must not tear down the first —
+    /// and refusing in SILENCE was the bug. Five call sites returned with no
+    /// console entry, so a script that called `net.host` twice got a no-op it
+    /// could not tell from success, because `net.role()` reads the same either
+    /// way. `floptle run --join` is where it surfaced: it printed "the reason
+    /// is in the log above" pointing at an empty log.
+    ///
+    /// The two cases are asserted to differ, because "you are already in a
+    /// session" is the message that does not help — which of the two you are in
+    /// is what tells you what to do about it.
+    #[test]
+    fn a_second_session_is_refused_with_which_one_you_are_already_in() {
+        let hosting = second_session_reason(true, false).expect("hosting is a refusal");
+        let client = second_session_reason(false, true).expect("a client is a refusal");
+        assert!(hosting.contains("HOSTING"), "{hosting}");
+        assert!(client.contains("CLIENT"), "{client}");
+        assert_ne!(hosting, client, "which session you are in is the actionable half");
+        // Both name the way out, or the message is a dead end.
+        assert!(hosting.contains("net.leave()"), "{hosting}");
+        assert!(client.contains("net.leave()"), "{client}");
+        // …and a peer in no session is not refused at all.
+        assert_eq!(second_session_reason(false, false), None);
+        // Hosting wins the description when somehow both are set: it is the one
+        // that owns the world.
+        assert_eq!(second_session_reason(true, true), Some(hosting));
+    }
+
+    /// **`net.join` and `floptle run --join` spell an address the same way.**
+    ///
+    /// The help text and every error message here use `quic://host:port`, and
+    /// `net.join` strips that scheme itself before calling in — so a person who
+    /// copied the spelling out of the help got `quic://quic://127.0.0.1:30040`
+    /// handed to the resolver, and a DNS failure naming a hostname they never
+    /// typed. Both spellings have to work, and the bare one has to be left
+    /// exactly alone.
+    #[test]
+    fn a_join_address_takes_both_spellings() {
+        assert_eq!(quic_addr("quic://127.0.0.1:30040"), "127.0.0.1:30040");
+        assert_eq!(quic_addr("127.0.0.1:30040"), "127.0.0.1:30040");
+        assert_eq!(quic_addr("quic://us-east-1.fleet.fopull.com:30017"), "us-east-1.fleet.fopull.com:30017");
+        // Only the leading scheme, and only once: a host that happens to
+        // contain the text is not rewritten.
+        assert_eq!(quic_addr("quic://quic://1.2.3.4:9"), "quic://1.2.3.4:9");
+        assert_eq!(quic_addr("relay://code"), "relay://code", "another scheme is not ours");
+        assert_eq!(quic_addr(""), "");
+    }
 
     use floptle_core::{Replicated, ReplicationMode};
 

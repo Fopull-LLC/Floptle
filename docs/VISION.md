@@ -152,7 +152,7 @@ Floptle becomes a (free, open-source, donation-supported) Fopull LLC product whe
 1. A maker can build a small surreal game **and** a small combat game end-to-end
    using only the features above.
 2. It exports running builds for all three platforms.
-3. All temporary Ocarina-of-Time test assets are replaced with original Fopull
+3. All third-party placeholder test assets are replaced with original Fopull
    art (see ADR-0010).
 4. The headline features (renderer, shader IR, VFX timeline, scene-building,
    UI, dialogue, pooling) feel *better* to use than the incumbents — that's the

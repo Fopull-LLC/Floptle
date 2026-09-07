@@ -1,0 +1,25 @@
+[package]
+name = "floptle-fleet"
+description = "The fleet agent: turns a region's desired deployments into running dedicated servers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The control plane. One GET and one POST every ten seconds, on the agent's own
+# thread with nobody waiting behind it — the same blocking client the relay, the
+# Hub and `account.*` already use.
+ureq = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# A bundle arrives as bytes off the internet and is then EXECUTED, so the digest
+# check is not optional and neither is the unpack guard. `floptle-dist` already
+# streams a SHA-256; the unpack here is this crate's own, because "reject
+# anything that would land outside the destination" is a security property a
+# fleet agent has to be able to point at rather than inherit.
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"

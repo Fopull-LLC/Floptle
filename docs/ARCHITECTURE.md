@@ -323,13 +323,17 @@ render/physics/matter, so the spine adds one authority without dependency cycles
 Discipline: ship it as a thin seam wiring only the axes you can prove — it shapes
 the seams cheaply; it must never compete with getting pixels on screen.
 
-## 10. Networking boundary (deferred)
+## 10. Networking boundary
 
-`floptle-net` exists now only to *hold a seam*. Gameplay logic is written against
-an authoritative-update model (fixed timestep, serializable component state) so a
-dedicated **server build** + connecting clients can be added later on the maker's
-own infrastructure — without reshaping the engine. Not a launch requirement.
-See [`subsystems/networking-future.md`](subsystems/networking-future.md).
+`floptle-net` began as a seam to hold: gameplay logic is written against an
+authoritative-update model (fixed timestep, serializable component state), so a
+server and its clients could be added without reshaping the engine. That seam
+was built through. The engine now hosts and joins over QUIC or a relay, ships a
+dedicated server (`floptle serve`), and replicates node state, ownership and
+input across peers — on the maker's own infrastructure or on a managed relay.
+The shape of the boundary is unchanged, which is what the seam was for.
+
+See [`multiplayer.md`](multiplayer.md) for what a game does with it.
 
 ## 11. Crate dependency rules (enforced by review)
 

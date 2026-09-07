@@ -184,6 +184,21 @@ pub struct NetState {
     /// `None` offline, on a client, and on a direct/LAN host (there is no code
     /// to show — joiners use the address).
     pub lobby_code: Option<String>,
+    /// **Is this a server with NOBODY SITTING AT IT?**
+    ///
+    /// `net.isServer()` is true for both shapes of host and that is usually the
+    /// right question — the simulation does not care who started it. This is the
+    /// one thing that differs, and a game cannot infer it: a dedicated server
+    /// has no local player, so it must not take a seat, deal itself a
+    /// character, count toward "enough players", or wait for itself to press
+    /// Ready.
+    ///
+    /// Every one of those went wrong in Forgery for want of this: the lobby
+    /// called `hello()` on any machine that was the server, so a deployed box
+    /// entered its own roster as "Player", and `canBegin` — which requires every
+    /// entry to be ready — could then never be true, because nobody was there to
+    /// ready it. The match could not start, and nothing said why.
+    pub dedicated: bool,
 }
 
 /// One peer's account identity, mirrored to Lua.
@@ -201,6 +216,7 @@ impl Default for NetState {
     fn default() -> Self {
         Self {
             role: NetRoleState::Offline,
+            dedicated: false,
             peers: Vec::new(),
             rtt_ms: 0.0,
             my_peer: None,
@@ -689,6 +705,15 @@ pub(crate) fn install_net_api(
         t.set(
             "isClient",
             lua.create_function(move |_, ()| Ok(n.state.borrow().role == NetRoleState::Client))?,
+        )?;
+    }
+    // net.isDedicated() — a server with nobody sitting at it. See
+    // `NetState::dedicated` for why a game cannot work this out for itself.
+    {
+        let n = net.clone();
+        t.set(
+            "isDedicated",
+            lua.create_function(move |_, ()| Ok(n.state.borrow().dedicated))?,
         )?;
     }
     // net.joinState() — "offline" | "connecting" | "joined" | "refused".

@@ -409,10 +409,11 @@ impl HubApp {
                 }
             };
             // The plan is secondary: a failed fetch shows "unknown" (not a wrong "free") and is
-            // reconciled on the next refresh.
+            // reconciled on the next refresh. `floptle/0189` made that the rule everywhere
+            // rather than this one call site's good instinct.
             let ent = provider
                 .entitlements(&tokens.access_token)
-                .unwrap_or(auth::Entitlements { tier: "unknown".into() });
+                .unwrap_or_else(|_| auth::Entitlements::unknown());
             let session = auth::Session::from_parts(tokens, who, ent);
             let _ = auth::KeyringStore::default().save(&session);
             let _ = tx.send(AuthEvent::Signed(Box::new(session)));
@@ -582,7 +583,21 @@ impl HubApp {
                 }
             } else if let Some(session) = &self.session {
                 ui.label(format!("Signed in as {}", session.display_name()));
-                ui.small(format!("plan: {}", session.tier));
+                // **A plan we could not read is not a plan we are on**
+                // (`floptle/0189`). Rendering the free tier as fact after a bad
+                // minute on `/entitlements` is how an outage reaches support as
+                // "my limits silently dropped" — and from a paying developer,
+                // as a billing complaint. Nothing is blocked either way; the
+                // difference is entirely in whether the number is stated or
+                // hedged.
+                if session.plan_known() {
+                    ui.small(format!("plan: {}", session.tier));
+                } else {
+                    ui.small("Could not check your plan — showing the free tier.")
+                        .on_hover_text(
+                            "fopull.com did not answer when this session asked what you are entitled to, so the free tier's limits are what you will see until it does. This is not a change to your account. It re-checks on the next sign-in or refresh.",
+                        );
+                }
                 if ui.button(format!("{} Sign out", ico::CLOSE)).clicked() {
                     sign_out = true;
                 }
