@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.85.0-rc5 "Web World"** (beta channel) — **a dedicated server, and two
+multiplayer bugs that broke the path the documentation tells you to take.**
+`net.on` written at the top of a script — the form every example uses — never
+fired: the handler was registered and then deleted a few lines later by the
+pass that clears the previous version's handlers, silently, so only `net.on`
+inside `start` ever worked. And the *first* player to join was served by a host
+that still believed it was not the server, so `net.spawn`, `net.kick`,
+`net.setOwner` and `net.setRelevant` all quietly refused for them and worked
+for everybody after — which reads exactly like a flaky connection and was
+nothing of the kind. Alongside those, `floptle-server` is a new binary for
+running a world on a machine nobody is sitting at: it is the same tick the
+editor runs when you press Play, not a smaller copy of it, and it starts on a
+minimal Linux server image with nothing installed. `--max-players` turns away
+the next arrival without dropping anyone already playing, and `--status-file`
+writes what the server is doing every five seconds. Stopping one is no longer
+indistinguishable from a crash — every player is told the world is going away
+before it goes. On the **beta** channel — switch in Hub ⏵ Settings ⏵ Channel.
+
 **v0.85.0-rc4 "Web World"** (beta channel) — **the second beta: everything in
 rc3, plus nine fixes found by going back over the release before promoting
 it.** Four of them were real problems. A package's scripts did not load in an
