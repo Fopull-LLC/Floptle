@@ -1175,10 +1175,10 @@ impl Sim {
                 }
                 // Same reject as §2, the other way round: one sensor body against
                 // every static collider in the world (`floptle/0171`).
-                if let Some((bc, br)) = col.bounds() {
-                    if (bc - pc).length() > br + pr {
-                        continue;
-                    }
+                if let Some((bc, br)) = col.bounds()
+                    && (bc - pc).length() > br + pr
+                {
+                    continue;
                 }
                 let (centers, n_c, radius) = body.sample_centers();
                 for &c in &centers[..n_c] {

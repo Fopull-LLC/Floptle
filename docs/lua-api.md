@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 144
 - [node — transform & body fields](#node--transform--body-fields) — 36
-- [node — methods & handles](#node--methods--handles) — 26
+- [node — methods & handles](#node--methods--handles) — 28
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -908,6 +908,14 @@ node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, h
 
 node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off).
 
+### `node:setGlyphOffsets`
+
+node:setGlyphOffsets{ vec2(0,0), vec2(0,-3), … } — displace individual characters at draw time, in design units, one entry per character of the authored string (shorter is fine; the rest stay still, and {} clears).
+
+The half spans cannot do. Glyph positions are computed inside the renderer and never surface, so a game could not move one letter at any price — no wobble, no shake, no per-glyph reveal. Applied AFTER layout: a displaced glyph never re-wraps its line and never moves its neighbours, so an effect cannot reflow the sentence it is decorating.
+
+Deliberately offsets rather than named effects: which characters move, by how much and on what phase is the game's to decide, and the engine only agrees to move a glyph it has already positioned. A shadow and an outline follow the glyph they belong to.
+
 ### `node:setLighting2D`
 
 node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inner=4, falloff=2, shadows=true} — 2D lighting, from a script. `mode` is auto/2d/3d and says whether this node is on the 2D lighting path at all; auto decides from the scene and is never re-decided once you say otherwise. On a LIGHT, `layers` is the sorting layers it reaches — empty or absent means all of them, which is how you keep a torch off the background. `inner` is full brightness out to that radius before the ramp starts (0 = the ramp starts at the light) and `falloff` is its exponent (2 = the curve every light has always had): together they let a posterized game land a whole light inside one band instead of drawing concentric rings. `shadows=false` makes this one light pass through everything, whatever the scene blocks. On a RECEIVER, `blocks` is auto/on/off for whether it occludes light — under auto a tilemap casts from the collision it already declares, so a level's collision IS its light occlusion. A bad spelling names the accepted set rather than silently meaning auto.
@@ -976,6 +984,14 @@ node:setTerrain(id) — make the node a Terrain volume with that id; fill it wit
 ### `node:setTerrainGen`
 
 node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears.
+
+### `node:setTextSpans`
+
+node:setTextSpans{ {len=10}, {len=3, color={1,0.3,0.3}}, {len=8} } — colour stretches of this UI element's text instead of the whole string. A TextSpec carries one colour, which is a fine default and the wrong floor: the moment a game writes prose at the player it wants a proper noun in the speaker's colour, a keyword tinted to match the key it names, or an item name in its rarity. The only alternative was splitting the line into sibling elements laid out by hand, which re-wraps wrong at every resolution and cannot be revealed a glyph at a time.
+
+Spans style; they never lay out. Wrapping, alignment, max_lines and ellipsis are computed across the whole string exactly as before, so a two-colour run wraps identically to the same string in one colour — a span boundary is not a line break a plain string would not have had. That is also why a span cannot change size or font: those WOULD move the text, and a field that quietly did nothing would be worse than its absence.
+
+len is CHARACTERS of the authored string, not bytes, and spans run end to end from the start — a span with no color is how you spell a gap. Characters no span reaches keep the element's own colour. Pass {} to clear.
 
 ### `node:setTint`
 

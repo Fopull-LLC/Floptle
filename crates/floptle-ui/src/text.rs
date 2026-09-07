@@ -153,6 +153,48 @@ pub fn wrap_lines(text: &str, max_width: f32, advance: &dyn Fn(&str) -> f32) -> 
     out
 }
 
+/// Per drawn character, its index in the string the lines were broken from.
+///
+/// **This is what keeps a colour attached to its word through a wrap.** The
+/// layout produces `Vec<String>`, and those strings are not the source: a wrap
+/// eats the space it broke at, and an ellipsis appends a `…` that was never
+/// typed. Counting characters as they are drawn therefore drifts one place per
+/// line break, and the drift is silent — the text still reads correctly, the
+/// colours simply creep along it.
+///
+/// Recovering the mapping is exact rather than approximate because
+/// [`wrap_lines`] only ever DROPS whitespace and never reorders or inserts: a
+/// two-pointer walk that skips source whitespace re-finds every character.
+/// `None` marks a character the layout inserted, which is only ever the
+/// ellipsis.
+pub fn source_indices(source: &str, lines: &[String]) -> Vec<Vec<Option<usize>>> {
+    let src: Vec<char> = source.chars().collect();
+    let mut at = 0usize;
+    lines
+        .iter()
+        .map(|line| {
+            line.chars()
+                .map(|c| {
+                    // Skip what the break ate. Bounded to whitespace, so a
+                    // character that genuinely is not there cannot run the
+                    // cursor off the end of the string.
+                    while at < src.len() && src[at] != c && src[at].is_whitespace() {
+                        at += 1;
+                    }
+                    if at < src.len() && src[at] == c {
+                        at += 1;
+                        Some(at - 1)
+                    } else {
+                        // The appended `…`, or a line the caller truncated
+                        // past. Either way it is not a source character.
+                        None
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Truncate `line` to `max_width`, appending `…`. Returns the original when it
 /// already fits.
 pub fn ellipsize(line: &str, max_width: f32, advance: &dyn Fn(&str) -> f32) -> String {
