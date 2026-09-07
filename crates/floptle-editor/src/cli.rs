@@ -694,6 +694,32 @@ pub(crate) const VERBS: &[Verb] = &[
                        settings is noise",
             },
             Arg {
+                name: "--ghosts",
+                value: Value::Text,
+                required: false,
+                help: "join this many headless CLIENTS to the session the project hosts, \
+                       through the same in-process harness the 🌐 panel's \"Host + join a \
+                       local client\" button uses. Each gets its own world and receives real \
+                       snapshots, so the half of a multiplayer game that is only true across \
+                       the wire — a client's mirror, targeted RPCs, late joiners, and above \
+                       all interest management, whose promise is about what a client is NOT \
+                       sent — can be checked without a person at a GUI or a second machine. \
+                       The report says how many connected and how many replicated nodes each \
+                       one can see. FLOPTLE_NET_IMPAIR degrades their links like any other",
+            },
+            Arg {
+                name: "--join",
+                value: Value::Text,
+                required: false,
+                help: "be a CLIENT of a server in another process — the address a `floptle \
+                       serve` is listening on. The other half of --ghosts, and the shape a \
+                       dedicated-server project actually ships in: this is the real QUIC \
+                       transport rather than the loopback hub, so it is the only way to test \
+                       the wire itself. The project's OWN scripts run as the client, so \
+                       net.isServer() answers false and the game does its own asserting. \
+                       Cannot be combined with --ghosts, which hosts",
+            },
+            Arg {
                 name: "--json",
                 value: Value::Flag,
                 required: false,
@@ -1453,6 +1479,28 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                     }
                 },
             };
+            if a.contains_id("ghosts")
+                && text(a, "ghosts").is_some()
+                && text(a, "join").is_some()
+            {
+                eprintln!(
+                    "--ghosts hosts a session and --join joins somebody else's; a run can do \
+                     one or the other"
+                );
+                return Outcome::Exit(2);
+            }
+            let ghosts = match text(a, "ghosts").as_deref().map(str::parse::<u32>) {
+                Some(Ok(0)) => {
+                    eprintln!("--ghosts 0 asks for no clients, which is what run does anyway");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(n)) => n,
+                Some(Err(_)) => {
+                    eprintln!("--ghosts wants a whole number of clients");
+                    return Outcome::Exit(2);
+                }
+                None => 0,
+            };
             Outcome::Exit(crate::run::run(
                 &project,
                 text(a, "scene").as_deref(),
@@ -1463,6 +1511,8 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                     timing: a.get_flag("timing"),
                     alloc: a.get_flag("alloc"),
                     seed,
+                    ghosts,
+                    join: text(a, "join"),
                 },
             ))
         }

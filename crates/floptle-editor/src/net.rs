@@ -701,7 +701,17 @@ impl Editor {
             return;
         }
         let hub = floptle_net::MemoryHub::new();
-        let mut s = NetSession::server(Box::new(hub.server_endpoint()), self.input_map_hash());
+        // **Impairment reaches the loopback harness too** (`floptle/0190`).
+        // `net_impair_wrap` was applied at the two REAL tails — QUIC and the
+        // relay — so `FLOPTLE_NET_IMPAIR` did nothing at all to an in-process
+        // session. That was invisible while the harness was only reachable from
+        // the 🌐 panel beside a live link; now that `run --ghosts` makes it the
+        // way multiplayer is tested headlessly, a knob that silently does
+        // nothing is a test that silently passes under conditions nobody set.
+        let mut s = NetSession::server(
+            Self::net_impair_wrap(Box::new(hub.server_endpoint())),
+            self.input_map_hash(),
+        );
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.set_scene(&self.scene_rel_or_default());
         s.register_scene(&self.world);
@@ -730,7 +740,8 @@ impl Editor {
         let mut cw = World::default();
         floptle_scene::spawn_into(&doc, &mut cw);
         let hub = self.net_hub.as_ref().unwrap();
-        let mut c = NetSession::client(Box::new(hub.connect()), self.input_map_hash());
+        let mut c =
+            NetSession::client(Self::net_impair_wrap(Box::new(hub.connect())), self.input_map_hash());
         c.register_scene(&cw);
         self.net_client = Some((c, cw));
         self.net_ghosts = true;
@@ -1490,7 +1501,7 @@ impl Editor {
     /// Put the bad link in front of a real transport, if this build has one.
     /// Applied at the two tails every real session funnels through, so QUIC and
     /// the relay are covered by construction rather than by remembering.
-    fn net_impair_wrap(
+    pub(crate) fn net_impair_wrap(
         t: Box<dyn floptle_net::Transport>,
     ) -> Box<dyn floptle_net::Transport> {
         match Self::net_impair() {

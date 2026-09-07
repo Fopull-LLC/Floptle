@@ -646,11 +646,59 @@ run a box (ADR-0022).
 
 ---
 
+## 6d. Testing it with nobody at the keyboard
+
+`floptle run` plays a project headlessly, with no window and no GPU — and it can
+**host a real session** while it does. `net.host{}` with neither `port` nor
+`relay` stands up the in-process harness, and `net.role`, `net.isServer`,
+`synced`, `onRpc`, `net.rpc(…, {to = peer})`, `net.spawn` and `scene.load` all
+work under it. A whole lobby → roster → scene swap → spawn flow is regression
+testable on one machine.
+
+That only ever tested the **server**, though, and half a server-authoritative
+design is not a design. `--ghosts` joins real clients to it:
+
+```
+floptle run . --seconds 10 --ghosts 2
+```
+
+Each ghost gets its own world and receives real snapshots, exactly as a second
+machine would. The run reports how many connected and, for each, **how many
+replicated nodes it was actually sent** — not how many it knows the names of.
+That distinction is the whole point of the number:
+
+```
+2 of 2 ghost client(s) connected — each is sent [1, 2] replicated node(s).
+```
+
+A count that differs between clients is interest management doing its job. This
+is how `net.setRelevant(node, peer, false)` gets verified at all: the
+cheat-resistance of a hidden-role game is *defined* by what a client is not sent,
+and there was previously no way to be a client and check.
+
+`--ghosts` runs no Lua of its own — a ghost is a client's world, not a second
+copy of your game. For the client half of your own scripts, be the client:
+
+```
+floptle serve .                 # in one process
+floptle run . --join 127.0.0.1:7777 --seconds 10
+```
+
+`--join` uses the real QUIC transport rather than the loopback hub, so it is the
+only form that tests the wire itself, and the project's **own** scripts run as
+the client — `net.isServer()` answers false, and your game does its own
+asserting. The two flags are mutually exclusive: one hosts, the other joins.
+
+`FLOPTLE_NET_IMPAIR` (§7) reaches all of it, the loopback harness included, so
+"does this hold up at 100 ms and 2% loss" is a question one machine can answer.
+
+---
+
 ## 7. Rehearsing a bad connection
 
 The simulated-link sliders only shape the in-editor harness. To put real latency
-on a **real** QUIC or relay session between two instances on one desk, start the
-editor with:
+on a **real** QUIC or relay session — or on the headless harness `run` stands up
+(§6d) — start the editor or the run with:
 
 ```
 FLOPTLE_NET_IMPAIR= cargo run -p floptle-editor            # on, sliders at zero
