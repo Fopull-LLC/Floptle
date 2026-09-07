@@ -117,6 +117,7 @@ fn the_bake_and_its_queries_stay_linear() {
     pathing_grows_with_the_level_it_crosses(&yard);
     a_crowd_costs_what_the_crowd_costs(&yard);
     a_wander_point_costs_what_its_window_costs(&yard);
+    a_held_samplers_draw_is_priced_by_nothing(&yard);
 }
 
 /// **A wander point is priced by its window, not by the level.**
@@ -153,6 +154,46 @@ fn a_wander_point_costs_what_its_window_costs(yard: &Yardstick) {
         std::hint::black_box(acc);
     });
     yard.assert_linearish("picking a wander point in a fixed window", ratio);
+}
+
+/// **A draw from a held sampler is priced by nothing at all.**
+///
+/// The guard above pins the half that was already true — the same window costs
+/// the same on four times the level. This pins the half `floptle/0177` is
+/// about: cost against the WINDOW. `nav.random` gathers, sorts, dedupes and
+/// measures every polygon its window touches on every single call, so a 40 m
+/// window really did cost twenty times an 8 m one, and a dozen agents redrawing
+/// a destination in one frame really did cost 4 ms.
+///
+/// A squad wanders around the same place, so the gather is held and the draws
+/// binary search it. Quadrupling the radius covers about SIXTEEN times the
+/// polygons; a draw that still walked them would show it. The bar is
+/// deliberately far below linear-in-polygons rather than at 1.0 — the gather
+/// itself is still in the measurement, and pretending a timing on a shared
+/// machine is exact is how a guard becomes something people re-run.
+fn a_held_samplers_draw_is_priced_by_nothing(yard: &Yardstick) {
+    let settings = NavSettings { cell_size: 0.5, ..Default::default() };
+    let mesh = bake(&level(6400), &settings).unwrap();
+    let ratio = growth(6, |r| {
+        let sampler = mesh.sampler(Some(([40.0, 0.0, 40.0], r as f32)));
+        let mut acc = 0.0f32;
+        for i in 0..20_000 {
+            let u = (i % 97) as f32 / 97.0;
+            let v = (i % 89) as f32 / 89.0;
+            if let Some(p) = sampler.point(u, v) {
+                acc += p[0];
+            }
+        }
+        std::hint::black_box(acc);
+    });
+    let ratio = ratio.expect("20k draws must be long enough to time");
+    assert!(
+        ratio < 4.0,
+        "4x the radius covers ~16x the polygons and cost {ratio:.1}x the time — a held \
+         sampler's draw is walking its neighbourhood again. Linear work measures {:.1}x \
+         here and now, so this is not machine noise.",
+        yard.linear
+    );
 }
 
 /// The harness has to be able to fail, or the guards below are decoration —

@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 35
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
-- [pathfinding — nav.*](#pathfinding--nav) — 25
+- [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 36
@@ -2398,6 +2398,10 @@ nav.rebake(centre, size) — re-measure this box of the level and splice the ans
 ### `nav.regionOf`
 
 nav.regionOf(point[, tolerance]) — which walkable island a point is on, or nil if it is not on the navmesh. Two points in different regions can never be walked between, so comparing two ids rules out a search that was never going to succeed. The number itself means nothing beyond "the same one is the same island".
+
+### `nav.sampler`
+
+nav.sampler([near, radius]) — the neighbourhood gathered ONCE, for many draws: local s = nav.sampler(node.position, 20); local p = s:point(math.random(), math.random()). nav.random re-gathers, re-sorts and re-measures every polygon its window covers on every call, so its cost grows with the radius — a dozen agents redrawing a destination in one frame was measured at 4 ms. A squad wanders around the same place, so hold the gather and each draw becomes a binary search. s.count is how many polygon parts the window covers; a count of 0 answers nil forever, which otherwise reads as bad luck. s:point(u, v) takes the same caller-supplied 0..1 pair nav.random does and for the same reason. A sampler is a SNAPSHOT: nav.splice re-baking the level does not reach one already built, so rebuild it when the ground changes.
 
 ### `nav.settings`
 
