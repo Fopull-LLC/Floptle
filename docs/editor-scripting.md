@@ -542,6 +542,7 @@ origin needs no arithmetic at your end.
 | `nav.onMesh(p)` · `nav.regionOf(p)` · `nav.reachable(a, b)` | |
 | `nav.path(a, b)` · `nav.distance(a, b)` · `nav.raycast(a, b)` | |
 | `nav.random(seed [, near, radius])` | repeatable for a given seed |
+| `nav.sampler([near, radius])` | the same neighbourhood gathered once, for many draws |
 
 ### Reading the surface
 

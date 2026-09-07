@@ -214,6 +214,118 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
+/// A headless client of the session the project is hosting — `--ghosts N`.
+///
+/// **`floptle run` could already HOST a real session** — `net.host{}` with
+/// neither `port` nor `relay` stands up the in-editor loopback harness with no
+/// GPU and no window, and `net.role`, `synced`, `onRpc`, `net.rpc{to = peer}`,
+/// `net.spawn` and `scene.load` all work under it. Nothing could JOIN it. The
+/// ghost client existed too (`Editor::net_join_local`), but it hung off the
+/// Editor and was reachable only from the 🌐 panel's button, so everything that
+/// is only true ACROSS THE WIRE was untestable except by a person clicking in a
+/// GUI or by two machines: a client's mirror, targeted RPCs reaching the peer
+/// they named and only that peer, late joiners receiving current `synced`
+/// values, and — the one that matters most — interest management, whose whole
+/// promise is about what a client is NOT sent (`floptle/0190`).
+///
+/// These are owned by the RUN LOOP rather than by the Editor, deliberately: the
+/// Editor holds exactly one ghost and one Lua VM, and N of either is a design
+/// question this verb does not need to answer to make the wire observable.
+struct Ghost {
+    session: floptle_net::NetSession,
+    /// Its own world, built from the same scene doc a remote client would load.
+    world: floptle_core::World,
+}
+
+impl Ghost {
+    /// What this client is actually **being sent** — the question interest
+    /// management exists to answer, and the one nothing could ask before.
+    ///
+    /// Deliberately not `net_entities`, which counts the ids this client bound
+    /// locally from the scene file and is therefore the same number whether the
+    /// server replicates everything or nothing. See
+    /// [`floptle_net::NetSession::nodes_receiving`].
+    fn receiving(&self) -> usize {
+        self.session.nodes_receiving()
+    }
+}
+
+/// Join up to `want` ghosts once the project is hosting, then tick the ones
+/// that are already in.
+///
+/// Joining is LAZY because hosting is the project's decision, not this verb's:
+/// the script calls `net.host{}` on whichever frame its lobby flow reaches, and
+/// a ghost that tried to connect before that would find nothing and be counted
+/// as a client that failed rather than one that had not been invited yet.
+fn pump_ghosts(ed: &mut crate::Editor, ghosts: &mut Vec<Ghost>, want: usize) {
+    if ghosts.len() < want
+        && ed.net_server.is_some()
+        && let (Some(hub), Some(doc)) = (ed.net_hub.as_ref(), ed.net_scene_doc.clone())
+    {
+        let mut world = floptle_core::World::default();
+        floptle_scene::spawn_into(&doc, &mut world);
+        // Impaired like any other link when `FLOPTLE_NET_IMPAIR` is set, so
+        // "does this hold up under 50 ms and 2% loss" is a question this verb
+        // can answer rather than one that needs two machines.
+        let mut session = floptle_net::NetSession::client(
+            crate::Editor::net_impair_wrap(Box::new(hub.connect())),
+            ed.input_map_hash(),
+        );
+        session.register_scene(&world);
+        ghosts.push(Ghost { session, world });
+    }
+    for g in ghosts.iter_mut() {
+        g.session.tick_client(&mut g.world);
+        // A ghost runs no scripts, so nothing would ever drain these and they
+        // would grow for the whole run.
+        let _ = g.session.take_rpcs();
+        let _ = g.session.take_events();
+        let _ = g.session.take_synced();
+        let _ = g.session.take_anim_updates();
+    }
+    // Follow scene switches exactly as a remote client does: reload from DISK
+    // into the ghost's own world and rebind its NetIds. Without this a ghost
+    // holds stale ids after `scene.load` and silently discards every snapshot,
+    // which makes a working server look like a broken one.
+    for i in 0..ghosts.len() {
+        let Some(scene) = ghosts[i].session.take_scene_switch() else { continue };
+        let loaded = ed.resolve_scene_request(&scene).and_then(|p| floptle_scene::load(&p).ok());
+        match loaded {
+            Some(doc) => {
+                let g = &mut ghosts[i];
+                g.world = floptle_core::World::default();
+                floptle_scene::spawn_into(&doc, &mut g.world);
+                g.session.rebind_scene(&g.world);
+            }
+            None => eprintln!("ghost {i}: could not load \"{scene}\" — it is now out of the game"),
+        }
+    }
+}
+
+/// What the wire did, per client. The 🌐 panel knows all of this already; this
+/// is the same numbers reaching a process with no window.
+fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
+    ghosts
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let stats = g.session.stats(floptle_net::SERVER);
+            serde_json::json!({
+                "ghost": i,
+                "connected": g.session.is_connected(),
+                // The count a relevancy test reads. `net.setRelevant(node, peer,
+                // false)` is verified by this number going DOWN for that peer
+                // and not for the others — which is `floptle/0182`'s whole
+                // promise, and was taken on trust in every project until now.
+                // Nodes actually being SENT state, not ids bound locally.
+                "receiving": g.receiving(),
+                "rtt_ms": stats.rtt_ms,
+                "loss": stats.loss,
+            })
+        })
+        .collect()
+}
+
 /// The verb's flags, as one value. Each is described on its command-line
 /// flag in `cli.rs`; the short of it:
 ///
@@ -226,18 +338,31 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 /// * `alloc` (`--alloc`) measures Lua-heap allocation per frame, in total and
 ///   per script, with the collector stopped across a mid-run window.
 /// * `seed` (`--seed`) pins the game's randomness so two runs are the same run.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) json: bool,
     pub(crate) steam: bool,
     pub(crate) timing: bool,
     pub(crate) alloc: bool,
     pub(crate) seed: Option<u32>,
+    /// `--ghosts N`: how many headless clients to join the session the project
+    /// hosts. Zero — the default — stands none up and costs nothing.
+    pub(crate) ghosts: u32,
+    /// `--join <addr>`: be a CLIENT of a server in another process, rather than
+    /// hosting one.
+    ///
+    /// The other half of `--ghosts`, and the shape a dedicated-server project
+    /// actually ships in: this is the real QUIC transport rather than the
+    /// loopback hub, so it is the only way to test the wire itself. It also
+    /// gets the ghosts' missing half for free — the run's own Lua IS the
+    /// client's, so `net.isServer()` answers false and the project's own
+    /// scripts do the asserting (`floptle/0190`).
+    pub(crate) join: Option<String>,
 }
 
 /// Run `root` for `span`. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -> i32 {
-    let Options { json, steam, timing, alloc, seed } = opts;
+    let Options { json, steam, timing, alloc, seed, ghosts: want_ghosts, join } = opts;
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -291,6 +416,20 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         eprintln!("the project did not enter play mode");
         return 1;
     }
+    // Joining happens after Play starts, because that is the rule the session
+    // itself enforces — and it is the project's OWN scripts that then run as a
+    // client, which is what makes the client half assertable at all.
+    if let Some(addr) = join.as_deref() {
+        ed.net_join_quic(addr);
+        if ed.net_play_client.is_none() {
+            ed.drain_script_logs();
+            eprintln!(
+                "could not join {addr} — is a `floptle serve` listening there? (the reason is \
+                 in the log above)"
+            );
+            return 1;
+        }
+    }
     let asked = span.steps();
     // **Counted, not assumed.** The report used to publish the number that was
     // asked for, which is an echo of the command line rather than an
@@ -322,6 +461,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
             AllocWindow::MIN_SPAN
         );
     }
+    let mut ghosts: Vec<Ghost> = Vec::new();
     let mut allocated: Option<f64> = None;
     // …and which scripts made it: bytes per frame per script kind, from the
     // same window, sampled around each hook call while the collector is off.
@@ -367,6 +507,11 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // not have. See `pump_world_streaming`.
         ed.pump_world_streaming();
         ed.play_step(DT, true);
+        // After the step, so a ghost sees the tick the server has just
+        // finished rather than the one before it.
+        if want_ghosts > 0 {
+            pump_ghosts(&mut ed, &mut ghosts, want_ghosts as usize);
+        }
         // **The engine's frame, and nothing after it.** Everything below —
         // draining the log, folding the profiler — is this file's bookkeeping,
         // and charging the game for it would make the number depend on how
@@ -421,6 +566,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         asked,
         simulated,
         Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed },
+        &ghosts,
         json,
     )
 }
@@ -456,6 +602,34 @@ fn summary_line(steps: u32, asked: u32, simulated: f32, errors: usize, warnings:
         (e, 0) => format!("{ran} — {e} error(s)"),
         (e, w) => format!("{ran} — {e} error(s), {w} warning(s)"),
     }
+}
+
+/// The line `--ghosts` adds.
+///
+/// Its own function for the reason `summary_line` is one: a caller believes it
+/// without checking anything else, so a test has to be able to read it.
+///
+/// **A ghost that never connected is said out loud.** A run that stood up two
+/// clients and joined neither otherwise looks exactly like a run where both
+/// joined and were sent nothing, and those are opposite problems.
+fn ghosts_line(ghosts: &[Ghost]) -> String {
+    let joined = ghosts.iter().filter(|g| g.session.is_connected()).count();
+    if joined == 0 {
+        return format!(
+            "{} ghost client(s) stood up and NONE connected — the project never hosted, or \
+             hosted somewhere a loopback client cannot reach (net.host{{}} with no port and \
+             no relay is the in-process harness)",
+            ghosts.len()
+        );
+    }
+    let seen: Vec<String> = ghosts.iter().map(|g| g.receiving().to_string()).collect();
+    format!(
+        "{joined} of {} ghost client(s) connected — each is sent [{}] replicated node(s). A \
+         number that differs between clients is interest management doing its job; one that \
+         is zero everywhere is a session nothing was replicated into",
+        ghosts.len(),
+        seen.join(", ")
+    )
 }
 
 /// The line `--timing` adds.
@@ -530,6 +704,7 @@ fn report(
     asked: u32,
     simulated: f32,
     measured: Measured<'_>,
+    ghosts: &[Ghost],
     json: bool,
 ) -> i32 {
     let Measured { clock, allocated, by_script, seed } = measured;
@@ -577,6 +752,13 @@ fn report(
             "warnings": warnings,
             "log": lines,
         });
+        // Absent unless ghosts were asked for, by the same rule: an empty
+        // `clients: []` on a run that stood none up reads as "nobody could
+        // join", which is a claim about the netcode rather than about the
+        // command line.
+        if !ghosts.is_empty() {
+            doc["clients"] = serde_json::Value::Array(ghost_report(ghosts));
+        }
         // Present only under `--timing`, and absent rather than zeroed when it
         // was not asked for: a reader who finds `p95_ms: 0` in a document has
         // been told a frame took no time, which is the "reads as zero, means
@@ -653,6 +835,9 @@ fn report(
         }
     }
     println!("{}", summary_line(steps, asked, simulated, errors, warnings));
+    if !ghosts.is_empty() {
+        println!("{}", ghosts_line(ghosts));
+    }
     if let Some(c) = clock {
         println!("{}", timing_line(c));
     }
@@ -762,6 +947,164 @@ mod alloc_window_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `floptle/0190`: `run` could HOST a real session and nothing could JOIN
+    /// it, so everything that is only true across the wire was untestable
+    /// except by a person clicking in a GUI or by two machines.
+    ///
+    /// The assertion that matters is the second one. A ghost that connects and
+    /// sees NOTHING is the failure this whole thing exists to catch — it is what
+    /// an interest-management bug looks like, and it reads exactly like success
+    /// if all you check is that a client joined.
+    #[test]
+    fn a_headless_client_joins_the_session_the_project_hosts_and_is_sent_the_world() {
+        let d = std::env::temp_dir().join(format!(
+            "flrun-ghosts-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
+        )
+        .unwrap();
+        // Neither `port` nor `relay`: the in-process loopback harness, which is
+        // the shape this verb can stand up with no window and no socket.
+        std::fs::write(d.join("scripts/host.lua"), "function start() net.host{} end\n").unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            "(name: \"s\", nodes: [\
+               (name: \"Host\", scripts: [(kind: \"host\")]), \
+               (name: \"Crate\", net: Some(())), \
+               (name: \"Barrel\", net: Some(()))\
+             ])",
+        )
+        .unwrap();
+
+        let mut ed = crate::Editor {
+            console: ConsoleState { mirror_to_stderr: false, ..Default::default() },
+            ..Default::default()
+        };
+        ed.open_project(d.clone());
+        ed.toggle_play();
+        assert!(ed.playing, "the fixture must enter play mode");
+
+        let mut ghosts: Vec<Ghost> = Vec::new();
+        // Long enough for the script to host, two clients to be admitted one
+        // per step, and the first snapshots to land.
+        for _ in 0..180 {
+            ed.pump_world_streaming();
+            ed.play_step(DT, true);
+            pump_ghosts(&mut ed, &mut ghosts, 2);
+        }
+
+        assert_eq!(ghosts.len(), 2, "both clients should have been stood up");
+        assert!(
+            ghosts.iter().all(|g| g.session.is_connected()),
+            "a client could not reach a session the project is hosting: {}",
+            ghosts_line(&ghosts)
+        );
+        // The world reached them. Without this the test passes on a server that
+        // accepts connections and replicates nothing.
+        for (i, g) in ghosts.iter().enumerate() {
+            assert!(
+                g.receiving() >= 2,
+                "ghost {i} was sent {} replicated node(s) of the 2 in the scene — a client \
+                 that joins and is told nothing is the bug this exists to catch",
+                g.receiving()
+            );
+        }
+        // …and the report says so in words a caller believes without checking.
+        let line = ghosts_line(&ghosts);
+        assert!(line.contains("2 of 2"), "{line}");
+        assert!(!line.contains("NONE connected"), "{line}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The acceptance test `floptle/0190` was written to make possible**, and
+    /// the one that says the number above measures what it claims to.
+    ///
+    /// `net.setRelevant(node, peer, false)` is `floptle/0182`'s whole promise —
+    /// the cheat-resistance of a hidden-role game is *defined* by what a client
+    /// is NOT sent — and until there was a way to be a client, every project
+    /// relying on it took it on trust.
+    ///
+    /// It is also what proves the report is honest. Counting the ids a client
+    /// bound locally would answer the same for both peers here, because both
+    /// loaded the same scene file; only counting what each was actually SENT
+    /// can tell them apart.
+    #[test]
+    fn a_node_hidden_from_one_client_is_missing_from_that_clients_wire_and_no_ones_else() {
+        let d = std::env::temp_dir().join(format!(
+            "flrun-relevancy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
+        )
+        .unwrap();
+        // Host, then hide the Secret from the FIRST peer to arrive and nobody
+        // else. Done once, on the frame the second peer shows up, so the two
+        // clients differ by exactly one decision.
+        std::fs::write(
+            d.join("scripts/host.lua"),
+            "local done = false\n\
+             function start() net.host{} end\n\
+             function update()\n\
+             \x20 if done then return end\n\
+             \x20 local p = net.peers()\n\
+             \x20 if #p < 2 then return end\n\
+             \x20 net.setRelevant(find(\"Secret\"), p[1], false)\n\
+             \x20 done = true\n\
+             end\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            "(name: \"s\", nodes: [\
+               (name: \"Host\", scripts: [(kind: \"host\")]), \
+               (name: \"Secret\", net: Some(())), \
+               (name: \"Common\", net: Some(()))\
+             ])",
+        )
+        .unwrap();
+
+        let mut ed = crate::Editor {
+            console: ConsoleState { mirror_to_stderr: false, ..Default::default() },
+            ..Default::default()
+        };
+        ed.open_project(d.clone());
+        ed.toggle_play();
+        assert!(ed.playing);
+
+        let mut ghosts: Vec<Ghost> = Vec::new();
+        for _ in 0..240 {
+            ed.pump_world_streaming();
+            ed.play_step(DT, true);
+            pump_ghosts(&mut ed, &mut ghosts, 2);
+        }
+        assert_eq!(ghosts.len(), 2);
+
+        let sent: Vec<usize> = ghosts.iter().map(|g| g.receiving()).collect();
+        assert!(
+            sent[0] < sent[1],
+            "the peer the Secret was hidden from must be sent LESS than the peer it was not: \
+             {sent:?} — a report that cannot tell these two apart cannot verify a hidden-role \
+             game at all"
+        );
+        assert_eq!(sent[1], 2, "the other client must still be sent both nodes: {sent:?}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn seconds_and_frames_meet_at_the_tick_rate() {

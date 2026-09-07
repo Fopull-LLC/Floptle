@@ -685,6 +685,23 @@ impl NetSession {
         self.role == NetRole::Server || self.connected
     }
 
+    /// Client: how many replicated nodes the server is actually **sending state
+    /// for** — not how many this client happens to know the ids of.
+    ///
+    /// The distinction is the whole point. `net_entities` counts what
+    /// `register_scene` bound locally, which is every replicated node in the
+    /// scene file whether or not a single byte about it ever arrives — so
+    /// reading it as "what this client can see" reports a working interest
+    /// filter as though it were doing nothing. This counts nodes with at least
+    /// one snapshot sample, which is what `net.setRelevant(node, peer, false)`
+    /// takes away and therefore the number a relevancy test has to read
+    /// (`floptle/0190`, verifying `floptle/0182`).
+    ///
+    /// It is a client-side measure and answers 0 on a server.
+    pub fn nodes_receiving(&self) -> usize {
+        self.interp.values().filter(|b| !b.samples.is_empty()).count()
+    }
+
     /// Server: currently connected client peers.
     pub fn peers(&self) -> &[PeerId] {
         &self.peers
