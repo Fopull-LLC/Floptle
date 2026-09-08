@@ -719,6 +719,13 @@ function net.role() end
 function net.isServer() end
 ---@return boolean
 function net.isClient() end
+---What the relay last told this HOST about the session, or nil: today, that the
+---account is at its player ceiling and joins are being turned away. Nobody
+---playing was disconnected. Said once per episode. Worth showing on your own
+---lobby screen — the people it concerns are looking at your game, not your
+---console.
+---@return string|nil
+function net.notice() end
 ---True on a server with nobody sitting at it (`floptle serve`), as opposed to a
 ---player hosting the game they are in. Both answer `net.isServer()` the same.
 ---A dedicated server must not take a seat in its own lobby or be waited on to

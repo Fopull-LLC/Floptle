@@ -76,6 +76,8 @@ pub(crate) const ANIMATION: &str = "⏱";
 pub(crate) const CONTROLLER: &str = "◎";
 pub(crate) const PARTICLES: &str = "✱";
 pub(crate) const MIXER: &str = "≣";
+/// Networking / Floptle Cloud. The same globe the multiplayer panel uses.
+pub(crate) const NET: &str = "🌐";
 pub(crate) const SHADERS: &str = "◈";
 pub(crate) const PAINT: &str = "◨";
 /// The 2D image editor (distinct from ◨ Paint, which is the 3D brush).
@@ -118,6 +120,7 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("ANIMATION", ANIMATION),
     ("CONTROLLER", CONTROLLER),
     ("PARTICLES", PARTICLES),
+    ("NET", NET),
     ("MIXER", MIXER),
     ("SHADERS", SHADERS),
     ("PAINT", PAINT),

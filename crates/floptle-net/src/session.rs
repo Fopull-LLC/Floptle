@@ -552,6 +552,16 @@ impl NetSession {
     /// `input_map_hash` is this peer's `floptle_input::InputMap::hash()`.
     /// Input commands index actions by position in that map, so a joiner whose
     /// map has a different SHAPE is refused rather than allowed to desync.
+    /// Anything the relay said that a developer should read, drained.
+    ///
+    /// Empty for every transport but a managed relay — see
+    /// [`Transport::take_notices`]. The host drains it each tick and puts it
+    /// wherever that host shows a developer things: the editor's console, a
+    /// dedicated server's stdout, or the game's own UI.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        self.transport.take_notices()
+    }
+
     pub fn server(transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
         let mut s = Self::new(NetRole::Server, transport);
         s.input_map_hash = input_map_hash;

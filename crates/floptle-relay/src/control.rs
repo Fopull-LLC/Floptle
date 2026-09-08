@@ -131,13 +131,35 @@ pub struct KeySnapshot {
     #[serde(default)]
     pub removed: Vec<String>,
 }
-
-/// One region's usage for one key, at one moment.
-#[derive(Clone, Debug, PartialEq)]
+/// One key's traffic and occupancy over a reporting interval.
+///
+/// **Additive by design** (`floptle/0195`): the three fields below arrived after
+/// the control plane already accepted the first two. They are extra keys on a
+/// JSON object a control plane that ignores them keeps parsing, which is the §8
+/// rule and why this is not a schema bump.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageSample {
     pub key: String,
     pub ccu: u32,
     pub lobbies: u32,
+    /// Payload bytes the relay **received** for this key's lobbies during the
+    /// interval, forwarded or not.
+    pub bytes_in: u64,
+    /// Payload bytes the relay **sent** on for this key's lobbies. This is the
+    /// half that costs money — egress is what a region is billed for — and it
+    /// is deliberately separate from `bytes_in` rather than assumed equal: a
+    /// datagram for a peer that has just left is received and never forwarded,
+    /// so the two diverge exactly when something is going wrong.
+    pub bytes_out: u64,
+    /// Joins refused during the interval **because the account was at its
+    /// ceiling** — not refusals for a bad code, a ban or a revoked key, which
+    /// are different facts about different people.
+    ///
+    /// ⚠ **Zero and absent are different and must stay so.** Absent means a
+    /// relay too old to count them; zero means a relay that counted and found
+    /// none. A page that reads the two the same way tells a developer nobody
+    /// was turned away when the truth is that nobody knows.
+    pub refused_joins: u32,
 }
 
 /// Why a control-plane call did not answer.
@@ -259,7 +281,16 @@ impl ControlPlane for HttpControl {
     fn report_usage(&self, samples: &[UsageSample]) -> Result<(), ControlError> {
         let rows: Vec<_> = samples
             .iter()
-            .map(|s| ureq::json!({ "key": s.key, "ccu": s.ccu, "lobbies": s.lobbies }))
+            .map(|s| {
+                ureq::json!({
+                    "key": s.key,
+                    "ccu": s.ccu,
+                    "lobbies": s.lobbies,
+                    "bytes_in": s.bytes_in,
+                    "bytes_out": s.bytes_out,
+                    "refused_joins": s.refused_joins,
+                })
+            })
             .collect();
         Self::body(
             self.agent()

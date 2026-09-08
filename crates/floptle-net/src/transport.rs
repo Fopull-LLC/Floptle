@@ -84,6 +84,20 @@ pub trait Transport: Send {
     /// player still in the game. Implement it where the transport can, so the
     /// kicked client stops paying for a connection it is no longer part of.
     fn disconnect(&mut self, _peer: PeerId) {}
+
+    /// Anything the far end said that a DEVELOPER should read, drained.
+    ///
+    /// Defaulted to nothing because only a managed relay has any: it runs on
+    /// somebody else's machine, so a message about the developer's own game —
+    /// "it filled up, here is where to raise the ceiling" — has nowhere else to
+    /// go. Every other transport is a direct link between two machines the
+    /// developer already has, and has nothing to say that is not traffic.
+    ///
+    /// Not an `Incoming`: it is neither a peer event nor an error, and a
+    /// session that treated it as either would be wrong about both.
+    fn take_notices(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A boxed transport is a transport — what lets a wrapper such as
@@ -91,6 +105,9 @@ pub trait Transport: Send {
 impl Transport for Box<dyn Transport> {
     fn send(&mut self, peer: PeerId, channel: Channel, bytes: &[u8]) {
         (**self).send(peer, channel, bytes);
+    }
+    fn take_notices(&mut self) -> Vec<String> {
+        (**self).take_notices()
     }
     fn poll(&mut self) -> Vec<Incoming> {
         (**self).poll()

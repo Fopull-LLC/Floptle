@@ -154,6 +154,18 @@ pub struct RollbackInfo {
 #[derive(Clone, Debug)]
 pub struct NetState {
     pub role: NetRoleState,
+    /// **What the relay last told the HOST about this session**, or `None`
+    /// (`floptle/0194`).
+    ///
+    /// Today that is one message: the account is at its player ceiling, joins
+    /// are being turned away, and nobody playing was disconnected. It is here
+    /// so a game can put it in its own UI rather than leaving it in a console
+    /// the players never see — a lobby screen saying "we are full, someone will
+    /// be along" is a far better experience than friends silently failing to
+    /// join.
+    ///
+    /// Set once per episode, not once per refused join.
+    pub notice: Option<String>,
     pub peers: Vec<u64>,
     pub rtt_ms: f32,
     /// Server: who each connected peer is, for `net.identity(peer)`
@@ -216,6 +228,7 @@ impl Default for NetState {
     fn default() -> Self {
         Self {
             role: NetRoleState::Offline,
+            notice: None,
             dedicated: false,
             peers: Vec::new(),
             rtt_ms: 0.0,
@@ -729,6 +742,17 @@ pub(crate) fn install_net_api(
                 let st = n.state.borrow();
                 Ok((st.join_state.to_string(), st.join_error.clone()))
             })?,
+        )?;
+    }
+    // net.notice() — what the relay last told this HOST about the session, or
+    // nil. Today: the account is at its player ceiling and joins are being
+    // turned away, said once per episode. A lobby screen that shows it turns
+    // "my friends cannot join and I do not know why" into a sentence.
+    {
+        let n = net.clone();
+        t.set(
+            "notice",
+            lua.create_function(move |_, ()| Ok(n.state.borrow().notice.clone()))?,
         )?;
     }
     // net.lobbyCode() — the code friends type in, on a relay host. nil until

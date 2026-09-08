@@ -2,7 +2,7 @@
 
 The platformer, played by two machines at once — and everything that has to change for that to work.
 
-**some coding** · about 50 minutes · 11 steps
+**some coding** · about 50 minutes · 12 steps
 
 > Follow this along **inside the editor** — the 🎓 Learn tab has the same steps and ticks each one off as your project starts to match it.
 
@@ -510,18 +510,46 @@ answer. A script that polled `input.pressed("space")` would read neutral on a
 predicted node and simply never jump, with no error anywhere — which is why the
 Input settings list every such call site.
 
-## 11. Where to go next
+## 11. Let a friend join, from their machine
+
+Everything so far ran on your desk. This is the step that makes it a multiplayer
+game, and it takes about two minutes.
+
+You need a **relay** — a rendezvous both machines can reach, so neither of you
+forwards a port. You can run your own (`cargo run -p floptle-relay` on any box
+you both can reach), or use Floptle Cloud, which is free for twenty players at a
+time and is what the rest of this step uses.
+
+1. **Register the game** at fopull.com/cloud, under a name. You get a game key.
+2. **Paste the key in:** ⚙ Settings ⏵ **Networked** ⏵ **Game key**. That writes
+   it into your project, so every build carries it.
+3. **Host on it** — one word changes from step 4:
+
+```lua
+net.host{ relay = "cloud" }
+```
+
+4. **Read them the code.** `net.lobbyCode()` gives you six characters. Your
+   friend types them into **🌐 → code → ⏵ Join by code**, or your game calls
+   `net.join("relay://cloud/" .. code)`.
+
+That is the whole difference between a game you can test and a game somebody
+else can play.
+
+**Without a key**, `net.host{ relay = "cloud" }` says so and points at the page
+— it does not fail as a connection error, and it never needs the network to tell
+you. Hosting on your own machine or your own relay needs no key at all.
+
+**If more people turn up than your plan seats**, nobody playing is disconnected:
+the next arrival is asked to try again shortly, and you are told once, with the
+number and where to raise it. `net.notice()` hands you that sentence if you want
+it on your own lobby screen.
+
+## 12. Where to go next
 
 You have a networked platformer, tested at 200 ms and 10% loss without leaving
 your desk. The things you'd reach for next, in the order you'll want them:
 
-- **Two real machines.** Both open this project and press Play. The host
-  clicks **🌐 → ⏵ Host — get a lobby code** and reads out five letters; the
-  other types them into **code → ⏵ Join by code**. Nobody port-forwards — the
-  relay is a rendezvous, and you can run your own with `cargo run -p
-  floptle-relay` on any box both machines can reach. From a script, it's the
-  one-line change promised in step 4: `net.host{ relay = "host:7788" }`, and
-  `net.lobbyCode()` to put the letters on your own lobby screen.
 - **A lobby screen that handles a wrong code.** `net.join` doesn't block; wait
   on `net.joinState()` and show its reason. Mistyping the code is the most
   common thing that will ever go wrong in an online session.

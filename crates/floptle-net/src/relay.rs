@@ -93,6 +93,18 @@ enum RelayMsg {
     /// — a new build meeting an OLD relay — is what
     /// [`RelayHost::host_keyed`]'s fallback is for.
     HostKeyed { key: String, build: Option<String> },
+    /// Relay → host: something the developer should hear, once per episode.
+    ///
+    /// **Not a refusal and not an error** — the session is fine and nobody was
+    /// disconnected. It exists because a managed relay runs on somebody else's
+    /// machine, so the only way a developer learns that their game filled up is
+    /// if the relay tells their process.
+    ///
+    /// Appended after `HostKeyed` for the same compatibility reason that one
+    /// was: postcard numbers variants by declaration order, so an older host
+    /// simply fails to decode this and skips it, exactly as it would any
+    /// message it has never heard of.
+    Notice { text: String },
 }
 
 impl RelayMsg {
@@ -174,6 +186,33 @@ pub trait RelayPolicy: Send {
     fn lobby_closed(&mut self, _code: &str) {}
     fn peer_joined(&mut self, _code: &str) {}
     fn peer_left(&mut self, _code: &str) {}
+
+    /// Messages the relay should push to a lobby's **host**, drained each step.
+    ///
+    /// **The developer never reads the relay's journal.** A managed relay runs
+    /// on Fopull's box; `say()` reaches the operator there, which is the wrong
+    /// person entirely for "your game filled up". This is the seam that carries
+    /// such a message back to the process that opened the lobby, so it lands
+    /// where a developer actually looks — the editor console, a dedicated
+    /// server's stdout, or their game's own UI.
+    ///
+    /// `(lobby code, text)`. Drained rather than pushed because the policy has
+    /// no idea which connection a code belongs to; the relay does.
+    fn take_host_notices(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Payload forwarded for a lobby: what arrived, and what went on.
+    ///
+    /// **The two numbers are not the same number** (`floptle/0195`). A datagram
+    /// for a peer that has just left is received and never forwarded, so a
+    /// divergence between them is a real signal rather than rounding — and
+    /// egress is the half a region is billed for, which is the reason the
+    /// control plane wants them apart.
+    ///
+    /// Defaulted to nothing, so the open self-hosted relay — which meters
+    /// nobody and reports to no one — is unaffected by its existence.
+    fn forwarded(&mut self, _code: &str, _bytes_in: u64, _bytes_out: u64) {}
 
     /// Called on every [`RelayServer::step`], so a policy can refresh its
     /// snapshot or flush a usage batch without owning a thread of its own.
@@ -303,6 +342,15 @@ impl RelayServer {
         if let Some(p) = self.policy.as_mut() {
             p.tick();
         }
+        // **The policy has words for a developer and no way to reach one.** It
+        // knows lobby codes; only the relay knows which connection a code
+        // belongs to, so the routing is here.
+        let notices = self.policy.as_mut().map(|p| p.take_host_notices()).unwrap_or_default();
+        for (code, text) in notices {
+            if let Some(host) = self.lobbies.get(&code).map(|l| l.host) {
+                self.send(host, Channel::Reliable, &RelayMsg::Notice { text });
+            }
+        }
         self.retry_parked_hosts();
         let mut moved = 0;
         for inc in self.transport.poll() {
@@ -359,19 +407,40 @@ impl RelayServer {
             }
             RelayMsg::ToPeer { peer, channel, seq, bytes } => {
                 let Some(Role::Host { code }) = self.conns.get(&from) else { return };
-                let Some(target) = self.lobbies.get(code).and_then(|l| l.clients.get(&peer))
-                else {
+                let code = code.clone();
+                let n = bytes.len() as u64;
+                let target = self.lobbies.get(&code).and_then(|l| l.clients.get(&peer)).copied();
+                // Counted even when it goes nowhere: bytes arriving for a peer
+                // who has just left are real traffic this region carried, and
+                // the gap between the two numbers is how that shows up.
+                let Some(target) = target else {
+                    if let Some(p) = self.policy.as_mut() {
+                        p.forwarded(&code, n, 0);
+                    }
                     return;
                 };
-                self.send(*target, leg_channel, &RelayMsg::FromHost { channel, seq, bytes });
+                self.send(target, leg_channel, &RelayMsg::FromHost { channel, seq, bytes });
+                if let Some(p) = self.policy.as_mut() {
+                    p.forwarded(&code, n, n);
+                }
             }
             RelayMsg::ToHost { channel, seq, bytes } => {
                 let Some(Role::Client { code, game_peer }) = self.conns.get(&from) else {
                     return;
                 };
-                let (peer, host) = (*game_peer, self.lobbies.get(code).map(|l| l.host));
-                let Some(host) = host else { return };
+                let (peer, code) = (*game_peer, code.clone());
+                let n = bytes.len() as u64;
+                let host = self.lobbies.get(&code).map(|l| l.host);
+                let Some(host) = host else {
+                    if let Some(p) = self.policy.as_mut() {
+                        p.forwarded(&code, n, 0);
+                    }
+                    return;
+                };
                 self.send(host, leg_channel, &RelayMsg::FromPeer { peer, channel, seq, bytes });
+                if let Some(p) = self.policy.as_mut() {
+                    p.forwarded(&code, n, n);
+                }
             }
             _ => { /* endpoints never send the rest */ }
         }
@@ -548,6 +617,9 @@ pub struct RelayHost {
     /// message that is not merely unhelpful but points at the wrong thing
     /// entirely, since the relay is plainly running and plainly answering.
     refused: Option<String>,
+    /// Things the relay said about this lobby that a developer should read,
+    /// drained by whoever is hosting — see [`Transport::take_notices`].
+    notices: Vec<String>,
 }
 
 impl RelayHost {
@@ -593,7 +665,14 @@ impl RelayHost {
         let mut inner = QuicClient::connect(relay_addr)?;
         inner.send(SERVER, Channel::Reliable, &ask.encode());
         let mut me =
-            Self { inner, code: None, seq: 0, dedup: SeqState::default(), refused: None };
+            Self {
+                inner,
+                code: None,
+                seq: 0,
+                dedup: SeqState::default(),
+                refused: None,
+                notices: Vec::new(),
+            };
         let mut fallback = fallback;
         for i in 0..600 {
             let _ = me.poll(); // stashes Hosted{code} / Refused{reason} when it lands
@@ -633,6 +712,10 @@ impl Transport for RelayHost {
         self.inner.send(SERVER, leg, &msg.encode());
     }
 
+    fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
+
     fn poll(&mut self) -> Vec<Incoming> {
         let mut out = Vec::new();
         for inc in self.inner.poll() {
@@ -648,6 +731,11 @@ impl Transport for RelayHost {
                         }
                         out.push(Incoming::refused(SERVER, reason));
                     }
+                    // Kept for the host process rather than turned into an
+                    // `Incoming`: it is not a peer event and not an error, and
+                    // a session that treated it as either would be wrong about
+                    // both.
+                    Some(RelayMsg::Notice { text }) => self.notices.push(text),
                     Some(RelayMsg::PeerJoined { peer }) => out.push(Incoming::Connected(peer)),
                     Some(RelayMsg::PeerLeft { peer }) => out.push(Incoming::dropped(peer)),
                     Some(RelayMsg::FromPeer { peer, channel, seq, bytes })
@@ -754,6 +842,51 @@ impl Transport for RelayClient {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Every wire variant keeps the number it was born with.**
+    ///
+    /// Postcard indexes enum variants by DECLARATION ORDER, so inserting one
+    /// anywhere but the end renumbers everything after it — and a build in the
+    /// wild then sends `HostKeyed` at an index the relay now reads as something
+    /// else. The failure is silent on both sides: a decode returns `None` and
+    /// the message is skipped, so a game simply hangs with nothing said.
+    ///
+    /// The file says this in prose above `Host` and `HostKeyed`, and prose did
+    /// not stop it happening while `Notice` was being added — it went in before
+    /// `HostKeyed` first. So the order is pinned here as bytes: each of these
+    /// is the discriminant that shipped, and changing one is a wire break
+    /// rather than a refactor.
+    #[test]
+    fn every_wire_variant_keeps_the_number_it_shipped_with() {
+        // The first byte postcard writes for a variant IS its index.
+        let index = |m: &RelayMsg| RelayMsg::encode(m)[0];
+
+        assert_eq!(index(&RelayMsg::Host), 0);
+        assert_eq!(index(&RelayMsg::Join { code: String::new() }), 1);
+        assert_eq!(index(&RelayMsg::Hosted { code: String::new() }), 2);
+        assert_eq!(index(&RelayMsg::JoinOk), 3);
+        assert_eq!(index(&RelayMsg::Refused { reason: String::new() }), 4);
+        assert_eq!(index(&RelayMsg::PeerJoined { peer: 0 }), 5);
+        assert_eq!(index(&RelayMsg::PeerLeft { peer: 0 }), 6);
+        assert_eq!(index(&RelayMsg::ToPeer { peer: 0, channel: 0, seq: 0, bytes: vec![] }), 7);
+        assert_eq!(index(&RelayMsg::FromPeer { peer: 0, channel: 0, seq: 0, bytes: vec![] }), 8);
+        assert_eq!(index(&RelayMsg::ToHost { channel: 0, seq: 0, bytes: vec![] }), 9);
+        assert_eq!(index(&RelayMsg::FromHost { channel: 0, seq: 0, bytes: vec![] }), 10);
+        assert_eq!(index(&RelayMsg::HostKeyed { key: String::new(), build: None }), 11);
+        // Anything added from here on takes the next number and never a used one.
+        assert_eq!(index(&RelayMsg::Notice { text: String::new() }), 12);
+    }
+
+    /// A relay that has never heard of a message skips it rather than dying,
+    /// which is the other half of why appending is safe: an OLD host meeting a
+    /// `Notice` must carry on hosting.
+    #[test]
+    fn an_unknown_variant_decodes_to_nothing_rather_than_breaking_the_link() {
+        // Index 99: no variant, now or plausibly ever.
+        assert!(RelayMsg::decode(&[99, 0, 0, 0]).is_none());
+        assert!(RelayMsg::decode(&[]).is_none());
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
