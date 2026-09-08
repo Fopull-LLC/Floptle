@@ -2781,6 +2781,14 @@ struct Editor {
     net_join_code: String,
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,
+    /// The last thing a managed relay said to this host about the session —
+    /// today, that the account is at its player ceiling (`floptle/0194`).
+    ///
+    /// Kept rather than only printed, because the people it concerns are the
+    /// friends who cannot get in, and they are looking at the game's own lobby
+    /// screen rather than at the developer's console. `net.notice()` is how a
+    /// game puts it there.
+    net_notice: Option<String>,
     /// PLAYER MODE (`--play`, or a `floptle-game.ron` manifest next to the
     /// binary — what File ⏵ Export Game… produces): boot straight into Play,
     /// Game view fullscreen, no editor chrome. F1 = the multiplayer menu.

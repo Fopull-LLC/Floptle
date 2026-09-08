@@ -598,6 +598,12 @@ impl HubApp {
                             "fopull.com did not answer when this session asked what you are entitled to, so the free tier's limits are what you will see until it does. This is not a change to your account. It re-checks on the next sign-in or refresh.",
                         );
                 }
+                // **Where a registered game is managed** (`floptle/0196`).
+                // A developer signs in here and then has nowhere to go: the
+                // game key, the player numbers and the plan all live on the
+                // website, and nothing in the tools said where. One link, in
+                // the place a signed-in user is already looking.
+                ui.hyperlink_to("Your games on fopull.com", "https://fopull.com/cloud");
                 if ui.button(format!("{} Sign out", ico::CLOSE)).clicked() {
                     sign_out = true;
                 }

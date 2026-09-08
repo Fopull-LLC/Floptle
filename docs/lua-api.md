@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
-- [networking — net.*, synced](#networking--net-synced) — 36
+- [networking — net.*, synced](#networking--net-synced) — 37
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
 - [pathfinding — nav.*](#pathfinding--nav) — 26
@@ -2149,6 +2149,12 @@ net.lobbyCode() — the code friends type in to join, on a host that used net.ho
 ### `net.mispredictRate`
 
 net.mispredictRate() — 0..1, the fraction of simulated ticks that had to guess a peer's input. Rises with latency; what the input delay is chosen against.
+
+### `net.notice`
+
+net.notice() — what the relay last told this HOST about the session, or nil. Today there is one: your account is at its player ceiling, so new joins are being turned away — and nobody already playing was disconnected. Said once per episode, not once per refused join.
+
+Worth putting on your own lobby screen. The people it concerns are the friends who cannot get in, and they are looking at your game rather than at your console; "we are full right now, someone will be along" is a far better experience than a join that silently fails. nil on a client and on a direct/LAN host, where there is no relay to say anything.
 
 ### `net.on`
 

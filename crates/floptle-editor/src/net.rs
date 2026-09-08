@@ -146,6 +146,28 @@ impl Editor {
     /// ghost-client sessions, and dispatch received RPCs/events into scripts.
     pub(crate) fn net_tick(&mut self, tick: u64) {
         self.voice_tick();
+        // **What the relay had to say to the developer** (`floptle/0194`).
+        // A managed relay runs on somebody else's machine, so "your game
+        // filled up, here is where to raise the ceiling" reaches the operator's
+        // journal there and nobody here unless it is carried back. Drained
+        // before anything else so a message about this tick's refusals is on
+        // the console in the same frame.
+        //
+        // The `print()` level, deliberately, not a warning: nothing is broken,
+        // nobody was disconnected, and a game filling up is the best news a
+        // developer gets all week. A warning icon would say the opposite of
+        // what the sentence says.
+        if let Some(s) = self.net_server.as_mut() {
+            let said = s.take_notices();
+            if let Some(last) = said.last() {
+                // Kept for `net.notice()` so a game can put it on its own lobby
+                // screen, where the players who cannot get in are looking.
+                self.net_notice = Some(last.clone());
+            }
+            for line in said {
+                self.console.push(floptle_script::LogLevel::Debug, line, None);
+            }
+        }
         for cmd in self.script_host.take_net_commands() {
             match cmd {
                 NetCmd::Host {
@@ -169,11 +191,23 @@ impl Editor {
                         // Resolved here rather than in the transport so the
                         // Console carries the reason when it cannot be.
                         (Some(addr), _) if addr.trim_start().starts_with("cloud") => {
-                            match self.cloud_relay_addr(&addr) {
-                                Ok(real) => self.net_host_relay(&real),
+                            // **A missing game key is answered HERE, before a
+                            // packet leaves** (`floptle/0196`). A managed relay
+                            // refuses a keyless host with good words, but only
+                            // if it can be reached — so on a plane, behind a
+                            // firewall, or in a headless harness the developer
+                            // got a connection error about a project that was
+                            // simply never connected. The engine already knows.
+                            match self.cloud_key_or_reason() {
                                 Err(why) => {
                                     self.console.push(floptle_script::LogLevel::Warn, why, None)
                                 }
+                                Ok(()) => match self.cloud_relay_addr(&addr) {
+                                    Ok(real) => self.net_host_relay(&real),
+                                    Err(why) => {
+                                        self.console.push(floptle_script::LogLevel::Warn, why, None)
+                                    }
+                                },
                             }
                         }
                         (Some(addr), _) => self.net_host_relay(&addr),
@@ -696,6 +730,7 @@ impl Editor {
                 role: NetRoleState::Server,
                 // The one session fact a game cannot infer: is anybody here.
                 dedicated: self.dedicated,
+                notice: self.net_notice.clone(),
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
@@ -1909,6 +1944,8 @@ impl Editor {
             role: NetRoleState::Server,
             // The in-editor harness has somebody sitting at it, by definition.
             dedicated: false,
+            // A hidden local server talks to nobody's relay.
+            notice: None,
             peers: hs.session.peers().to_vec(),
             rtt_ms: hs.session.stats(hs.peer).rtt_ms,
             my_peer: None,
@@ -2535,6 +2572,8 @@ impl Editor {
             role: NetRoleState::Client,
             // A client is somebody's machine, always.
             dedicated: false,
+            // The relay's word to the HOST; a client is not one.
+            notice: None,
             peers: Vec::new(),
             rtt_ms: rtt,
             my_peer,
@@ -3047,6 +3086,47 @@ impl Editor {
 }
 
 impl Editor {
+    /// Does this project carry a Floptle Cloud game key, and if not, why that
+    /// matters and what to do (`floptle/0196`).
+    ///
+    /// **Answered locally, on purpose.** A managed relay refuses a keyless host
+    /// with a good sentence, but a developer only reads it if they can reach
+    /// the relay — and "I have not connected my project yet" is a state the
+    /// engine can see without asking anybody. Left to the network it surfaces
+    /// as a connection failure on a plane, behind a firewall, or in a headless
+    /// harness, about a project that was never connected in the first place.
+    ///
+    /// The URL is prefilled with the project's own name, because the register
+    /// form takes it and typing it twice is a step nobody needs.
+    pub(crate) fn cloud_key_or_reason(&self) -> Result<(), String> {
+        if self.project.cloud.as_ref().is_some_and(|c| c.is_connected()) {
+            return Ok(());
+        }
+        let name = self
+            .project
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| {
+                self.project_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let url = if name.is_empty() {
+            "https://fopull.com/cloud".to_string()
+        } else {
+            format!("https://fopull.com/cloud?game={name}")
+        };
+        Err(format!(
+            "net.host{{ relay = \"cloud\" }}: this project has no Floptle Cloud game key, so \
+             there is nothing to host it under. Register the game at {url}, then paste the key \
+             into Project settings ⏵ Networked ⏵ Game key.\n  \
+             Hosting on your own machine needs no key: net.host{{ port = 30040 }}, or \
+             net.host{{ relay = \"<your relay>\" }}."
+        ))
+    }
+
     /// Resolve `net.host{ relay = "cloud" }` to a real managed relay address.
     ///
     /// Accepts `"cloud"` — the nearest region this build may host on — and
@@ -3280,6 +3360,59 @@ mod cloud_project_tests {
         assert!(!connected("").unwrap().is_connected());
         assert!(!connected("   ").unwrap().is_connected());
         assert!(connected("fk_live_REAL").unwrap().is_connected());
+    }
+
+    /// **A project with no game key is told so before a packet leaves**
+    /// (`floptle/0196`).
+    ///
+    /// A managed relay refuses a keyless host with a good sentence — and only
+    /// if it can be reached. On a plane, behind a firewall, or in a headless
+    /// harness, that arrived as a connection error about a project that was
+    /// simply never connected. The engine can see this without asking anybody,
+    /// so it does.
+    ///
+    /// The assertions are about what the sentence *contains*, because every one
+    /// of them is a step the developer would otherwise have to be told by
+    /// somebody: where to register, that the name is prefilled, and where the
+    /// key goes once they have it.
+    #[test]
+    fn hosting_on_cloud_without_a_key_says_so_without_the_network() {
+        let mut ed = Editor::default();
+        ed.project.title = Some("Fofighter".into());
+
+        let why = ed.cloud_key_or_reason().expect_err("no key is not a session");
+        assert!(why.contains("no Floptle Cloud game key"), "{why}");
+        assert!(
+            why.contains("https://fopull.com/cloud?game=Fofighter"),
+            "the register form takes the name, so it is prefilled: {why}"
+        );
+        // The path the WEBSITE tells people to use. If this string and the
+        // site's ever disagree, one of the two is sending developers to a menu
+        // that is not there.
+        assert!(
+            why.contains("Project settings ⏵ Networked ⏵ Game key"),
+            "names where the key goes: {why}"
+        );
+        // …and it must not read as "multiplayer needs a subscription", which is
+        // the wrong lesson and not true.
+        assert!(
+            why.contains("net.host{ port = 30040 }"),
+            "hosting without Cloud needs no key and the message has to say so: {why}"
+        );
+
+        // A key makes it a session.
+        ed.project.cloud = Some(floptle_scene::CloudProjectSettings {
+            game: "fofighter".into(),
+            key: "fk_live_REAL".into(),
+        });
+        assert!(ed.cloud_key_or_reason().is_ok());
+
+        // A `cloud:` block somebody started and did not finish is not a key.
+        ed.project.cloud = Some(floptle_scene::CloudProjectSettings {
+            game: "fofighter".into(),
+            key: "   ".into(),
+        });
+        assert!(ed.cloud_key_or_reason().is_err(), "an empty key is not a connection");
     }
 
     /// The default is not connected, and stays that way. Everything about

@@ -23,6 +23,7 @@ pub(crate) enum SettingsSection {
     Rendering,
     Layers,
     Input,
+    Networked,
     Access,
 }
 
@@ -33,6 +34,7 @@ impl SettingsSection {
         SettingsSection::Rendering,
         SettingsSection::Layers,
         SettingsSection::Input,
+        SettingsSection::Networked,
         SettingsSection::Access,
     ];
 
@@ -43,6 +45,7 @@ impl SettingsSection {
             SettingsSection::Rendering => "Rendering",
             SettingsSection::Layers => "Layers",
             SettingsSection::Input => "Input",
+            SettingsSection::Networked => "Networked",
             SettingsSection::Access => "Accessibility",
         }
     }
@@ -55,6 +58,7 @@ impl SettingsSection {
             SettingsSection::Rendering => icons::SHADERS,
             SettingsSection::Layers => icons::MAP,
             SettingsSection::Input => icons::KEYBOARD,
+            SettingsSection::Networked => icons::NET,
             // The international access symbol, which is what this is.
             SettingsSection::Access => "♿",
         }
@@ -70,6 +74,11 @@ impl SettingsSection {
             SettingsSection::Input => {
                 "Named actions your scripts read, and the keys, mouse buttons \
                  and gamepad controls that trigger them."
+            }
+            SettingsSection::Networked => {
+                "Hosting this game on Floptle Cloud. Multiplayer itself needs \
+                 nothing here — a direct connection and your own relay both \
+                 work without an account."
             }
             SettingsSection::Access => {
                 "What a player can change. Try your game with these on — \
@@ -91,6 +100,10 @@ impl SettingsSection {
             SettingsSection::Input => {
                 "action axis binding key keyboard mouse gamepad pad controller \
                  jump move look bind rebind deadzone socd motion buffer player"
+            }
+            SettingsSection::Networked => {
+                "cloud game key relay host multiplayer online fopull register \
+                 lobby code ceiling players hosting"
             }
             SettingsSection::Access => {
                 "accessibility a11y colourblind colorblind deuteranopia protanopia \
@@ -292,6 +305,7 @@ impl<'a> SettingsCtx<'a> {
                 SettingsSection::Rendering => self.settings_rendering(ui, project, out),
                 SettingsSection::Layers => self.settings_layers(ui, project, out),
                 SettingsSection::Input => self.settings_input(ui, &query, out),
+                SettingsSection::Networked => self.settings_networked(ui, project, out),
                 SettingsSection::Access => self.settings_access(ui, out),
             }
             ui.add_space(16.0);
@@ -374,6 +388,119 @@ impl<'a> SettingsCtx<'a> {
     /// claims you have to look at to believe, and because a developer wanting to
     /// see their game through a deuteranope's eyes should not have to write a
     /// script first.
+    /// **Project settings ⏵ Networked ⏵ Game key** (`floptle/0196`).
+    ///
+    /// This section exists because the website tells every developer to come
+    /// here. The registration flow ends "paste it into Floptle: Project
+    /// settings ⏵ Networked ⏵ Game key", and before this there was no such
+    /// place — the key could only be set by hand-editing `project.ron`, which
+    /// is exactly the thing Ty ruled out.
+    ///
+    /// **Multiplayer needs none of it.** A direct connection and a self-hosted
+    /// relay both work with no account, no key and no internet, and the blurb
+    /// says so — a settings page that reads like a paywall on multiplayer would
+    /// be lying about the engine.
+    fn settings_networked(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: &mut floptle_scene::ProjectConfigDoc,
+        out: &mut SettingsOut,
+    ) {
+        let cloud = project.cloud.clone().unwrap_or_default();
+        let (mut game, mut key) = (cloud.game.clone(), cloud.key.clone());
+        let mut changed = false;
+
+        row(
+            ui,
+            "Game",
+            Some("the name this game is registered under on fopull.com"),
+            |ui| {
+                if ui
+                    .add_sized(
+                        [fit(ui, 220.0), 20.0],
+                        egui::TextEdit::singleline(&mut game).hint_text("my-game"),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            },
+        );
+
+        row(
+            ui,
+            "Game key",
+            Some("lets this project host on Floptle Cloud — paste the one from the website"),
+            |ui| {
+                // **Not a password field.** A game key is not a secret from the
+                // person holding it: it ships inside every build of the game,
+                // so hiding it here would only stop the developer checking they
+                // pasted the right one.
+                if ui
+                    .add_sized(
+                        [fit(ui, 220.0), 20.0],
+                        egui::TextEdit::singleline(&mut key).hint_text("fk_live_…"),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            },
+        );
+
+        if changed {
+            let now = floptle_scene::CloudProjectSettings {
+                game: game.trim().to_string(),
+                key: key.trim().to_string(),
+            };
+            // Both empty is not a connection somebody started — it is a project
+            // that does not use Cloud, and it should leave no line behind.
+            project.cloud =
+                (!now.game.is_empty() || !now.key.is_empty()).then_some(now);
+            out.save_project = true;
+        }
+
+        ui.add_space(8.0);
+        let connected = project.cloud.as_ref().is_some_and(|c| c.is_connected());
+        if connected {
+            ui.label(format!(
+                "{} this project can host on Floptle Cloud: net.host{{ relay = \"cloud\" }}",
+                icons::ON
+            ));
+            if let Some(g) = project.cloud.as_ref().map(|c| c.game.clone()).filter(|g| !g.is_empty())
+            {
+                ui.hyperlink_to(
+                    "Manage this game on fopull.com",
+                    format!("https://fopull.com/cloud/games/{g}"),
+                );
+            }
+        } else {
+            ui.label(format!(
+                "{} no key yet — hosting on Floptle Cloud needs one",
+                icons::OFF
+            ));
+            // Prefilled with the project's own name, because the register form
+            // takes it and typing it twice is a step nobody needs.
+            let name = project
+                .title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| game.clone());
+            let url = if name.trim().is_empty() {
+                "https://fopull.com/cloud".to_string()
+            } else {
+                format!("https://fopull.com/cloud?game={}", name.trim())
+            };
+            ui.hyperlink_to("Register this game at fopull.com/cloud", url);
+        }
+        ui.add_space(4.0);
+        ui.small(
+            "Multiplayer does not need any of this. net.host{ port = 30040 } and your own \
+             relay work with no account and no internet — Floptle Cloud is for when you want \
+             somebody else to run the relay.",
+        );
+    }
+
     fn settings_access(&mut self, ui: &mut egui::Ui, out: &mut SettingsOut) {
         use floptle_core::access::{Accessibility, ColorFilter};
         let mut a = self.access;
@@ -1142,6 +1269,41 @@ impl<'a> SettingsCtx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The menu path the website sends people to has to exist**
+    /// (`floptle/0196`).
+    ///
+    /// fopull.com ends its registration flow with "paste it into Floptle:
+    /// Project settings ⏵ Networked ⏵ Game key", and before this card there was
+    /// no Networked section and no Game key field — the key could only be set
+    /// by hand-editing `project.ron`, which is the one thing Ty ruled out. So
+    /// every developer who registered a game arrived at a menu that was not
+    /// there.
+    ///
+    /// This asserts the two words in that sentence, because they are a contract
+    /// with a web page nobody editing this file can see. If the section is ever
+    /// renamed, the site has to be told in the same breath.
+    #[test]
+    fn the_settings_path_the_website_names_exists() {
+        let networked = SettingsSection::ALL
+            .iter()
+            .find(|s| s.title() == "Networked")
+            .expect("the website tells developers to open Project settings ⏵ Networked");
+        // Findable by search as well as by eye: "game key" is what somebody
+        // types, and it is not in the section's title.
+        assert!(
+            matches("game key", networked.keywords()),
+            "searching the settings for `game key` must find it"
+        );
+        assert!(matches("cloud", networked.keywords()));
+        // The blurb must not read like a paywall on multiplayer, which would be
+        // untrue: a direct connection and a self-hosted relay need none of it.
+        let blurb = networked.blurb().to_lowercase();
+        assert!(
+            blurb.contains("needs nothing here") || blurb.contains("without an account"),
+            "the section must say multiplayer works without it: {blurb}"
+        );
+    }
 
     /// **Every section must survive a thin dock.** ⚙ Settings is the widest
     /// panel in the editor — a layer matrix, a rebind table and a page of

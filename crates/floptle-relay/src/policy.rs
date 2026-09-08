@@ -99,6 +99,40 @@ pub struct CloudPolicy {
     of_lobby: HashMap<String, String>,
     live: HashMap<String, u32>,
     last_usage: Instant,
+    /// Payload carried per lobby since the last usage flush: `(in, out)`.
+    ///
+    /// Per LOBBY rather than per key, because a lobby is what the relay knows
+    /// while it forwards — the key is looked up once at flush time, from the
+    /// same `of_lobby` map the occupancy counts use, so the two halves of a
+    /// sample can never disagree about which key a lobby belonged to.
+    traffic: HashMap<String, (u64, u64)>,
+    /// Joins turned away for the ceiling since the last flush, per key.
+    ///
+    /// Only the ceiling: a bad code, a ban and a revoked key are refusals too,
+    /// and reporting them here would tell a developer they are outgrowing a
+    /// plan when somebody mistyped six characters.
+    refused: HashMap<String, u32>,
+    /// The key a lobby was opened with, kept from when it CLOSES until the
+    /// next usage flush.
+    ///
+    /// A game that filled up and emptied again inside one ten-second interval
+    /// has carried real bytes under a key `of_lobby` no longer remembers.
+    /// Without this its traffic folds under an empty key and is dropped, which
+    /// is precisely the busiest lobby going unbilled.
+    closed_keys: HashMap<String, String>,
+    /// Payload forwarded since this relay started, for the periodic log line —
+    /// an operator on the box can sanity-check the reported figure against the
+    /// interface counters, which is the only independent check there is.
+    bytes_total: (u64, u64),
+    /// Keys currently at their ceiling, so the host is told ONCE per episode
+    /// rather than once per refused join (`floptle/0194`). A busy game at cap
+    /// refuses constantly, and a line per refusal is a flood that gets muted —
+    /// taking the one message that matters with it.
+    at_cap: HashSet<String>,
+    /// At-cap messages waiting to be pushed to the lobby's host, drained by the
+    /// relay each step. `say()` reaches the OPERATOR's journal on this box; the
+    /// developer is somewhere else entirely, and this is how they hear.
+    host_notices: Vec<(String, String)>,
     /// Deprecated keys already warned about, so a popular game on a rotated key
     /// does not write one journal line per player.
     warned: HashSet<String>,
@@ -128,6 +162,12 @@ impl CloudPolicy {
             of_lobby: HashMap::new(),
             live: HashMap::new(),
             last_usage: Instant::now(),
+            traffic: HashMap::new(),
+            closed_keys: HashMap::new(),
+            refused: HashMap::new(),
+            bytes_total: (0, 0),
+            at_cap: HashSet::new(),
+            host_notices: Vec::new(),
             warned: HashSet::new(),
             denied: false,
             tx,
@@ -255,12 +295,12 @@ impl CloudPolicy {
                 };
             }
             if row.account_over_limit {
+                // A host refused at host time is the SAME event as a join
+                // refused at the ceiling, so it gets the same sentence rather
+                // than a generic "refused" (`floptle/0194`). This one goes to
+                // the developer, so it carries the number and the portal.
                 return HostAdmission::Refuse {
-                    reason: format!(
-                        "Floptle Cloud: this account is at its {}-player limit on the {} \
-                         plan. Upgrade at fopull.com/cloud.",
-                        row.ccu_limit, row.tier
-                    ),
+                    reason: host_at_cap_notice(row.ccu_limit, &row.tier, &row.game),
                 };
             }
             let deprecated = row.state == KeyState::Deprecated;
@@ -333,30 +373,55 @@ impl RelayPolicy for CloudPolicy {
     }
 
     fn admit_join(&mut self, code: &str) -> JoinAdmission {
-        let Some(key) = self.of_lobby.get(code) else { return JoinAdmission::Allow };
-        let limit = self
-            .keys
-            .get(key)
-            .map(|r| r.ccu_limit)
-            .filter(|l| *l > 0)
-            .unwrap_or(FREE_TIER_CCU);
-        // The host counts against the cap alongside its clients.
+        let Some(key) = self.of_lobby.get(code).cloned() else { return JoinAdmission::Allow };
+        let row = self.keys.get(&key);
+        let limit = row.map(|r| r.ccu_limit).filter(|l| *l > 0).unwrap_or(FREE_TIER_CCU);
+        // The host counts against the ceiling alongside its clients.
         let here = self.live.get(code).copied().unwrap_or(0) + 1;
         if here >= limit {
-            let (game, tier) = self
-                .keys
-                .get(key)
-                .map(|r| (r.game.clone(), r.tier.clone()))
-                .unwrap_or_else(|| (String::new(), "free".into()));
-            let who = if game.is_empty() { "this game".into() } else { game };
-            return JoinAdmission::Refuse {
-                reason: format!(
-                    "Floptle Cloud: {who} is at its {limit}-player limit on the {tier} plan. \
-                     Upgrade at fopull.com/cloud."
-                ),
-            };
+            *self.refused.entry(key.clone()).or_insert(0) += 1;
+
+            // **The host is told once per episode, not once per refusal**
+            // (`floptle/0194`). A busy game at its ceiling refuses constantly,
+            // and a line per refusal is a flood that gets muted — taking the
+            // one message that matters with it.
+            if self.at_cap.insert(key.clone()) {
+                let (game, tier) = row
+                    .map(|r| (r.game.clone(), r.tier.clone()))
+                    .unwrap_or_else(|| (String::new(), "free".into()));
+                let notice = host_at_cap_notice(limit, &tier, &game);
+                // The operator's journal, so a person on the box can see a
+                // region filling up…
+                self.say(notice.clone());
+                // …and the developer's own process, which is the one that can
+                // do anything about it.
+                self.host_notices.push((code.to_string(), notice));
+            }
+
+            // **What the JOINER sees names nothing they can act on.** They are
+            // a friend of the developer holding a lobby code: they are not the
+            // customer, they cannot upgrade anything, and a sentence about
+            // plans and prices is noise to them and embarrassing for the
+            // developer. The number, the plan and the portal go to the host,
+            // above, where somebody can do something with them.
+            return JoinAdmission::Refuse { reason: FULL_RIGHT_NOW.into() };
         }
+        // There is room again, so the next time this key fills up it is a new
+        // episode and the host hears about it afresh.
+        self.at_cap.remove(&key);
         JoinAdmission::Allow
+    }
+
+    fn take_host_notices(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.host_notices)
+    }
+
+    fn forwarded(&mut self, code: &str, bytes_in: u64, bytes_out: u64) {
+        let e = self.traffic.entry(code.to_string()).or_insert((0, 0));
+        e.0 = e.0.saturating_add(bytes_in);
+        e.1 = e.1.saturating_add(bytes_out);
+        self.bytes_total.0 = self.bytes_total.0.saturating_add(bytes_in);
+        self.bytes_total.1 = self.bytes_total.1.saturating_add(bytes_out);
     }
 
     fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
@@ -368,7 +433,11 @@ impl RelayPolicy for CloudPolicy {
 
     fn lobby_closed(&mut self, code: &str) {
         self.live.remove(code);
-        self.of_lobby.remove(code);
+        // Remembered until the next flush so this lobby's bytes still find
+        // their key — see `closed_keys`.
+        if let Some(key) = self.of_lobby.remove(code) {
+            self.closed_keys.insert(code.to_string(), key);
+        }
     }
 
     fn peer_joined(&mut self, code: &str) {
@@ -413,6 +482,25 @@ impl RelayPolicy for CloudPolicy {
                 e.0 += self.live.get(code).copied().unwrap_or(0) + 1; // + the host
                 e.1 += 1;
             }
+            // Traffic folds onto the SAME `of_lobby` mapping the occupancy
+            // used, so a sample's bytes and its lobby count can never disagree
+            // about which key a lobby belonged to. A lobby that closed inside
+            // this interval has carried real bytes and no longer appears in
+            // `of_lobby`; its traffic is drained anyway, under the key it was
+            // opened with, so nothing a region carried goes unbilled.
+            let mut bytes: HashMap<String, (u64, u64)> = HashMap::new();
+            for (code, (i, o)) in self.traffic.drain() {
+                let key = self
+                    .of_lobby
+                    .get(&code)
+                    .cloned()
+                    .or_else(|| self.closed_keys.remove(&code))
+                    .unwrap_or_default();
+                let e = bytes.entry(key).or_insert((0, 0));
+                e.0 += i;
+                e.1 += o;
+            }
+            let mut refused = std::mem::take(&mut self.refused);
             // **Posted even when it is empty** — this is the relay's heartbeat
             // as well as its meter (`floptle/0191`). A region's health is
             // derived from how long ago its box token was last seen, and a
@@ -421,10 +509,37 @@ impl RelayPolicy for CloudPolicy {
             // and the quiet one would have been marked degraded. An empty
             // report every interval costs one small POST every ten seconds and
             // makes "last seen" mean what it says.
+            //
+            // A key with traffic or refusals but no live lobby still gets a row
+            // — a game that filled up and emptied again inside one interval is
+            // exactly the game whose numbers matter most.
+            for k in bytes.keys().chain(refused.keys()) {
+                if !k.is_empty() {
+                    by_key.entry(k.clone()).or_insert((0, 0));
+                }
+            }
             let samples: Vec<UsageSample> = by_key
                 .into_iter()
-                .map(|(key, (ccu, lobbies))| UsageSample { key, ccu, lobbies })
+                .map(|(key, (ccu, lobbies))| {
+                    let (bytes_in, bytes_out) = bytes.get(&key).copied().unwrap_or((0, 0));
+                    let refused_joins = refused.remove(&key).unwrap_or(0);
+                    UsageSample { key, ccu, lobbies, bytes_in, bytes_out, refused_joins }
+                })
                 .collect();
+            // **The operator's own check on the number** (`floptle/0195`).
+            // Everything above is reported to a control plane nobody on this
+            // box can see; this line is the figure a person standing at the
+            // machine can hold against `ip -s link` and decide whether to
+            // believe. Once per interval, and only when something moved — an
+            // idle region is already saying it is alive through the empty POST.
+            if self.bytes_total.0 > 0 || self.bytes_total.1 > 0 {
+                let (i, o) = self.bytes_total;
+                self.say(format!(
+                    "forwarded {} in / {} out since start",
+                    human_bytes(i),
+                    human_bytes(o)
+                ));
+            }
             let c = self.control.clone();
             std::thread::spawn(move || {
                 let _ = c.report_usage(&samples);
@@ -432,6 +547,58 @@ impl RelayPolicy for CloudPolicy {
         }
     }
 }
+
+/// **What the joiner sees when a game is at its ceiling** (`floptle/0194`).
+///
+/// The person reading this is a friend of the developer holding a lobby code.
+/// They are not the customer, they cannot upgrade anything, and a sentence
+/// naming a plan, a player count or a price is noise to them and embarrassing
+/// for the developer. So it names none of those, and it says the one true
+/// actionable thing: someone will leave.
+pub const FULL_RIGHT_NOW: &str = "This game is full right now. Try again in a minute.";
+
+/// **What the HOST is told, once per at-cap episode** (`floptle/0194`).
+///
+/// The developer's mental model of a refused friend is "my netcode is broken".
+/// Left alone that is a churn event; named, it is the best news they have had
+/// all week — somebody's game filled up. So this says the number, says plainly
+/// that nobody playing was affected, and gives the one link where the ceiling
+/// can be raised.
+///
+/// **The word "limit" is deliberately absent**, and a guard enforces it. Nobody
+/// is charged for reaching the ceiling, no game is throttled and nobody playing
+/// is disconnected — so "limit" is the less accurate word as well as the more
+/// discouraging one. The website's copy makes the same choice, and the two
+/// describing one event in two different vocabularies is its own confusion.
+pub fn host_at_cap_notice(ceiling: u32, tier: &str, game: &str) -> String {
+    let mut s = format!(
+        "Floptle Cloud: {ceiling} players are in your games right now, the most the {tier} \
+         plan allows. New joins are being turned away until someone leaves; nobody playing \
+         was disconnected."
+    );
+    // The portal URL only where there is a game to point at. `<slug>` is the
+    // `game` from the authorize response, and this one template is the whole of
+    // what the engine knows about the site's URL structure.
+    if !game.is_empty() {
+        s.push_str(&format!("\n  Raise the ceiling: {PORTAL_BASE}/{game}"));
+    }
+    s
+}
+
+/// Bytes as an operator reads them.
+fn human_bytes(b: u64) -> String {
+    const K: u64 = 1024;
+    match b {
+        n if n >= K * K * K => format!("{:.1} GB", n as f64 / (K * K * K) as f64),
+        n if n >= K * K => format!("{:.1} MB", n as f64 / (K * K) as f64),
+        n if n >= K => format!("{:.1} KB", n as f64 / K as f64),
+        n => format!("{n} B"),
+    }
+}
+
+/// Where a game is managed on the website. The engine knows this one template
+/// and nothing else about the site's shape.
+pub const PORTAL_BASE: &str = "https://fopull.com/cloud/games";
 
 /// The five rules that make a pulled snapshot safe to authorize from, plus the
 /// outage behaviour underneath them.
@@ -559,6 +726,100 @@ mod tests {
     /// off-by-one here is the whole feature: refuse one early and a paying
     /// developer's lobby is short a player with no explanation; refuse one late
     /// and the limit does not mean what the pricing page says.
+    /// Force a usage flush and hand back the batch that was posted.
+    ///
+    /// The POST happens on its own thread, so this waits for it rather than
+    /// assuming — a bare `tick()` and an immediate read is a race that passes
+    /// on a quiet machine and fails on a loaded one.
+    fn flush_usage(p: &mut CloudPolicy, fake: &Arc<Fake>) -> Vec<UsageSample> {
+        fake.usage_posts.lock().unwrap().clear();
+        p.last_usage = Instant::now() - USAGE_INTERVAL - Duration::from_millis(1);
+        p.tick();
+        for _ in 0..200 {
+            if !fake.usage_posts.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let posts = fake.usage_posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "one batch for the whole region, got {posts:?}");
+        posts[0].clone()
+    }
+
+    /// **A region cannot be priced from players and lobbies alone**
+    /// (`floptle/0195`).
+    ///
+    /// Egress is what a region is billed for, and until now a usage sample
+    /// carried occupancy and nothing about traffic — so the one number that
+    /// costs money was the one nobody had. The two byte figures are kept apart
+    /// rather than assumed equal because they diverge exactly when something is
+    /// wrong: a datagram for a peer who has just left is received and never
+    /// forwarded.
+    #[test]
+    fn a_usage_sample_carries_the_bytes_and_the_refusals() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 0);
+
+        // Traffic both ways, and one datagram that arrives for nobody.
+        p.forwarded("UABCDE", 1000, 1000);
+        p.forwarded("UABCDE", 500, 500);
+        p.forwarded("UABCDE", 300, 0); // the peer had already left
+
+        // …and a ceiling episode, which is a different fact from a bad code.
+        let mut full = lobby_with(&fake, 1, 0); // the host alone fills a 1-seat plan
+        let _ = full.admit_join("UABCDE");
+        let _ = full.admit_join("UABCDE");
+        assert_eq!(full.refused.get(KEY).copied(), Some(2), "both refusals counted");
+
+        let s = flush_usage(&mut p, &fake);
+        let row = s.iter().find(|s| s.key == KEY).expect("a row for the key");
+        assert_eq!(row.bytes_in, 1800, "everything that arrived");
+        assert_eq!(row.bytes_out, 1500, "…and only what left");
+        assert_ne!(row.bytes_in, row.bytes_out, "the two are not the same number");
+        assert_eq!(row.ccu, 1, "the occupancy is still there");
+    }
+
+    /// A lobby that filled up and emptied again inside one interval is the
+    /// busiest lobby there was, and its bytes must still find their key.
+    ///
+    /// `of_lobby` forgets a closed lobby, so without `closed_keys` its traffic
+    /// folds under an empty key and is dropped — precisely the traffic that
+    /// mattered most going unbilled.
+    #[test]
+    fn a_lobby_that_closed_inside_the_interval_is_still_billed() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 0);
+        p.forwarded("UABCDE", 4096, 4096);
+        p.lobby_closed("UABCDE");
+
+        let s = flush_usage(&mut p, &fake);
+        let row = s.iter().find(|s| s.key == KEY).expect("a closed lobby still reports its bytes");
+        assert_eq!(row.bytes_in, 4096);
+        assert_eq!(row.bytes_out, 4096);
+        assert_eq!(row.lobbies, 0, "it is gone, and it still carried the traffic");
+    }
+
+    /// The counters are per interval, not cumulative: a control plane summing
+    /// them must not double-count.
+    #[test]
+    fn the_counters_reset_each_interval() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 0);
+        p.forwarded("UABCDE", 100, 100);
+        let first = flush_usage(&mut p, &fake);
+        assert_eq!(first.iter().find(|s| s.key == KEY).unwrap().bytes_in, 100);
+
+        let second = flush_usage(&mut p, &fake);
+        let row = second.iter().find(|s| s.key == KEY).expect("still occupied, so still reported");
+        assert_eq!(row.bytes_in, 0, "the interval's bytes were reported once");
+        assert_eq!(row.refused_joins, 0);
+    }
+
+    /// Everything the policy has said to the operator's journal so far.
+    fn fake_log(p: &CloudPolicy) -> String {
+        p.status.lock().map(|s| s.log.join("\n")).unwrap_or_default()
+    }
+
     #[test]
     fn the_twenty_first_player_is_refused_and_the_twentieth_is_not() {
         let fake = Arc::new(Fake::default());
@@ -572,12 +833,54 @@ mod tests {
         let JoinAdmission::Refuse { reason } = p.admit_join("UABCDE") else {
             panic!("the 21st player must be refused");
         };
-        // The sentence is product copy: it names the game, the number, the plan
-        // and where to change it. A player reads this verbatim.
-        assert!(reason.contains("forgery"), "names the game: {reason}");
-        assert!(reason.contains("20-player limit"), "names the number: {reason}");
-        assert!(reason.contains("free plan"), "names the plan: {reason}");
-        assert!(reason.contains("fopull.com/cloud"), "names the way out: {reason}");
+
+        // **This sentence turned around in `floptle/0194`, and the negative is
+        // the point.** It used to name the game, the number, the plan and the
+        // price page. The person reading it is a friend of the developer
+        // holding a lobby code: they are not the customer, they cannot upgrade
+        // anything, and every one of those four is noise to them and
+        // embarrassing for the developer.
+        assert_eq!(reason, FULL_RIGHT_NOW);
+        for leak in ["forgery", "20", "free", "plan", "fopull.com", "limit", "upgrade"] {
+            assert!(
+                !reason.to_lowercase().contains(leak),
+                "the joiner must not be told {leak:?}: {reason}"
+            );
+        }
+
+        // …and the developer, who CAN act on it, gets all of it — once.
+        let said = fake_log(&p);
+        assert!(said.contains("20 players are in your games"), "names the number: {said}");
+        assert!(said.contains("free plan"), "names the plan: {said}");
+        assert!(
+            said.contains("nobody playing was disconnected"),
+            "the reassurance is the half that stops it reading as a fault: {said}"
+        );
+        assert!(
+            said.contains("https://fopull.com/cloud/games/forgery"),
+            "and where to raise it, for THIS game: {said}"
+        );
+        // "limit" is banned from this copy on both sides of the product — the
+        // website enforces it too, and one event described in two vocabularies
+        // is its own confusion.
+        assert!(!said.to_lowercase().contains("limit"), "the word is `ceiling`: {said}");
+
+        // **Once per episode, not once per refusal.** A busy game at its
+        // ceiling refuses constantly; a line per refusal is a flood that gets
+        // muted, taking the one message that matters with it.
+        for _ in 0..5 {
+            let _ = p.admit_join("UABCDE");
+        }
+        let again = fake_log(&p);
+        assert_eq!(
+            again.matches("players are in your games").count(),
+            1,
+            "the host was told once per refused join: {again}"
+        );
+
+        // Six refusals were still COUNTED, which is what the control plane
+        // meters (`floptle/0195`).
+        assert_eq!(p.refused.get(KEY).copied(), Some(6));
     }
 
     /// **A live session is never broken for a cap.** Reaching the limit refuses
@@ -623,9 +926,14 @@ mod tests {
         let HostAdmission::Refuse { reason } = p.admit_host(Some(KEY), None) else {
             panic!("an account over its pooled limit must not open another lobby");
         };
-        assert!(reason.contains("account"), "says it is the ACCOUNT, not this game: {reason}");
-        assert!(reason.contains("20-player"), "{reason}");
-        assert!(reason.contains("fopull.com/cloud"), "{reason}");
+        // A host refused at host time is the SAME event as a join refused at
+        // the ceiling, so it says the same thing rather than a generic
+        // "refused" (`floptle/0194`) — and this one IS the developer, so it
+        // carries the number, the reassurance and the portal.
+        assert!(reason.contains("20 players are in your games"), "names the number: {reason}");
+        assert!(reason.contains("nobody playing was disconnected"), "{reason}");
+        assert!(reason.contains("https://fopull.com/cloud/games/forgery"), "{reason}");
+        assert!(!reason.to_lowercase().contains("limit"), "the word is `ceiling`: {reason}");
     }
 
     /// **Rule 1, and the one that bites.** A key minted since the last pull is
