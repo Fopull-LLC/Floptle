@@ -346,7 +346,7 @@ floptle-server <project-dir> [--scene scenes/arena.ron]
 | `--build` | the same thing as the positional, said about an exported server folder |
 | `--max-players` | refuse a join past this many players. Nobody already playing is ever dropped for it |
 | `--status-file` | write a small JSON document here every 5 seconds: `peers`, `uptime_s`, `ticks`, `tick_hz`, `scene`, `lobby_code`, `tick_p95_ms`. Written and renamed, so a watcher never reads half a file. The directory has to be one the server's user can write — under systemd, a `RuntimeDirectory=` of its own |
-| `--game-key` | which Floptle Cloud game this process belongs to. Recorded and reported, not checked — a dedicated server is reached directly |
+| `--game-key` | which Floptle Cloud game this process belongs to. Recorded and reported, not checked — a dedicated server is reached directly. Also read from `FLOPTLE_GAME_KEY`, which is how a service manager should pass it: a command line is readable by every process on the machine and is copied into the system log |
 
 See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
 

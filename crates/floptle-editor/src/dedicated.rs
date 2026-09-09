@@ -201,9 +201,33 @@ impl ServerArgs {
         if self.tick_hz <= 0.0 || self.tick_hz > 1000.0 {
             return Err("--tick must be between 1 and 1000 Hz".into());
         }
+        // The key a supervisor could only pass safely through the environment.
+        self.game_key =
+            resolve_game_key(self.game_key.take(), std::env::var(GAME_KEY_ENV).ok());
         Ok(())
     }
 }
+
+/// Which game key this process reports, given the command line and the
+/// environment.
+///
+/// **A supervisor cannot put a key on the command line.** An `ExecStart` is
+/// readable by every `ps` on the box and is echoed into the journal — which is
+/// then shipped to a control plane and rendered on a web page — so
+/// `floptle-fleet` deliberately passes the key as `FLOPTLE_GAME_KEY` in the
+/// unit's environment instead, with a test of its own asserting it never
+/// appears in the command. Nothing here read that variable, so the careful path
+/// went nowhere and every status report said `"game_key": null`.
+///
+/// An explicit `--game-key` still wins, and a blank value is no key rather than
+/// an empty one — an unset variable and one set to nothing should not mean two
+/// different things to a script that exports it conditionally.
+pub(crate) fn resolve_game_key(explicit: Option<String>, from_env: Option<String>) -> Option<String> {
+    explicit.or(from_env).map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+}
+
+/// The environment variable a supervisor passes the game key in.
+pub(crate) const GAME_KEY_ENV: &str = "FLOPTLE_GAME_KEY";
 
 /// Run until interrupted. Returns an exit code.
 ///
@@ -904,6 +928,36 @@ mod tests {
         assert_eq!(a.max_players, Some(8));
         assert_eq!(a.status_file, Some(PathBuf::from("/run/s.json")));
         assert_eq!(a.game_key.as_deref(), Some("fk_live_ABC"));
+    }
+
+    /// **A key a supervisor could only pass through the environment is read.**
+    ///
+    /// `floptle-fleet` puts the game key in its unit's `Environment=` rather
+    /// than on the `ExecStart`, because a command line is readable by every
+    /// `ps` on the box and is echoed into the journal the agent then ships to
+    /// the control plane and which is rendered on a web page. The agent has a
+    /// test of its own asserting the key never reaches the command line — and
+    /// nothing on this side read the variable, so that careful path went
+    /// nowhere and every live status report said `"game_key": null`.
+    #[test]
+    fn a_game_key_can_arrive_through_the_environment() {
+        assert_eq!(
+            resolve_game_key(Some("fk_flag".into()), Some("fk_env".into())).as_deref(),
+            Some("fk_flag"),
+            "an explicit --game-key wins over the environment"
+        );
+        assert_eq!(
+            resolve_game_key(None, Some("fk_env".into())).as_deref(),
+            Some("fk_env"),
+            "the supervisor's variable is the only way to pass a key safely"
+        );
+        assert_eq!(resolve_game_key(None, None), None, "no key is no key");
+        assert_eq!(
+            resolve_game_key(None, Some("   ".into())),
+            None,
+            "a blank variable is no key rather than an empty one — a script that \
+             exports it conditionally must not produce a second meaning"
+        );
     }
 
     /// Both entry points reach the same parser, so a flag cannot mean one thing
