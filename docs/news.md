@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.86.0 "Room For One More"** — **the two moments where a
+multiplayer game meets other people.** A dedicated server on Floptle Cloud now
+reports who is playing it, how long it has been up, and the six-character code
+people join with — it had nowhere it was allowed to write that down, so a server
+could run all day while its page showed no players and no code to give anybody.
+A bundle now arrives with all of its files: one that was readable only by you on
+your own machine used to reach the server unreadable, and the server ran without
+it, quietly missing its input bindings or a handful of scripts. That is fixed for
+bundles already uploaded, not only for the next one. And a game that fills up
+reads as the good news it is: the friend who cannot get in is told the game is
+full and to try again in a minute, with no plan, number or price page in sight,
+while you are told once — with the number, the fact that nobody playing was
+disconnected, and where to raise it — in the editor console, in a server's
+output, and through `net.notice()` for your own lobby screen. A Floptle Cloud
+game key now goes in **Project settings ⏵ Networked ⏵ Game key** rather than into
+a file by hand, hosting on the cloud without one says so before anything touches
+the network, and exporting a server bundle from a beta engine is refused with the
+reason instead of becoming a deployment that will not come up.
+
 **v0.85.0-rc6 "Web World"** (beta channel) — **the things you could not
 previously check.** `floptle run` could already host a real multiplayer session
 with no window and no GPU, but nothing could join it, so everything only true
