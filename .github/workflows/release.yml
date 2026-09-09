@@ -85,6 +85,26 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: cargo build --release -p floptle-relay --target ${{ matrix.rust }}
 
+      # The verb table, as a release artifact (`floptle/0201`). `cli.rs` is the
+      # one source of truth for the command line — the parser, `--help` and
+      # `help --json` are all generated from it — and fopull.com/floptle/cli
+      # was hand-carried from it: seven verbs when the engine had 21, and wrong
+      # about `needs_gpu` and `writes_project` for `run` and `shot`, the two
+      # flags the page exists to publish. Published beside `releases.json` and
+      # `docs.json`, the site renders from it the way it already does for
+      # releases and docs, and cannot describe a verb the engine does not have.
+      - name: Describe the command line (linux-x86_64)
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          ./target/${{ matrix.rust }}/release/floptle help --json > cli.json
+          # A page renders `name`, `summary`, `needsGpu` and `writesProject` per
+          # verb; an artifact missing any of them is a broken page, so it is a
+          # broken release.
+          jq -e '.version and (.verbs | length > 0)' cli.json >/dev/null
+          jq -e '[.verbs[] | has("name") and has("summary") and has("needsGpu") and has("writesProject")] | all' cli.json >/dev/null
+          echo "cli.json: $(jq '.verbs | length' cli.json) verbs for $(jq -r .version cli.json)"
+
       - name: Package the relay
         if: matrix.target == 'linux-x86_64'
         shell: bash
@@ -173,6 +193,7 @@ jobs:
             fragment-*.json
             hub-fragment-*.json
             floptle-relay-*
+            cli.json
           if-no-files-found: error
 
   # The ARM box's half of the dedicated-server story (`floptle/0197`).
@@ -387,6 +408,13 @@ jobs:
           scripts/embed-release-notes.sh releases.json docs/releases docs/news.md
           jq '{schema, channels, news: (.news | length), versions: [.versions[] | {version, title, notes: (.notes | length), changed: (.changed // "both"), engine: (.artifacts | keys), hub: (.hub_artifacts // {} | keys)}]}' releases.json
 
+      # `cli.json` rides with them (`floptle/0201`): the verb table the linux
+      # build wrote from `floptle help --json`, published at the same stable URL
+      # as the manifest so the site's CLI page renders from it.
+      - name: The verb table is here
+        shell: bash
+        run: test -s artifacts/bundle-linux-x86_64/cli.json
+
       # The docs feed fopull.com renders (contracts/engine-site-feed.md). It rides
       # the release rather than the website reading `main`, for the same reason the
       # notes do: docs describe a BUILD. Scraping the branch would put a guide to
@@ -432,7 +460,7 @@ jobs:
                    artifacts/*/floptle-fleet-*-linux-aarch64 \
                    artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
-          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$REPO"
+          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$REPO"
 
       - name: Publish to the public releases repo
         env:
@@ -457,13 +485,13 @@ jobs:
                    artifacts/*/floptle-fleet-*-linux-aarch64 \
                    artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
-          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$PUBLIC_REPO"
+          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to
           # the newest list (releases/download/manifest/releases.json). It's a PRERELEASE
           # and the version release is explicitly marked LATEST: GitHub otherwise crowns
           # the most recently CREATED release, which made /releases/latest land on the
           # manifest holder (a page with no downloads) instead of the real bundles.
           gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --prerelease --notes "Machine-readable version manifest for the Floptle Hub — not a download page. Get Floptle from the LATEST release instead." || true
-          gh release upload manifest releases.json docs.json --clobber --repo "$PUBLIC_REPO"
+          gh release upload manifest releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
           gh release edit manifest --repo "$PUBLIC_REPO" --prerelease
           case "$TAG" in *-*) ;; *) gh release edit "$TAG" --repo "$PUBLIC_REPO" --latest;; esac

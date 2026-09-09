@@ -63,6 +63,10 @@ pub struct UnitPlan<'a> {
     pub scene: Option<String>,
     /// The relay this server hosts through, if the region names one.
     pub relay: Option<String>,
+    /// The `RuntimeDirectory=` this unit declares, relative to `/run`, so that
+    /// `status_file` is in a directory the server's own dynamic user owns.
+    /// `None` only when `--run` is somewhere systemd cannot create it.
+    pub runtime_dir: Option<String>,
 }
 
 /// Render the unit file.
@@ -99,7 +103,13 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     s.push_str("[Unit]\n");
     s.push_str(&format!("Description=Floptle dedicated server {} ({})\n", d.deployment_id, d.game));
     s.push_str("After=network-online.target\n");
-    s.push_str("Wants=network-online.target\n\n");
+    s.push_str("Wants=network-online.target\n");
+    // **`[Unit]`, not `[Service]`.** These two are unit-level keys; in
+    // `[Service]` systemd logs "Unknown key name … ignoring" and the
+    // give-up-after-five-starts promised below never happens, so a build that
+    // cannot start restarts forever and the journal fills with one traceback
+    // (`floptle/0200`, defect three). The guard checks the SECTION.
+    s.push_str("StartLimitIntervalSec=300\nStartLimitBurst=5\n\n");
 
     s.push_str("[Service]\n");
     s.push_str("Type=simple\n");
@@ -128,11 +138,20 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     // sees a reason, rather than restarting forever and filling the journal
     // with the same traceback.
     s.push_str("Restart=on-failure\nRestartSec=5\n");
-    s.push_str("StartLimitIntervalSec=300\nStartLimitBurst=5\n");
 
     // Unprivileged, and confined to what a game server needs.
     s.push_str("DynamicUser=yes\n");
     s.push_str(&format!("StateDirectory=floptle-fleet/{}\n", sanitize(&d.deployment_id)));
+    // **The directory the status file is in is this unit's own.** A dynamic
+    // user under `ProtectSystem=strict` can write nowhere it is not handed,
+    // and the agent's root-owned runtime directory was not such a place — so
+    // the file was never written and every deployment reported zeros forever
+    // (`floptle/0200`, defect one). systemd creates this one owned by the
+    // server's user; see `Args::runtime_directory` for why it is not nested
+    // under the agent's.
+    if let Some(rd) = &plan.runtime_dir {
+        s.push_str(&format!("RuntimeDirectory={rd}\n"));
+    }
     s.push_str("NoNewPrivileges=yes\n");
     s.push_str("PrivateTmp=yes\n");
     s.push_str("PrivateDevices=yes\n");
@@ -216,9 +235,65 @@ mod tests {
             dep: d,
             server_bin: PathBuf::from("/var/lib/floptle-fleet/engines/0.85.0-rc6/floptle-server"),
             bundle_dir: PathBuf::from("/var/lib/floptle-fleet/builds/aa"),
-            status_file: PathBuf::from("/run/floptle-fleet/d_1.json"),
+            status_file: PathBuf::from("/run/floptle-d/d_1/status.json"),
             scene: Some("scenes/lobby.ron".into()),
             relay: Some("relay.fopull.com:7788".into()),
+            runtime_dir: Some("floptle-d/d_1".into()),
+        }
+    }
+
+    /// The lines of one `[Section]` of a unit.
+    fn section<'a>(unit: &'a str, name: &str) -> Vec<&'a str> {
+        let head = format!("[{name}]");
+        unit.lines()
+            .skip_while(|l| *l != head)
+            .skip(1)
+            .take_while(|l| !l.starts_with('['))
+            .collect()
+    }
+
+    /// **The status file is in a directory the server's own user owns.**
+    ///
+    /// `floptle/0200`, defect one: the server runs `DynamicUser=yes` under
+    /// `ProtectSystem=strict`, and the file used to be pointed at the AGENT's
+    /// runtime directory — root-owned, `0755` — so it was never written, and
+    /// every deployment reported zero players, zero uptime and no lobby code
+    /// forever. The portal showed a running server nobody could join. The unit
+    /// now declares its own `RuntimeDirectory=`, which systemd creates owned by
+    /// the dynamic user, and `--status-file` points inside it.
+    #[test]
+    fn the_status_file_is_in_a_directory_the_server_can_write() {
+        let d = dep();
+        let u = render(&plan_for(&d));
+        let service = section(&u, "Service");
+        assert!(
+            service.contains(&"RuntimeDirectory=floptle-d/d_1"),
+            "the unit must own the directory its status file is in:\n{u}"
+        );
+        let exec = u.lines().find(|l| l.starts_with("ExecStart=")).unwrap();
+        assert!(
+            exec.contains("--status-file /run/floptle-d/d_1/status.json"),
+            "and point the status file inside it: {exec}"
+        );
+    }
+
+    /// **`StartLimitIntervalSec` and `StartLimitBurst` are `[Unit]` keys.**
+    ///
+    /// `floptle/0200`, defect three: in `[Service]` systemd logs "Unknown key
+    /// name … ignoring" and the documented give-up-after-five-starts never
+    /// happens, so a build that cannot start restarts forever, writing the
+    /// same traceback into a journal the agent then ships every ten seconds.
+    /// Asserted by SECTION rather than by substring, because the substring was
+    /// there all along.
+    #[test]
+    fn the_start_limit_is_where_systemd_reads_it() {
+        let d = dep();
+        let u = render(&plan_for(&d));
+        let unit = section(&u, "Unit");
+        let service = section(&u, "Service");
+        for key in ["StartLimitIntervalSec=300", "StartLimitBurst=5"] {
+            assert!(unit.contains(&key), "{key} belongs in [Unit], where systemd reads it:\n{u}");
+            assert!(!service.contains(&key), "{key} in [Service] is ignored with a warning:\n{u}");
         }
     }
 

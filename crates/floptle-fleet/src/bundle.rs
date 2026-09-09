@@ -133,7 +133,73 @@ pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> Result<u64, String> {
         entry.unpack(&out).map_err(|e| format!("write {}: {e}", out.display()))?;
         files += 1;
     }
+    normalise_modes(dest)?;
+    std::fs::write(dest.join(READABLE_MARKER), "").map_err(|e| format!("mark {}: {e}", dest.display()))?;
     Ok(files)
+}
+
+/// Written beside `.verified` once a bundle's modes have been normalised.
+const READABLE_MARKER: &str = ".readable";
+
+/// Normalise a bundle that is already on the box, once.
+///
+/// A present bundle is never re-unpacked — it is content-addressed and the
+/// unpack is what verified it — so a fix that lived only in [`unpack_tar_gz`]
+/// would leave every bundle unpacked by an older agent exactly as broken as it
+/// was, until somebody redeployed with a new digest. The live Forgery server
+/// on `us-east-1` was one of those. So the agent does it here on the first
+/// cycle after an upgrade, and the marker keeps it from walking 500 files
+/// every ten seconds forever.
+pub fn ensure_readable(dir: &Path) -> Result<bool, String> {
+    if dir.join(READABLE_MARKER).is_file() {
+        return Ok(false);
+    }
+    normalise_modes(dir)?;
+    std::fs::write(dir.join(READABLE_MARKER), "").map_err(|e| format!("mark {}: {e}", dir.display()))?;
+    Ok(true)
+}
+
+/// Make everything under `dir` readable by a user other than the one that
+/// unpacked it: files `0644` (`0755` where an exec bit was set), directories
+/// `0755`.
+///
+/// **The archive's own mode bits are an accident of the machine it was made
+/// on**, not a statement about the box. `tar` carries a developer's umask
+/// faithfully, and a `0600` file that was fine on their laptop is unreadable
+/// to the server, which runs as a different user. `floptle/0200`, defect two,
+/// and it was live: the Forgery server on `us-east-1` ran without its input
+/// bindings and four of its scripts, half-working, and nothing reported it.
+/// Equivalent to `chmod -R a+rX`, which is also what the upload endpoint tells
+/// a developer to run — the agent does it here so nobody has to.
+fn normalise_modes(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+        for e in rd {
+            let e = e.map_err(|e| format!("read {}: {e}", dir.display()))?;
+            let p = e.path();
+            let meta = std::fs::symlink_metadata(&p).map_err(|e| format!("stat {}: {e}", p.display()))?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            // A directory needs its search bit; a file keeps an exec bit it had.
+            let executable = meta.is_dir() || meta.permissions().mode() & 0o111 != 0;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("chmod {}: {e}", p.display()))?;
+            if meta.is_dir() {
+                normalise_modes(&p)?;
+            }
+        }
+        // The root itself: a bundle whose top-level directory entry was `0700`
+        // would hide the manifest.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Print one line to stdout for the journal.
@@ -335,6 +401,98 @@ mod tests {
         assert_eq!(m.project.as_deref(), Some("assets"));
         assert_eq!(m.scene.as_deref(), Some("scenes/lobby.ron"));
         assert_eq!(m.engine_version.as_deref(), Some("0.85.0-rc6"));
+    }
+
+    /// **The bundle's own mode bits are not trusted.**
+    ///
+    /// `floptle/0200`, defect two, and it was live: the Forgery server on
+    /// `us-east-1` ran without its input bindings and four of its Lua scripts,
+    /// because those files were `0600` on the developer's laptop, `tar` carried
+    /// the bit, and the server — a different user — could not read them. It
+    /// did not fail; it half-worked, and nothing reported it. The modes in an
+    /// archive are an accident of the machine it was made on, so the unpack
+    /// normalises them: every file readable, every directory listable, an
+    /// exec bit kept where one was set.
+    #[test]
+    fn a_bundle_written_with_a_tight_umask_is_readable_by_the_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("modes");
+        let archive = root.join("b.tar.gz");
+        {
+            let f = std::fs::File::create(&archive).unwrap();
+            let gz = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            let mut b = tar::Builder::new(gz);
+            let mut dir = tar::Header::new_gnu();
+            dir.set_entry_type(tar::EntryType::Directory);
+            dir.set_size(0);
+            dir.set_mode(0o700);
+            dir.set_cksum();
+            b.append_data(&mut dir, "./assets/scripts", &[][..]).unwrap();
+            for (name, body, mode) in [
+                ("./floptle-server.ron", &b"(project: \"assets\")"[..], 0o600),
+                ("./assets/input.ron", &b"()"[..], 0o600),
+                ("./assets/scripts/gun.lua", &b"return 1"[..], 0o600),
+                ("./assets/tool.sh", &b"#!/bin/sh"[..], 0o700),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(mode);
+                h.set_cksum();
+                b.append_data(&mut h, name, body).unwrap();
+            }
+            b.into_inner().unwrap().finish().unwrap();
+        }
+        let dest = root.join("dest");
+        unpack_tar_gz(&archive, &dest).expect("unpacks");
+        let mode = |rel: &str| std::fs::metadata(dest.join(rel)).unwrap().permissions().mode() & 0o777;
+        for f in ["floptle-server.ron", "assets/input.ron", "assets/scripts/gun.lua"] {
+            assert_eq!(mode(f), 0o644, "{f} must be readable by a user that is not the unpacker");
+        }
+        assert_eq!(mode("assets/tool.sh"), 0o755, "an exec bit that was set is kept");
+        assert_eq!(mode("assets/scripts"), 0o755, "a 0700 directory hides everything in it");
+        assert_eq!(mode("assets"), 0o755);
+    }
+
+    /// **A bundle unpacked by an older agent is fixed on the next cycle, once.**
+    ///
+    /// The live case: the bundle is present and verified, so it will never be
+    /// unpacked again, and its `0600` files are exactly as unreadable as the
+    /// day they arrived. The first cycle after the upgrade walks it; the
+    /// second does not.
+    #[test]
+    fn a_bundle_already_on_the_box_is_made_readable_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("present-modes");
+        let dir = root.join("aa");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/input.ron"), "()").unwrap();
+        std::fs::set_permissions(dir.join("assets/input.ron"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(dir.join("assets"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(dir.join(".verified"), "").unwrap();
+
+        assert!(ensure_readable(&dir).unwrap(), "the first cycle after the upgrade does the work");
+        let mode = |rel: &str| std::fs::metadata(dir.join(rel)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("assets/input.ron"), 0o644);
+        assert_eq!(mode("assets"), 0o755);
+        assert!(!ensure_readable(&dir).unwrap(), "and never again");
+
+        // …and a freshly unpacked bundle is already marked, so it is not
+        // walked a second time either.
+        let archive = root.join("b.tar.gz");
+        {
+            let f = std::fs::File::create(&archive).unwrap();
+            let gz = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            let mut b = tar::Builder::new(gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o600);
+            h.set_cksum();
+            b.append_data(&mut h, "./floptle-server.ron", &b"()"[..]).unwrap();
+            b.into_inner().unwrap().finish().unwrap();
+        }
+        let fresh = root.join("fresh");
+        unpack_tar_gz(&archive, &fresh).unwrap();
+        assert!(!ensure_readable(&fresh).unwrap(), "unpacking normalised it already");
     }
 
     /// A half-unpacked bundle is not "present". The marker is written last, so

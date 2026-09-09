@@ -579,8 +579,17 @@ pub fn host_at_cap_notice(ceiling: u32, tier: &str, game: &str) -> String {
     // The portal URL only where there is a game to point at. `<slug>` is the
     // `game` from the authorize response, and this one template is the whole of
     // what the engine knows about the site's URL structure.
+    //
+    // **At the top of the plans there is nothing to sell.** A Studio account
+    // (or anything that is not one of the two tiers below it) is not offered
+    // an upgrade it cannot buy; the website gives that developer a person to
+    // talk to on the same page, so the line says that instead.
     if !game.is_empty() {
-        s.push_str(&format!("\n  Raise the ceiling: {PORTAL_BASE}/{game}"));
+        if matches!(tier, "free" | "indie") {
+            s.push_str(&format!("\n  Raise the ceiling: {PORTAL_BASE}/{game}"));
+        } else {
+            s.push_str(&format!("\n  Need more? Talk to us: {PORTAL_BASE}/{game}"));
+        }
     }
     s
 }
@@ -881,6 +890,23 @@ mod tests {
         // Six refusals were still COUNTED, which is what the control plane
         // meters (`floptle/0195`).
         assert_eq!(p.refused.get(KEY).copied(), Some(6));
+    }
+
+    /// **A developer already on the top plan is not offered an upgrade.**
+    ///
+    /// The website's ceiling copy gives a Studio account a person to talk to
+    /// rather than an upgrade button, because there is nothing above it to
+    /// sell — and the console line describing the same event should not say
+    /// "raise the ceiling" to somebody who cannot (`floptle/0194`, W's note).
+    #[test]
+    fn a_studio_host_is_offered_a_conversation_and_not_an_upgrade() {
+        let free = host_at_cap_notice(20, "free", "forgery");
+        assert!(free.contains("Raise the ceiling: https://fopull.com/cloud/games/forgery"), "{free}");
+        let studio = host_at_cap_notice(500, "studio", "forgery");
+        assert!(!studio.to_lowercase().contains("raise"), "nothing to raise it to: {studio}");
+        assert!(studio.contains("https://fopull.com/cloud/games/forgery"), "still says where: {studio}");
+        assert!(studio.contains("500 players"), "and still says the number: {studio}");
+        assert!(!studio.to_lowercase().contains("limit"), "the word is `ceiling`: {studio}");
     }
 
     /// **A live session is never broken for a cap.** Reaching the limit refuses

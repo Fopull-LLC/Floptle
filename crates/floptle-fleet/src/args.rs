@@ -22,7 +22,9 @@ pub struct Args {
     pub root: PathBuf,
     /// Where unit files are written.
     pub units: PathBuf,
-    /// Where each server's `--status-file` goes.
+    /// The directory under `/run` that holds one runtime directory per
+    /// deployment, each created by systemd and owned by that server's own
+    /// dynamic user — see [`Args::status_file`].
     pub run: PathBuf,
     /// Seconds between polls.
     pub interval: u64,
@@ -43,7 +45,7 @@ impl Default for Args {
             token: None,
             root: PathBuf::from("/var/lib/floptle-fleet"),
             units: PathBuf::from("/etc/systemd/system"),
-            run: PathBuf::from("/run/floptle-fleet"),
+            run: PathBuf::from("/run/floptle-d"),
             interval: 10,
             relay: None,
             once: false,
@@ -73,8 +75,10 @@ FLAGS
                         /var/lib/floptle-fleet.
   --units <dir>         where unit files are written. Default
                         /etc/systemd/system.
-  --run <dir>           where each server's status file goes. Default
-                        /run/floptle-fleet.
+  --run <dir>           parent of each server's runtime directory, which
+                        systemd creates for that server's own user; the status
+                        file is <dir>/<deployment>/status.json. Must be under
+                        /run. Default /run/floptle-d.
   --relay <addr>        relay a dedicated server hosts through, so players join
                         by lobby code rather than by address.
   --interval <secs>     seconds between polls. Default 10.
@@ -151,6 +155,44 @@ an endpoint that will refuse it every ten seconds forever.
             a.token = resolve_token(token_file.as_deref());
         }
         Ok(Some(a))
+    }
+
+    /// Where deployment `id`'s `--status-file` goes:
+    /// `<run>/<id>/status.json`.
+    ///
+    /// **In a directory of its own, not a file beside the others** — the
+    /// directory is what a unit can be given. The server runs `DynamicUser=yes`
+    /// under `ProtectSystem=strict`, so it can write nowhere it is not handed
+    /// explicitly, and the agent's own runtime directory (root, `0755`) was
+    /// exactly such a place: `floptle/0200`'s first defect was every deployment
+    /// reporting zero players and no lobby code forever, because the file was
+    /// never written and nothing said so. Each server now declares
+    /// [`Args::runtime_directory`] and systemd creates it owned by that
+    /// server's user.
+    pub fn status_file(&self, deployment_id: &str) -> PathBuf {
+        self.run.join(crate::unit::sanitize(deployment_id)).join("status.json")
+    }
+
+    /// The `RuntimeDirectory=` a deployment's unit declares, relative to
+    /// `/run` as systemd wants it: `floptle-d/d_1`.
+    ///
+    /// `None` when `--run` is not under `/run` — systemd cannot create a
+    /// runtime directory anywhere else, and the agent says so rather than
+    /// writing a unit whose status file silently never appears.
+    ///
+    /// **Deliberately not nested under the agent's own `RuntimeDirectory`.**
+    /// systemd removes a unit's runtime directory when that unit stops, so a
+    /// status directory under the agent's would be deleted out from under every
+    /// running server the moment the agent was restarted or upgraded — and the
+    /// zeros would come back with nothing in the journal to say why.
+    pub fn runtime_directory(&self, deployment_id: &str) -> Option<String> {
+        let rel = self.run.strip_prefix("/run").ok()?;
+        let rel = rel.to_string_lossy();
+        let rel = rel.trim_matches('/');
+        if rel.is_empty() {
+            return None;
+        }
+        Some(format!("{rel}/{}", crate::unit::sanitize(deployment_id)))
     }
 
     /// `https://fopull.com/api/floptle/v1/cloud/fleet/us-east/desired`
@@ -295,6 +337,29 @@ mod tests {
     }
 
     /// An explicit token file is read, and a blank one is not a token.
+    /// **The status file is in a directory systemd can hand to the server.**
+    ///
+    /// The unit's `RuntimeDirectory=` is relative to `/run`, so a `--run`
+    /// anywhere else is a unit whose status file silently never appears —
+    /// the exact shape of `floptle/0200`'s first defect — and the agent says
+    /// so instead of writing one. The id is sanitised on the way in, the same
+    /// way the unit name is, because it becomes a path.
+    #[test]
+    fn the_status_directory_is_the_units_own_and_under_run() {
+        let a = Args::default();
+        assert_eq!(a.runtime_directory("d_1").as_deref(), Some("floptle-d/d_1"));
+        assert_eq!(a.status_file("d_1"), PathBuf::from("/run/floptle-d/d_1/status.json"));
+        assert_eq!(
+            a.runtime_directory("../etc").as_deref(),
+            Some("floptle-d/___etc"),
+            "a deployment id is filtered before it becomes a path"
+        );
+        let elsewhere = Args { run: PathBuf::from("/var/tmp/fleet"), ..Args::default() };
+        assert_eq!(elsewhere.runtime_directory("d_1"), None, "systemd cannot create it there");
+        let bare = Args { run: PathBuf::from("/run"), ..Args::default() };
+        assert_eq!(bare.runtime_directory("d_1"), None, "/run itself is not a directory to own");
+    }
+
     #[test]
     fn a_blank_token_file_is_no_token() {
         let dir = std::env::temp_dir().join(format!("fleet-tok-{}", std::process::id()));

@@ -94,7 +94,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/floptle-fleet --region us-east
+ExecStart=/usr/local/bin/floptle-fleet --region us-east --relay us-east.relay.fopull.com:7788
 LoadCredential=fleet-token:/etc/floptle/fleet-token
 Restart=always
 RestartSec=10
@@ -121,6 +121,23 @@ journalctl -u floptle-fleet -f
 
 The agent finds the token at `$CREDENTIALS_DIRECTORY/fleet-token` without being
 told where it is, which is why the unit needs no `--token-file`.
+
+⚠ **`--relay` is load-bearing.** It is passed through to every server the agent
+starts, and it is what makes a dedicated server reachable by the same
+six-character code a player uses for a friend's laptop. Without it a server is
+reachable only at `quic://host:port`, which no player types. Use the region's
+own relay from `GET /cloud/regions`.
+
+**Each server gets a directory of its own under `/run/floptle-d/`** (the
+`--run` parent; it must be under `/run`). Its unit declares that directory as
+its `RuntimeDirectory=`, so systemd creates it owned by the server's own
+dynamic user, and the server's `--status-file` is written inside it — that
+file is where the player count, uptime, p95 tick time and **lobby code** in
+every status report come from. It is deliberately not under the agent's own
+runtime directory: systemd removes a unit's runtime directory when that unit
+stops, so an agent restart would otherwise delete every running server's
+status file and the portal would show zeros with nothing in the journal to say
+why.
 
 ### Checking it before you commit to it
 
@@ -177,3 +194,9 @@ The region's UDP port range has to be open explicitly.
   is echoed into the journal — which the agent then ships to the control plane.
 - **It will not touch units it does not own.** It manages exactly
   `floptle-d-*.service` in its unit directory.
+- **It will not trust a bundle's mode bits.** `tar` carries the developer's
+  umask faithfully, and a `0600` file that was fine on their laptop is
+  unreadable to the server, which runs as a different user — a server that
+  starts, registers, takes a lobby code and runs without its input bindings,
+  with nothing to say so. Everything unpacked is made readable (`chmod -R
+  a+rX`, in effect); an exec bit that was set is kept.
