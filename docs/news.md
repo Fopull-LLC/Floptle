@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.86.1** — **a patch for two things a live server showed us within an hour of
+0.86.0.** Changing a dedicated server's scene, player cap, tick rate or port now
+actually reaches the server: the region would write the new configuration and
+leave the old process running, with nothing to say it had been ignored, so the
+change would appear to have worked and would take effect at some unrelated
+restart days later. That gap is also why 0.86.0's status fix needed a server
+restarted by hand before it did anything. And a dedicated server now reads its
+Floptle Cloud game key from `FLOPTLE_GAME_KEY`, which is the only way a service
+manager can pass one without putting it where every process on the machine can
+read it.
+
 **v0.86.0 "Room For One More"** — **the two moments where a
 multiplayer game meets other people.** A dedicated server on Floptle Cloud now
 reports who is playing it, how long it has been up, and the six-character code
