@@ -98,6 +98,12 @@ pub struct CloudPolicy {
     /// means, so the meter lives here.
     of_lobby: HashMap<String, String>,
     live: HashMap<String, u32>,
+    /// Lobbies whose host is a dedicated server rather than a player
+    /// (`floptle/0211`). Occupancy is clients **plus the host**, which is right
+    /// for a listen host and an off-by-one for a box nobody is sitting at: an
+    /// idle dedicated server read as one concurrent player on its developer's
+    /// page and held one of the account's ceiling for as long as it ran.
+    dedicated: std::collections::HashSet<String>,
     last_usage: Instant,
     /// Payload carried per lobby since the last usage flush: `(in, out)`.
     ///
@@ -147,6 +153,17 @@ pub struct CloudPolicy {
 }
 
 impl CloudPolicy {
+    /// Does this lobby's host occupy a seat? One for a listen host, none for a
+    /// dedicated server (`floptle/0211`).
+    ///
+    /// **One definition on purpose.** The number is read twice — once for the
+    /// ceiling a join is refused at, once for the occupancy a region reports —
+    /// and the two disagreeing would mean a developer's page and the limit that
+    /// turns their players away were counting different things.
+    fn host_seat(&self, code: &str) -> u32 {
+        u32::from(!self.dedicated.contains(code))
+    }
+
     pub fn new(control: Arc<dyn ControlPlane>, region: &str, letter: char) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
@@ -161,6 +178,7 @@ impl CloudPolicy {
             floored: HashSet::new(),
             of_lobby: HashMap::new(),
             live: HashMap::new(),
+            dedicated: std::collections::HashSet::new(),
             last_usage: Instant::now(),
             traffic: HashMap::new(),
             closed_keys: HashMap::new(),
@@ -376,8 +394,9 @@ impl RelayPolicy for CloudPolicy {
         let Some(key) = self.of_lobby.get(code).cloned() else { return JoinAdmission::Allow };
         let row = self.keys.get(&key);
         let limit = row.map(|r| r.ccu_limit).filter(|l| *l > 0).unwrap_or(FREE_TIER_CCU);
-        // The host counts against the ceiling alongside its clients.
-        let here = self.live.get(code).copied().unwrap_or(0) + 1;
+        // The host counts against the ceiling alongside its clients — unless
+        // nobody is sitting at it.
+        let here = self.live.get(code).copied().unwrap_or(0) + self.host_seat(code);
         if here >= limit {
             *self.refused.entry(key.clone()).or_insert(0) += 1;
 
@@ -431,8 +450,13 @@ impl RelayPolicy for CloudPolicy {
         }
     }
 
+    fn host_is_dedicated(&mut self, code: &str) {
+        self.dedicated.insert(code.to_string());
+    }
+
     fn lobby_closed(&mut self, code: &str) {
         self.live.remove(code);
+        self.dedicated.remove(code);
         // Remembered until the next flush so this lobby's bytes still find
         // their key — see `closed_keys`.
         if let Some(key) = self.of_lobby.remove(code) {
@@ -479,7 +503,12 @@ impl RelayPolicy for CloudPolicy {
             let mut by_key: HashMap<String, (u32, u32)> = HashMap::new();
             for (code, key) in &self.of_lobby {
                 let e = by_key.entry(key.clone()).or_insert((0, 0));
-                e.0 += self.live.get(code).copied().unwrap_or(0) + 1; // + the host
+                // **Clients, plus the host only when the host is a person.**
+                // A listen host is playing and counts; a dedicated server is a
+                // box nobody is sitting at, and counting it showed "1 in this
+                // game right now" on an empty server and spent one of the
+                // account's ceiling for as long as it ran (`floptle/0211`).
+                e.0 += self.live.get(code).copied().unwrap_or(0) + self.host_seat(code);
                 e.1 += 1;
             }
             // Traffic folds onto the SAME `of_lobby` mapping the occupancy
@@ -753,6 +782,72 @@ mod tests {
         let posts = fake.usage_posts.lock().unwrap().clone();
         assert_eq!(posts.len(), 1, "one batch for the whole region, got {posts:?}");
         posts[0].clone()
+    }
+
+    /// **An idle dedicated server is not a player** (`floptle/0211`).
+    ///
+    /// Occupancy is clients plus the host, which is right for a listen host —
+    /// that person is playing — and an off-by-one for a box nobody is sitting
+    /// at. Measured on the live region: a Forgery server whose own status file
+    /// said `"peers": 0` was reported as `ccu=1`, so the developer's page said
+    /// "1 in this game right now" about an empty server.
+    ///
+    /// Both halves are asserted, because the failure that matters is the two
+    /// drifting apart: the same rule decides the number a page shows and the
+    /// number a ceiling is measured against.
+    #[test]
+    fn an_idle_dedicated_server_is_not_counted_as_a_player() {
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 20, 0);
+
+        // A listen host is somebody playing, and still counts.
+        assert_eq!(flush_usage(&mut p, &fake)[0].ccu, 1, "a listen host is a player");
+
+        p.host_is_dedicated("UABCDE");
+        assert_eq!(
+            flush_usage(&mut p, &fake)[0].ccu,
+            0,
+            "an empty dedicated server has nobody on it"
+        );
+
+        // …and it counts its actual players, rather than becoming uncountable.
+        p.peer_joined("UABCDE");
+        p.peer_joined("UABCDE");
+        assert_eq!(flush_usage(&mut p, &fake)[0].ccu, 2, "two players are two players");
+    }
+
+    /// **A dedicated server does not spend one of the account's seats**
+    /// (`floptle/0211`).
+    ///
+    /// The same off-by-one, on the side that a player actually feels: at a
+    /// ceiling of N, a dedicated server was seating N−1 people and turning the
+    /// Nth away — which is the exact moment `floptle/0194` is trying to turn
+    /// into good news, spoiled by arriving one player early.
+    #[test]
+    fn a_dedicated_server_does_not_spend_a_seat_at_the_ceiling() {
+        // A listen host with four players is full at five, because the host is
+        // the fifth person in the game.
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 5, 4);
+        assert!(
+            matches!(p.admit_join("UABCDE"), JoinAdmission::Refuse { .. }),
+            "host + 4 players IS five people"
+        );
+
+        // The same lobby hosted by a box seats five players.
+        let fake = Arc::new(Fake::default());
+        let mut p = lobby_with(&fake, 5, 4);
+        p.host_is_dedicated("UABCDE");
+        assert_eq!(
+            p.admit_join("UABCDE"),
+            JoinAdmission::Allow,
+            "the fifth player was turned away so a server could hold their seat"
+        );
+        p.peer_joined("UABCDE");
+        assert!(
+            matches!(p.admit_join("UABCDE"), JoinAdmission::Refuse { .. }),
+            "and the ceiling still bites at five"
+        );
     }
 
     /// **A region cannot be priced from players and lobbies alone**

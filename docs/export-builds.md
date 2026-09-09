@@ -241,6 +241,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
 [x] floptle api [QUERY] [--json]
 [x] floptle export <PROJ> <OUT> <PLATFORM|server> [--title T] [--scene S]
+                                     # server: name OUT *.tar.gz for the archive
 [x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]
 [x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]
@@ -359,18 +360,17 @@ headless run never reads, plus a manifest saying which scene and which engine
 version to run it with.
 
 ```
-floptle export <PROJECT> <OUT> server [--scene scenes/lobby.ron] [--title T]
+floptle export <PROJECT> ~/builds/my-game-server.tar.gz server [--scene scenes/lobby.ron]
 ```
 
-writes `<OUT>/floptle-server.ron` and `<OUT>/assets/`. Then:
+**Name the output `.tar.gz` and you get the archive itself** — the thing you
+upload, with nothing to do in between. Upload it on the game's page at
+[fopull.com/cloud](https://fopull.com/cloud), which reads the manifest back and
+offers the scene it names.
 
-```
-tar -C <OUT> -czf my-game-server.tar.gz .
-```
-
-and upload the archive on the game's page at
-[fopull.com/cloud](https://fopull.com/cloud) — or paste it into the deploy
-form there, which reads the manifest back and offers the scene it names.
+Name a folder instead and you get a folder: `<OUT>/floptle-server.ron` and
+`<OUT>/assets/`, which is useful if you want to look inside one before it goes
+anywhere.
 
 What the export does, so you know what you are shipping:
 

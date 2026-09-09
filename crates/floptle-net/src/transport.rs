@@ -98,6 +98,19 @@ pub trait Transport: Send {
     fn take_notices(&mut self) -> Vec<String> {
         Vec::new()
     }
+
+    /// The lobby code players join with, for a transport that has one.
+    ///
+    /// `None` for every transport but a relay host — and **`None` for a relay
+    /// host whose relay is unreachable**, which is the point of asking rather
+    /// than remembering. A code is a fact the relay owns: it hands it over once
+    /// at registration, and a relay restart destroys every lobby it knew. A
+    /// host that kept publishing the code it was told at startup advertised
+    /// six characters that refuse everybody who types them, on a page, to a
+    /// shipped build, indefinitely (`floptle/0210`).
+    fn lobby_code(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A boxed transport is a transport — what lets a wrapper such as
@@ -108,6 +121,9 @@ impl Transport for Box<dyn Transport> {
     }
     fn take_notices(&mut self) -> Vec<String> {
         (**self).take_notices()
+    }
+    fn lobby_code(&self) -> Option<String> {
+        (**self).lobby_code()
     }
     fn poll(&mut self) -> Vec<Incoming> {
         (**self).poll()

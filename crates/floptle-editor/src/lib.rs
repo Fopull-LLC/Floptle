@@ -2781,6 +2781,14 @@ struct Editor {
     net_join_code: String,
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,
+    /// The relay address this session is actually hosted through, when it is.
+    ///
+    /// Distinct from `net_relay_addr`, which is the 🌐 panel's text buffer. It
+    /// exists so the engine can tell "no code because this is not a relay host"
+    /// from "no code because the relay went away" — the same `None`, and very
+    /// different situations (`floptle/0210`).
+    net_relay_hosting: Option<String>,
+
     /// The last thing a managed relay said to this host about the session —
     /// today, that the account is at its player ceiling (`floptle/0194`).
     ///

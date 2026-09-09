@@ -184,6 +184,19 @@ impl<T: Transport> Transport for Impaired<T> {
         self.inner.poll()
     }
 
+    /// **Both of these pass straight through, and forgetting them is a real
+    /// bug rather than a tidiness point.** A wrapper that dropped them would
+    /// make a lobby code vanish and a relay's messages to the developer go
+    /// silent for anybody who happened to have link impairment switched on —
+    /// which is to say, while they were debugging exactly this sort of thing.
+    fn take_notices(&mut self) -> Vec<String> {
+        self.inner.take_notices()
+    }
+
+    fn lobby_code(&self) -> Option<String> {
+        self.inner.lobby_code()
+    }
+
     fn stats(&self, peer: PeerId) -> LinkStats {
         let mut s = self.inner.stats(peer);
         let imp = self.knob.get();

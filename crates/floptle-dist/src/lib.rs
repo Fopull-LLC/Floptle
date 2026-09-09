@@ -14,7 +14,7 @@ pub use fetch::{is_github_host, set_executable};
 // A browser has no answer for any of them — and no use for one: a web export
 // is served, not downloaded and unpacked by a Hub.
 #[cfg(not(target_arch = "wasm32"))]
-pub use fetch::{download, fetch_manifest, unpack, verify_sha256};
+pub use fetch::{download, fetch_manifest, pack_tar_gz, unpack, verify_sha256};
 pub use manifest::{Artifact, Manifest, PreId, ReleaseInfo, version_key};
 
 /// The manifest that lists installable engine versions. Lives on the PUBLIC

@@ -1076,8 +1076,30 @@ pub(crate) fn export_server(
     let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
     check_server_engine(&engine)?;
 
+    // **An archive if that is what was asked for** (`floptle/0197`). A bundle
+    // is UPLOADED, so a directory is never the finished article — every
+    // developer then ran a `tar` line copied off the website, which is the step
+    // that assumes a shell, gets `-C` wrong, and is why both bundles that exist
+    // were hand-rolled. Asking for `…​.tar.gz` gets the archive itself, and the
+    // staging directory is cleaned up afterwards.
+    let archive = wants_archive(out).then(|| out.to_path_buf());
+    let staging = match &archive {
+        // Beside the archive rather than in a temp dir: a server bundle is tens
+        // of megabytes and `/tmp` is not always the biggest disk on the machine
+        // — and if anything goes wrong, what is left is next to where the
+        // developer was already looking.
+        Some(a) => a.with_file_name(format!(
+            ".{}-staging",
+            a.file_name().and_then(|n| n.to_str()).unwrap_or("bundle")
+        )),
+        None => out.to_path_buf(),
+    };
+    if archive.is_some() && floptle_vfs::is_dir(&staging) {
+        std::fs::remove_dir_all(&staging).map_err(|e| format!("clear staging: {e}"))?;
+    }
+
     // Only now does anything land on disk.
-    let (_, out_c) = prepare_out(project_root, out)?;
+    let (_, out_c) = prepare_out(project_root, &staging)?;
 
     // **A bundle is UPLOADED, so anything left in this folder rides with it.**
     // Export a server bundle over a native export — the same "builds" folder,
@@ -1132,12 +1154,26 @@ pub(crate) fn export_server(
     floptle_vfs::write(out_c.join("floptle-server.ron"), manifest)
         .map_err(|e| format!("write manifest: {e}"))?;
 
-    let bytes = dir_bytes(&ship) + 1024;
+    // The archive, and the staging directory goes away with it: what the
+    // developer asked for is one file, and leaving a second copy of a 26 MB
+    // bundle beside it is a surprise rather than a convenience.
+    let mut bytes = dir_bytes(&ship) + 1024;
+    let mut wrote = out_c.clone();
+    if let Some(a) = &archive {
+        floptle_dist::pack_tar_gz(&out_c, a)
+            .map_err(|e| format!("write the archive: {e}"))?;
+        let _ = std::fs::remove_dir_all(&out_c);
+        bytes = floptle_vfs::size(a).unwrap_or(bytes);
+        wrote = a.clone();
+    }
     let mut msg = format!(
         "bundled {files} file(s) ({}) to {} — serves {rel} on engine {engine}",
         human_bytes(bytes),
-        out_c.display()
+        wrote.display()
     );
+    if archive.is_some() {
+        msg.push_str("\n  ready to upload as it is — no tar step");
+    }
     if skipped.files > 0 {
         msg.push_str(&format!(
             "\n  left out {} file(s) ({}) a headless server never reads",
@@ -1163,6 +1199,17 @@ pub(crate) fn export_server(
         ));
     }
     Ok((msg, out_c))
+}
+
+/// Did the caller ask for an archive rather than a folder?
+///
+/// The out path's own name decides it, which is the spelling a developer
+/// reaches for without being told: `… server ~/builds/forgery.tar.gz` writes
+/// the file, `… server ~/builds/forgery` writes the folder it always did.
+#[cfg(feature = "editor-ui")]
+fn wants_archive(out: &Path) -> bool {
+    let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+    name.ends_with(".tar.gz") || name.ends_with(".tgz")
 }
 
 /// The contract's upload ceiling for one server bundle (§4).
@@ -1985,6 +2032,51 @@ mod tests {
         assert_eq!(mode("scenes/first.ron"), 0o644, "a user that is not the developer can read the scene");
         assert_eq!(mode("scripts/gun.lua"), 0o644, "and the script");
         assert_eq!(mode("scripts/tool.sh"), 0o755, "an exec bit that was set is kept");
+    }
+
+    /// **Asking for an archive gets an archive** (`floptle/0197`).
+    ///
+    /// A server bundle is uploaded, so a folder is never the finished article.
+    /// Every developer therefore ran a `tar` line copied off the website — the
+    /// step that assumes a shell, gets `-C` wrong, and is why both bundles that
+    /// existed were hand-rolled. Ty's steer was that shipping a game should not
+    /// be a hassle; this is the whole of the remaining hassle.
+    ///
+    /// The staging directory must not survive: what was asked for is one file,
+    /// and a second 26 MB copy of it sitting alongside is a surprise.
+    #[test]
+    fn a_server_bundle_can_be_written_as_the_archive_that_gets_uploaded() {
+        let proj = temp("srv-tgz-proj");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), SERVABLE_PROJECT).unwrap();
+        floptle_vfs::write(
+            proj.join("scenes/first.ron"),
+            "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
+        )
+        .unwrap();
+
+        let out = temp("srv-tgz-out").join("forgery-server.tar.gz");
+        let (msg, _) = export_server(&proj, &out, "Arena", None).expect("bundles");
+        assert!(floptle_vfs::is_file(&out), "the archive itself, not a folder: {msg}");
+        assert!(
+            !floptle_vfs::exists(out.with_file_name(".forgery-server.tar.gz-staging")),
+            "the staging directory was left behind beside the archive"
+        );
+
+        // …and it is a real tar.gz whose top level is what a fleet box expects:
+        // the manifest and the project directory it names, with no wrapper.
+        let back = temp("srv-tgz-back");
+        floptle_dist::unpack(&out, &back).expect("a bundle the agent could unpack");
+        assert!(
+            floptle_vfs::is_file(back.join("floptle-server.ron")),
+            "the manifest has to be at the TOP level, not inside a folder named after staging"
+        );
+        assert!(floptle_vfs::is_file(back.join("assets/scenes/first.ron")), "and the project");
+
+        // A folder is still a folder — the old spelling keeps working.
+        let dir_out = temp("srv-tgz-dir");
+        export_server(&proj, &dir_out, "Arena", None).expect("bundles");
+        assert!(floptle_vfs::is_file(dir_out.join("floptle-server.ron")));
     }
 
     /// A project with no entry scene is refused with a sentence, and the

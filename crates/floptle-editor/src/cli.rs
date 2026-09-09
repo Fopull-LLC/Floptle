@@ -268,7 +268,13 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: true,
                 help: "the project directory",
             },
-            Arg { name: "OUT", value: Value::Path, required: true, help: "where to write it" },
+            Arg {
+                name: "OUT",
+                value: Value::Path,
+                required: true,
+                help: "where to write it. For `server`, naming a *.tar.gz writes the uploadable \
+                       archive itself instead of a folder",
+            },
             Arg {
                 name: "PLATFORM",
                 value: Value::Choice(export_platforms),
@@ -933,7 +939,11 @@ pub(crate) const VERBS: &[Verb] = &[
                  return: it ticks the scene and replicates it until something stops it.\n\n\
                  Give it a PORT to listen directly, or a RELAY address to be reachable from \
                  behind a router — the relay prints a lobby code for players to join with. \
-                 With neither it listens on the default port.\n\n\
+                 **They are alternatives, not a pair**: through a relay the server makes one \
+                 outbound connection and listens on nothing, so a PORT passed alongside is \
+                 not bound, and it says so at startup rather than leaving you to find out \
+                 from an address that reaches nothing. With neither it refuses, because a \
+                 server nobody can reach is not a server.\n\n\
                  The scene needs Networked nodes, or a session would replicate nothing, and \
                  it must not be a rollback scene: a rollback match is simulated by every \
                  peer and hosted by one of the players, so there is nothing here to drive \
@@ -955,7 +965,8 @@ pub(crate) const VERBS: &[Verb] = &[
                 name: "--port",
                 value: Value::Text,
                 required: false,
-                help: "listen on this port",
+                help: "listen on this port. Ignored when --relay is given — a relayed server \
+                       binds nothing, and says so",
             },
             Arg {
                 name: "--relay",
