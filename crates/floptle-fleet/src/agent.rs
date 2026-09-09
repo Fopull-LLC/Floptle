@@ -244,8 +244,19 @@ impl Agent {
             std::fs::create_dir_all(&args.units).map_err(|e| format!("create unit dir: {e}"))?;
             std::fs::write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
             host.run("systemctl", &["daemon-reload"])?;
-            host.run("systemctl", &["enable", "--now", &name])?;
-            bundle::log_line(&format!("{name}: written and started"));
+            host.run("systemctl", &["enable", &name])?;
+            // **`restart`, not `enable --now`.** `--now` means "start it if it
+            // is not running", and on a unit that is already active it does
+            // NOTHING — so the agent would write a corrected unit, log that it
+            // had started it, and leave the old process running the old command
+            // line forever. That is not a hypothetical: it is what happened on
+            // `us-east-1` when `floptle/0200`'s fix first reached the box, and
+            // the fix read as a failure because the file on disk was right and
+            // the running process was a day old. Reaching this branch at all
+            // means the text CHANGED, which means the running process is
+            // serving something other than what the control plane asked for.
+            host.run("systemctl", &["restart", &name])?;
+            bundle::log_line(&format!("{name}: written and (re)started"));
         } else {
             // Present and unchanged — but it may have been stopped by hand or
             // never started, so ask rather than assume.
@@ -548,6 +559,47 @@ mod tests {
         assert!(State::Stopped.is_terminal());
     }
 
+    /// **A unit whose text changed is RESTARTED, not merely started.**
+    ///
+    /// `systemctl enable --now` on a unit that is already active does nothing:
+    /// `--now` means "start it if it is not running", and it was running. So
+    /// the agent could write a corrected unit file, log that it had started it,
+    /// and leave the old process running the old command line forever.
+    ///
+    /// That is not hypothetical — it is what happened on `us-east-1` the first
+    /// time `floptle/0200`'s fix reached the box. The unit file on disk had the
+    /// new `RuntimeDirectory=` and the new `--status-file`; the process was a
+    /// day-old one still writing to the path that never worked, so the status
+    /// file was still missing and the fix looked like it had failed.
+    #[test]
+    fn a_unit_whose_text_changed_is_restarted_rather_than_merely_started() {
+        let dir = tmp("rewrite");
+        let a = args_in(&dir);
+        seed(&a, "aa", "0.85.0-rc6", "scenes/lobby.ron");
+        let mut h = FakeHost { active: "active".into(), ..Default::default() };
+        let mut agent = Agent::default();
+
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![dep("d_1")] }).expect("first cycle");
+        let unit_path = a.units.join(unit::unit_name("d_1"));
+        let first = std::fs::read_to_string(&unit_path).expect("the first cycle wrote a unit");
+        assert!(first.contains("--port 30017"), "{first}");
+        h.calls.clear();
+
+        // The same deployment, moved to another port: the unit text changes, so
+        // the running process is serving the wrong one until it is replaced.
+        let mut moved = dep("d_1");
+        moved.port = 30099;
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![moved] }).expect("second cycle");
+
+        let second = std::fs::read_to_string(&unit_path).expect("still a unit");
+        assert!(second.contains("--port 30099"), "the rewrite never happened:\n{second}");
+        assert!(
+            h.calls.iter().any(|c| c == "systemctl restart floptle-d-d_1.service"),
+            "the unit was rewritten and the old process was left running: {:?}",
+            h.calls
+        );
+    }
+
     /// A deployment that is already correct is left alone.
     ///
     /// Rewriting the unit and reloading on every ten-second poll would bounce
@@ -563,12 +615,15 @@ mod tests {
         let d = Desired { deployments: vec![dep("d_1")] };
 
         agent.cycle(&a, &mut h, &d).expect("first cycle writes it");
-        assert!(h.calls.iter().any(|c| c.contains("enable --now")), "first cycle starts it");
+        assert!(h.calls.iter().any(|c| c.contains("enable")), "first cycle enables it");
+        assert!(h.calls.iter().any(|c| c.contains("restart")), "and starts it");
 
         h.calls.clear();
         let r = agent.cycle(&a, &mut h, &d).expect("second cycle");
         assert!(
-            !h.calls.iter().any(|c| c.contains("daemon-reload") || c.contains("enable --now")),
+            !h.calls.iter().any(|c| {
+                c.contains("daemon-reload") || c.contains("enable") || c.contains("restart")
+            }),
             "an unchanged deployment was bounced: {:?}",
             h.calls
         );
