@@ -240,7 +240,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle lint [PROJECT] [--vec3] [--json]    # what to change before switching vec3
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
 [x] floptle api [QUERY] [--json]
-[x] floptle export <PROJ> <OUT> <PLATFORM> [--title T]
+[x] floptle export <PROJ> <OUT> <PLATFORM|server> [--title T] [--scene S]
 [x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]
 [x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]
@@ -345,10 +345,70 @@ floptle-server <project-dir> [--scene scenes/arena.ron]
 |---|---|
 | `--build` | the same thing as the positional, said about an exported server folder |
 | `--max-players` | refuse a join past this many players. Nobody already playing is ever dropped for it |
-| `--status-file` | write a small JSON document here every 5 seconds: `peers`, `uptime_s`, `ticks`, `tick_hz`, `scene`, `lobby_code`. Written and renamed, so a watcher never reads half a file |
+| `--status-file` | write a small JSON document here every 5 seconds: `peers`, `uptime_s`, `ticks`, `tick_hz`, `scene`, `lobby_code`, `tick_p95_ms`. Written and renamed, so a watcher never reads half a file. The directory has to be one the server's user can write — under systemd, a `RuntimeDirectory=` of its own |
 | `--game-key` | which Floptle Cloud game this process belongs to. Recorded and reported, not checked — a dedicated server is reached directly |
 
 See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
+
+### A server bundle, for a box you do not log in to
+
+Floptle Cloud's dedicated hosting runs your game on a region's box. What you
+upload is not a build with a binary in it — the box runs its own
+`floptle-server` — it is a **server bundle**: the project, minus everything a
+headless run never reads, plus a manifest saying which scene and which engine
+version to run it with.
+
+```
+floptle export <PROJECT> <OUT> server [--scene scenes/lobby.ron] [--title T]
+```
+
+writes `<OUT>/floptle-server.ron` and `<OUT>/assets/`. Then:
+
+```
+tar -C <OUT> -czf my-game-server.tar.gz .
+```
+
+and upload the archive on the game's page at
+[fopull.com/cloud](https://fopull.com/cloud) — or paste it into the deploy
+form there, which reads the manifest back and offers the scene it names.
+
+What the export does, so you know what you are shipping:
+
+- **Leaves out what a server cannot use** — textures, audio, fonts, video and
+  shaders — and says how much it left out. Models stay, because a mesh collider
+  *is* a mesh and a skeleton lives inside the `.glb`; every `.ron`, script and
+  text file stays, because a script may read its own data through
+  `assets.getContents` and the strip list does not get to guess which file that
+  is.
+- **Materialises linked packages and makes paths portable**, the same as a
+  native export.
+- **Refuses a project that cannot run headless**, at your machine with the
+  reason in front of you, rather than as a deployment that goes `failed` on a
+  box you cannot see. A `Rollback` scene is the common one: every peer simulates
+  a rollback match, so it is hosted by a player, and a dedicated server has
+  nothing to drive.
+- **Refuses to pin an engine version no box can fetch.** The box downloads
+  `floptle-server-<version>-linux-aarch64` for the version the manifest names,
+  and that is published for **stable releases from 0.85.0** only. A bundle
+  exported from a beta build would pin a file that exists nowhere, so the export
+  says so instead — export it from the stable engine.
+- **Makes every file readable.** The bundle is unpacked by one user and read by
+  another; a file that was `0600` on your machine would reach the box as a file
+  the server silently runs without. The export normalises the modes (the box
+  does too), so nothing depends on your umask.
+- **Says which scene it hosts.** `--scene` wins; otherwise the project's entry
+  scene. ⚠ It is the scene the server *boots into* — for a game with a lobby
+  that swaps to a map, that is the lobby scene, where the persistent nodes that
+  run the match live.
+
+The upload ceiling is 256 MB; a real bundle is tens of megabytes, because the
+models are usually most of what is left.
+
+Two things a game needs before it runs well on a box: `net.isDedicated()`
+([lua-api.md](lua-api.md)), so the server does not seat itself as a player, and
+a game key in **Project settings ⏵ Networked** ([multiplayer.md](multiplayer.md)),
+so the server registers with the region's relay and gets the six-character code
+players join with.
 
 ## v1 limits (deliberate)
 

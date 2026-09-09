@@ -653,6 +653,20 @@ fn copy_tree_with(
                 continue;
             }
             std::fs::copy(&from, &to)?;
+            // **A build is for somebody else's machine, so its files are
+            // readable by somebody else.** `std::fs::copy` carries the mode
+            // bits, and a `0600` file — an accident of the developer's umask —
+            // reached a fleet box as a server that ran without its input
+            // bindings and four of its scripts, half-working, with nothing to
+            // say so (`floptle/0200`). The agent normalises on unpack too; this
+            // is for the developer who tars the folder by hand.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&to)?.permissions().mode();
+                let want = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+                std::fs::set_permissions(&to, std::fs::Permissions::from_mode(want))?;
+            }
             n += 1;
         }
     }
@@ -1058,6 +1072,10 @@ pub(crate) fn export_server(
     .map_err(|e| format!("read {want}: {e}"))?;
     crate::dedicated::check_servable(&doc, &scene_path)?;
 
+    // WHICH ENGINE runs it — and whether a box could ever fetch that engine.
+    let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
+    check_server_engine(&engine)?;
+
     // Only now does anything land on disk.
     let (_, out_c) = prepare_out(project_root, out)?;
 
@@ -1099,7 +1117,6 @@ pub(crate) fn export_server(
         .strip_prefix(&proj)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| want.clone());
-    let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
     let manifest = format!(
         "(\n    \
          // A dedicated-server bundle. The box runs its OWN `floptle serve` of\n    \
@@ -1151,6 +1168,49 @@ pub(crate) fn export_server(
 /// The contract's upload ceiling for one server bundle (§4).
 #[cfg(feature = "editor-ui")]
 pub(crate) const SERVER_BUNDLE_MAX: u64 = 256 * 1024 * 1024;
+
+/// The first engine a fleet box can run a bundle with.
+///
+/// `floptle-server-<version>-linux-aarch64` first appears on this tag, and is
+/// published on **stable** tags only.
+#[cfg(feature = "editor-ui")]
+const FIRST_SERVER_ENGINE: (u64, u64, u64) = (0, 85, 0);
+
+/// Refuse to pin an engine version no box can fetch.
+///
+/// A bundle carries no binary: the box downloads `floptle-server-<version>-
+/// linux-aarch64` for whatever version the manifest names. That artifact is
+/// published for stable releases from 0.85.0 on, and for nothing else — so a
+/// bundle exported from a beta build pins a file that exists nowhere, and the
+/// only answer the box can give is a 404 forty seconds after Deploy
+/// (`floptle/0200`). The upload endpoint refuses such a bundle too; refusing
+/// here, before anything is written, puts the sentence in front of the person
+/// who can act on it.
+#[cfg(feature = "editor-ui")]
+fn check_server_engine(engine: &str) -> Result<(), String> {
+    let v: floptle_package::Version =
+        engine.parse().map_err(|e| format!("this project's engine version is not one: {e}"))?;
+    let (ma, mi, pa) = FIRST_SERVER_ENGINE;
+    let floor = floptle_package::Version::new(ma, mi, pa);
+    let artifact = format!("floptle-server-{engine}-linux-aarch64");
+    if v.is_pre() {
+        return Err(format!(
+            "this project pins engine {engine}, a pre-release, and Floptle Cloud publishes a \
+             server ({artifact}) for stable releases only — a bundle pinning it could never \
+             start on a box. Export it from the stable {}.{}.{} or later, which stamps a version \
+             a box can fetch.",
+            v.major, v.minor, v.patch
+        ));
+    }
+    if v < floor {
+        return Err(format!(
+            "this project pins engine {engine}, and no server is published for it — \
+             {artifact} does not exist, because dedicated hosting starts at {floor}. Open the \
+             project in {floor} or later and export it from there."
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(feature = "editor-ui")]
 fn dir_bytes(p: &Path) -> u64 {
@@ -1804,7 +1864,7 @@ mod tests {
     fn a_server_bundle_clears_a_previous_export_but_not_a_strangers_folder() {
         let proj = temp("srv-over-proj");
         floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
-        floptle_vfs::write(proj.join("project.ron"), "(entry_scene: Some(\"first\"))").unwrap();
+        floptle_vfs::write(proj.join("project.ron"), SERVABLE_PROJECT).unwrap();
         floptle_vfs::write(
             proj.join("scenes/first.ron"),
             "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
@@ -1841,6 +1901,90 @@ mod tests {
         export_server(&proj, &out2, "Arena", None).expect("bundles");
         assert!(floptle_vfs::is_file(out2.join("notes/deploy.txt")), "a stranger's folder");
         assert!(floptle_vfs::is_file(out2.join("README.md")), "a stranger's file");
+    }
+
+    /// A project a server can host, pinned to an engine a box can fetch.
+    ///
+    /// Pinned EXPLICITLY rather than left to `distribution_version()`, because
+    /// that is the workspace version — and the day it is bumped to a `-rc`
+    /// for a beta tag, every server-export test would be refused for pinning
+    /// a pre-release, which is the refusal working, not the bundle breaking.
+    const SERVABLE_PROJECT: &str = "(entry_scene: Some(\"first\"), engine_version: Some(\"0.85.0\"))";
+
+    /// **A bundle pinning an engine no box can fetch is refused, before
+    /// anything is written.**
+    ///
+    /// The bundle carries no binary; the box downloads
+    /// `floptle-server-<version>-linux-aarch64` for the version the manifest
+    /// names, and that is published for stable releases from 0.85.0 only. So
+    /// a bundle exported from a beta pins a file that exists nowhere, and the
+    /// only answer the box could give was a 404 forty seconds after Deploy
+    /// (`floptle/0200`). The sentence names the artifact, so the developer
+    /// can see for themselves that it is not there.
+    #[test]
+    fn a_bundle_pinning_an_engine_no_box_can_fetch_is_refused_before_anything_is_written() {
+        for (pinned, why) in [("0.85.0-rc6", "a pre-release"), ("0.84.2", "before dedicated hosting")] {
+            let proj = temp(&format!("srv-pin-{pinned}"));
+            floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+            floptle_vfs::write(
+                proj.join("project.ron"),
+                format!("(entry_scene: Some(\"first\"), engine_version: Some({pinned:?}))"),
+            )
+            .unwrap();
+            floptle_vfs::write(
+                proj.join("scenes/first.ron"),
+                "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
+            )
+            .unwrap();
+            let out = temp(&format!("srv-pin-out-{pinned}"));
+            let e = export_server(&proj, &out, "Arena", None).expect_err(why);
+            assert!(e.contains(pinned), "{why}: names the version: {e}");
+            assert!(
+                e.contains(&format!("floptle-server-{pinned}-linux-aarch64")),
+                "{why}: names the artifact that does not exist: {e}"
+            );
+            assert!(!e.contains("   "), "the message has a hole in it: {e:?}");
+            assert!(
+                !floptle_vfs::exists(out.join("floptle-server.ron")) && !floptle_vfs::exists(out.join("assets")),
+                "{why}: a refused export must leave nothing bundle-shaped behind"
+            );
+        }
+        // …and the stable version at the floor is what every other test here
+        // exports with, so it is exercised by all of them.
+        assert!(check_server_engine("0.85.0").is_ok());
+        assert!(check_server_engine("0.86.1").is_ok());
+    }
+
+    /// **A file only the developer could read ships readable.**
+    ///
+    /// `std::fs::copy` carries the mode bits, so a `0600` scene — an
+    /// accident of the developer's umask — reached a fleet box as a file the
+    /// server's user could not open. The server did not fail; it ran without
+    /// that file, and nothing said so (`floptle/0200`, live on `us-east-1`).
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_developer_alone_could_read_ships_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let proj = temp("srv-modes");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::create_dir_all(proj.join("scripts")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), SERVABLE_PROJECT).unwrap();
+        floptle_vfs::write(
+            proj.join("scenes/first.ron"),
+            "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
+        )
+        .unwrap();
+        floptle_vfs::write(proj.join("scripts/gun.lua"), "return 1").unwrap();
+        floptle_vfs::write(proj.join("scripts/tool.sh"), "#!/bin/sh").unwrap();
+        for (f, mode) in [("scenes/first.ron", 0o600), ("scripts/gun.lua", 0o600), ("scripts/tool.sh", 0o700)] {
+            std::fs::set_permissions(proj.join(f), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let out = temp("srv-modes-out");
+        export_server(&proj, &out, "Arena", None).expect("bundles");
+        let mode = |rel: &str| std::fs::metadata(out.join("assets").join(rel)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("scenes/first.ron"), 0o644, "a user that is not the developer can read the scene");
+        assert_eq!(mode("scripts/gun.lua"), 0o644, "and the script");
+        assert_eq!(mode("scripts/tool.sh"), 0o755, "an exec bit that was set is kept");
     }
 
     /// A project with no entry scene is refused with a sentence, and the

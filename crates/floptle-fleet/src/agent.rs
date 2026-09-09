@@ -163,6 +163,10 @@ impl Agent {
                 return Ok(self.status_of(args, host, d, State::Starting));
             }
             crate::fetch::fetch_bundle(&d.build_url, &d.sha256, &bundle_dir)?;
+        } else if !args.dry_run && bundle::ensure_readable(&bundle_dir)? {
+            // Unpacked by an agent that trusted the archive's mode bits
+            // (`floptle/0200`, defect two). Once, then the marker says so.
+            bundle::log_line(&format!("{}: made the bundle readable by the server", d.redacted()));
         }
 
         // **The bundle's own manifest wins over the row for scene and project.**
@@ -200,15 +204,27 @@ impl Agent {
 
         let server_bin = crate::engine::ensure_engine(args, &d.engine_version)?;
 
+        // The parent only. The per-deployment directory under it is systemd's
+        // to create, owned by the server's own user — a directory the agent
+        // made here would be root's, which is the bug this replaces.
         std::fs::create_dir_all(&args.run).map_err(|e| format!("create run dir: {e}"))?;
-        let status_file = args.run.join(format!("{}.json", unit::sanitize(&d.deployment_id)));
+        let runtime_dir = args.runtime_directory(&d.deployment_id);
+        if runtime_dir.is_none() {
+            bundle::log_line(&format!(
+                "warning: --run {} is not under /run, so systemd cannot hand the server a \
+                 directory there and {} will not be written",
+                args.run.display(),
+                d.deployment_id
+            ));
+        }
         let plan = unit::UnitPlan {
             dep: &d,
             server_bin,
             bundle_dir,
-            status_file,
+            status_file: args.status_file(&d.deployment_id),
             scene,
             relay: args.relay.clone(),
+            runtime_dir,
         };
         let text = unit::render(&plan);
         let name = unit::unit_name(&d.deployment_id);
@@ -259,7 +275,7 @@ impl Agent {
         }
         self.seen.insert(id.clone(), state);
 
-        let s = read_server_status(&args.run.join(format!("{}.json", unit::sanitize(&id))));
+        let s = read_server_status(&args.status_file(&id));
         DeploymentStatus {
             deployment_id: id.clone(),
             state: state.as_str(),
@@ -468,6 +484,36 @@ mod tests {
         let e = engine_dir(&a.root, version);
         std::fs::create_dir_all(&e).unwrap();
         std::fs::write(e.join("floptle-server"), "#!/bin/true\n").unwrap();
+    }
+
+    /// **What the server writes is what the control plane receives.**
+    ///
+    /// The status file lives at `<run>/<id>/status.json` — inside the
+    /// directory the unit declares as its own — and the agent reads it from
+    /// there. Before `floptle/0200` the agent read `<run>/<id>.json`, a file
+    /// the server could never create, so the report carried a structural zero
+    /// for peers and uptime and `null` for the lobby code on every deployment.
+    /// Seeded at the new path; a reader still looking at the old one reports
+    /// zeros here.
+    #[test]
+    fn the_report_carries_what_the_server_wrote() {
+        let dir = tmp("status");
+        let a = args_in(&dir);
+        seed(&a, "aa", "0.85.0-rc6", "scenes/lobby.ron");
+        std::fs::create_dir_all(a.status_file("d_1").parent().unwrap()).unwrap();
+        std::fs::write(
+            a.status_file("d_1"),
+            "{\"peers\": 3, \"uptime_s\": 812, \"tick_p95_ms\": 4.25, \"lobby_code\": \"UE44B4\"}",
+        )
+        .unwrap();
+        let mut host = FakeHost { active: "active".into(), ..Default::default() };
+        let mut agent = Agent::default();
+        let r = agent.cycle(&a, &mut host, &Desired { deployments: vec![dep("d_1")] }).unwrap();
+        let s = &r.deployments[0];
+        assert_eq!(s.peers, 3, "peers come from the status file");
+        assert_eq!(s.uptime_s, 812, "and uptime — W trusts the reported values only once this is non-zero");
+        assert_eq!(s.lobby_code.as_deref(), Some("UE44B4"), "the code is a startup fact a log tail cannot carry");
+        assert_eq!(s.tick_p95_ms, Some(4.25));
     }
 
     /// **A deployment that leaves `/desired` is stopped AND reported gone.**
