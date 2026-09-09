@@ -50,7 +50,11 @@ jobs:
       - name: Linux build deps
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          # `|| true`: the runner image carries third-party repos (Chrome,
+          # Microsoft) nothing here installs from, and a hash-sum mismatch on
+          # one of them exits 100 with every Ubuntu index already fetched —
+          # twice in a row on 2026-09-09. The install below is the real check.
+          sudo apt-get update || true
           sudo apt-get install -y \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
             libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
@@ -226,7 +230,11 @@ jobs:
       # without one.
       - name: Linux build deps
         run: |
-          sudo apt-get update
+          # `|| true`: the runner image carries third-party repos (Chrome,
+          # Microsoft) nothing here installs from, and a hash-sum mismatch on
+          # one of them exits 100 with every Ubuntu index already fetched —
+          # twice in a row on 2026-09-09. The install below is the real check.
+          sudo apt-get update || true
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev \
             libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
 
