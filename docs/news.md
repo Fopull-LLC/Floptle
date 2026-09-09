@@ -1,5 +1,21 @@
 ## Just shipped
 
+**v0.86.2** — **five fixes, four of them from running a real game on a real
+server for a week.** The biggest is one nobody could have reported: the player
+who *joined* a rollback match was quietly getting a worse game than the host,
+with every one of the host's actions arriving as a correction, on a perfect
+connection, because the two machines never started counting from the same
+moment — the joiner banked its whole scene load and spent it at once, landing up
+to eight steps ahead for the rest of the match. Both machines agreed about
+everything throughout, so it only ever read as "rollback feels worse for my
+friend than for me". On the Cloud side, a server whose relay restarts now comes
+back by itself instead of silently handing out a lobby code that turns everybody
+away, an empty dedicated server has stopped counting itself as a player (it was
+spending one of your plan's slots and telling the twentieth player a
+twenty-player game was full), and shipping a server is one command now — name
+the output `.tar.gz` and you get the file you upload, with no tar step in
+between.
+
 **v0.86.1** — **a patch for two things a live server showed us within an hour of
 0.86.0.** Changing a dedicated server's scene, player cap, tick rate or port now
 actually reaches the server: the region would write the new configuration and
