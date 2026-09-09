@@ -112,6 +112,25 @@ impl Editor {
         delay: u8,
         seed: u64,
     ) {
+        // **Tick 0 is NOW, not now plus whatever the last frame owed.**
+        //
+        // The fixed-step clock banks real time and spends it as ticks. A joiner
+        // reaches this line at the end of a scene load — it receives `Scene`
+        // and `RollbackStart` back to back, and loading the arena takes 100–200
+        // ms — with that whole load banked and unspent. Left alone, those ticks
+        // are spent immediately AFTER the restart, as a burst, and the joiner's
+        // tick 0 is really the host's tick 6, 7 or 8. The bank is clamped at
+        // eight ticks, which is exactly the six-to-eight skew measured
+        // (`floptle/0206`).
+        //
+        // Nothing downstream ever compares the two clocks: `should_stall` only
+        // stops a peer running past the CONFIRMED frontier, and a peer six
+        // ticks ahead never reaches that cap. So the skew, once taken, is
+        // carried for the whole match — the joiner guesses every one of the
+        // host's inputs, re-simulates about four ticks per tick, and reads it
+        // as "rollback is worse for me than for my friend". Both peers agree on
+        // every checksum throughout, so nothing reports it.
+        self.game_tick.reset();
         let mut d = match self.net_rollback.take() {
             Some(mut d) => {
                 d.restart(local, peers.clone(), delay, seed);

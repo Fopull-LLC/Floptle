@@ -157,6 +157,45 @@ impl Editor {
         // nobody was disconnected, and a game filling up is the best news a
         // developer gets all week. A warning icon would say the opposite of
         // what the sentence says.
+        // **The lobby code is the relay's fact, not ours** (`floptle/0210`).
+        // It used to be latched at host time and believed forever — so when a
+        // relay restarted, every server kept advertising six characters that
+        // refused everybody who typed them, on the developer's page and to any
+        // shipped build that asked, with nothing anywhere saying otherwise.
+        // Followed from the transport each tick instead, which reports `None`
+        // whenever there is no live lobby.
+        if self.net_relay_hosting.is_some()
+            && let Some(s) = self.net_server.as_ref()
+        {
+            let now = s.lobby_code();
+            if now != self.net_lobby_code {
+                let addr = self.net_relay_hosting.clone().unwrap_or_default();
+                match (&self.net_lobby_code, &now) {
+                    // Gone: say it as a WARNING, because unlike a game filling
+                    // up this one IS broken — nobody can join until it is back.
+                    (Some(_), None) => self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!(
+                            "the relay at {addr} is unreachable — the lobby code is not valid \
+                             and nobody can join until it is back. Reconnecting."
+                        ),
+                        None,
+                    ),
+                    // Back, with a new code: the relay lost every lobby, so the
+                    // old six characters are gone for good and anybody who was
+                    // told them needs the new ones.
+                    (None, Some(c)) => self.console.push(
+                        // The  level: this one is good news, and a
+                        // warning icon beside "you are back" says the opposite.
+                        floptle_script::LogLevel::Debug,
+                        format!("back on the relay at {addr} — LOBBY CODE {c}"),
+                        None,
+                    ),
+                    _ => {}
+                }
+                self.net_lobby_code = now;
+            }
+        }
         if let Some(s) = self.net_server.as_mut() {
             let said = s.take_notices();
             if let Some(last) = said.last() {
@@ -734,9 +773,20 @@ impl Editor {
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
-                // A host is not joining anything.
-                join_state: "joined",
-                join_error: None,
+                // A host is not joining anything — but a RELAY host can stop
+                // being reachable while it carries on simulating perfectly, and
+                // a lobby screen that reads "joined" through a relay outage is
+                // lying to the person staring at it (`floptle/0210`).
+                join_state: match (&self.net_relay_hosting, &self.net_lobby_code) {
+                    (Some(_), None) => "reconnecting",
+                    _ => "joined",
+                },
+                join_error: match (&self.net_relay_hosting, &self.net_lobby_code) {
+                    (Some(addr), None) => Some(format!(
+                        "the relay at {addr} is unreachable — nobody can join until it is back"
+                    )),
+                    _ => None,
+                },
                 // The relay's answer, so a game can put the code on its own
                 // lobby screen instead of sending players to the 🌐 panel.
                 lobby_code: self.net_lobby_code.clone(),
@@ -1544,6 +1594,7 @@ impl Editor {
         // read those five letters out and their friend would get "no such
         // lobby" — with the game insisting it is hosting.
         self.net_lobby_code = None;
+        self.net_relay_hosting = None;
         // **Present the game key if this project has one.** A managed relay
         // refuses a keyless host — that is the whole point of it — and a
         // self-hosted relay ignores the key, so sending it whenever we have one
@@ -1554,7 +1605,7 @@ impl Editor {
             Some(c) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
             None => floptle_net::RelayHost::host(relay_addr),
         };
-        let (transport, code) = match hosted {
+        let (mut transport, code) = match hosted {
             Ok(t) => t,
             Err(e) => {
                 // The relay's own words, when it had any — "connect your
@@ -1569,7 +1620,17 @@ impl Editor {
                 return;
             }
         };
+        // **Say what kind of host this is, or the relay counts the box as a
+        // player** (`floptle/0211`). A relay's occupancy is a lobby's clients
+        // plus its host, which is right for a listen host and wrong for a
+        // machine nobody is sitting at — it showed "1 in this game right now"
+        // on an empty server and held one of the account's ceiling for as long
+        // as the server ran.
+        if self.dedicated {
+            transport.declare_dedicated();
+        }
         self.net_lobby_code = Some(code.clone());
+        self.net_relay_hosting = Some(relay_addr.to_string());
         self.net_host_with(
             Box::new(transport),
             &format!(
@@ -3445,5 +3506,43 @@ mod cloud_project_tests {
         let back: floptle_scene::ProjectConfigDoc =
             ron::from_str("(retro: true)").expect("an old project still parses");
         assert!(back.cloud.is_none());
+    }
+
+    /// **A rollback match starts at tick 0 now, not tick 0 plus a debt**
+    /// (`floptle/0206`).
+    ///
+    /// The fixed-step clock banks real time and spends it as ticks. A joiner
+    /// arrives here at the end of a scene load — `Scene` and `RollbackStart`
+    /// come back to back, and loading an arena takes 100–200 ms — with that
+    /// whole load banked. Spent after the restart it is a burst that puts the
+    /// joiner six to eight ticks ahead of the host, for the whole match,
+    /// because nothing downstream ever compares the two clocks.
+    ///
+    /// Measured that way in the field: the joiner mispredicted 100 % of ticks
+    /// on a LOOPBACK link with a two-tick delay, re-simulating ~3.7 ticks per
+    /// tick, while the host mispredicted none. Every checksum agreed, so it
+    /// presented as "rollback feels worse for my friend than for me".
+    #[test]
+    fn a_rollback_match_starts_at_tick_zero_and_not_in_debt() {
+        // The control first: banked time really is spent as a burst of ticks,
+        // and the bank's eight-tick ceiling is the size of the skew observed.
+        let mut ed = Editor::default();
+        ed.game_tick.accumulate(0.2);
+        let mut burst = 0;
+        while ed.game_tick.tick() {
+            burst += 1;
+        }
+        assert!(burst >= 6, "a 200 ms load banks the ticks that put a joiner ahead: {burst}");
+
+        // Starting a match discards it, so the first tick of the match is the
+        // first tick after the match started.
+        let mut ed = Editor::default();
+        ed.game_tick.accumulate(0.2);
+        ed.net_rollback_start(floptle_net::SERVER, vec![floptle_net::SERVER, 1], 2, 0);
+        let mut owed = 0;
+        while ed.game_tick.tick() {
+            owed += 1;
+        }
+        assert_eq!(owed, 0, "the match began {owed} ticks in debt, and would spend them at once");
     }
 }

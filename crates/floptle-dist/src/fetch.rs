@@ -130,6 +130,33 @@ pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
 ///
 /// Callers restore the executable bit themselves via [`set_executable`] — which
 /// binary matters is the caller's business, not this crate's.
+/// The counterpart of [`unpack`]: everything in `dir` into one `.tar.gz`.
+///
+/// **This exists so a developer never has to type a `tar` line.** Shipping a
+/// dedicated server used to be "export, then run this command off our website,
+/// then upload" — and the middle step is the one that assumes a shell, gets
+/// `-C` wrong, and produced both of the hand-rolled bundles that exist
+/// (`floptle/0197`). The archive is written with the directory's CONTENTS at
+/// the top level, which is the shape the fleet agent unpacks and the control
+/// plane's index walk reads.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn pack_tar_gz(dir: &Path, archive: &Path) -> Result<(), String> {
+    let file = std::fs::File::create(archive)
+        .map_err(|e| format!("create {}: {e}", archive.display()))?;
+    let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    // An empty prefix puts `floptle-server.ron` and `assets/` at the root of
+    // the archive rather than under a directory named after wherever it was
+    // staged — a bundle that unpacked into an extra folder would name a project
+    // directory the manifest does not.
+    tar.append_dir_all("", dir).map_err(|e| format!("write {}: {e}", archive.display()))?;
+    tar.into_inner()
+        .map_err(|e| format!("write {}: {e}", archive.display()))?
+        .finish()
+        .map_err(|e| format!("finish {}: {e}", archive.display()))?;
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
     let name = archive.file_name().and_then(|s| s.to_str()).unwrap_or_default();

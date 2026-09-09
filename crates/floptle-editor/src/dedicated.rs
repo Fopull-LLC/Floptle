@@ -229,6 +229,35 @@ pub(crate) fn resolve_game_key(explicit: Option<String>, from_env: Option<String
 /// The environment variable a supervisor passes the game key in.
 pub(crate) const GAME_KEY_ENV: &str = "FLOPTLE_GAME_KEY";
 
+/// **Where a running server can actually be reached** (`floptle/0209`).
+///
+/// `--port` and `--relay` are alternatives, not a pair: with a relay the server
+/// makes one outbound connection and listens on nothing, so a port given
+/// alongside it is not bound and never was. That was silent, and it mattered
+/// because the control plane was publishing an address built from the port it
+/// allocated — `quic://host:30000` — for a process that had no socket there.
+/// For two days that address resolved to a *different* game, a leftover test
+/// server that happened to hold the port.
+///
+/// One rule, read twice: once for what the server says at startup and once for
+/// what it writes into its status file. A server that told an operator one
+/// thing and a control plane another would be worse than either.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Reachable {
+    /// The UDP port this server is listening on, if it is listening at all.
+    pub port: Option<u16>,
+    /// The relay it registered with, if it did.
+    pub relay: Option<String>,
+}
+
+pub(crate) fn reachable(args: &ServerArgs) -> Reachable {
+    match &args.relay {
+        // The relay wins, and the port is not bound — see `run`'s dispatch.
+        Some(addr) => Reachable { port: None, relay: Some(addr.clone()) },
+        None => Reachable { port: args.port, relay: None },
+    }
+}
+
 /// Run until interrupted. Returns an exit code.
 ///
 /// **Off wasm32**: a browser tab can open a connection but never accept one, so
@@ -272,6 +301,19 @@ pub fn run(args: ServerArgs) -> i32 {
         return 2;
     }
 
+    // **Say that the port is not being listened on** (`floptle/0209`). A
+    // caller that passed both had no way to learn one of them did nothing, and
+    // an address built from it reaches nothing. Said rather than refused,
+    // deliberately: a fleet box passes both today, and refusing would take a
+    // region down to make a point about a flag.
+    if args.relay.is_some()
+        && let Some(port) = args.port
+    {
+        println!(
+            "  --port {port} is not being listened on: this server is reachable through the \
+             relay, by lobby code, and has no socket of its own"
+        );
+    }
     match (&args.relay, args.port) {
         (Some(addr), _) => ed.net_host_relay(addr),
         (None, Some(port)) => ed.net_host_quic(port),
@@ -534,10 +576,12 @@ fn write_status(
     ticks_ms: &TickWindow,
 ) {
     let peers = ed.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
+    let where_reachable = reachable(args);
     let doc = format!(
         "{{\n  \"peers\": {peers},\n  \"max_players\": {},\n  \"uptime_s\": {},\n  \
          \"ticks\": {ticks},\n  \"tick_hz\": {},\n  \"scene\": {:?},\n  \
          \"project\": {:?},\n  \"game_key\": {},\n  \"lobby_code\": {},\n  \
+         \"port\": {},\n  \"relay\": {},\n  \
          \"tick_p95_ms\": {}\n}}\n",
         args.max_players.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
         started.elapsed().as_secs(),
@@ -546,6 +590,12 @@ fn write_status(
         args.project.to_string_lossy(),
         args.game_key.as_deref().map(|k| format!("{k:?}")).unwrap_or_else(|| "null".into()),
         ed.net_lobby_code.as_deref().map(|c| format!("{c:?}")).unwrap_or_else(|| "null".into()),
+        // **Where this server is reachable, measured rather than derived**
+        // (`floptle/0209`). A control plane that builds an address out of the
+        // port it allocated publishes one that reaches nothing whenever the
+        // server is relay-hosted, and nothing anywhere contradicts it.
+        where_reachable.port.map(|p| p.to_string()).unwrap_or_else(|| "null".into()),
+        where_reachable.relay.as_deref().map(|r| format!("{r:?}")).unwrap_or_else(|| "null".into()),
         // `null` rather than 0 before the window has a sample: a zero would be
         // read as a perfect tick time on a server that has not run one yet.
         ticks_ms.p95().map(|v| format!("{v:.3}")).unwrap_or_else(|| "null".into()),
@@ -774,6 +824,22 @@ fn entry_scene(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A `ServerArgs` with nothing set, for a test about one field.
+    fn blank_args() -> ServerArgs {
+        ServerArgs {
+            project: PathBuf::new(),
+            scene: None,
+            port: None,
+            relay: None,
+            tick_hz: 60.0,
+            interest: None,
+            budget: None,
+            max_players: None,
+            status_file: None,
+            game_key: None,
+        }
+    }
+
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -928,6 +994,42 @@ mod tests {
         assert_eq!(a.max_players, Some(8));
         assert_eq!(a.status_file, Some(PathBuf::from("/run/s.json")));
         assert_eq!(a.game_key.as_deref(), Some("fk_live_ABC"));
+    }
+
+    /// **A relay-hosted server is not listening on a port** (`floptle/0209`).
+    ///
+    /// `--port` and `--relay` are alternatives. With a relay the server makes
+    /// one outbound connection and binds nothing, so a port passed alongside is
+    /// not listened on — which was silent, while the control plane published
+    /// `quic://<host>:<that port>` as the deployment's address. For two days
+    /// that address resolved to a **different game**: a leftover test server
+    /// was holding the port. Once it was killed the address simply reached
+    /// nothing, which is how it was noticed at all.
+    ///
+    /// The rule is asserted rather than the flags, because the same answer is
+    /// read twice — the startup line an operator sees and the status file a
+    /// control plane reads — and those two disagreeing is the actual failure.
+    #[test]
+    fn a_relay_hosted_server_reports_no_local_port() {
+        let with_relay = ServerArgs {
+            port: Some(30000),
+            relay: Some("us-east.relay.fopull.com:7788".into()),
+            ..blank_args()
+        };
+        assert_eq!(
+            reachable(&with_relay),
+            Reachable { port: None, relay: Some("us-east.relay.fopull.com:7788".into()) },
+            "a port that is not bound must not be published as an address"
+        );
+
+        // Direct hosting is the case where the port IS the handle, and a region
+        // with no relay has nothing else to publish.
+        let direct = ServerArgs { port: Some(30000), relay: None, ..blank_args() };
+        assert_eq!(
+            reachable(&direct),
+            Reachable { port: Some(30000), relay: None },
+            "a directly hosted server is reachable at its port and nowhere else"
+        );
     }
 
     /// **A key a supervisor could only pass through the environment is read.**

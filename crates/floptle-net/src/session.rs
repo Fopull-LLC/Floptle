@@ -562,6 +562,15 @@ impl NetSession {
         self.transport.take_notices()
     }
 
+    /// The lobby code players join with, **as the transport believes it right
+    /// now** rather than as it was at startup.
+    ///
+    /// `None` on every transport but a relay host, and `None` on one whose
+    /// relay is unreachable — see [`Transport::lobby_code`].
+    pub fn lobby_code(&self) -> Option<String> {
+        self.transport.lobby_code()
+    }
+
     pub fn server(transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
         let mut s = Self::new(NetRole::Server, transport);
         s.input_map_hash = input_map_hash;

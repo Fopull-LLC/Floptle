@@ -181,6 +181,11 @@ pub struct NetState {
     /// Client: how the join attempt is going — `"connecting"`, `"joined"`, or
     /// `"refused"`, with `join_error` carrying the relay's own words.
     ///
+    /// A relay HOST uses it too, for the one state it can be in that is not
+    /// simply "hosting": `"reconnecting"` while its relay is unreachable, so a
+    /// lobby screen can say the code is not usable rather than showing one that
+    /// refuses everybody (`floptle/0210`).
+    ///
     /// Needed because joining does not block: `role` reads `Client` from the
     /// frame `net.join` was called, whether or not that lobby exists.
     pub join_state: &'static str,
@@ -729,7 +734,8 @@ pub(crate) fn install_net_api(
             lua.create_function(move |_, ()| Ok(n.state.borrow().dedicated))?,
         )?;
     }
-    // net.joinState() — "offline" | "connecting" | "joined" | "refused".
+    // net.joinState() — "offline" | "connecting" | "joined" | "refused" |
+    // "reconnecting".
     // A lobby screen should wait on THIS rather than on net.role(): joining
     // does not block, so role says "client" from the frame you called join,
     // whether or not the code was real. Second return is the reason on
