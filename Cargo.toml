@@ -35,6 +35,7 @@ members = [
     "crates/floptle-package",  # packages: package.ron manifests, install/link/remove, the registry index
     "crates/floptle-account",  # Foverse account: device-flow sign-in + Floptle Cloud client
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
+    "crates/floptle-relay-bench", # load-generator for the relay: Mbps per CCU, where drops start (bin)
     "crates/floptle-fleet",    # fleet agent: desired deployments -> running dedicated servers (bin)
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
     "crates/floptle-services", # platform capability boundary: Platform trait + NullPlatform (steam plan, Phase 0)
@@ -50,7 +51,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.87.0"
+version = "0.88.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — ADR-0009
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]

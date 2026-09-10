@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.88.0 — "Hold The Line".** Two players fought over a relay for ten minutes,
+and three times the host's connection blipped for a few seconds — each time the
+lobby was destroyed and the other player was quietly cut off, watching everything
+vanish except the sky and the HUD. A lobby now outlives its host's connection by
+twenty seconds, the players stay in it, and a host that comes back lands straight
+back in the match with the same people. A lobby code can survive a restart too:
+`floptle serve --lobby-code` reclaims the six characters your players already
+wrote down instead of taking new ones. Joining a server that is still starting up
+now waits and tells the player how long, rather than failing. And `net.traffic()`
+shows where your bandwidth actually goes, broken down by message kind — worth a
+look on any fast multiplayer game, because a `Snapshot` row in a rollback match
+means full state is going out where a few bytes of input would do.
+
 **v0.87.0 — "Wide Awake".** A player joining a server that is still starting up
 can now be told so, instead of being told the game does not exist.
 `net.joinState()` has a new answer, `"starting"`, with words you can put on
