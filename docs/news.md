@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.86.3** — **the fix before it, finished.** A dedicated server learned to
+report where it is actually reachable in 0.86.2, because one hosted through a
+relay listens on no port at all while the address published for it claimed
+otherwise. The agent that runs your server on a region read that and dropped it,
+so the correction reached an operator at the machine and never reached your
+game's page. It carries it now, which is the difference between a published
+address that means something and one that was guessed.
+
 **v0.86.2** — **five fixes, four of them from running a real game on a real
 server for a week.** The biggest is one nobody could have reported: the player
 who *joined* a rollback match was quietly getting a worse game than the host,
