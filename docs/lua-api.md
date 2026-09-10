@@ -2132,7 +2132,7 @@ net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code
 
 ### `net.joinState`
 
-net.joinState() -> state, reason — how a join is going: "offline" | "connecting" | "joined" | "refused", plus "reconnecting" on a RELAY HOST whose relay is unreachable — during which net.lobbyCode() is nil, because the code the relay gave you does not exist while the relay does not have it. On "refused" and "reconnecting" the second return says why, in the relay's own words ("no lobby QK7RM") — print it. WAIT ON THIS, not on net.role(): joining does not block, so role reads "client" from the frame you called net.join, whether or not that code matched any lobby.
+net.joinState() -> state, reason — how a join is going: "offline" | "connecting" | "joined" | "refused" | "starting", plus "reconnecting" on a RELAY HOST whose relay is unreachable — during which net.lobbyCode() is nil, because the code the relay gave you does not exist while the relay does not have it. "starting" means the lobby is REAL and its dedicated server is waking up — it is not "refused", which means the attempt will never succeed, and it can take tens of seconds where "connecting" is one relay round trip. On "refused", "reconnecting" and "starting" the second return says why or how long, in the relay's own words ("no lobby QK7RM", "about 20 seconds") — print it. WAIT ON THIS, not on net.role(): joining does not block, so role reads "client" from the frame you called net.join, whether or not that code matched any lobby.
 
 ### `net.kick`
 

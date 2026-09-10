@@ -48,6 +48,12 @@ pub struct Deployment {
     #[serde(default = "default_project")]
     pub project: String,
     pub port: u16,
+    /// The lobby code this deployment should present, when the control plane
+    /// allocates one. ⚠ **Absent on every deployment today** — the relay mints
+    /// codes, not the control plane (`floptle/0216`). Read here so the agent
+    /// can carry one the day that inverts, and ignored until then.
+    #[serde(default)]
+    pub lobby_code: Option<String>,
     #[serde(default)]
     pub args: DeployArgs,
     #[serde(default)]
@@ -173,12 +179,29 @@ impl Report {
     }
 }
 
+/// What this machine says about itself, alongside what its deployments are doing.
+///
+/// ⚠ **Every measurement is optional, and an unmeasurable one is OMITTED rather
+/// than sent as zero** (`floptle/0213`). The control plane reads `mem_free_mb`
+/// now, and treats a box that reports little free memory as full regardless of
+/// how many slots its declaration still shows — so a `/proc/meminfo` this agent
+/// could not read, sent as `0`, is a healthy box declaring itself out of memory.
+/// That does not merely stop a placement: a region whose only box looks full is
+/// a region the control plane prices a NEW MACHINE for. "Did not measure" and
+/// "measured none left" are opposite facts and only one of them should cost
+/// money.
+///
+/// `host` is the exception and is always sent: it is the field `/desired` selects
+/// on, and a box that does not name itself is served its region's whole list.
 #[derive(Debug, Default, Serialize)]
 pub struct BoxStats {
     pub host: String,
-    pub load1: f32,
-    pub mem_free_mb: u64,
-    pub disk_free_mb: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load1: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_free_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_free_mb: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,6 +213,33 @@ pub struct DeploymentStatus {
     pub restarts: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_p95_ms: Option<f32>,
+    /// **What this deployment actually costs in memory**, from systemd's own
+    /// cgroup accounting (`floptle/0214`).
+    ///
+    /// `servers_per_box` is arithmetic on DECLARED quotas — six Studio slots at
+    /// 1536 MB inside 11.9 GB — and had never been checked against a running
+    /// server. A measured idle one is ~21 MB. Whether a loaded one is 200 MB or
+    /// 1500 MB is the difference between a box holding roughly 40 and holding
+    /// 6, and nobody could answer it because nothing measured it.
+    ///
+    /// Cgroup rather than the main process's RSS on purpose: it counts anything
+    /// the server forks, and it is the same number the `MemoryMax` cap is
+    /// enforced against, so a deployment nearing its limit reads as nearing its
+    /// limit rather than as merely large.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_mb: Option<u64>,
+    /// The **high-water mark since this unit started**, from systemd's
+    /// `MemoryPeak`.
+    ///
+    /// This is the number that sizes a slot: an average tells you what a server
+    /// idles at, and a box is sized by what its servers PEAK at. Peak "since
+    /// the last report" would have been identical to `mem_mb` — the agent
+    /// reports every cycle — so the useful window is the unit's whole life,
+    /// which systemd already keeps at no cost.
+    ///
+    /// Absent on systemd older than v253, which does not expose the property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_peak_mb: Option<u64>,
     /// The most recent 200 journal lines, oldest first.
     pub last_lines: Vec<String>,
     /// The six-character code players join with, once the server has one.
@@ -336,9 +386,9 @@ mod tests {
         let r = Report {
             box_: BoxStats {
                 host: "us-east-1".into(),
-                load1: 0.4,
-                mem_free_mb: 9000,
-                disk_free_mb: 40000,
+                load1: Some(0.4),
+                mem_free_mb: Some(9000),
+                disk_free_mb: Some(40000),
             },
             deployments: vec![DeploymentStatus {
                 deployment_id: "d_1".into(),
@@ -347,6 +397,8 @@ mod tests {
                 uptime_s: 8812,
                 restarts: 0,
                 tick_p95_ms: Some(4.1),
+                mem_mb: Some(203),
+                mem_peak_mb: Some(311),
                 last_lines: vec!["listening on 30017".into()],
                 lobby_code: Some("UQK7RM".into()),
                 port: None,
@@ -359,5 +411,60 @@ mod tests {
         assert_eq!(v["deployments"][0]["peers"], 3);
         assert_eq!(v["deployments"][0]["lobby_code"], "UQK7RM");
         assert_eq!(v["deployments"][0]["relay"], "us-east.relay.fopull.com:7788");
+        // The numbers a slot is about to be priced from (`floptle/0214`).
+        assert_eq!(v["deployments"][0]["mem_mb"], 203);
+        assert_eq!(v["deployments"][0]["mem_peak_mb"], 311);
+    }
+
+    /// ⚠ **A measurement that failed is ABSENT, never `0`** (`floptle/0213`).
+    ///
+    /// The control plane reads `mem_free_mb` now and treats a box with little
+    /// free memory as full — so a healthy machine whose `/proc/meminfo` this
+    /// agent could not read, sending `0`, declares itself out of memory. The
+    /// region then looks saturated, and a saturated region is one the control
+    /// plane prices a new machine for. This asserts the keys are gone rather
+    /// than zero, because a `0` here spends money.
+    #[test]
+    fn a_measurement_the_box_could_not_take_is_omitted_rather_than_zero() {
+        let r = Report {
+            box_: BoxStats { host: "us-east-1".into(), ..Default::default() },
+            deployments: vec![],
+        };
+        let v = r.to_json();
+        assert_eq!(v["box"]["host"], "us-east-1", "the box still names itself");
+        let b = v["box"].as_object().expect("an object");
+        for f in ["load1", "mem_free_mb", "disk_free_mb"] {
+            assert!(!b.contains_key(f), "{f} was sent as zero rather than omitted: {v}");
+        }
+    }
+
+    /// The same rule for a deployment nobody can measure.
+    ///
+    /// A stopped unit has no cgroup to ask. Reporting that as `0 MB` would say
+    /// the server is free, which is the one answer that would make the fleet
+    /// look cheaper than it is.
+    #[test]
+    fn an_unmeasurable_deployment_reports_no_memory_rather_than_no_memory_used() {
+        let r = Report {
+            box_: BoxStats::default(),
+            deployments: vec![DeploymentStatus {
+                deployment_id: "d_1".into(),
+                state: State::Stopped.as_str(),
+                peers: 0,
+                uptime_s: 0,
+                restarts: 0,
+                tick_p95_ms: None,
+                mem_mb: None,
+                mem_peak_mb: None,
+                last_lines: vec![],
+                lobby_code: None,
+                port: None,
+                relay: None,
+            }],
+        };
+        let v = r.to_json();
+        let d = v["deployments"][0].as_object().expect("an object");
+        assert!(!d.contains_key("mem_mb"), "0 MB would read as a free server: {v}");
+        assert!(!d.contains_key("mem_peak_mb"), "{v}");
     }
 }

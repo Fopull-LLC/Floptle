@@ -99,6 +99,17 @@ pub trait Transport: Send {
         Vec::new()
     }
 
+    /// **A join that has not landed yet, and what the relay says about it.**
+    ///
+    /// `None` for every transport but a relay client, and `None` there too
+    /// unless the relay has said something. Separate from [`Incoming`] on
+    /// purpose: every variant of that enum means something happened to the
+    /// connection, and this means the opposite — the link is fine, the lobby is
+    /// real, keep waiting. A refusal ends a join attempt; this one continues it.
+    fn take_join_progress(&mut self) -> Option<String> {
+        None
+    }
+
     /// The lobby code players join with, for a transport that has one.
     ///
     /// `None` for every transport but a relay host — and **`None` for a relay
@@ -121,6 +132,9 @@ impl Transport for Box<dyn Transport> {
     }
     fn take_notices(&mut self) -> Vec<String> {
         (**self).take_notices()
+    }
+    fn take_join_progress(&mut self) -> Option<String> {
+        (**self).take_join_progress()
     }
     fn lobby_code(&self) -> Option<String> {
         (**self).lobby_code()

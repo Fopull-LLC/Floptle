@@ -990,7 +990,26 @@ pub(crate) const VERBS: &[Verb] = &[
                 name: "--budget",
                 value: Value::Text,
                 required: false,
-                help: "cap on entities replicated per tick",
+                help: "replication bandwidth ceiling, in BYTES PER SECOND. Only meaningful \
+                       alongside --interest",
+            },
+            Arg {
+                name: "--max-players",
+                value: Value::Text,
+                required: false,
+                help: "refuse joins past this many players. Unset means the scene's own limit \
+                       applies",
+            },
+            Arg {
+                name: "--status-file",
+                value: Value::Path,
+                required: false,
+                help: "write live status as JSON to this path, rewritten on a timer: peers, \
+                       uptime, tick_p95_ms, the lobby code, and the port or relay the server \
+                       is actually reachable on. Written temp-file-and-rename, so a reader \
+                       never sees a torn one. This is how a supervisor learns the lobby code \
+                       — the server is told it by the relay at registration and has no other \
+                       way to report it",
             },
         ],
         needs_gpu: false,

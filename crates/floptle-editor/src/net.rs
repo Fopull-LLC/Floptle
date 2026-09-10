@@ -2627,6 +2627,9 @@ impl Editor {
             Some(floptle_net::JoinState::Joined) => ("joined", None),
             Some(floptle_net::JoinState::Refused(why)) => ("refused", Some(why.clone())),
             Some(floptle_net::JoinState::Connecting) => ("connecting", None),
+            // The lobby is real and its box is waking. The detail is the
+            // relay's words and a game can render it directly.
+            Some(floptle_net::JoinState::Starting(d)) => ("starting", Some(d.clone())),
             None => ("offline", None),
         };
         self.script_host.set_net_state(NetState {

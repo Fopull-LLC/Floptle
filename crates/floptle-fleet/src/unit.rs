@@ -118,6 +118,26 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     if let Some(k) = &d.game_key {
         s.push_str(&format!("Environment=FLOPTLE_GAME_KEY={}\n", systemd_escape(k)));
     }
+    // **Which deployment this process is.** The server has never been told its
+    // own id: it knows a port, a project and a key, and every one of those can
+    // be shared or reused. An operator reading a journal, or a crash report
+    // arriving at the portal, could not say which row on the page it came from
+    // without working backwards through the unit name.
+    s.push_str(&format!(
+        "Environment=FLOPTLE_DEPLOYMENT_ID={}\n",
+        systemd_escape(&d.deployment_id)
+    ));
+    // ⚠ **The lobby code, when the control plane has one to give — and today it
+    // never does.** The relay mints codes (`floptle/0216`), so this is empty on
+    // every deployment now and the variable is simply not written. It is here
+    // because the agent is the only thing positioned to carry a code from
+    // `/desired` to the process, and wiring that after the fact would mean
+    // touching the unit renderer during whatever release lands scale-to-zero.
+    // **Nothing sets it and nothing reads it yet**; it is a socket, not a
+    // feature.
+    if let Some(code) = &d.lobby_code {
+        s.push_str(&format!("Environment=FLOPTLE_LOBBY_CODE={}\n", systemd_escape(code)));
+    }
     // stdout is the log, and the journal is where it goes — `floptle/0197`
     // asks for no file logging on the box.
     s.push_str("StandardOutput=journal\nStandardError=journal\n");
@@ -221,6 +241,7 @@ mod tests {
             engine_version: "0.85.0-rc6".into(),
             project: "assets".into(),
             port: 30017,
+            lobby_code: None,
             args: DeployArgs {
                 scene: Some("scenes/lobby.ron".into()),
                 tick: Some(60.0),
@@ -314,6 +335,34 @@ mod tests {
             "the key is in the command line, where `ps` and the journal both read it: {exec}"
         );
         assert!(u.contains("Environment=FLOPTLE_GAME_KEY=fk_live_secret"), "{u}");
+    }
+
+    /// **A server is told which deployment it is, and its lobby code when there
+    /// is one to tell it.**
+    ///
+    /// The id is unconditional: a process that knows only a port, a project and
+    /// a key knows three things that can each be shared or reused, so nothing
+    /// in its journal could be traced back to a row on the portal.
+    ///
+    /// ⚠ The code is written **only when `/desired` carried one**, and today it
+    /// never does — the relay mints codes, not the control plane
+    /// (`floptle/0216`). An empty `Environment=FLOPTLE_LOBBY_CODE=` would be
+    /// worse than the variable being absent: a server reading it would find a
+    /// set-but-empty code rather than no code, which is the same
+    /// zero-versus-unmeasured confusion that bit the box stats.
+    #[test]
+    fn a_unit_names_its_deployment_and_omits_a_code_it_was_not_given() {
+        let d = dep();
+        let u = render(&plan_for(&d));
+        assert!(u.contains("Environment=FLOPTLE_DEPLOYMENT_ID=d_1"), "{u}");
+        assert!(
+            !u.contains("FLOPTLE_LOBBY_CODE"),
+            "an unset code was written as an empty variable: {u}"
+        );
+
+        let with_code = Deployment { lobby_code: Some("U5FEFJ".into()), ..dep() };
+        let u = render(&plan_for(&with_code));
+        assert!(u.contains("Environment=FLOPTLE_LOBBY_CODE=U5FEFJ"), "{u}");
     }
 
     /// The unit says what to run, where, and on which port — and the scene and

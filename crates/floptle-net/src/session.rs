@@ -39,6 +39,16 @@ pub enum JoinState {
     Connecting,
     /// In. The session is real.
     Joined,
+    /// **The lobby is real and its server is waking up.** Carries words for a
+    /// human, not a status noun.
+    ///
+    /// A dedicated server that was slept to free its machine is "not yet", and
+    /// [`JoinState::Refused`] means "never" by definition — so a cold start
+    /// gets its own state rather than borrowing one that would tell a player
+    /// holding a good code that the game does not exist. Distinct from
+    /// `Connecting` by *timing*: that one resolves in a relay round trip, and a
+    /// lobby screen written against it treats thirty seconds as a hang.
+    Starting(String),
     /// It will never succeed, and this is why — usually a code that matches
     /// no lobby.
     ///
@@ -2747,6 +2757,15 @@ impl NetSession {
     /// Client, once per gameplay tick: poll, buffer snapshots, apply the
     /// interpolated state a fixed delay behind the server.
     pub fn tick_client(&mut self, world: &mut World) {
+        // **A waking server, before the traffic.** Only while the join is still
+        // outstanding: once `Joined` or `Refused` has been decided, a late
+        // `Starting` from a relay must not drag the session backwards into a
+        // waiting state it has already left.
+        if let Some(detail) = self.transport.take_join_progress()
+            && matches!(self.join_state, JoinState::Connecting | JoinState::Starting(_))
+        {
+            self.join_state = JoinState::Starting(detail);
+        }
         for inc in self.transport.poll() {
             match inc {
                 Incoming::Message(_, _, bytes) => {
@@ -3230,6 +3249,77 @@ mod tests {
 
     /// A client session with one rollback node mapped and one snapshot sample
     /// already buffered for it.
+    /// A transport that says a server is waking, on demand.
+    struct WakingRelay {
+        progress: Option<String>,
+    }
+    impl Transport for WakingRelay {
+        fn send(&mut self, _p: PeerId, _c: Channel, _b: &[u8]) {}
+        fn poll(&mut self) -> Vec<Incoming> {
+            Vec::new()
+        }
+        fn stats(&self, _p: PeerId) -> LinkStats {
+            LinkStats::default()
+        }
+        fn take_join_progress(&mut self) -> Option<String> {
+            self.progress.take()
+        }
+    }
+
+    /// ⚠ **A waking server reads as `Starting`, not as `Refused`.**
+    ///
+    /// `Refused` means *this will never succeed* — that is the entire reason
+    /// the state exists. A dedicated server slept to free its machine is "not
+    /// yet", and answering a join to one with a refusal tells a player holding
+    /// a perfectly good lobby code that their friend's game does not exist.
+    #[test]
+    fn a_waking_server_is_not_a_refusal() {
+        let mut s = NetSession::client(
+            Box::new(WakingRelay { progress: Some("about 20 seconds".into()) }),
+            0,
+        );
+        let mut w = World::default();
+        assert_eq!(*s.join_state(), JoinState::Connecting, "a fresh join is connecting");
+        s.tick_client(&mut w);
+        assert_eq!(
+            *s.join_state(),
+            JoinState::Starting("about 20 seconds".into()),
+            "a waking server must not land in Connecting or Refused"
+        );
+    }
+
+    /// ⚠ **A late `Starting` must not drag a settled join backwards.**
+    ///
+    /// The relay is a network away, so a wake notice can arrive after the
+    /// server finished waking and the client already got in. A session that
+    /// applied it unconditionally would put a player who is *in the game* back
+    /// onto the loading screen — and the lobby screen is driven by exactly this
+    /// value, so they would watch their own session disappear.
+    #[test]
+    fn a_late_wake_notice_does_not_unjoin_a_joined_client() {
+        let mut s = NetSession::client(
+            Box::new(WakingRelay { progress: Some("about 20 seconds".into()) }),
+            0,
+        );
+        let mut w = World::default();
+        s.join_state = JoinState::Joined;
+        s.tick_client(&mut w);
+        assert_eq!(*s.join_state(), JoinState::Joined, "a joined client was un-joined");
+
+        // And the same for a decision that has already gone the other way: a
+        // refusal is final, and a stray notice must not reopen it.
+        let mut s = NetSession::client(
+            Box::new(WakingRelay { progress: Some("about 20 seconds".into()) }),
+            0,
+        );
+        s.join_state = JoinState::Refused("no lobby QK7RM".into());
+        s.tick_client(&mut w);
+        assert!(
+            matches!(s.join_state(), JoinState::Refused(_)),
+            "a refusal was reopened by a stray wake notice"
+        );
+    }
+
     fn client_with_fighter() -> (NetSession, World, floptle_core::Entity) {
         let hub = crate::MemoryHub::new();
         let mut s = NetSession::client(Box::new(hub.connect()), 0);

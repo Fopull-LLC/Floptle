@@ -120,6 +120,28 @@ enum RelayMsg {
     /// variant, because a dedicated server may host keyless on a self-hosted
     /// relay too. Appended last, for the reason every variant above it says.
     HostIsDedicated,
+    /// Relay → client: **the lobby exists, and its server is waking up.**
+    ///
+    /// ⚠ **Not a refusal, and the distinction is the whole point.**
+    /// [`RelayMsg::Refused`] means *this will never succeed* — that is what the
+    /// state is for, separating "not yet" from "never" in a way elapsed time
+    /// cannot. A dedicated server that has been slept to free its machine is
+    /// emphatically "not yet", and answering a join to one with `Refused` tells
+    /// a player holding a perfectly good code that their friend's game does not
+    /// exist.
+    ///
+    /// `detail` is words for a human, not a status noun — "about 20 seconds"
+    /// renders as a sentence, where "starting" makes every developer invent one
+    /// and most will not.
+    ///
+    /// **Appended last, and here that placement is the entire compatibility
+    /// story rather than merely a rule followed.** A build already in players'
+    /// hands has never heard of this variant, so it decodes to nothing and the
+    /// client stays in `connecting` — showing the spinner it already draws,
+    /// which is the correct thing for it to draw. A new build reads the state
+    /// and can say something better. No version negotiation, no flag: old games
+    /// degrade to "slow" instead of to a black screen, for free.
+    Starting { detail: String },
 }
 
 impl RelayMsg {
@@ -947,6 +969,9 @@ pub struct RelayClient {
     inner: QuicClient,
     seq: u64,
     dedup: SeqState,
+    /// The relay's last word on a join that has not landed yet — see
+    /// [`RelayMsg::Starting`]. Drained by [`Transport::take_join_progress`].
+    starting: Option<String>,
 }
 
 impl RelayClient {
@@ -957,11 +982,15 @@ impl RelayClient {
     pub fn join(relay_addr: &str, code: &str) -> Result<Self, String> {
         let mut inner = QuicClient::connect(relay_addr)?;
         inner.send(SERVER, Channel::Reliable, &RelayMsg::Join { code: code.to_uppercase() }.encode());
-        Ok(Self { inner, seq: 0, dedup: SeqState::default() })
+        Ok(Self { inner, seq: 0, dedup: SeqState::default(), starting: None })
     }
 }
 
 impl Transport for RelayClient {
+    fn take_join_progress(&mut self) -> Option<String> {
+        self.starting.take()
+    }
+
     fn send(&mut self, _peer: PeerId, channel: Channel, bytes: &[u8]) {
         let seq = if channel == Channel::UnreliableSequenced {
             self.seq += 1;
@@ -987,6 +1016,14 @@ impl Transport for RelayClient {
                     // indistinguishable from the host closing their laptop.
                     Some(RelayMsg::Refused { reason }) => {
                         out.push(Incoming::refused(SERVER, reason));
+                    }
+                    // ⚠ Deliberately NOT an `Incoming` — the link is fine and
+                    // nobody is disconnected. A refusal ends the attempt; this
+                    // says to keep waiting, so it rides the same side channel
+                    // `Notice` uses rather than widening a transport enum whose
+                    // every variant means something happened to the connection.
+                    Some(RelayMsg::Starting { detail }) => {
+                        self.starting = Some(detail);
                     }
                     Some(RelayMsg::FromHost { channel, seq, bytes })
                         if !self.dedup.stale(SERVER, channel, seq) =>
@@ -1044,6 +1081,7 @@ mod tests {
         // Anything added from here on takes the next number and never a used one.
         assert_eq!(index(&RelayMsg::Notice { text: String::new() }), 12);
         assert_eq!(index(&RelayMsg::HostIsDedicated), 13);
+        assert_eq!(index(&RelayMsg::Starting { detail: String::new() }), 14);
     }
 
     /// A relay that has never heard of a message skips it rather than dying,

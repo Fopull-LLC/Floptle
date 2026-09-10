@@ -735,7 +735,12 @@ pub(crate) fn install_net_api(
         )?;
     }
     // net.joinState() — "offline" | "connecting" | "joined" | "refused" |
-    // "reconnecting".
+    // "reconnecting" | "starting".
+    // "starting" means the lobby is real and its dedicated server is waking
+    // up; the second return carries words to show. It is NOT "refused", which
+    // means the attempt will never succeed, and it is kept apart from
+    // "connecting" because that one resolves in a relay round trip while a cold
+    // start can take tens of seconds.
     // A lobby screen should wait on THIS rather than on net.role(): joining
     // does not block, so role says "client" from the frame you called join,
     // whether or not the code was real. Second return is the reason on
