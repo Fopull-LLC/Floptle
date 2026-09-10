@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
-- [networking — net.*, synced](#networking--net-synced) — 37
+- [networking — net.*, synced](#networking--net-synced) — 38
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
 - [pathfinding — nav.*](#pathfinding--nav) — 26
@@ -2128,11 +2128,11 @@ net.isServer() — true on the authoritative host.
 
 ### `net.join`
 
-net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code (six characters; the first names the region, so it resolves with no call to fopull.com and works during an outage), "relay://relayaddr/CODE" = a lobby code through any relay (no port-forwarding), "quic://host:port" = a server directly, "local://" = the in-editor test harness.
+net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code (six characters; the first names the region, so it resolves with no call to fopull.com and works during an outage), "relay://relayaddr/CODE" = a lobby code through any relay (no port-forwarding), "quic://host:port" = a server directly, "local://" = the in-editor test harness. Optional second argument is an options table: net.join(addr, {timeout = 30}) sets how long to wait on a server that is WAKING UP (default 90 s) before giving up with "refused". It bounds only a wake — an ordinary join is answered in one relay round trip.
 
 ### `net.joinState`
 
-net.joinState() -> state, reason — how a join is going: "offline" | "connecting" | "joined" | "refused" | "starting", plus "reconnecting" on a RELAY HOST whose relay is unreachable — during which net.lobbyCode() is nil, because the code the relay gave you does not exist while the relay does not have it. "starting" means the lobby is REAL and its dedicated server is waking up — it is not "refused", which means the attempt will never succeed, and it can take tens of seconds where "connecting" is one relay round trip. On "refused", "reconnecting" and "starting" the second return says why or how long, in the relay's own words ("no lobby QK7RM", "about 20 seconds") — print it. WAIT ON THIS, not on net.role(): joining does not block, so role reads "client" from the frame you called net.join, whether or not that code matched any lobby.
+net.joinState() -> state, reason — how a join is going: "offline" | "connecting" | "joined" | "refused" | "starting", plus "reconnecting" on a RELAY HOST whose relay is unreachable — during which net.lobbyCode() is nil, because the code the relay gave you does not exist while the relay does not have it. "starting" means the lobby is REAL and its dedicated server is waking up — the engine keeps retrying by itself and gives up after net.join's timeout option (default 90 s), then reports "refused" with "took too long to start" — it is not "refused", which means the attempt will never succeed, and it can take tens of seconds where "connecting" is one relay round trip. On "refused", "reconnecting" and "starting" the second return says why or how long, in the relay's own words ("no lobby QK7RM", "about 20 seconds") — print it. WAIT ON THIS, not on net.role(): joining does not block, so role reads "client" from the frame you called net.join, whether or not that code matched any lobby.
 
 ### `net.kick`
 
@@ -2219,6 +2219,10 @@ SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a 
 ### `net.stalled`
 
 net.stalled() — true while the sim is waiting for a peer's input rather than guessing past the depth cap. The game runs slightly slow instead of teleporting the opponent. Drive your own "connection trouble" banner off this — a stall is otherwise indistinguishable from a bad frame rate.
+
+### `net.traffic`
+
+net.traffic() -> {{kind=, count=, bytes=}, ...} — what this peer has SENT since the last call, broken down by message kind, biggest first. RESETS on read, so successive calls measure the interval between them. Use it to find out where your bandwidth goes: a rollback game should be almost entirely "Input"/"Inputs" and a few hundred bytes a second — a large "Snapshot" row in a rollback match means state is going out where inputs should.
 
 ### `onRpc`
 

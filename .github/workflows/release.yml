@@ -89,6 +89,14 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: cargo build --release -p floptle-relay --target ${{ matrix.rust }}
 
+      # The load-generator that sizes the relay (`floptle/0218`). Published for
+      # BOTH Linux architectures: the relay is x86_64 today and may move to an
+      # A1, and the box it is DRIVEN FROM is aarch64 — a bench run from a laptop
+      # measures a home upstream rather than a region link.
+      - name: Build the relay bench (linux-x86_64)
+        if: matrix.target == 'linux-x86_64'
+        run: cargo build --release -p floptle-relay-bench --target ${{ matrix.rust }}
+
       # The verb table, as a release artifact (`floptle/0201`). `cli.rs` is the
       # one source of truth for the command line — the parser, `--help` and
       # `help --json` are all generated from it — and fopull.com/floptle/cli
@@ -129,6 +137,15 @@ jobs:
           # failing for a reason that has nothing to do with the build.
           ./"$R" --help > relay-help.txt
           head -3 relay-help.txt
+
+          B="floptle-relay-bench-$VER-linux-x86_64"
+          cp "target/${{ matrix.rust }}/release/floptle-relay-bench" "$B"
+          chmod +x "$B"
+          sha256sum "$B" > "$B.sha256"
+          # Same reason as above: to a FILE, never through `head` under
+          # `pipefail`.
+          ./"$B" --help > bench-help.txt
+          head -3 bench-help.txt
 
       # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
       # archive root, matching floptle_hub::install::unpack. The HUB ships as its own
@@ -246,14 +263,14 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: cargo build --release -p floptle-server -p floptle-fleet
+        run: cargo build --release -p floptle-server -p floptle-fleet -p floptle-relay-bench
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
           VER="${{ steps.ver.outputs.version }}"
-          for BIN in floptle-server floptle-fleet; do
+          for BIN in floptle-server floptle-fleet floptle-relay-bench; do
             OUT="$BIN-$VER-linux-aarch64"
             cp "target/release/$BIN" "$OUT"
             chmod +x "$OUT"
@@ -272,6 +289,10 @@ jobs:
           # writer fail for a reason that has nothing to do with the build.
           ./"floptle-fleet-$VER-linux-aarch64" --help > fleet-help.txt
           head -3 fleet-help.txt
+          # ⚠ The bench is RUN FROM this box (`floptle/0218`): driving a region
+          # relay from a laptop measures a home upstream, not a region link.
+          ./"floptle-relay-bench-$VER-linux-aarch64" --help > bench-help.txt
+          head -3 bench-help.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -281,6 +302,8 @@ jobs:
             floptle-server-*-linux-aarch64.sha256
             floptle-fleet-*-linux-aarch64
             floptle-fleet-*-linux-aarch64.sha256
+            floptle-relay-bench-*-linux-aarch64
+            floptle-relay-bench-*-linux-aarch64.sha256
           if-no-files-found: error
 
   # The browser template: the wasm module, its JS glue and the player page —
@@ -466,7 +489,9 @@ jobs:
                    artifacts/*/floptle-server-*-linux-aarch64 \
                    artifacts/*/floptle-server-*-linux-aarch64.sha256 \
                    artifacts/*/floptle-fleet-*-linux-aarch64 \
-                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
+                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256 \
+                   artifacts/*/floptle-relay-bench-*-linux-aarch64 \
+                   artifacts/*/floptle-relay-bench-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$REPO"
 
@@ -491,7 +516,9 @@ jobs:
                    artifacts/*/floptle-server-*-linux-aarch64 \
                    artifacts/*/floptle-server-*-linux-aarch64.sha256 \
                    artifacts/*/floptle-fleet-*-linux-aarch64 \
-                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256)
+                   artifacts/*/floptle-fleet-*-linux-aarch64.sha256 \
+                   artifacts/*/floptle-relay-bench-*-linux-aarch64 \
+                   artifacts/*/floptle-relay-bench-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to

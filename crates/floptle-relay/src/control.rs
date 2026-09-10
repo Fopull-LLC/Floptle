@@ -132,6 +132,118 @@ pub struct KeySnapshot {
     /// page.
     #[serde(default)]
     pub removed: Vec<String>,
+    /// **Lobby codes the control plane has promised to somebody**
+    /// (`floptle/0217`).
+    ///
+    /// ⚠ **Always complete, never a delta** — the same rule as
+    /// `over_limit_accounts` and for a sharper reason: a relay that came back
+    /// empty and merged would not know which codes are spoken for, and would
+    /// hand a memorised one to a stranger. W sends only reservations it can
+    /// attribute to a key; one it cannot is a string this relay could do
+    /// nothing with anyway.
+    #[serde(default)]
+    pub reserved: Vec<Reservation>,
+}
+
+/// One lobby code the control plane owns, and what its deployment is doing.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Reservation {
+    pub code: String,
+    /// The game key entitled to reclaim it. The relay already validates this at
+    /// registration, so a reservation introduces no new secret.
+    pub key: String,
+    #[serde(default)]
+    pub state: ReservedState,
+}
+
+/// What the deployment behind a reserved code is doing.
+///
+/// ⚠ **`Sleeping` and `Stopped` are opposite facts and the relay must act on
+/// the difference.** Sleeping is the platform saving money on a server the
+/// developer still expects to work, so a join wakes it. Stopped is a decision
+/// somebody made, and a stranger's join must never restart a server its owner
+/// turned off — that is the one case where "no lobby" is the honest answer.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReservedState {
+    /// Up, or on its way up. Nothing to do but let the code be reclaimed.
+    #[default]
+    Live,
+    /// Idle and shut down to free its box. A join wakes it.
+    Sleeping,
+    /// The developer stopped it. A join is refused as it always was.
+    Stopped,
+    /// ⚠ **A state this relay has never heard of.** Treated as `Live`: the code
+    /// stays reserved so nobody else is given it, and a join is neither woken
+    /// nor specially refused. A control plane that adds a state must not be
+    /// able to make an older relay hand out somebody's code.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What `POST /cloud/relay/wake` said.
+///
+/// ⚠ **Every case is a 200 with a body, not a 4xx**, which is W's design and
+/// the right one: the relay retries, and there is nothing it could usefully do
+/// differently on a status code. The distinction it *does* act on lives in the
+/// body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakeOutcome {
+    /// It was asleep and is now coming up.
+    Woken,
+    /// Running, starting, or already on its way. Wait, do not refuse.
+    AlreadyAwake,
+    /// ⚠ **The developer stopped it.** Refuse the join, as before — a
+    /// stranger's join must not restart a server its owner turned off.
+    Stopped,
+    /// No such reservation, or a malformed code. Refuse.
+    UnknownCode,
+}
+
+impl WakeOutcome {
+    /// Read the body's `reason`. An unrecognised one is treated as
+    /// [`WakeOutcome::AlreadyAwake`] — hold the joiner rather than refuse,
+    /// because a control plane that learns a new reason must not turn a waking
+    /// server into a missing one on an older relay.
+    pub fn from_body(woken: bool, reason: Option<&str>) -> Self {
+        if woken {
+            return WakeOutcome::Woken;
+        }
+        match reason {
+            Some("stopped") => WakeOutcome::Stopped,
+            Some("unknown_code") => WakeOutcome::UnknownCode,
+            _ => WakeOutcome::AlreadyAwake,
+        }
+    }
+
+    /// Is this the answer that refuses the join?
+    pub fn refuses(self) -> bool {
+        matches!(self, WakeOutcome::Stopped | WakeOutcome::UnknownCode)
+    }
+}
+
+impl ReservedState {
+    /// Should a join for this code wake the deployment behind it?
+    pub fn wakes_on_join(self) -> bool {
+        matches!(self, ReservedState::Sleeping)
+    }
+
+    /// Is a join for this code refused outright, as it was before reservations?
+    ///
+    /// Kept for readers and for the guards, which assert the two halves agree;
+    /// the policy branches on [`ReservedState::wakes_on_join`] so there is
+    /// exactly one decision in the code.
+    #[cfg(test)]
+    ///
+    /// ⚠ **Every state but `Sleeping`**, which is the same set
+    /// `!wakes_on_join()` describes — kept as its own name because the reasons
+    /// differ even though the answer does not. `Stopped` is a decision somebody
+    /// made; `Live` is a server between connections; `Unknown` is a control
+    /// plane newer than this relay. The policy branches on `wakes_on_join` so
+    /// there is exactly one decision in the code.
+    pub fn refuses_join(self) -> bool {
+        !self.wakes_on_join()
+    }
 }
 /// One key's traffic and occupancy over a reporting interval.
 ///
@@ -162,6 +274,14 @@ pub struct UsageSample {
     /// none. A page that reads the two the same way tells a developer nobody
     /// was turned away when the truth is that nobody knows.
     pub refused_joins: u32,
+    /// **Payload that arrived for a lobby that did not exist** (`floptle/0222`).
+    ///
+    /// ⚠ These bytes used to be visible only as `bytes_in` exceeding
+    /// `bytes_out` — and that is literally how a host being torn down three
+    /// times inside one real match was found, by differencing two counters that
+    /// had matched to the byte in every other bucket ever recorded. Anything
+    /// above zero means somebody is sending into a lobby that is gone.
+    pub orphan_bytes: u64,
 }
 
 /// The `box` object, built by hand so the omission rule is visible in one place.
@@ -213,6 +333,25 @@ mod box_tests {
     /// 0` from a relay that is keeping up is the best news it has, while the
     /// same `0` from a relay that could not read `/proc/net/udp` is a relay
     /// losing players' packets while reporting perfect health.
+    /// ⚠ **The two halves of the state's meaning agree.**
+    ///
+    /// `refuses_join` and `wakes_on_join` describe complementary sets, and the
+    /// policy branches on only one of them. If they ever drifted apart, the
+    /// unused one would document behaviour the code does not have.
+    #[test]
+    fn only_a_sleeping_deployment_wakes_and_everything_else_refuses() {
+        use crate::control::ReservedState as S;
+        for st in [S::Live, S::Sleeping, S::Stopped, S::Unknown] {
+            assert_eq!(st.refuses_join(), !st.wakes_on_join(), "{st:?} disagrees with itself");
+        }
+        assert!(S::Sleeping.wakes_on_join(), "a sleeping server must wake on a join");
+        assert!(S::Stopped.refuses_join(), "a stopped server must not be restarted by a stranger");
+        // ⚠ A state this relay is too old to know keeps the code reserved and
+        // wakes nothing — a newer control plane must not be able to make an
+        // older relay hand somebody's code away.
+        assert!(!S::Unknown.wakes_on_join());
+    }
+
     #[test]
     fn a_relay_that_could_not_measure_omits_rather_than_reporting_zero() {
         let v = box_json(&RelayBox { host: "relay-1".into(), ..Default::default() });
@@ -283,6 +422,16 @@ pub trait ControlPlane: Send + Sync {
     fn pull_keys(&self, cursor: Option<&str>) -> Result<KeySnapshot, ControlError>;
     /// The cold path: ask about one key the snapshot has never carried.
     fn authorize(&self, key: &str) -> Result<KeyRow, ControlError>;
+    /// **Ask the control plane to wake the deployment behind `code`**
+    /// (`floptle/0217`). Idempotent and fire-and-forget.
+    ///
+    /// The answer matters even though the relay cannot act on most of it: only
+    /// `Stopped` changes what the joiner is told, and it is the one case where
+    /// refusing is honest.
+    fn wake(&self, _code: &str) -> Result<WakeOutcome, ControlError> {
+        Err(ControlError::Unavailable("this control plane cannot wake".into()))
+    }
+
     /// Report usage, and what this box looks like while carrying it.
     ///
     /// Fire and forget from the caller's point of view.
@@ -375,6 +524,23 @@ impl ControlPlane for HttpControl {
         Self::parse_authorize(&body, key)
     }
 
+    fn wake(&self, code: &str) -> Result<WakeOutcome, ControlError> {
+        let body = Self::body(
+            self.agent()
+                .post(&self.url("/cloud/relay/wake"))
+                .set("Authorization", &format!("Bearer {}", self.token))
+                .set("Accept", "application/json")
+                .send_json(ureq::json!({ "code": code })),
+        )?;
+        // A body that does not parse is not a refusal. The server answered, so
+        // the deployment is somebody's — holding the joiner is the safe read.
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        Ok(WakeOutcome::from_body(
+            v.get("woken").and_then(|w| w.as_bool()).unwrap_or(false),
+            v.get("reason").and_then(|r| r.as_str()),
+        ))
+    }
+
     fn report_usage(
         &self,
         box_: &RelayBox,
@@ -390,6 +556,7 @@ impl ControlPlane for HttpControl {
                     "bytes_in": s.bytes_in,
                     "bytes_out": s.bytes_out,
                     "refused_joins": s.refused_joins,
+                    "orphan_bytes": s.orphan_bytes,
                 })
             })
             .collect();

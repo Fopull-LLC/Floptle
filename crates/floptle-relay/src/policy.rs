@@ -105,6 +105,16 @@ pub struct CloudPolicy {
     /// idle dedicated server read as one concurrent player on its developer's
     /// page and held one of the account's ceiling for as long as it ran.
     dedicated: std::collections::HashSet<String>,
+    /// **Codes the control plane owns**, replaced whole on every full snapshot
+    /// (`floptle/0217`). Never merged — see [`crate::control::KeySnapshot`].
+    reserved: HashMap<String, crate::control::Reservation>,
+    /// Wakes already asked for, so a lobby full of friends all typing the same
+    /// code at once produces one POST rather than one each. Cleared when the
+    /// code turns up as a live lobby.
+    waking: HashSet<String>,
+    /// Payload received for a lobby that does not exist, per code, since the
+    /// last usage flush (`floptle/0222`).
+    orphaned: HashMap<String, u64>,
     last_usage: Instant,
     /// **The forwarding loop's own period, sampled every tick**
     /// (`floptle/0215`). `tick()` runs at the top of every `step()` and the
@@ -195,6 +205,9 @@ impl CloudPolicy {
             of_lobby: HashMap::new(),
             live: HashMap::new(),
             dedicated: std::collections::HashSet::new(),
+            reserved: HashMap::new(),
+            waking: HashSet::new(),
+            orphaned: HashMap::new(),
             last_usage: Instant::now(),
             last_tick: None,
             steps: Vec::new(),
@@ -223,6 +236,60 @@ impl CloudPolicy {
         if let Ok(mut s) = self.status.lock() {
             s.log.push(line);
         }
+    }
+
+    /// **A join arrived for a reserved code with no lobby behind it.**
+    ///
+    /// Three outcomes, and the difference between the first two is the product:
+    /// a sleeping server is woken and the joiner is held; a stopped one is
+    /// refused, because a stranger's join must never restart a server its owner
+    /// turned off.
+    ///
+    /// ⚠ **The wake POST is deliberately synchronous here**, unlike the usage
+    /// flush. This is a decision the joiner is waiting on — the alternative is
+    /// answering before asking, which means either refusing a server we are
+    /// about to wake or promising a wake that may be refused. It is one request
+    /// on a relay that makes at most one every thirty seconds otherwise, and it
+    /// happens once per code rather than once per joiner.
+    fn wake_for_join(&mut self, res: &crate::control::Reservation) -> JoinAdmission {
+        use crate::control::WakeOutcome;
+
+        // ⚠ **One match, because two guards here were the same guard.** An
+        // earlier version checked `refuses_join()` and then `!wakes_on_join()`,
+        // which read as two decisions and was one: disabling the first changed
+        // nothing, because the second refused `Stopped` as well. A branch that
+        // cannot be reached is worse than no branch — it claims a distinction
+        // the code does not make.
+        //
+        // The distinction between `Stopped` and `Live` is **intent, not
+        // behaviour**: both refuse, and no test can tell them apart today. What
+        // must never drift is that only `Sleeping` reaches the wake below.
+        if !res.state.wakes_on_join() {
+            return JoinAdmission::Refuse { reason: format!("no lobby {}", res.code) };
+        }
+
+        // One POST per code, however many friends type it at once.
+        if self.waking.insert(res.code.clone()) {
+            match self.control.wake(&res.code) {
+                Ok(o) if o.refuses() => {
+                    self.waking.remove(&res.code);
+                    return JoinAdmission::Refuse { reason: format!("no lobby {}", res.code) };
+                }
+                Ok(WakeOutcome::Woken) => {
+                    self.say(format!("waking the server behind {}", res.code));
+                }
+                Ok(_) => {}
+                // ⚠ **An unreachable control plane holds the joiner rather than
+                // refusing.** The same failing-open rule the rest of this file
+                // follows: an outage and a deleted game must never look the same
+                // to a player, and this one is recoverable by waiting.
+                Err(e) => {
+                    self.waking.remove(&res.code);
+                    self.say(format!("could not ask to wake {}: {e:?}", res.code));
+                }
+            }
+        }
+        JoinAdmission::Starting { detail: WAKE_ESTIMATE.into() }
     }
 
     /// **What this relay says about itself**, alongside what it carried
@@ -313,6 +380,12 @@ impl CloudPolicy {
                         self.cursor = snap.cursor.clone();
                     }
                     self.keys.apply(&snap);
+                    // ⚠ **Replaced whole, never merged.** A reservation the
+                    // control plane has released must stop being reserved here,
+                    // or the code is locked out of circulation for as long as
+                    // this process lives.
+                    self.reserved =
+                        snap.reserved.iter().map(|r| (r.code.clone(), r.clone())).collect();
                     self.last_pull_ok = Some(Instant::now());
                     // A key we had to floor is now properly known.
                     self.floored.retain(|k| self.keys.get(k).is_none());
@@ -448,7 +521,36 @@ impl RelayPolicy for CloudPolicy {
         self.verdict(key)
     }
 
+    fn claim_code(&mut self, key: Option<&str>, code: &str) -> bool {
+        // The key is the proof of ownership, and it has already been validated
+        // at registration. A host with no key never reclaims: a keyless host on
+        // a managed relay is refused outright anyway.
+        let Some(key) = key else { return false };
+        self.reserved.get(code).is_some_and(|r| r.key == key)
+    }
+
+    fn code_is_reserved(&self, code: &str) -> bool {
+        self.reserved.contains_key(code)
+    }
+
+    fn may_mint(&self) -> bool {
+        // ⚠ Not "have we ever pulled" but "do we hold a snapshot" — the same
+        // `primed` flag that decides whether this relay knows anything about
+        // keys. Before it, every code minted is one that might already be
+        // promised to a sleeping deployment.
+        self.keys.primed
+    }
+
     fn admit_join(&mut self, code: &str) -> JoinAdmission {
+        // **A code with no lobby may still be somebody's** (`floptle/0217`).
+        // This runs before the relay's own "no lobby" refusal, which is the
+        // whole point: that refusal means "never", and a sleeping server is
+        // "not yet".
+        if !self.of_lobby.contains_key(code)
+            && let Some(res) = self.reserved.get(code).cloned()
+        {
+            return self.wake_for_join(&res);
+        }
         let Some(key) = self.of_lobby.get(code).cloned() else { return JoinAdmission::Allow };
         let row = self.keys.get(&key);
         let limit = row.map(|r| r.ccu_limit).filter(|l| *l > 0).unwrap_or(FREE_TIER_CCU);
@@ -505,7 +607,33 @@ impl RelayPolicy for CloudPolicy {
         self.bytes_interval.1 = self.bytes_interval.1.saturating_add(bytes_out);
     }
 
+    fn lobby_host_lost(&mut self, code: &str) {
+        // ⚠ **Named, with the code.** The relay printed a bare lobby COUNT
+        // before this, and a count cannot say which lobby died or what killed
+        // it — which is why a host dropping three times inside one real match
+        // was found by differencing two byte counters rather than by reading
+        // the journal (`floptle/0222`).
+        self.say(format!("lobby {code}: host connection lost — holding the lobby for its return"));
+    }
+
+    fn lobby_host_returned(&mut self, code: &str) {
+        self.say(format!("lobby {code}: host is back, players kept"));
+    }
+
+    fn lobby_ended(&mut self, code: &str, why: floptle_net::LobbyEnd) {
+        self.say(format!("lobby {code} ended: {}", why.as_str()));
+    }
+
+    fn orphaned(&mut self, code: &str, bytes: u64) {
+        // Counted per interval and reported, rather than left to show up as
+        // `bytes_in` exceeding `bytes_out`.
+        *self.orphaned.entry(code.to_string()).or_insert(0) += bytes;
+    }
+
     fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
+        self.say(format!("lobby {code}: open"));
+        // It woke up. The next joiner asks the relay, not the control plane.
+        self.waking.remove(code);
         self.live.insert(code.to_string(), 0);
         if let Some(k) = key {
             self.of_lobby.insert(code.to_string(), k.to_string());
@@ -607,6 +735,7 @@ impl RelayPolicy for CloudPolicy {
                 e.1 += o;
             }
             let mut refused = std::mem::take(&mut self.refused);
+            let mut orphaned = std::mem::take(&mut self.orphaned);
             // **Posted even when it is empty** — this is the relay's heartbeat
             // as well as its meter (`floptle/0191`). A region's health is
             // derived from how long ago its box token was last seen, and a
@@ -619,7 +748,21 @@ impl RelayPolicy for CloudPolicy {
             // A key with traffic or refusals but no live lobby still gets a row
             // — a game that filled up and emptied again inside one interval is
             // exactly the game whose numbers matter most.
-            for k in bytes.keys().chain(refused.keys()) {
+            // ⚠ Orphan bytes belong to a lobby that has GONE, so `of_lobby` no
+            // longer maps it — the same reason `closed_keys` exists. Fold it
+            // there, or the one signal that says "somebody is shouting into a
+            // dead lobby" is dropped exactly when it fires.
+            let mut orphan_by_key: HashMap<String, u64> = HashMap::new();
+            for (code, n) in orphaned.drain() {
+                let key = self
+                    .of_lobby
+                    .get(&code)
+                    .cloned()
+                    .or_else(|| self.closed_keys.get(&code).cloned())
+                    .unwrap_or_default();
+                *orphan_by_key.entry(key).or_insert(0) += n;
+            }
+            for k in bytes.keys().chain(refused.keys()).chain(orphan_by_key.keys()) {
                 if !k.is_empty() {
                     by_key.entry(k.clone()).or_insert((0, 0));
                 }
@@ -629,7 +772,16 @@ impl RelayPolicy for CloudPolicy {
                 .map(|(key, (ccu, lobbies))| {
                     let (bytes_in, bytes_out) = bytes.get(&key).copied().unwrap_or((0, 0));
                     let refused_joins = refused.remove(&key).unwrap_or(0);
-                    UsageSample { key, ccu, lobbies, bytes_in, bytes_out, refused_joins }
+                    let orphan_bytes = orphan_by_key.remove(&key).unwrap_or(0);
+                    UsageSample {
+                        key,
+                        ccu,
+                        lobbies,
+                        bytes_in,
+                        bytes_out,
+                        refused_joins,
+                        orphan_bytes,
+                    }
                 })
                 .collect();
             // **The operator's own check on the number** (`floptle/0195`).
@@ -719,6 +871,14 @@ fn p95(v: &mut [f32]) -> Option<f32> {
     Some(v[i])
 }
 
+/// **What a joiner is told while a server wakes** (`floptle/0217`).
+///
+/// A sentence a game can print, not a status noun — a noun makes every
+/// developer invent the wording and most will not. W measures each deployment's
+/// real wake time and targets under thirty seconds, so this is the honest
+/// region default until a per-deployment figure travels with the reservation.
+pub const WAKE_ESTIMATE: &str = "about 30 seconds";
+
 fn human_bytes(b: u64) -> String {
     const K: u64 = 1024;
     match b {
@@ -763,6 +923,10 @@ mod tests {
         usage_posts: Mutex<Vec<Vec<UsageSample>>>,
         /// The `box` object that rode along with each usage POST.
         boxes: Mutex<Vec<RelayBox>>,
+        /// Codes the relay asked the control plane to wake.
+        wakes: Mutex<Vec<String>>,
+        /// Make `wake` answer as an unreachable control plane.
+        wake_fails: Mutex<bool>,
     }
 
     fn row(key: &str, limit: u32) -> KeyRow {
@@ -790,6 +954,7 @@ mod tests {
                     full: true,
                     keys: vec![],
                     removed: vec![],
+            reserved: vec![],
                 }),
             }
         }
@@ -803,6 +968,14 @@ mod tests {
                 }
             }
         }
+        fn wake(&self, code: &str) -> Result<crate::control::WakeOutcome, ControlError> {
+            if *self.wake_fails.lock().unwrap() {
+                return Err(ControlError::Unavailable("no route".into()));
+            }
+            self.wakes.lock().unwrap().push(code.to_string());
+            Ok(crate::control::WakeOutcome::Woken)
+        }
+
         fn report_usage(
             &self,
             box_: &RelayBox,
@@ -846,6 +1019,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, limit)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
@@ -893,6 +1067,149 @@ mod tests {
         let boxes = fake.boxes.lock().unwrap().clone();
         assert_eq!(boxes.len(), 1, "one box object per usage POST");
         boxes[0].clone()
+    }
+
+    fn reservation(code: &str, key: &str, state: &str) -> crate::control::Reservation {
+        serde_json::from_value(serde_json::json!({"code":code,"key":key,"state":state}))
+            .expect("a reservation")
+    }
+
+    /// Seat a policy holding one reservation, primed.
+    fn with_reservation(state: &str) -> (CloudPolicy, Arc<Fake>) {
+        let fake = Arc::new(Fake::default());
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![row(KEY, 20)],
+            removed: vec![],
+            reserved: vec![reservation("U5FEFJ", KEY, state)],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
+        (p, fake)
+    }
+
+    /// ⚠ **A join for a SLEEPING server is held, never refused**
+    /// (`floptle/0217`).
+    ///
+    /// `Refuse` means *this will never succeed* — that is its whole purpose.
+    /// A player holding six characters their friend wrote down would be told
+    /// the game does not exist, which is the failure a surviving code exists to
+    /// prevent. A code that survives a sleep and is then refused on use is the
+    /// same broken experience with better bookkeeping.
+    #[test]
+    fn a_join_for_a_sleeping_server_wakes_it_rather_than_refusing() {
+        let (mut p, fake) = with_reservation("sleeping");
+        match p.admit_join("U5FEFJ") {
+            JoinAdmission::Starting { detail } => {
+                assert!(!detail.is_empty(), "a game needs something to print");
+            }
+            other => panic!("a sleeping server was not held: {other:?}"),
+        }
+        assert_eq!(fake.wakes.lock().unwrap().as_slice(), ["U5FEFJ"], "nothing was woken");
+    }
+
+    /// ⚠ **A server the DEVELOPER stopped is refused, and that is honest.**
+    ///
+    /// `stopped` and `sleeping` are opposite facts. Sleeping is the platform
+    /// saving money on a server its owner still expects to work; stopped is a
+    /// decision somebody made — and a stranger's join must never restart a
+    /// server its owner turned off.
+    #[test]
+    fn a_join_for_a_server_its_owner_stopped_is_refused_and_wakes_nothing() {
+        let (mut p, fake) = with_reservation("stopped");
+        assert!(
+            matches!(p.admit_join("U5FEFJ"), JoinAdmission::Refuse { .. }),
+            "a stopped server was treated as sleeping"
+        );
+        assert!(
+            fake.wakes.lock().unwrap().is_empty(),
+            "a stranger's join restarted a server its owner had stopped"
+        );
+    }
+
+    /// **One wake per code, however many friends type it at once.**
+    #[test]
+    fn a_lobby_full_of_friends_asks_the_control_plane_once() {
+        let (mut p, fake) = with_reservation("sleeping");
+        for _ in 0..5 {
+            let _ = p.admit_join("U5FEFJ");
+        }
+        assert_eq!(fake.wakes.lock().unwrap().len(), 1, "one POST per code, not per joiner");
+    }
+
+    /// ⚠ **Only the key that owns a code may reclaim it.**
+    ///
+    /// The code is the product's promise and the key is the only proof of
+    /// ownership. If any host could name any code, a stranger could take over
+    /// somebody's lobby address by asking for it.
+    #[test]
+    fn a_code_is_reclaimed_only_by_the_key_that_owns_it() {
+        let (mut p, _f) = with_reservation("live");
+        assert!(p.claim_code(Some(KEY), "U5FEFJ"), "the owner could not reclaim its own code");
+        assert!(
+            !p.claim_code(Some("fk_live_SOMEBODY_ELSE"), "U5FEFJ"),
+            "a stranger reclaimed a code they do not own"
+        );
+        assert!(!p.claim_code(None, "U5FEFJ"), "a keyless host reclaimed a reserved code");
+        assert!(!p.claim_code(Some(KEY), "UZZZZZ"), "an unreserved code was 'reclaimed'");
+    }
+
+    /// ⚠ **A reserved code is never minted for somebody else**, and a relay
+    /// that has not pulled a snapshot yet does not mint at all.
+    ///
+    /// The second half is the one that bites: a freshly restarted relay knows
+    /// no reservations, so every code it invents is one that might already be
+    /// promised to a sleeping deployment — and handing those six characters to
+    /// a stranger is exactly what this mechanism exists to prevent.
+    #[test]
+    fn a_relay_that_knows_no_reservations_does_not_invent_codes() {
+        let fake = Arc::new(Fake::default());
+        let p = policy(fake.clone());
+        assert!(!p.may_mint(), "a relay with no snapshot minted a code it could not vet");
+
+        let (p, _f) = with_reservation("sleeping");
+        assert!(p.may_mint(), "a primed relay must mint as usual");
+        assert!(p.code_is_reserved("U5FEFJ"), "a reserved code was mintable");
+        assert!(!p.code_is_reserved("UZZZZZ"), "an ordinary code was treated as reserved");
+    }
+
+    /// **A reservation the control plane released stops being reserved here.**
+    ///
+    /// The snapshot is replaced whole rather than merged. Merging would lock a
+    /// released code out of circulation for as long as this process lives.
+    #[test]
+    fn a_released_reservation_is_forgotten_rather_than_merged() {
+        let (mut p, fake) = with_reservation("sleeping");
+        assert!(p.code_is_reserved("U5FEFJ"));
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c2".into()),
+            full: true,
+            keys: vec![row(KEY, 20)],
+            removed: vec![],
+            reserved: vec![],
+        });
+        due_now(&mut p);
+        assert!(
+            settle(&mut p, |p| !p.code_is_reserved("U5FEFJ")),
+            "a released code is still reserved — the snapshot was merged, not replaced"
+        );
+    }
+
+    /// ⚠ **A control plane this relay cannot reach HOLDS the joiner** rather
+    /// than refusing.
+    ///
+    /// The same failing-open rule the rest of this file follows: an outage and
+    /// a deleted game must never look the same to a player, and this one is
+    /// recoverable by waiting.
+    #[test]
+    fn an_unreachable_control_plane_holds_the_joiner_rather_than_refusing() {
+        let (mut p, fake) = with_reservation("sleeping");
+        *fake.wake_fails.lock().unwrap() = true;
+        assert!(
+            matches!(p.admit_join("U5FEFJ"), JoinAdmission::Starting { .. }),
+            "an outage was reported to the player as a game that does not exist"
+        );
     }
 
     /// ⚠ **The relay reports its own load, and the numbers are real**
@@ -1222,6 +1539,7 @@ mod tests {
             full: true,
             keys: vec![over],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
@@ -1295,6 +1613,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1), "the first page never landed");
@@ -1305,6 +1624,7 @@ mod tests {
             full: true,
             keys: vec![row(NEW, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         due_now(&mut p);
         assert!(
@@ -1325,6 +1645,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));
@@ -1335,6 +1656,7 @@ mod tests {
             full: false,
             keys: vec![],
             removed: vec![KEY.into()],
+            reserved: vec![],
         });
         due_now(&mut p);
         // It hangs on the cold path rather than refusing outright, which is
@@ -1396,6 +1718,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));
@@ -1462,6 +1785,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));
@@ -1513,6 +1837,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));
@@ -1560,6 +1885,7 @@ mod tests {
             full: true,
             keys: vec![row(KEY, 20)],
             removed: vec![],
+            reserved: vec![],
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));

@@ -1001,6 +1001,14 @@ pub(crate) const VERBS: &[Verb] = &[
                        applies",
             },
             Arg {
+                name: "--lobby-code",
+                value: Value::Text,
+                required: false,
+                help: "reclaim this lobby code instead of being given a new one. Only honoured \
+                       when the relay has reserved that code for this game's key — otherwise a \
+                       fresh code comes back as usual. Also read from FLOPTLE_LOBBY_CODE",
+            },
+            Arg {
                 name: "--status-file",
                 value: Value::Path,
                 required: false,

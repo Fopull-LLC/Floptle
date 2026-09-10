@@ -1,0 +1,15 @@
+[package]
+name = "floptle-relay-bench"
+description = "Load-generator for floptle-relay: what a region's link actually carries, in Mbps per CCU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The real client and host legs. **Not a mock**: the thing being measured is
+# the relay's forwarding loop and its link, and a fake transport would measure
+# neither.
+floptle-net = { path = "../floptle-net" }

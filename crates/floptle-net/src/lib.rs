@@ -44,8 +44,8 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{
-    HostAdmission, JoinAdmission, RelayClient, RelayHost, RelayPolicy, RelayServer,
-    HOST_DECISION_DEADLINE,
+    HostAdmission, JoinAdmission, LobbyEnd, RelayClient, RelayHost, RelayPolicy, RelayServer,
+    HOST_DECISION_DEADLINE, HOST_GRACE,
 };
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};
@@ -57,8 +57,8 @@ pub use session::{
     SyncedVars,
 };
 pub use wire::{
-    AnimEntry, AnimLayerWire, IdentityClaim, InputCmd, NetInput, CHECKSUM_EVERY,
-    PROTO_VERSION,
+    AnimEntry, AnimLayerWire, IdentityClaim, InputCmd, NetInput, traffic_since_last_read,
+    CHECKSUM_EVERY, PROTO_VERSION,
 };
 pub use transport::{
     Channel, Incoming, LinkStats, MemoryHub, MemoryTransport, PeerId, Transport, SERVER,

@@ -378,14 +378,18 @@ impl Editor {
                         );
                     }
                 }
-                NetCmd::Join { addr } if addr.starts_with("local") => self.net_join_local(),
+                NetCmd::Join { addr, timeout_s } if addr.starts_with("local") => {
+                    self.net_join_timeout = timeout_s;
+                    self.net_join_local()
+                }
                 // `net.join("cloud://UABCDE")` — the code's FIRST LETTER names
                 // the region, and the region list is already on disk, so this
                 // resolves without asking fopull.com anything. That is the
                 // whole reason the join path never depends on the control
                 // plane: a player typing a friend's code gets in during an
                 // outage exactly as they would on a good day.
-                NetCmd::Join { addr } if addr.starts_with("cloud://") => {
+                NetCmd::Join { addr, timeout_s } if addr.starts_with("cloud://") => {
+                    self.net_join_timeout = timeout_s;
                     let code = addr.trim_start_matches("cloud://").trim().to_string();
                     match Self::cloud_relay_for_code(&code) {
                         Ok(raddr) => self.net_join_relay(&raddr, &code),
@@ -394,7 +398,8 @@ impl Editor {
                         }
                     }
                 }
-                NetCmd::Join { addr } if addr.starts_with("relay://") => {
+                NetCmd::Join { addr, timeout_s } if addr.starts_with("relay://") => {
+                    self.net_join_timeout = timeout_s;
                     let rest = addr.trim_start_matches("relay://").to_string();
                     match rest.rsplit_once('/') {
                         Some((raddr, code)) => self.net_join_relay(raddr, code),
@@ -405,11 +410,12 @@ impl Editor {
                         ),
                     }
                 }
-                NetCmd::Join { addr } if addr.starts_with("quic://") => {
+                NetCmd::Join { addr, timeout_s } if addr.starts_with("quic://") => {
+                    self.net_join_timeout = timeout_s;
                     let a = addr.trim_start_matches("quic://").to_string();
                     self.net_join_quic(&a);
                 }
-                NetCmd::Join { addr } => self.console.push(
+                NetCmd::Join { addr, timeout_s: _ } => self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
                         "net.join(\"{addr}\"): use relay://relayaddr/CODE (a lobby code), \
@@ -1601,9 +1607,18 @@ impl Editor {
         // is right in both directions. A `cloud:` block with an empty key is a
         // connection somebody started and did not finish, and is not a key.
         let cloud = self.project.cloud.clone().filter(|c| c.is_connected());
-        let hosted = match &cloud {
-            Some(c) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
-            None => floptle_net::RelayHost::host(relay_addr),
+        let hosted = match (&cloud, self.net_reclaim_code.as_deref()) {
+            // **Reclaim** (`floptle/0217`): a managed server brings the code it
+            // already had. The relay honours it only when its snapshot reserves
+            // that code for this key, so asking costs nothing when we are wrong
+            // — a fresh code comes back exactly as before.
+            (Some(c), Some(code)) => {
+                floptle_net::RelayHost::host_keyed_reclaiming(relay_addr, &c.key, None, code)
+            }
+            (Some(c), None) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
+            // A code without a key is not a claim anybody can honour — the key
+            // is the proof of ownership — so it is ignored rather than sent.
+            (None, _) => floptle_net::RelayHost::host(relay_addr),
         };
         let (mut transport, code) = match hosted {
             Ok(t) => t,
@@ -1817,6 +1832,11 @@ impl Editor {
         Self::net_assign_scene_owners(&mut self.world, self.dedicated);
         let mut client =
             NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
+        // `net.join(addr, {timeout = …})` — only ever bounds a WAKING server
+        // (`floptle/0217`); an ordinary join is answered in a round trip.
+        if let Some(t) = self.net_join_timeout.take() {
+            client.set_join_timeout(std::time::Duration::from_secs_f32(t));
+        }
         client.register_scene(&self.world);
         // Which slot is ours depends on the peer id the server assigns —
         // everything is snapshot-driven until the Welcome binds our avatar.

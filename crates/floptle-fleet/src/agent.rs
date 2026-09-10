@@ -102,6 +102,7 @@ impl Agent {
                         uptime_s: 0,
                         restarts: *self.restarts.get(&d.deployment_id).unwrap_or(&0),
                         tick_p95_ms: None,
+                        max_players: None,
                         // A deployment that failed to start has no cgroup to
                         // ask, which is not the same as having used no memory.
                         mem_mb: None,
@@ -142,6 +143,7 @@ impl Agent {
                     uptime_s: 0,
                     restarts: 0,
                     tick_p95_ms: None,
+                    max_players: None,
                     // Its cgroup went away with the unit; what it peaked at is
                     // gone rather than zero.
                     mem_mb: None,
@@ -314,6 +316,7 @@ impl Agent {
             uptime_s: s.uptime_s,
             restarts: *self.restarts.get(&id).unwrap_or(&0),
             tick_p95_ms: s.tick_p95_ms,
+            max_players: s.max_players,
             mem_mb,
             mem_peak_mb,
             last_lines: journal_tail(host, &unit::unit_name(&id)),
@@ -716,6 +719,47 @@ mod tests {
             h.calls
         );
         assert_eq!(r.deployments[0].state, "running");
+    }
+
+    /// ⚠ **The engine's own player ceiling reaches the report** (`floptle/0221`)
+    /// — asserted through `cycle`, the function production calls.
+    ///
+    /// The card asked for "a guard that fails when the field is DROPPED rather
+    /// than only when it is inconsistent", and that distinction earned itself
+    /// immediately: a self-contained wire test that builds a `DeploymentStatus`
+    /// by hand stays green while `status_of` — the only thing that fills one in
+    /// production — passes `None`. This writes a real status file and reads the
+    /// field off the real report.
+    ///
+    /// Same seam as `port` and `relay` (`floptle/0209`, `floptle/0212`): three
+    /// fields now, each written by the server, each dropped in this one
+    /// function.
+    #[test]
+    fn the_engines_player_ceiling_reaches_the_report_through_the_real_path() {
+        let dir = tmp("maxplayers");
+        let a = args_in(&dir);
+        seed(&a, "aa", "0.85.0-rc6", "scenes/lobby.ron");
+        let mut h = FakeHost { active: "active".into(), ..Default::default() };
+        let mut agent = Agent::default();
+        let d = Desired { deployments: vec![dep("d_1")] };
+        agent.cycle(&a, &mut h, &d).expect("first cycle");
+
+        // What the running server actually writes, copied from the live box.
+        let sf = a.status_file("d_1");
+        std::fs::create_dir_all(sf.parent().unwrap()).unwrap();
+        std::fs::write(
+            &sf,
+            r#"{"peers":0,"max_players":8,"uptime_s":15,"lobby_code":"U3Z458"}"#,
+        )
+        .unwrap();
+
+        let r = agent.cycle(&a, &mut h, &d).expect("second cycle");
+        let one = &r.deployments[0];
+        assert_eq!(one.max_players, Some(8), "the box knew 8 and the report lost it");
+        // The neighbours this rode in with, so a regression that drops the whole
+        // status file is told apart from one that drops this field.
+        assert_eq!(one.lobby_code.as_deref(), Some("U3Z458"));
+        assert_eq!(one.uptime_s, 15);
     }
 
     /// **A bundle whose scene is missing is refused before it is started.**

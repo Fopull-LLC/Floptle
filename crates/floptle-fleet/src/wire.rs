@@ -226,6 +226,24 @@ pub struct DeploymentStatus {
     /// the server forks, and it is the same number the `MemoryMax` cap is
     /// enforced against, so a deployment nearing its limit reads as nearing its
     /// limit rather than as merely large.
+    /// **The ceiling the engine is actually enforcing** (`floptle/0221`).
+    ///
+    /// ⚠ **Third time this seam has been wrong in one direction**: `port` and
+    /// `relay` were written by the server and dropped here too (`floptle/0209`,
+    /// `floptle/0212`). The server has written `max_players` into its status
+    /// file all along and the agent parsed the file without carrying this one
+    /// field, so the control plane stored null while the box knew the answer.
+    ///
+    /// It exists so the two ceilings can be COMPARED. The control plane sets a
+    /// cap from the account's plan and the engine enforces one from
+    /// `--max-players`; when they disagree a developer meets whichever is lower
+    /// with nothing to say which. They agree today — this is a monitor going in
+    /// before it is needed.
+    ///
+    /// ⚠ Absent when the server does not report it, never `0`: a cap of zero is
+    /// a server that admits nobody, which is the opposite of "no cap set".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_players: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem_mb: Option<u64>,
     /// The **high-water mark since this unit started**, from systemd's
@@ -285,6 +303,9 @@ pub struct ServerStatus {
     pub tick_p95_ms: Option<f32>,
     #[serde(default)]
     pub lobby_code: Option<String>,
+    /// The player ceiling the ENGINE is enforcing, as the server reports it.
+    #[serde(default)]
+    pub max_players: Option<u32>,
     /// **Where this server is actually reachable** (`floptle/0209`, forwarded
     /// by `floptle/0212`): the UDP port it bound, or `None` when it listens on
     /// nothing because it went out through a relay.
@@ -397,6 +418,7 @@ mod tests {
                 uptime_s: 8812,
                 restarts: 0,
                 tick_p95_ms: Some(4.1),
+                max_players: Some(8),
                 mem_mb: Some(203),
                 mem_peak_mb: Some(311),
                 last_lines: vec!["listening on 30017".into()],
@@ -414,6 +436,75 @@ mod tests {
         // The numbers a slot is about to be priced from (`floptle/0214`).
         assert_eq!(v["deployments"][0]["mem_mb"], 203);
         assert_eq!(v["deployments"][0]["mem_peak_mb"], 311);
+        assert_eq!(v["deployments"][0]["max_players"], 8);
+    }
+
+    /// ⚠ **The engine's own ceiling reaches the wire** (`floptle/0221`).
+    ///
+    /// The server has written `max_players` into its status file all along; the
+    /// agent parsed that file and carried every field but this one, so the
+    /// control plane stored null about a number the box knew. That is the same
+    /// seam as `port` and `relay` before it — **third time in one direction** —
+    /// so this asserts the whole trip: file text in, wire JSON out.
+    #[test]
+    fn the_engines_own_player_ceiling_survives_the_trip_from_the_status_file() {
+        let file = r#"{"peers":0,"max_players":8,"uptime_s":15,"lobby_code":"U3Z458"}"#;
+        let s: ServerStatus = serde_json::from_str(file).expect("the live status file");
+        assert_eq!(s.max_players, Some(8), "the file says 8 and the parse lost it");
+
+        let r = Report {
+            box_: BoxStats::default(),
+            deployments: vec![DeploymentStatus {
+                deployment_id: "d_1".into(),
+                state: State::Running.as_str(),
+                peers: s.peers,
+                uptime_s: s.uptime_s,
+                restarts: 0,
+                tick_p95_ms: None,
+                max_players: s.max_players,
+                mem_mb: None,
+                mem_peak_mb: None,
+                last_lines: vec![],
+                lobby_code: s.lobby_code.clone(),
+                port: None,
+                relay: None,
+            }],
+        };
+        assert_eq!(r.to_json()["deployments"][0]["max_players"], 8);
+    }
+
+    /// ⚠ **A server that reports no ceiling sends NO field, not `0`.**
+    ///
+    /// `max_players: 0` is a server that admits nobody. "No cap set" and "a cap
+    /// of none" would then be the same JSON, and the control plane would read a
+    /// perfectly open server as one refusing every player.
+    #[test]
+    fn a_server_with_no_ceiling_omits_the_field_rather_than_capping_at_zero() {
+        let s: ServerStatus = serde_json::from_str(r#"{"peers":3}"#).expect("parses");
+        assert_eq!(s.max_players, None, "absent must not become 0");
+        let r = Report {
+            box_: BoxStats::default(),
+            deployments: vec![DeploymentStatus {
+                deployment_id: "d_1".into(),
+                state: State::Running.as_str(),
+                peers: 3,
+                uptime_s: 1,
+                restarts: 0,
+                tick_p95_ms: None,
+                max_players: None,
+                mem_mb: None,
+                mem_peak_mb: None,
+                last_lines: vec![],
+                lobby_code: None,
+                port: None,
+                relay: None,
+            }],
+        };
+        let v = r.to_json();
+        assert!(
+            !v["deployments"][0].as_object().unwrap().contains_key("max_players"),
+            "a cap of zero would read as a server that admits nobody: {v}"
+        );
     }
 
     /// ⚠ **A measurement that failed is ABSENT, never `0`** (`floptle/0213`).
@@ -454,6 +545,7 @@ mod tests {
                 uptime_s: 0,
                 restarts: 0,
                 tick_p95_ms: None,
+                max_players: None,
                 mem_mb: None,
                 mem_peak_mb: None,
                 last_lines: vec![],
