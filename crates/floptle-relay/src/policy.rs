@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use floptle_net::{HostAdmission, JoinAdmission, RelayPolicy};
 
+use crate::boxstats::{self, RelayBox};
 use crate::control::{ControlError, ControlPlane, KeyRow, KeyState, KeyTable, UsageSample,
                      FREE_TIER_CCU};
 
@@ -105,6 +106,21 @@ pub struct CloudPolicy {
     /// page and held one of the account's ceiling for as long as it ran.
     dedicated: std::collections::HashSet<String>,
     last_usage: Instant,
+    /// **The forwarding loop's own period, sampled every tick**
+    /// (`floptle/0215`). `tick()` runs at the top of every `step()` and the
+    /// binary steps in a tight loop, so the gap between consecutive ticks IS
+    /// the loop period — no plumbing through the relay required. It stretches
+    /// under load before the kernel starts dropping datagrams, which makes it
+    /// the earliest honest saturation signal this box has.
+    last_tick: Option<Instant>,
+    /// Loop periods in milliseconds since the last flush, for a p95. Bounded:
+    /// at a millisecond a tick this fills fast, and an unbounded vector on a
+    /// relay that cannot reach the control plane is a slow leak on a box with
+    /// one gigabyte of RAM.
+    steps: Vec<f32>,
+    /// Payload carried since the last usage flush, for the box's own rate.
+    /// Separate from `bytes_total`, which is since start and never resets.
+    bytes_interval: (u64, u64),
     /// Payload carried per lobby since the last usage flush: `(in, out)`.
     ///
     /// Per LOBBY rather than per key, because a lobby is what the relay knows
@@ -180,6 +196,9 @@ impl CloudPolicy {
             live: HashMap::new(),
             dedicated: std::collections::HashSet::new(),
             last_usage: Instant::now(),
+            last_tick: None,
+            steps: Vec::new(),
+            bytes_interval: (0, 0),
             traffic: HashMap::new(),
             closed_keys: HashMap::new(),
             refused: HashMap::new(),
@@ -204,6 +223,45 @@ impl CloudPolicy {
         if let Ok(mut s) = self.status.lock() {
             s.log.push(line);
         }
+    }
+
+    /// **What this relay says about itself**, alongside what it carried
+    /// (`floptle/0215`).
+    ///
+    /// Drains the interval counters, so it must be called exactly once per
+    /// flush. Everything the box could not measure stays `None` and is left off
+    /// the wire — see [`crate::boxstats`] for why memory is not the number to
+    /// rank a relay on.
+    fn box_report(&mut self, elapsed_s: f64) -> RelayBox {
+        let mut b = boxstats::host_metrics();
+        let (q, drops) = boxstats::socket_pressure();
+        b.rx_queue_bytes = q;
+        b.rx_drops = drops;
+
+        // Occupancy: lobbies the relay is holding, and the players in them
+        // counted the ONE way `host_seat` defines (`floptle/0211`) — a
+        // dedicated server is a box nobody is sitting at and is not a player.
+        b.lobbies = self.of_lobby.len() as u32;
+        b.peers = self
+            .of_lobby
+            .keys()
+            .map(|c| self.live.get(c).copied().unwrap_or(0) + self.host_seat(c))
+            .sum();
+
+        // Rates over the window that just closed. A zero-length window would
+        // divide by zero into infinity, which serializes as `null` and would
+        // reach the control plane as a field that is present and meaningless.
+        if elapsed_s > 0.0 {
+            let (i, o) = std::mem::take(&mut self.bytes_interval);
+            b.ingress_bps = Some((i as f64 / elapsed_s) as u64);
+            b.egress_bps = Some((o as f64 / elapsed_s) as u64);
+        } else {
+            self.bytes_interval = (0, 0);
+        }
+
+        b.step_p95_ms = p95(&mut self.steps);
+        self.steps.clear();
+        b
     }
 
     /// How stale the key snapshot is, in seconds, or `None` if there has never
@@ -441,6 +499,10 @@ impl RelayPolicy for CloudPolicy {
         e.1 = e.1.saturating_add(bytes_out);
         self.bytes_total.0 = self.bytes_total.0.saturating_add(bytes_in);
         self.bytes_total.1 = self.bytes_total.1.saturating_add(bytes_out);
+        // The same bytes again over the reporting window, for the box's rate.
+        // `bytes_total` is since start and cannot answer "how fast, now".
+        self.bytes_interval.0 = self.bytes_interval.0.saturating_add(bytes_in);
+        self.bytes_interval.1 = self.bytes_interval.1.saturating_add(bytes_out);
     }
 
     fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
@@ -475,6 +537,17 @@ impl RelayPolicy for CloudPolicy {
     }
 
     fn tick(&mut self) {
+        // **The loop period, measured where the loop actually is.** Capped so a
+        // relay that has been unable to flush for hours cannot grow this
+        // without bound on a 1 GB box; 8192 samples at ~1 ms covers the whole
+        // ten-second window several times over.
+        let now = Instant::now();
+        if let Some(prev) = self.last_tick.replace(now)
+            && self.steps.len() < 8192
+        {
+            self.steps.push(prev.elapsed().as_secs_f32() * 1000.0);
+        }
+
         self.drain_workers();
         if let Ok(mut s) = self.status.lock() {
             s.keys = self.keys.len();
@@ -497,6 +570,10 @@ impl RelayPolicy for CloudPolicy {
             self.spawn_pull();
         }
         if self.last_usage.elapsed() >= USAGE_INTERVAL {
+            // How long this window actually was, before the clock is reset —
+            // the rates below are per second and a hardcoded USAGE_INTERVAL
+            // would be wrong on any cycle the relay ran long.
+            let elapsed = self.last_usage.elapsed().as_secs_f64();
             self.last_usage = Instant::now();
             // One POST for the whole region, built from the running counts —
             // never one per lobby event.
@@ -569,9 +646,10 @@ impl RelayPolicy for CloudPolicy {
                     human_bytes(o)
                 ));
             }
+            let box_ = self.box_report(elapsed);
             let c = self.control.clone();
             std::thread::spawn(move || {
-                let _ = c.report_usage(&samples);
+                let _ = c.report_usage(&box_, &samples);
             });
         }
     }
@@ -624,6 +702,23 @@ pub fn host_at_cap_notice(ceiling: u32, tier: &str, game: &str) -> String {
 }
 
 /// Bytes as an operator reads them.
+/// The 95th percentile of `v`, or `None` when there is nothing to take one of.
+///
+/// ⚠ **An empty sample is `None`, not `0.0`.** A relay whose loop never ticked
+/// reporting `step_p95_ms: 0` would read as the fastest box in the fleet.
+///
+/// Sorts in place — the caller is about to clear the vector anyway.
+fn p95(v: &mut [f32]) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f32::total_cmp);
+    // Nearest-rank: the smallest value at least 95% of the samples are under.
+    // `len - 1` at the top so a full window cannot index off the end.
+    let i = (((v.len() as f64) * 0.95).ceil() as usize).saturating_sub(1).min(v.len() - 1);
+    Some(v[i])
+}
+
 fn human_bytes(b: u64) -> String {
     const K: u64 = 1024;
     match b {
@@ -666,6 +761,8 @@ mod tests {
         cold: Mutex<HashMap<String, Result<KeyRow, ControlError>>>,
         cursors_seen: Mutex<Vec<Option<String>>>,
         usage_posts: Mutex<Vec<Vec<UsageSample>>>,
+        /// The `box` object that rode along with each usage POST.
+        boxes: Mutex<Vec<RelayBox>>,
     }
 
     fn row(key: &str, limit: u32) -> KeyRow {
@@ -706,7 +803,12 @@ mod tests {
                 }
             }
         }
-        fn report_usage(&self, samples: &[UsageSample]) -> Result<(), ControlError> {
+        fn report_usage(
+            &self,
+            box_: &RelayBox,
+            samples: &[UsageSample],
+        ) -> Result<(), ControlError> {
+            self.boxes.lock().unwrap().push(box_.clone());
             self.usage_posts.lock().unwrap().push(samples.to_vec());
             Ok(())
         }
@@ -782,6 +884,86 @@ mod tests {
         let posts = fake.usage_posts.lock().unwrap().clone();
         assert_eq!(posts.len(), 1, "one batch for the whole region, got {posts:?}");
         posts[0].clone()
+    }
+
+    /// Force a flush and hand back the `box` object that rode with it.
+    fn flush_box(p: &mut CloudPolicy, fake: &Arc<Fake>) -> RelayBox {
+        fake.boxes.lock().unwrap().clear();
+        flush_usage(p, fake);
+        let boxes = fake.boxes.lock().unwrap().clone();
+        assert_eq!(boxes.len(), 1, "one box object per usage POST");
+        boxes[0].clone()
+    }
+
+    /// ⚠ **The relay reports its own load, and the numbers are real**
+    /// (`floptle/0215`).
+    ///
+    /// This box is where a signup surge lands first — every free-tier player in
+    /// a region goes through it, long before anyone rents a dedicated server —
+    /// and until now it said nothing about itself at all, so the way we would
+    /// have learned it was overloaded is complaints.
+    #[test]
+    fn the_relay_reports_its_own_saturation_alongside_the_usage() {
+        let fake = Arc::new(Fake::default());
+        let mut p = policy(fake.clone());
+        p.lobby_opened("UABCDE", Some(KEY));
+        p.peer_joined("UABCDE");
+        p.peer_joined("UABCDE");
+        // 1 MB out, 100 KB in — a relay multiplies traffic, so egress is the
+        // larger half and it is the half that is metered and capped.
+        p.forwarded("UABCDE", 100_000, 1_000_000);
+
+        let b = flush_box(&mut p, &fake);
+        assert!(!b.host.is_empty(), "the row has to name its box");
+        assert_eq!(b.lobbies, 1);
+        // Two joiners plus the listen host, the one definition `host_seat` gives.
+        assert_eq!(b.peers, 3, "occupancy counts the way the ceiling counts");
+
+        // ⚠ The ceiling this box actually reaches. 0.48 Gbps is 60 MB/s, so
+        // this number is what says how close the link is — not free memory.
+        let egress = b.egress_bps.expect("egress is the relay's real ceiling");
+        let ingress = b.ingress_bps.expect("ingress");
+        assert!(egress > ingress, "a relay forwards more than it receives: {egress} vs {ingress}");
+        assert!(egress > 0, "a megabyte moved and the rate came out zero");
+
+        // `load1` is meaningless without knowing it is out of one OCPU.
+        assert!(b.cores.is_some_and(|c| c > 0), "load1 cannot be read without cores");
+    }
+
+    /// **A second window does not re-report the first window's bytes.**
+    ///
+    /// The rate is drained per flush. If it accumulated instead, a relay that
+    /// carried one busy minute would report that minute's traffic forever and
+    /// read as permanently saturated — and the control plane would price a
+    /// machine against it.
+    #[test]
+    fn a_quiet_window_after_a_busy_one_reports_quiet() {
+        let fake = Arc::new(Fake::default());
+        let mut p = policy(fake.clone());
+        p.lobby_opened("UABCDE", Some(KEY));
+        p.forwarded("UABCDE", 100_000, 1_000_000);
+        let busy = flush_box(&mut p, &fake).egress_bps.expect("egress");
+        assert!(busy > 0);
+
+        let quiet = flush_box(&mut p, &fake).egress_bps.expect("egress");
+        assert_eq!(quiet, 0, "the busy window was reported twice");
+    }
+
+    /// ⚠ **An empty sample is `None`, not a fast relay.**
+    ///
+    /// `step_p95_ms: 0` would make a relay whose loop never ran read as the
+    /// quickest box in the fleet. This is the silent-failure shape this
+    /// codebase keeps paying for: the broken case and the healthy case
+    /// producing the same number.
+    #[test]
+    fn a_loop_that_never_ticked_reports_nothing_rather_than_zero() {
+        assert_eq!(p95(&mut []), None, "no samples is not 0.0 ms");
+        assert_eq!(p95(&mut [4.0]), Some(4.0));
+        // Nearest-rank over a known set: 95% of 20 samples is the 19th.
+        let mut v: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+        assert_eq!(p95(&mut v), Some(19.0));
+        // The top sample must be reachable and must not index off the end.
+        assert_eq!(p95(&mut [1.0, 2.0]), Some(2.0));
     }
 
     /// **An idle dedicated server is not a player** (`floptle/0211`).

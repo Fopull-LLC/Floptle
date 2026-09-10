@@ -102,6 +102,10 @@ impl Agent {
                         uptime_s: 0,
                         restarts: *self.restarts.get(&d.deployment_id).unwrap_or(&0),
                         tick_p95_ms: None,
+                        // A deployment that failed to start has no cgroup to
+                        // ask, which is not the same as having used no memory.
+                        mem_mb: None,
+                        mem_peak_mb: None,
                         last_lines: vec![e],
                         lobby_code: None,
                         port: None,
@@ -138,6 +142,10 @@ impl Agent {
                     uptime_s: 0,
                     restarts: 0,
                     tick_p95_ms: None,
+                    // Its cgroup went away with the unit; what it peaked at is
+                    // gone rather than zero.
+                    mem_mb: None,
+                    mem_peak_mb: None,
                     last_lines: vec!["stopped by the control plane".into()],
                     lobby_code: None,
                     port: None,
@@ -291,6 +299,14 @@ impl Agent {
         self.seen.insert(id.clone(), state);
 
         let s = read_server_status(&args.status_file(&id));
+        // Only a running unit has a cgroup to account. A stopped one answers
+        // `[not set]`, which is read as absent below rather than as zero — a
+        // server that is not running did not use no memory, it used none we can
+        // still see.
+        let (mem_mb, mem_peak_mb) = match state {
+            State::Running | State::Starting => unit_memory(host, &unit::unit_name(&id)),
+            State::Stopped | State::Failed => (None, None),
+        };
         DeploymentStatus {
             deployment_id: id.clone(),
             state: state.as_str(),
@@ -298,6 +314,8 @@ impl Agent {
             uptime_s: s.uptime_s,
             restarts: *self.restarts.get(&id).unwrap_or(&0),
             tick_p95_ms: s.tick_p95_ms,
+            mem_mb,
+            mem_peak_mb,
             last_lines: journal_tail(host, &unit::unit_name(&id)),
             lobby_code: s.lobby_code,
             port: s.port,
@@ -321,6 +339,33 @@ pub fn unit_state(host: &mut dyn Host, unit: &str) -> State {
     }
 }
 
+/// **What one deployment is costing in memory**, from systemd's cgroup
+/// accounting: `(current, peak-since-start)` in megabytes (`floptle/0214`).
+///
+/// Both are `None` when systemd will not answer. It says `[not set]` for a unit
+/// with no cgroup, and `infinity` where accounting is off — and older systemd
+/// does not know `MemoryPeak` at all, answering with an empty value. **None of
+/// those is zero.** A box's economics are about to be re-derived from these
+/// numbers, and a unit that failed to report reading as "0 MB" would say a
+/// server is free.
+///
+/// One `systemctl show` for both properties rather than two calls; the output is
+/// `KEY=value` lines, so `--value` is deliberately not passed.
+fn unit_memory(host: &mut dyn Host, unit: &str) -> (Option<u64>, Option<u64>) {
+    let out = host
+        .run("systemctl", &["show", unit, "--property=MemoryCurrent", "--property=MemoryPeak"])
+        .unwrap_or_default();
+    let field = |name: &str| -> Option<u64> {
+        out.lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix('='))?
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|bytes| bytes / (1024 * 1024))
+    };
+    (field("MemoryCurrent"), field("MemoryPeak"))
+}
+
 /// The last 200 journal lines for a unit, oldest first.
 fn journal_tail(host: &mut dyn Host, unit: &str) -> Vec<String> {
     let out = host
@@ -342,18 +387,24 @@ fn read_server_status(path: &Path) -> ServerStatus {
 
 /// The box's own numbers, best effort.
 ///
-/// Every one is optional in spirit: a proc file that is not there gives a zero
-/// rather than failing the whole report, because the deployment states are the
-/// part of this document that matters and losing them over a missing
-/// `/proc/loadavg` would be a poor trade.
+/// ⚠ **A number this cannot measure is left out, never sent as zero**
+/// (`floptle/0213`). A missing `/proc/loadavg` must not fail the whole report —
+/// the deployment states are the part of this document that matters — but the
+/// control plane reads these now, and `mem_free_mb: 0` from a box that simply
+/// could not read `/proc/meminfo` is a healthy machine declaring itself out of
+/// memory. The control plane would stop placing servers on it and price a new
+/// one for the region. So each measurement is an `Option` end to end and an
+/// absent one stays absent on the wire.
 pub fn box_stats(_host: &mut dyn Host) -> BoxStats {
+    // `host` is the exception: it selects this box's rows out of `/desired`, so
+    // a name is sent even when it had to be guessed at. A box W does not
+    // recognise is served its region's whole list rather than starved.
     let host = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".into());
     let load1 = std::fs::read_to_string("/proc/loadavg")
         .ok()
-        .and_then(|s| s.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0);
+        .and_then(|s| s.split_whitespace().next()?.parse().ok());
     let mem_free_mb = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|s| {
@@ -364,31 +415,31 @@ pub fn box_stats(_host: &mut dyn Host) -> BoxStats {
                 .parse::<u64>()
                 .ok()
         })
-        .map(|kb| kb / 1024)
-        .unwrap_or(0);
+        .map(|kb| kb / 1024);
     BoxStats { host, load1, mem_free_mb, disk_free_mb: disk_free_mb("/var") }
 }
 
-/// Free megabytes on the filesystem holding `path`, via `statvfs`.
-fn disk_free_mb(path: &str) -> u64 {
+/// Free megabytes on the filesystem holding `path`, via `statvfs`, or `None`
+/// when the call failed — see [`box_stats`] for why that is not zero.
+fn disk_free_mb(path: &str) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::ffi::CString;
-        let Ok(c) = CString::new(path) else { return 0 };
+        let c = CString::new(path).ok()?;
         // SAFETY: `statvfs` fills a POD struct; the path is a valid C string
         // and the struct is zeroed before the call.
         unsafe {
             let mut s: libc_statvfs = std::mem::zeroed();
             if statvfs(c.as_ptr(), &mut s) == 0 {
-                return s.f_bavail.saturating_mul(s.f_frsize) / (1024 * 1024);
+                return Some(s.f_bavail.saturating_mul(s.f_frsize) / (1024 * 1024));
             }
         }
-        0
+        None
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        0
+        None
     }
 }
 
@@ -482,6 +533,7 @@ mod tests {
             engine_version: "0.85.0-rc6".into(),
             project: "assets".into(),
             port: 30017,
+            lobby_code: None,
             args: DeployArgs { scene: Some("scenes/lobby.ron".into()), tick: None, max_players: None },
             limits: Limits::default(),
         }
@@ -729,6 +781,39 @@ mod tests {
         assert_eq!(unit_state(&mut h, "x.service"), State::Failed);
         h.active = "inactive".into();
         assert_eq!(unit_state(&mut h, "x.service"), State::Stopped);
+    }
+
+    /// **systemd's three ways of saying "no number" are not zero**
+    /// (`floptle/0214`).
+    ///
+    /// `[not set]` is a unit with no cgroup, `infinity` is accounting turned
+    /// off, and an empty value is a systemd older than v253 that has never
+    /// heard of `MemoryPeak`. Floptle Cloud is about to re-derive how many
+    /// servers a box holds from this field, and every one of these parsed as
+    /// `0` would report a server that costs nothing — the one wrong answer that
+    /// makes the fleet look cheaper than it is rather than more expensive.
+    #[test]
+    fn systemd_declining_to_answer_is_not_a_server_that_costs_nothing() {
+        let mut h = FakeHost {
+            active: "MemoryCurrent=213909504\nMemoryPeak=326471680\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(unit_memory(&mut h, "x.service"), (Some(204), Some(311)), "bytes to MB");
+
+        // No cgroup, and accounting off.
+        h.active = "MemoryCurrent=[not set]\nMemoryPeak=[not set]\n".into();
+        assert_eq!(unit_memory(&mut h, "x.service"), (None, None), "[not set] is not 0 MB");
+        h.active = "MemoryCurrent=infinity\nMemoryPeak=infinity\n".into();
+        assert_eq!(unit_memory(&mut h, "x.service"), (None, None), "infinity is not 0 MB");
+
+        // A systemd too old for MemoryPeak still gives up MemoryCurrent — the
+        // half that works must not be lost with the half that does not.
+        h.active = "MemoryCurrent=22020096\nMemoryPeak=\n".into();
+        assert_eq!(unit_memory(&mut h, "x.service"), (Some(21), None), "the idle server we measured");
+
+        // Nothing at all, as when systemctl itself fails.
+        h.active = String::new();
+        assert_eq!(unit_memory(&mut h, "x.service"), (None, None));
     }
 
     /// `--dry-run` touches nothing.

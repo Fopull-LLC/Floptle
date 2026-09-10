@@ -996,6 +996,86 @@ mod tests {
         assert_eq!(a.game_key.as_deref(), Some("fk_live_ABC"));
     }
 
+    /// ⚠ **Every flag `serve` accepts is in the published CLI docs**, and the
+    /// list comes off this file's OWN match arms rather than a second
+    /// hand-written one.
+    ///
+    /// `cli.json` is generated from the verb table and published to the website
+    /// as the developer-facing command reference (`floptle/0201`, where that
+    /// page turned out to have been hand-carried and wrong). A flag added to
+    /// the parser and not to the table is invisible to every developer who does
+    /// not read the source — which is all of them. `--status-file` and
+    /// `--max-players` had both been in the parser and out of the docs, and the
+    /// fleet agent depends on the first one.
+    ///
+    /// ⚠ Gated on `editor-ui` because the verb table is: `dedicated` builds in
+    /// the player and server configurations and `cli` does not, so an ungated
+    /// reference here fails a build that workspace clippy never attempts.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn every_serve_flag_the_parser_takes_is_in_the_published_cli_docs() {
+        let src = include_str!("dedicated.rs");
+        // The parser's arms as written: a line whose first token is a quoted
+        // flag, followed by `=>`.
+        let mut parsed: Vec<&str> = Vec::new();
+        for line in src.lines().map(str::trim) {
+            let Some(rest) = line.strip_prefix('"') else { continue };
+            let Some((flag, tail)) = rest.split_once('"') else { continue };
+            if flag.starts_with("--") && tail.trim_start().starts_with("=>") {
+                parsed.push(flag);
+            }
+        }
+        parsed.sort_unstable();
+        parsed.dedup();
+        // ⚠ Without this the guard passes by finding NOTHING the day the parser
+        // is reformatted — measuring nothing while reporting success.
+        assert!(
+            parsed.len() >= 9,
+            "the scrape found {parsed:?} — it has stopped seeing the match arms, so this \
+             guard is measuring nothing"
+        );
+
+        let serve = crate::cli::VERBS
+            .iter()
+            .find(|v| v.name == "serve")
+            .expect("the serve verb");
+        let documented: Vec<&str> =
+            serve.args.iter().map(|a| a.name).filter(|n| n.starts_with("--")).collect();
+
+        // Two are deliberately out of the published table, and neither is an
+        // oversight:
+        //
+        // `--game-key` is a CREDENTIAL. `ps` shows a command line, the journal
+        // echoes it, and the fleet agent ships the last 200 journal lines to the
+        // control plane where they are rendered on a web page — which is exactly
+        // why the agent passes the key in `Environment=` instead. Publishing a
+        // flag that puts it on the command line would be advice against the
+        // engine's own design.
+        //
+        // `--build` is an internal alias for the project path used by the export
+        // path, not a second way for a person to say PROJECT.
+        const UNPUBLISHED: &[&str] = &["--game-key", "--build"];
+
+        for flag in &parsed {
+            if UNPUBLISHED.contains(flag) {
+                continue;
+            }
+            assert!(
+                documented.contains(flag),
+                "`serve` accepts {flag} and the published CLI docs never mention it — \
+                 documented: {documented:?}"
+            );
+        }
+        // And the other direction: a documented flag the parser would reject is
+        // worse than an undocumented one, because somebody will type it.
+        for flag in &documented {
+            assert!(
+                parsed.contains(flag),
+                "the CLI docs advertise {flag} and the parser refuses it"
+            );
+        }
+    }
+
     /// **A relay-hosted server is not listening on a port** (`floptle/0209`).
     ///
     /// `--port` and `--relay` are alternatives. With a relay the server makes

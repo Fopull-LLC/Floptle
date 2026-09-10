@@ -338,9 +338,11 @@ congratulates a player on joining nothing. Wait on `net.joinState()`:
 
 ```lua
 local state, why = net.joinState()
--- "offline" | "connecting" | "joined" | "refused"
+-- "offline" | "connecting" | "joined" | "refused" | "starting"
 if state == "refused" then
   find("Error").text = why      -- "no lobby QK7RM", in the relay's own words
+elseif state == "starting" then
+  find("Error").text = why      -- "about 20 seconds": the lobby is real, its server is waking
 end
 ```
 
@@ -348,6 +350,13 @@ Mistyping the code is the most common failure in an online session, and it's the
 one your players will hit. Note the difference between a relay that says **no**
 (`"refused"`, with a reason) and one that is switched **off** (never answers,
 stays `"connecting"`) — the second needs a timeout of your own.
+
+`"starting"` is a third thing again, and the one worth handling separately:
+the lobby **exists** and its dedicated server is waking up. It is not a refusal,
+so do not send the player away; and it is not `"connecting"`, which resolves in
+one relay round trip — a wake can take tens of seconds, long enough that a bare
+spinner reads as a hung game. Show the second return, which carries words for a
+person rather than a status noun.
 
 ### A joiner plays with their own controls
 

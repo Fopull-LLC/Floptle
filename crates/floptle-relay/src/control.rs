@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::boxstats::RelayBox;
+
 /// The free tier's concurrent-player limit — the floor a relay allows at when
 /// it cannot reach the control plane and has never heard of the key.
 ///
@@ -162,6 +164,98 @@ pub struct UsageSample {
     pub refused_joins: u32,
 }
 
+/// The `box` object, built by hand so the omission rule is visible in one place.
+///
+/// ⚠ **A measurement that was not taken is left OUT of the object**, never sent
+/// as `0`. This is the fleet agent's rule and its shape (`floptle/0215`), so one
+/// code path on the control plane reads both — but the reason is sharper here:
+/// `rx_drops: 0` from a relay that is keeping up is the best news it has, and
+/// `rx_drops: 0` from a relay that could not read `/proc/net/udp` is a relay
+/// dropping packets while reporting health.
+fn box_json(b: &RelayBox) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    o.insert("host".into(), b.host.clone().into());
+    // Occupancy is always known — the relay is holding the lobbies.
+    o.insert("lobbies".into(), b.lobbies.into());
+    o.insert("peers".into(), b.peers.into());
+    let mut num = |k: &str, v: Option<serde_json::Value>| {
+        if let Some(v) = v {
+            o.insert(k.into(), v);
+        }
+    };
+    // ⚠ An `f32` widened to JSON's `f64` prints its own imprecision: 7.4
+    // becomes 7.400000095367432. Harmless arithmetically and ugly in a log a
+    // person reads, so the two floats are rounded to the precision they
+    // actually carry.
+    let hundredths = |v: f32| -> serde_json::Value {
+        ((v as f64 * 100.0).round() / 100.0).into()
+    };
+    num("load1", b.load1.map(hundredths));
+    num("cores", b.cores.map(Into::into));
+    num("mem_free_mb", b.mem_free_mb.map(Into::into));
+    num("disk_free_mb", b.disk_free_mb.map(Into::into));
+    num("egress_bps", b.egress_bps.map(Into::into));
+    num("ingress_bps", b.ingress_bps.map(Into::into));
+    num("rx_drops", b.rx_drops.map(Into::into));
+    num("rx_queue_bytes", b.rx_queue_bytes.map(Into::into));
+    num("step_p95_ms", b.step_p95_ms.map(hundredths));
+    serde_json::Value::Object(o)
+}
+
+#[cfg(test)]
+mod box_tests {
+    use super::*;
+
+    /// ⚠ **The `box` object omits what it could not measure** (`floptle/0215`).
+    ///
+    /// Same rule and same field names as the fleet agent, so the control plane
+    /// reads both with one code path. The reason bites harder here: `rx_drops:
+    /// 0` from a relay that is keeping up is the best news it has, while the
+    /// same `0` from a relay that could not read `/proc/net/udp` is a relay
+    /// losing players' packets while reporting perfect health.
+    #[test]
+    fn a_relay_that_could_not_measure_omits_rather_than_reporting_zero() {
+        let v = box_json(&RelayBox { host: "relay-1".into(), ..Default::default() });
+        let o = v.as_object().expect("an object");
+        assert_eq!(o["host"], "relay-1");
+        // Occupancy is always known — the relay holds the lobbies itself.
+        assert_eq!(o["lobbies"], 0);
+        assert_eq!(o["peers"], 0);
+        for f in [
+            "load1", "cores", "mem_free_mb", "disk_free_mb", "egress_bps",
+            "ingress_bps", "rx_drops", "rx_queue_bytes", "step_p95_ms",
+        ] {
+            assert!(!o.contains_key(f), "{f} was sent as zero rather than omitted: {v}");
+        }
+    }
+
+    /// A fully-measured relay sends every field, under the names W consumes.
+    #[test]
+    fn a_measured_relay_sends_the_shape_the_control_plane_reads() {
+        let v = box_json(&RelayBox {
+            host: "us-east-relay-1".into(),
+            load1: Some(0.91),
+            cores: Some(1),
+            mem_free_mb: Some(412),
+            disk_free_mb: Some(21000),
+            egress_bps: Some(41_000_000),
+            ingress_bps: Some(6_000_000),
+            lobbies: 12,
+            peers: 74,
+            rx_drops: Some(318),
+            rx_queue_bytes: Some(65_536),
+            step_p95_ms: Some(7.4),
+        });
+        assert_eq!(v["host"], "us-east-relay-1");
+        assert_eq!(v["cores"], 1, "one OCPU is what makes load1 0.91 alarming");
+        assert_eq!(v["egress_bps"], 41_000_000u64);
+        assert_eq!(v["rx_drops"], 318);
+        assert_eq!(v["peers"], 74);
+        assert_eq!(v["step_p95_ms"], 7.4);
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+    }
+}
+
 /// Why a control-plane call did not answer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlError {
@@ -189,8 +283,11 @@ pub trait ControlPlane: Send + Sync {
     fn pull_keys(&self, cursor: Option<&str>) -> Result<KeySnapshot, ControlError>;
     /// The cold path: ask about one key the snapshot has never carried.
     fn authorize(&self, key: &str) -> Result<KeyRow, ControlError>;
-    /// Report usage. Fire and forget from the caller's point of view.
-    fn report_usage(&self, samples: &[UsageSample]) -> Result<(), ControlError>;
+    /// Report usage, and what this box looks like while carrying it.
+    ///
+    /// Fire and forget from the caller's point of view.
+    fn report_usage(&self, box_: &RelayBox, samples: &[UsageSample])
+    -> Result<(), ControlError>;
 }
 
 /// The real one: fopull.com over HTTPS, with a per-box token.
@@ -278,7 +375,11 @@ impl ControlPlane for HttpControl {
         Self::parse_authorize(&body, key)
     }
 
-    fn report_usage(&self, samples: &[UsageSample]) -> Result<(), ControlError> {
+    fn report_usage(
+        &self,
+        box_: &RelayBox,
+        samples: &[UsageSample],
+    ) -> Result<(), ControlError> {
         let rows: Vec<_> = samples
             .iter()
             .map(|s| {
@@ -296,7 +397,11 @@ impl ControlPlane for HttpControl {
             self.agent()
                 .post(&self.url("/cloud/relay/usage"))
                 .set("Authorization", &format!("Bearer {}", self.token))
-                .send_json(ureq::json!({ "region": self.region, "samples": rows })),
+                .send_json(ureq::json!({
+                    "region": self.region,
+                    "box": box_json(box_),
+                    "samples": rows,
+                })),
         )
         .map(|_| ())
     }

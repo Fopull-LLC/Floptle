@@ -12,6 +12,7 @@
 //! us to. Managed mode is additive and opt-in, and a developer running their
 //! own relay never touches any of it.
 
+mod boxstats;
 mod control;
 mod policy;
 
