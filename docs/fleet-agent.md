@@ -28,7 +28,14 @@ One box runs one agent. The agent runs one `floptle-server` per deployment.
 3. **Reconciles the units.** Starts what should be running, stops what should
    not, and leaves alone anything already correct.
 4. **Says what happened.** `POST /status` with each deployment's state, player
-   count, uptime, restarts, p95 tick time and its last 200 journal lines.
+   count, uptime, restarts, p95 tick time, the lobby code, **where it is
+   reachable** (the port it bound, or the relay it registered with) and its last
+   200 journal lines.
+
+   Everything but the state and the journal lines comes from the server's own
+   `--status-file`, and that matters: the port a control plane *allocated* and
+   the port a server is *listening on* are not the same fact, and through a
+   relay nothing is listening on it at all.
 
 Step 4 is not just reporting. **The control plane holds a stopped deployment's
 UDP port for five minutes after the agent reports it gone**, because handing a
