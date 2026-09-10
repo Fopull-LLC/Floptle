@@ -104,6 +104,8 @@ impl Agent {
                         tick_p95_ms: None,
                         last_lines: vec![e],
                         lobby_code: None,
+                        port: None,
+                        relay: None,
                     });
                 }
             }
@@ -138,6 +140,8 @@ impl Agent {
                     tick_p95_ms: None,
                     last_lines: vec!["stopped by the control plane".into()],
                     lobby_code: None,
+                    port: None,
+                    relay: None,
                 });
             }
             if !args.dry_run {
@@ -296,6 +300,8 @@ impl Agent {
             tick_p95_ms: s.tick_p95_ms,
             last_lines: journal_tail(host, &unit::unit_name(&id)),
             lobby_code: s.lobby_code,
+            port: s.port,
+            relay: s.relay,
         }
     }
 }
@@ -514,7 +520,8 @@ mod tests {
         std::fs::create_dir_all(a.status_file("d_1").parent().unwrap()).unwrap();
         std::fs::write(
             a.status_file("d_1"),
-            "{\"peers\": 3, \"uptime_s\": 812, \"tick_p95_ms\": 4.25, \"lobby_code\": \"UE44B4\"}",
+            "{\"peers\": 3, \"uptime_s\": 812, \"tick_p95_ms\": 4.25, \"lobby_code\": \"UE44B4\", \
+             \"port\": null, \"relay\": \"us-east.relay.fopull.com:7788\"}",
         )
         .unwrap();
         let mut host = FakeHost { active: "active".into(), ..Default::default() };
@@ -525,6 +532,35 @@ mod tests {
         assert_eq!(s.uptime_s, 812, "and uptime — W trusts the reported values only once this is non-zero");
         assert_eq!(s.lobby_code.as_deref(), Some("UE44B4"), "the code is a startup fact a log tail cannot carry");
         assert_eq!(s.tick_p95_ms, Some(4.25));
+
+        // **Where it is reachable is forwarded, not merely read**
+        // (`floptle/0212`). The server has reported this since 0.86.2 and the
+        // agent dropped it on the floor, so the fix reached an operator on the
+        // box and never reached the product — which is the same shape as the
+        // lobby code before it, one layer further out.
+        assert_eq!(s.port, None, "a relayed server binds nothing, and `null` is the ANSWER");
+        assert_eq!(s.relay.as_deref(), Some("us-east.relay.fopull.com:7788"));
+
+        // …and it survives serialization, because the POST body is the only
+        // part of this the control plane ever sees. `port` is deliberately
+        // asserted ABSENT rather than zero: a control plane that read a
+        // missing port as 0 would publish `quic://host:0`.
+        let body = r.to_json();
+        let d = &body["deployments"][0];
+        assert!(d.get("port").is_none(), "a null port must not become a zero one: {d}");
+        assert_eq!(d["relay"], "us-east.relay.fopull.com:7788", "{d}");
+
+        // A directly-hosted server reports the port it really bound.
+        std::fs::write(
+            a.status_file("d_1"),
+            "{\"peers\": 0, \"uptime_s\": 5, \"port\": 30000, \"relay\": null}",
+        )
+        .unwrap();
+        let r = agent.cycle(&a, &mut host, &Desired { deployments: vec![dep("d_1")] }).unwrap();
+        assert_eq!(r.deployments[0].port, Some(30000));
+        assert_eq!(r.deployments[0].relay, None);
+        let body = r.to_json();
+        assert_eq!(body["deployments"][0]["port"], 30000);
     }
 
     /// **A deployment that leaves `/desired` is stopped AND reported gone.**

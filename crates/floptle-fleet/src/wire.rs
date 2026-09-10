@@ -200,6 +200,23 @@ pub struct DeploymentStatus {
     /// it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lobby_code: Option<String>,
+    /// **Where the server says it is reachable**, straight from its own status
+    /// file rather than derived from the port the control plane allocated.
+    ///
+    /// The control plane was building `quic://<host>:<allocated port>` for every
+    /// deployment, and for a relayed one nothing is listening there at all —
+    /// for two days that address reached a *different* game, a stray process
+    /// that happened to hold the port (`floptle/0209`). The server has known
+    /// the answer since 0.86.2 and the agent simply did not carry it, so the
+    /// fix reached an operator on the box and not the product
+    /// (`floptle/0212`).
+    ///
+    /// Both are skipped when absent, so a control plane that ignores them —
+    /// and an older server that does not report them — are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// What `floptle-server --status-file` writes, as much of it as the agent uses.
@@ -218,6 +235,14 @@ pub struct ServerStatus {
     pub tick_p95_ms: Option<f32>,
     #[serde(default)]
     pub lobby_code: Option<String>,
+    /// **Where this server is actually reachable** (`floptle/0209`, forwarded
+    /// by `floptle/0212`): the UDP port it bound, or `None` when it listens on
+    /// nothing because it went out through a relay.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The relay it registered with, or `None` when it listens directly.
+    #[serde(default)]
+    pub relay: Option<String>,
 }
 
 #[cfg(test)]
@@ -324,6 +349,8 @@ mod tests {
                 tick_p95_ms: Some(4.1),
                 last_lines: vec!["listening on 30017".into()],
                 lobby_code: Some("UQK7RM".into()),
+                port: None,
+                relay: Some("us-east.relay.fopull.com:7788".into()),
             }],
         };
         let v = r.to_json();
@@ -331,5 +358,6 @@ mod tests {
         assert_eq!(v["deployments"][0]["state"], "running");
         assert_eq!(v["deployments"][0]["peers"], 3);
         assert_eq!(v["deployments"][0]["lobby_code"], "UQK7RM");
+        assert_eq!(v["deployments"][0]["relay"], "us-east.relay.fopull.com:7788");
     }
 }
