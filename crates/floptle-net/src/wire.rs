@@ -368,9 +368,94 @@ pub enum Msg {
     Pong { id: u32 },
 }
 
+/// **What each kind of message is costing on the wire** (`floptle/0218`).
+///
+/// ⚠ **A real match measured 234 kbps per player — 487 bytes per frame at
+/// 60 Hz.** A rollback fighter should be sending *inputs*: a handful of bytes,
+/// and even generous redundancy does not reach five hundred. So either state is
+/// going out where inputs should, or input history is being resent far more
+/// than it needs to be — and nothing in the engine could say which, because
+/// traffic was only ever counted as one total.
+///
+/// A thread-local rather than a field on the session: messages are encoded at a
+/// dozen call sites and threading a counter to each is a dozen chances to miss
+/// one — which is how you get a counter that under-reports and is believed.
+/// The session tick is one thread, so this sees all of its traffic and none of
+/// anybody else's.
+mod traffic {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static SENT: RefCell<HashMap<&'static str, (u64, u64)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Record one encoded message: its kind and its size.
+    pub fn record(kind: &'static str, bytes: usize) {
+        SENT.with(|s| {
+            let mut m = s.borrow_mut();
+            let e = m.entry(kind).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += bytes as u64;
+        });
+    }
+
+    /// `(kind, count, bytes)` for everything encoded on this thread, largest
+    /// first, and reset if asked.
+    pub fn drain(reset: bool) -> Vec<(&'static str, u64, u64)> {
+        SENT.with(|s| {
+            let mut m = s.borrow_mut();
+            let mut out: Vec<_> = m.iter().map(|(k, (c, b))| (*k, *c, *b)).collect();
+            out.sort_by_key(|r| std::cmp::Reverse(r.2));
+            if reset {
+                m.clear();
+            }
+            out
+        })
+    }
+}
+
+pub use traffic::drain as traffic_since_last_read;
+
 impl Msg {
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("wire messages always encode")
+        let bytes = postcard::to_allocvec(self).expect("wire messages always encode");
+        traffic::record(self.kind(), bytes.len());
+        bytes
+    }
+
+    /// This message's kind, as a stable name for the traffic breakdown.
+    ///
+    /// Stable because it is read by a tool and printed for a person; renaming
+    /// one silently renames a row somebody is comparing across builds.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Msg::Hello { .. } => "Hello",
+            Msg::Welcome { .. } => "Welcome",
+            Msg::Refused { .. } => "Refused",
+            Msg::Kicked { .. } => "Kicked",
+            Msg::Scene { .. } => "Scene",
+            Msg::Spawn { .. } => "Spawn",
+            Msg::Despawn { .. } => "Despawn",
+            Msg::SetOwner { .. } => "SetOwner",
+            Msg::Snapshot { .. } => "Snapshot",
+            Msg::Input { .. } => "Input",
+            Msg::Rpc { .. } => "Rpc",
+            Msg::PeerJoined { .. } => "PeerJoined",
+            Msg::PeerLeft { .. } => "PeerLeft",
+            Msg::Bye => "Bye",
+            Msg::RollbackStart { .. } => "RollbackStart",
+            Msg::Inputs { .. } => "Inputs",
+            Msg::StateHash { .. } => "StateHash",
+            Msg::Desync { .. } => "Desync",
+            Msg::StateDetail { .. } => "StateDetail",
+            Msg::InputAck { .. } => "InputAck",
+            Msg::VoiceUp { .. } => "VoiceUp",
+            Msg::Voice { .. } => "Voice",
+            Msg::Ping { .. } => "Ping",
+            Msg::Pong { .. } => "Pong",
+        }
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Msg> {

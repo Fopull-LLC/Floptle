@@ -2781,6 +2781,17 @@ struct Editor {
     net_join_code: String,
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,
+    /// **The lobby code this server should reclaim rather than be given a new
+    /// one** (`floptle/0217`). Set by `floptle serve --lobby-code` or
+    /// `FLOPTLE_LOBBY_CODE`; `None` for every player-hosted session, which is
+    /// every session in the editor.
+    ///
+    /// It survives a re-host, so a relay restart returns the same six
+    /// characters rather than stranding everybody holding them.
+    pub(crate) net_reclaim_code: Option<String>,
+    /// `net.join(addr, {timeout = …})` — how long the NEXT join waits on a
+    /// waking server. Applied when the client session is created.
+    pub(crate) net_join_timeout: Option<f32>,
     /// The relay address this session is actually hosted through, when it is.
     ///
     /// Distinct from `net_relay_addr`, which is the 🌐 panel's text buffer. It

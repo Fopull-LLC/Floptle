@@ -102,6 +102,7 @@
     "news.md": "reaches the site through the releases manifest's `news`, not as a docs page",
     "releases/": "every version's notes already reach the site through the releases manifest, which carries them in full; re-publishing them as docs pages would be the same text at a second URL",
     "adr/": "the two architecture decision records the shipped code cites by name, published so `// ADR-0028` in a source file resolves to something. Not on the site: two of the twenty-eight decisions on record would read as an incomplete set, and a docs site is a finished surface",
+    "relay-bench.md": "an operator's tool for sizing a region relay — how many players its link carries, and where packet loss starts. Same audience as fleet-agent.md: somebody RUNNING the service, not somebody making a game with it. A developer never needs it, and publishing a load-generator's manual alongside the tutorials would only invite people to point it at our relays",
     "fleet-agent.md": "an operator's runbook for a Floptle Cloud region box — minting a box token, the systemd unit, what to read when a deployment will not start. It helps somebody RUN the service, not use the engine, and the audience is Fopull LLC plus anyone self-hosting a region; the page a game developer wants is multiplayer.md, which is published",
     "subsystems/README.md": "folder index — the section heading covers it",
     "tutorials/README.md": "folder index — the section heading covers it",

@@ -85,6 +85,10 @@ pub struct ServerArgs {
     pub scene: Option<String>,
     pub port: Option<u16>,
     pub relay: Option<String>,
+    /// **The lobby code to reclaim** (`floptle/0217`), from `--lobby-code` or
+    /// `FLOPTLE_LOBBY_CODE`. `None` means "give me a fresh one", which is every
+    /// self-hosted server and every player.
+    pub lobby_code: Option<String>,
     pub tick_hz: f32,
     pub interest: Option<f64>,
     pub budget: Option<u32>,
@@ -124,6 +128,7 @@ impl ServerArgs {
             scene: None,
             port: None,
             relay: None,
+            lobby_code: None,
             tick_hz: 60.0,
             interest: None,
             budget: None,
@@ -192,6 +197,7 @@ impl ServerArgs {
                             .map_err(|_| "--max-players must be a number")?,
                     )
                 }
+                "--lobby-code" => self.lobby_code = Some(need(val, "--lobby-code")?.to_uppercase()),
                 "--status-file" => self.status_file = Some(PathBuf::from(need(val, "--status-file")?)),
                 "--game-key" => self.game_key = Some(need(val, "--game-key")?),
                 other => return Err(format!("unknown flag {other}")),
@@ -204,6 +210,11 @@ impl ServerArgs {
         // The key a supervisor could only pass safely through the environment.
         self.game_key =
             resolve_game_key(self.game_key.take(), std::env::var(GAME_KEY_ENV).ok());
+        // The code a supervisor hands down, same shape and same reasoning as
+        // the key above: `floptle-fleet` sets it from `/desired`, and an
+        // explicit flag still wins.
+        self.lobby_code =
+            resolve_lobby_code(self.lobby_code.take(), std::env::var(LOBBY_CODE_ENV).ok());
         Ok(())
     }
 }
@@ -228,6 +239,30 @@ pub(crate) fn resolve_game_key(explicit: Option<String>, from_env: Option<String
 
 /// The environment variable a supervisor passes the game key in.
 pub(crate) const GAME_KEY_ENV: &str = "FLOPTLE_GAME_KEY";
+
+/// **Which lobby code this process should reclaim** (`floptle/0217`), given the
+/// command line and the environment.
+///
+/// ⚠ **A blank value is no code, not an empty code.** The fleet agent writes
+/// `FLOPTLE_LOBBY_CODE` only when `/desired` carries one, but a hand-written
+/// unit or a shell wrapper can easily export it as `""` — and an empty string
+/// reaching the relay would be a claim on a code that cannot exist, answered by
+/// minting a fresh one after a pointless round trip.
+///
+/// Upper-cased because lobby codes are, and a developer typing a lower-case one
+/// into a unit file should not silently fail to reclaim.
+pub(crate) fn resolve_lobby_code(
+    explicit: Option<String>,
+    from_env: Option<String>,
+) -> Option<String> {
+    explicit
+        .or(from_env)
+        .map(|c| c.trim().to_uppercase())
+        .filter(|c| !c.is_empty())
+}
+
+/// The environment variable a supervisor passes the lobby code in.
+pub(crate) const LOBBY_CODE_ENV: &str = "FLOPTLE_LOBBY_CODE";
 
 /// **Where a running server can actually be reached** (`floptle/0209`).
 ///
@@ -314,6 +349,9 @@ pub fn run(args: ServerArgs) -> i32 {
              relay, by lobby code, and has no socket of its own"
         );
     }
+    // Before hosting, not after: the code has to ride out with the host
+    // request itself.
+    ed.net_reclaim_code = args.lobby_code.clone();
     match (&args.relay, args.port) {
         (Some(addr), _) => ed.net_host_relay(addr),
         (None, Some(port)) => ed.net_host_quic(port),
@@ -831,6 +869,7 @@ mod tests {
             scene: None,
             port: None,
             relay: None,
+            lobby_code: None,
             tick_hz: 60.0,
             interest: None,
             budget: None,

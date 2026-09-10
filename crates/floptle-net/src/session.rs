@@ -32,6 +32,16 @@ pub enum NetRole {
     Client,
 }
 
+/// **How long a joiner waits on a waking server** before calling it refused
+/// (`floptle/0217`).
+///
+/// W targets under thirty seconds from the wake request to a server answering,
+/// so ninety is three times the expected worst case — long enough that a slow
+/// box is not mistaken for a broken one, short enough that a player is not left
+/// staring at a promise nothing is going to keep. `net.join{timeout = …}`
+/// overrides it.
+pub const DEFAULT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Session happenings for the game layer (`net.on(...)` in Lua).
 #[derive(Clone, Debug, PartialEq)]
 pub enum JoinState {
@@ -231,6 +241,12 @@ pub struct NetSession {
     /// Client: how the join attempt is going. `net.joinState()` reads it, so a
     /// lobby screen can say "no such lobby" instead of counting to ten.
     join_state: JoinState,
+    /// When this client first heard that a server was waking (`floptle/0217`),
+    /// for the deadline below. `None` for a join that never waited on one.
+    starting_since: Option<floptle_core::time::Instant>,
+    /// How long to wait on a waking server before calling it refused.
+    /// `net.join{timeout = …}`; see [`DEFAULT_JOIN_TIMEOUT`].
+    join_timeout: std::time::Duration,
     /// Interest management (`docs/multiplayer.md` §5.2). Off by default.
     interest: crate::interest::InterestConfig,
     /// Per-client relevant sets and priority accumulators. Empty and unused
@@ -625,6 +641,8 @@ impl NetSession {
             last_sent: HashMap::new(),
             last_synced: HashMap::new(),
             join_state: JoinState::Connecting,
+            starting_since: None,
+            join_timeout: DEFAULT_JOIN_TIMEOUT,
             interest: crate::interest::InterestConfig::default(),
             interest_sets: crate::interest::InterestSets::default(),
             interest_stats: HashMap::new(),
@@ -1331,6 +1349,14 @@ impl NetSession {
     /// Worth preferring over [`Self::role`] on a lobby screen: joining does not
     /// block, so role reads `Client` from the frame `net.join` was called,
     /// whether or not that lobby exists.
+    /// How long to wait on a **waking** server before giving up on it.
+    ///
+    /// Only the wake is bounded by this — an ordinary join is answered in a
+    /// relay round trip and never reaches it.
+    pub fn set_join_timeout(&mut self, t: std::time::Duration) {
+        self.join_timeout = t;
+    }
+
     pub fn join_state(&self) -> &JoinState {
         &self.join_state
     }
@@ -2764,7 +2790,24 @@ impl NetSession {
         if let Some(detail) = self.transport.take_join_progress()
             && matches!(self.join_state, JoinState::Connecting | JoinState::Starting(_))
         {
+            // The clock starts at the FIRST word of a wake, not at each one, or
+            // a relay that keeps saying "starting" would push the deadline back
+            // forever and the timeout would never fire.
+            self.starting_since.get_or_insert_with(floptle_core::time::Instant::now);
             self.join_state = JoinState::Starting(detail);
+        }
+        // ⚠ **A wake that never lands has to end somewhere.** Without this the
+        // joiner sits on "about 30 seconds" indefinitely for a server that is
+        // never coming — a box that is full, a deployment that fails to start —
+        // which is the hang this whole state exists to replace. Past the
+        // deadline it becomes what it actually is: never.
+        if let Some(since) = self.starting_since
+            && matches!(self.join_state, JoinState::Starting(_))
+            && since.elapsed() >= self.join_timeout
+        {
+            self.starting_since = None;
+            self.join_state = JoinState::Refused("took too long to start".into());
+            self.connected = false;
         }
         for inc in self.transport.poll() {
             match inc {
@@ -3317,6 +3360,71 @@ mod tests {
         assert!(
             matches!(s.join_state(), JoinState::Refused(_)),
             "a refusal was reopened by a stray wake notice"
+        );
+    }
+
+    /// ⚠ **A wake that never lands becomes a refusal, not a permanent wait**
+    /// (`floptle/0217`).
+    ///
+    /// Without a deadline a joiner sits on "about 30 seconds" forever for a
+    /// server that is never coming — a box that is full, a deployment that
+    /// fails to start. That is the hang this state was introduced to replace,
+    /// reappearing with friendlier wording, which is worse than the original
+    /// because it looks like it is working.
+    #[test]
+    fn a_server_that_never_wakes_ends_as_refused_rather_than_waiting_forever() {
+        let mut s = NetSession::client(
+            Box::new(WakingRelay { progress: Some("about 30 seconds".into()) }),
+            0,
+        );
+        let mut w = World::default();
+        s.set_join_timeout(std::time::Duration::from_millis(40));
+        s.tick_client(&mut w);
+        assert!(matches!(s.join_state(), JoinState::Starting(_)), "it should wait first");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        s.tick_client(&mut w);
+        match s.join_state() {
+            JoinState::Refused(why) => assert!(
+                why.contains("too long"),
+                "a game needs to be able to say what happened, got {why:?}"
+            ),
+            other => panic!("a wake that never landed left the player waiting: {other:?}"),
+        }
+    }
+
+    /// ⚠ **The deadline runs from the FIRST word of a wake, not the latest.**
+    ///
+    /// The relay repeats `starting` on every retry — every two seconds. If each
+    /// one reset the clock the timeout could never fire at all, and the guard
+    /// above would pass while protecting nothing.
+    #[test]
+    fn a_repeated_wake_notice_does_not_push_the_deadline_back_forever() {
+        struct Always;
+        impl Transport for Always {
+            fn send(&mut self, _p: PeerId, _c: Channel, _b: &[u8]) {}
+            fn poll(&mut self) -> Vec<Incoming> {
+                Vec::new()
+            }
+            fn stats(&self, _p: PeerId) -> LinkStats {
+                LinkStats::default()
+            }
+            // A fresh notice every single tick, as a real relay sends.
+            fn take_join_progress(&mut self) -> Option<String> {
+                Some("about 30 seconds".into())
+            }
+        }
+        let mut s = NetSession::client(Box::new(Always), 0);
+        let mut w = World::default();
+        s.set_join_timeout(std::time::Duration::from_millis(40));
+        for _ in 0..8 {
+            s.tick_client(&mut w);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        s.tick_client(&mut w);
+        assert!(
+            matches!(s.join_state(), JoinState::Refused(_)),
+            "each notice reset the clock, so the deadline can never fire"
         );
     }
 

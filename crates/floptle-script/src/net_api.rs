@@ -91,7 +91,16 @@ pub enum NetCmd {
     /// a new lobby.
     SetInputDelay { ticks: u8 },
     /// `net.join(addr)` — join a session (2b: `local://` only; real transports 2e).
-    Join { addr: String },
+    Join {
+        addr: String,
+        /// `net.join(addr, {timeout = seconds})` — how long to wait on a server
+        /// that is **waking up** before calling the join refused
+        /// (`floptle/0217`). `None` uses the engine default of 90 s.
+        ///
+        /// It bounds only the wake: an ordinary join is answered in a relay
+        /// round trip and never reaches it.
+        timeout_s: Option<f32>,
+    },
     /// `net.leave()` — tear the session down.
     Leave,
     /// `net.rpc(name, args, { to = peer, withInput = bool })` — a remote call
@@ -680,10 +689,29 @@ pub(crate) fn install_net_api(
         let n = net.clone();
         t.set(
             "join",
-            lua.create_function(move |_, addr: String| {
-                n.cmds.borrow_mut().push(NetCmd::Join { addr });
-                Ok(())
-            })?,
+            lua.create_function(
+                move |_, (addr, opts): (String, Option<mlua::Table>)| {
+                    // Read BY NAME and strictly: a present-but-wrong `timeout`
+                    // raises here rather than silently becoming the default,
+                    // because a lobby screen that waits ninety seconds when the
+                    // developer asked for ten looks like the engine ignoring
+                    // them — which it would be.
+                    let timeout_s = match opts {
+                        Some(t) => match t.get::<Option<f32>>("timeout")? {
+                            Some(v) if v > 0.0 => Some(v),
+                            Some(v) => {
+                                return Err(mlua::Error::RuntimeError(format!(
+                                    "net.join: timeout must be a positive number of seconds, got {v}"
+                                )));
+                            }
+                            None => None,
+                        },
+                        None => None,
+                    };
+                    n.cmds.borrow_mut().push(NetCmd::Join { addr, timeout_s });
+                    Ok(())
+                },
+            )?,
         )?;
     }
     {
@@ -752,6 +780,35 @@ pub(crate) fn install_net_api(
             lua.create_function(move |_, ()| {
                 let st = n.state.borrow();
                 Ok((st.join_state.to_string(), st.join_error.clone()))
+            })?,
+        )?;
+    }
+    // net.traffic() — what this peer has SENT, broken down by message kind
+    // (`floptle/0218`).
+    //
+    // ⚠ A real match measured 487 bytes per frame per player. A rollback
+    // fighter should be sending inputs — a handful of bytes — so either state
+    // is going out where inputs should, or history is being resent far more
+    // than it needs to be. This is the one number that says which.
+    //
+    // Returns a list of {kind, count, bytes}, biggest first, and RESETS, so
+    // successive calls measure the interval between them rather than all of
+    // history. Call it once a second and print the top row.
+    {
+        t.set(
+            "traffic",
+            lua.create_function(move |lua, ()| {
+                let rows = lua.create_table()?;
+                for (i, (kind, count, bytes)) in
+                    floptle_net::traffic_since_last_read(true).into_iter().enumerate()
+                {
+                    let r = lua.create_table()?;
+                    r.set("kind", kind)?;
+                    r.set("count", count)?;
+                    r.set("bytes", bytes)?;
+                    rows.set(i + 1, r)?;
+                }
+                Ok(rows)
             })?,
         )?;
     }
