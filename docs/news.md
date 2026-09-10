@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.87.0 — "Wide Awake".** A player joining a server that is still starting up
+can now be told so, instead of being told the game does not exist.
+`net.joinState()` has a new answer, `"starting"`, with words you can put on
+screen ("about 20 seconds") rather than a status word you have to translate — and
+games already published keep behaving exactly as they do today, no recompile
+needed. Nothing sends it yet; sleeping a server and waking it on demand is still
+being designed, and this is the half your lobby screen is written against,
+shipped early so it is already right when the rest lands. Also: two `floptle
+serve` flags that were always real and never written down (`--status-file` and
+`--max-players`), and a correction — `--budget` is a bandwidth ceiling in bytes
+per second, not a cap on entities per tick, so check the number if you set it
+from the old description.
+
 **v0.86.3** — **the fix before it, finished.** A dedicated server learned to
 report where it is actually reachable in 0.86.2, because one hosted through a
 relay listens on no port at all while the address published for it claimed
