@@ -293,6 +293,13 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: "which scene a `server` bundle hosts (default: the project's entry scene)",
             },
+            Arg {
+                name: "--label",
+                value: Value::Text,
+                required: false,
+                help: "what to call a `server` bundle on its game's page — beside its checksum, \
+                       never instead of it",
+            },
         ],
         needs_gpu: false,
         writes_project: false,
@@ -1340,12 +1347,14 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let platform = text(a, "PLATFORM").expect("required");
             let title = text(a, "title").unwrap_or_else(|| default_title(&project));
             let scene = text(a, "scene");
+            let label = text(a, "label");
             Outcome::Exit(crate::export::headless_export(
                 &project,
                 &out,
                 &platform,
                 &title,
                 scene.as_deref(),
+                label.as_deref(),
             ))
         }
         Some(("migrate", a)) => {

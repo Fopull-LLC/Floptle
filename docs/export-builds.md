@@ -240,7 +240,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle lint [PROJECT] [--vec3] [--json]    # what to change before switching vec3
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
 [x] floptle api [QUERY] [--json]
-[x] floptle export <PROJ> <OUT> <PLATFORM|server> [--title T] [--scene S]
+[x] floptle export <PROJ> <OUT> <PLATFORM|server> [--title T] [--scene S] [--label L]
                                      # server: name OUT *.tar.gz for the archive
 [x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]

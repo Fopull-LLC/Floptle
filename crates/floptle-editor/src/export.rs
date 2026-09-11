@@ -1042,6 +1042,7 @@ pub(crate) fn export_server(
     out: &Path,
     title: &str,
     scene: Option<&str>,
+    label: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
     // **EVERY REFUSAL BEFORE ANYTHING IS CREATED.** `prepare_out` makes the
     // output directory, so validating after it leaves a bundle-shaped folder
@@ -1139,6 +1140,17 @@ pub(crate) fn export_server(
         .strip_prefix(&proj)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| want.clone());
+    // **When it was MADE, and what the developer called it** (`floptle/0233`).
+    // The control plane knows when the bytes arrived; it cannot know when the
+    // build was exported, and a Tuesday bundle uploaded on Friday reads as
+    // Friday's work — which is how somebody deploys a build they thought they
+    // had replaced. The label is decoration beside the sha, never an
+    // identifier, and W renders it escaped and capped.
+    let label_line = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| format!("    label: {l:?},\n"))
+        .unwrap_or_default();
     let manifest = format!(
         "(\n    \
          // A dedicated-server bundle. The box runs its OWN `floptle serve` of\n    \
@@ -1147,9 +1159,12 @@ pub(crate) fn export_server(
          project: \"assets\",\n    \
          scene: {rel:?},\n    \
          engine_version: {engine:?},\n    \
-         game: {:?},\n\
+         game: {:?},\n    \
+         exported_at: {:?},\n\
+         {label_line}\
          )\n",
         cfg.cloud.as_ref().map(|c| c.game.clone()).unwrap_or_default(),
+        rfc3339_utc_now(),
     );
     floptle_vfs::write(out_c.join("floptle-server.ron"), manifest)
         .map_err(|e| format!("write manifest: {e}"))?;
@@ -1438,6 +1453,36 @@ fn web_template_from_checkout() -> Option<PathBuf> {
     floptle_vfs::is_file(&marker).then_some(marker)
 }
 
+/// Now, as `2026-09-11T14:03:27Z` — RFC 3339, UTC, whole seconds. Hand-rolled
+/// (Howard Hinnant's civil-from-days) because nothing in the workspace formats
+/// a date and a calendar dependency for one line is not worth its build.
+pub(crate) fn rfc3339_utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    rfc3339_utc(secs)
+}
+
+pub(crate) fn rfc3339_utc(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // days → civil date (proleptic Gregorian), valid for every date that has
+    // a Unix timestamp.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
 /// The PLATFORM that means "a dedicated-server bundle" rather than a build for
 /// a machine — see [`export_server`], which is what it dispatches to.
 #[cfg(feature = "editor-ui")]
@@ -1457,11 +1502,12 @@ pub(crate) fn headless_export(
     platform: &str,
     title: &str,
     scene: Option<&str>,
+    label: Option<&str>,
 ) -> i32 {
     // A server bundle is not a platform build and shares none of the machinery
     // below it: no template to resolve, no binary to copy, no cross toolchain.
     if platform == SERVER_PLATFORM {
-        return match export_server(project, out, title, scene) {
+        return match export_server(project, out, title, scene, label) {
             Ok((msg, _)) => {
                 floptle_say::say!("{msg}");
                 0
@@ -1925,7 +1971,7 @@ mod tests {
         floptle_vfs::write(out.join("floptle-game.ron"), "(title: \"Old\", project: \"assets\")")
             .unwrap();
 
-        export_server(&proj, &out, "Arena", None).expect("bundles");
+        export_server(&proj, &out, "Arena", None, None).expect("bundles");
         assert!(
             !floptle_vfs::exists(out.join("floptle-game.ron")),
             "the previous export's manifest would be uploaded to a server that ignores it"
@@ -1945,9 +1991,59 @@ mod tests {
         floptle_vfs::create_dir_all(out2.join("notes")).unwrap();
         floptle_vfs::write(out2.join("notes/deploy.txt"), "not ours").unwrap();
         floptle_vfs::write(out2.join("README.md"), "not ours either").unwrap();
-        export_server(&proj, &out2, "Arena", None).expect("bundles");
+        export_server(&proj, &out2, "Arena", None, None).expect("bundles");
         assert!(floptle_vfs::is_file(out2.join("notes/deploy.txt")), "a stranger's folder");
         assert!(floptle_vfs::is_file(out2.join("README.md")), "a stranger's file");
+    }
+
+    /// **The manifest says when the bundle was made and what it is called**
+    /// (`floptle/0233`). The control plane knows when the bytes arrived and
+    /// cannot know when the build was exported — a Tuesday bundle uploaded on
+    /// Friday reads as Friday's work, which is how somebody deploys a build
+    /// they thought they had replaced. The label is optional and absent when
+    /// not given or blank, so a reader with the old shape is untouched.
+    #[test]
+    fn the_manifest_carries_when_it_was_exported_and_what_it_is_called() {
+        let proj = temp("srv-label");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), SERVABLE_PROJECT).unwrap();
+        floptle_vfs::write(
+            proj.join("scenes/first.ron"),
+            "(nodes: [(name: \"Player\", net: Some((predicted: true)))])",
+        )
+        .unwrap();
+        let out = temp("srv-label-out");
+        export_server(&proj, &out, "Arena", None, Some("  lobby v3  ")).expect("bundles");
+        let m = floptle_vfs::read_to_string(out.join("floptle-server.ron")).unwrap();
+        assert!(m.contains("label: \"lobby v3\","), "trimmed and quoted:\n{m}");
+        let at = m
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("exported_at: "))
+            .unwrap_or_else(|| panic!("no exported_at:\n{m}"));
+        // `"2026-09-11T14:03:27Z",` — RFC 3339, UTC, whole seconds.
+        let at = at.trim_end_matches(',').trim_matches('"');
+        assert_eq!(at.len(), 20, "{at}");
+        assert!(at.ends_with('Z') && at.as_bytes()[10] == b'T', "{at}");
+        assert!(at.starts_with("20"), "a date in this century: {at}");
+        // The manifest still parses as RON with the new fields in it.
+        let v: ron::Value = ron::from_str(&m).expect("valid RON");
+        let _ = v;
+
+        let out2 = temp("srv-nolabel-out");
+        export_server(&proj, &out2, "Arena", None, Some("   ")).expect("bundles");
+        let m = floptle_vfs::read_to_string(out2.join("floptle-server.ron")).unwrap();
+        assert!(!m.contains("label:"), "a blank label is no label:\n{m}");
+        assert!(m.contains("exported_at:"));
+    }
+
+    /// The date formatter, against known instants — the epoch, a leap day, and
+    /// the end of a century year that is not a leap year.
+    #[test]
+    fn rfc3339_is_right_on_the_dates_that_trip_a_calendar() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(4_102_444_799), "2099-12-31T23:59:59Z");
+        assert_eq!(rfc3339_utc(1_788_995_007), "2026-09-09T23:03:27Z");
     }
 
     /// A project a server can host, pinned to an engine a box can fetch.
@@ -1984,7 +2080,7 @@ mod tests {
             )
             .unwrap();
             let out = temp(&format!("srv-pin-out-{pinned}"));
-            let e = export_server(&proj, &out, "Arena", None).expect_err(why);
+            let e = export_server(&proj, &out, "Arena", None, None).expect_err(why);
             assert!(e.contains(pinned), "{why}: names the version: {e}");
             assert!(
                 e.contains(&format!("floptle-server-{pinned}-linux-aarch64")),
@@ -2027,7 +2123,7 @@ mod tests {
             std::fs::set_permissions(proj.join(f), std::fs::Permissions::from_mode(mode)).unwrap();
         }
         let out = temp("srv-modes-out");
-        export_server(&proj, &out, "Arena", None).expect("bundles");
+        export_server(&proj, &out, "Arena", None, None).expect("bundles");
         let mode = |rel: &str| std::fs::metadata(out.join("assets").join(rel)).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode("scenes/first.ron"), 0o644, "a user that is not the developer can read the scene");
         assert_eq!(mode("scripts/gun.lua"), 0o644, "and the script");
@@ -2056,7 +2152,7 @@ mod tests {
         .unwrap();
 
         let out = temp("srv-tgz-out").join("forgery-server.tar.gz");
-        let (msg, _) = export_server(&proj, &out, "Arena", None).expect("bundles");
+        let (msg, _) = export_server(&proj, &out, "Arena", None, None).expect("bundles");
         assert!(floptle_vfs::is_file(&out), "the archive itself, not a folder: {msg}");
         assert!(
             !floptle_vfs::exists(out.with_file_name(".forgery-server.tar.gz-staging")),
@@ -2075,7 +2171,7 @@ mod tests {
 
         // A folder is still a folder — the old spelling keeps working.
         let dir_out = temp("srv-tgz-dir");
-        export_server(&proj, &dir_out, "Arena", None).expect("bundles");
+        export_server(&proj, &dir_out, "Arena", None, None).expect("bundles");
         assert!(floptle_vfs::is_file(dir_out.join("floptle-server.ron")));
     }
 
@@ -2091,7 +2187,7 @@ mod tests {
         floptle_vfs::create_dir_all(&proj).unwrap();
         floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
         let out = temp("srv-no-entry-out");
-        let e = export_server(&proj, &out, "Arena", None).expect_err("nothing to host");
+        let e = export_server(&proj, &out, "Arena", None, None).expect_err("nothing to host");
         assert!(e.contains("entry scene"), "{e}");
         assert!(!e.contains("   "), "the message has a hole in it: {e:?}");
         assert!(

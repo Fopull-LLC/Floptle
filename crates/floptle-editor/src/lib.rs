@@ -1561,6 +1561,7 @@ pub fn run() {
                     plat,
                     &title,
                     None,
+                    None,
                 ));
             }
             "--play" => player_mode = true,
