@@ -1,0 +1,12 @@
+[package]
+name = "floptle-brand"
+description = "The Floptle logo and app icons, embedded, and the desktop integration that shows them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+png = "0.18"

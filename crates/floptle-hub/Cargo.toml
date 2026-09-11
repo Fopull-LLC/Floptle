@@ -31,6 +31,7 @@ env_logger = { workspace = true }
 floptle-account = { path = "../floptle-account" }
 floptle-scene = { path = "../floptle-scene" }
 floptle-dist = { path = "../floptle-dist" }
+floptle-brand = { path = "../floptle-brand" }
 
 [dev-dependencies]
 flate2 = "1"
@@ -41,3 +42,7 @@ tempfile = "3"
 # `#[ignore]`d snapshot tests, which need a GPU and so never run in CI.
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 image = { workspace = true }
+
+# The Windows executable icon (`build.rs`); a no-op build script elsewhere.
+[build-dependencies]
+winresource = "0.1"

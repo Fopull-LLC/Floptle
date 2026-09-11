@@ -1453,6 +1453,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "floptle-brand"
+version = "0.90.0"
+dependencies = [
+ "png",
+]
+
+[[package]]
 name = "floptle-convert"
 version = "0.90.0"
 dependencies = [
@@ -1504,6 +1511,7 @@ dependencies = [
  "floptle-anim",
  "floptle-assets",
  "floptle-audio",
+ "floptle-brand",
  "floptle-convert",
  "floptle-core",
  "floptle-dist",
@@ -1551,6 +1559,7 @@ dependencies = [
  "web-sys",
  "wgpu",
  "winit",
+ "winresource",
 ]
 
 [[package]]
@@ -1591,6 +1600,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "floptle-account",
+ "floptle-brand",
  "floptle-dist",
  "floptle-scene",
  "image",
@@ -1601,6 +1611,7 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+ "winresource",
 ]
 
 [[package]]
@@ -1695,6 +1706,7 @@ name = "floptle-player"
 version = "0.90.0"
 dependencies = [
  "floptle-editor",
+ "winresource",
 ]
 
 [[package]]
@@ -5021,10 +5033,12 @@ version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -5057,6 +5071,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -5995,6 +6015,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

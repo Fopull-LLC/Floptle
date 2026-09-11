@@ -1368,6 +1368,13 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The window icon, decoded from the embedded brand set. `None` only if the
+/// committed PNG failed to decode, which the brand crate's own test rules out.
+fn brand_window_icon() -> Option<winit::window::Icon> {
+    let i = floptle_brand::Icon::at(64)?;
+    winit::window::Icon::from_rgba(i.rgba, i.width, i.height).ok()
+}
+
 /// The winit event loop — the default backend, except that **when Steam is
 /// live on a Wayland session we force X11 (XWayland)**.
 ///
@@ -3799,7 +3806,25 @@ impl ApplicationHandler for Editor {
         let mut attrs = Window::default_attributes()
             .with_title(&title)
             .with_inner_size(LogicalSize::new(place.width, place.height))
-            .with_maximized(place.maximized);
+            .with_maximized(place.maximized)
+            // The app icon, for the taskbar and title bar where the window
+            // system takes one (Windows, X11). Wayland does not: it shows the
+            // icon of the `.desktop` entry named by the window's app_id, which
+            // is what `with_name` below is for — see `floptle_brand`.
+            .with_window_icon(brand_window_icon());
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+                attrs,
+                floptle_brand::APP_ID,
+                floptle_brand::APP_ID,
+            );
+            attrs = winit::platform::x11::WindowAttributesExtX11::with_name(
+                attrs,
+                floptle_brand::APP_ID,
+                floptle_brand::APP_ID,
+            );
+        }
         if let (Some(x), Some(y)) = (place.x, place.y) {
             attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
         }

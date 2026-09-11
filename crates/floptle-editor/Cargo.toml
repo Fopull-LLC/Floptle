@@ -151,6 +151,7 @@ ureq = { workspace = true, optional = true }
 image = { workspace = true }
 
 winit = { workspace = true }
+floptle-brand = { path = "../floptle-brand" }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
@@ -212,3 +213,7 @@ tar = "0.4"
 image = { workspace = true }
 # `examples/vfx_shot.rs` writes contact sheets of rendered effects.
 png = "0.18"
+
+# The Windows executable icon (`build.rs`); a no-op build script elsewhere.
+[build-dependencies]
+winresource = "0.1"
