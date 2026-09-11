@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.91.0 — "In The Picture".** A relay asks the kernel for an 8 MiB socket
+buffer and prints what it was given, naming the sysctl to raise when it was
+clamped — the default-sized inbox was dropping packets at a hundred players on
+a link under one percent used. The relay bench's host fans out to its lobby
+like a game host does, prints no ceiling off a step that lost packets or
+stalled its senders, and calls bytes bytes. `floptle shot` draws every UI layer
+the way the Game view does, so a menu screen can be photographed from a
+terminal (`--after` for one a script builds, `--no-ui` for the world alone),
+and `node:uiRect()` under `floptle run` answers `nil` rather than four zeros.
+`node:material("Head#2"):setShaderParam(...)` / `:setShaderTexture(...)` drive
+one part's shader knobs from a script, and read back with `:shaderParam` /
+`:shaderTexture`.
+
 **v0.90.1 — "A Face".** The Floptle logo is the app icon: on the editor's, the
 player's and the Hub's windows, on the Windows executables, in the Hub's title
 bar and About page, and — on Linux — in your application menu, where the Hub
