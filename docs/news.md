@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.89.0-rc2** (beta channel) adds the rest: `account.*` from a game reaches
+only the player's endpoints, a project that arrives with packages inside it asks
+before they get their permissions, every relay — self-hosted too — refuses the
+shapes an abuser makes (per-address rates, per-connection budgets, idle lobbies),
+a host checks what a client sends, a managed relay is verified by name, and the
+last LuaJIT build is gone.
+
 **v0.89.0-rc1 — "Stay In Your Lane"** (beta channel). A script's paths stay
 inside its project: an absolute path or a `..` that would leave it resolves to
 nothing, and the Console says which rule refused it. A loop without an exit stops
