@@ -659,6 +659,15 @@ lobby code is the secret and the transport is not. Until the managed relay's
 certificate is live, a connection that cannot verify it goes ahead on the older
 model and says so once in the Console; a later release refuses instead.
 
+The relay's side of that is two flags: `floptle-relay --tls-cert fullchain.pem
+--tls-key privkey.pem` presents the chain in those files instead of a
+self-signed one, and **watches them** — a renewal written to the same paths
+(which is what certbot does) is presented to new connections within ten seconds,
+and no connection already up is touched, so a certificate rolling over ends no
+lobby. A renewal that will not load is said once on the relay's log and the
+previous certificate stays. `floptle-relay-bench --verify` checks the result
+from outside (see [Measuring a relay](relay-bench.md)).
+
 ### What it costs you if it is down
 
 Nothing that is already running, and nothing about joining. The relay decides

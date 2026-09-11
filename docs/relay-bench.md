@@ -73,6 +73,34 @@ times a second.
 | `--link` | 480 | the relay's link in Mbps, for the implied ceiling |
 | `--key` | — | a game key. **A managed relay refuses a keyless host**, so a run against one needs this |
 | `--unreliable` | off | send on the unreliable channel instead |
+| `--verify` | off | drive nothing; check the relay's certificate (below) |
+
+## Checking a relay's certificate
+
+A relay reached by a name under `fopull.com` is verified by every client: it has
+to present a chain a public CA issued for that name. `--verify` is how you find
+out whether it does, from outside the box, using the same handshake a player's
+build runs:
+
+```
+floptle-relay-bench --relay us-east.relay.fopull.com:7788 --verify
+```
+
+```
+us-east.relay.fopull.com:7788 presents 42:07:94:20:F7:12:…:A2:05
+VERIFIED — the chain is trusted for us-east.relay.fopull.com by the public roots
+```
+
+The first line is the SHA-256 fingerprint of the leaf the relay actually
+presented, in the spelling `openssl x509 -noout -fingerprint -sha256` uses, so
+you can compare it with the file on the box — after a renewal, that is how you
+know the running relay picked it up. The second is the verdict: exit 0 when the
+chain verifies for the name, 1 with the reason when it does not. A relay
+presenting its self-signed certificate reads `NOT VERIFIED … CaUsedAsEndEntity`.
+
+`openssl s_client` cannot do this check: it speaks TLS over TCP, and a relay
+answers QUIC on UDP. Give `--verify` the relay's **name**, not its address — a
+certificate is issued for a name, and an address is refused up front.
 
 ## Reading a bad run
 

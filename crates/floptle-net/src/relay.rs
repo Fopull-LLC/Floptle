@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::quic::{QuicClient, QuicServer};
+use crate::quic::{QuicClient, QuicServer, ServerCertificate};
 use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport, SERVER};
 
 /// Wire channel tags inside relay messages.
@@ -602,9 +602,26 @@ struct ParkedHost {
 }
 
 impl RelayServer {
-    /// Bind on `0.0.0.0:port` (0 = ephemeral; see [`Self::port`]).
+    /// Bind on `0.0.0.0:port` (0 = ephemeral; see [`Self::port`]) presenting
+    /// the dev self-signed certificate.
     pub fn bind(port: u16) -> Result<Self, String> {
-        let transport = QuicServer::bind(port)?;
+        Self::with_transport(QuicServer::bind(port)?)
+    }
+
+    /// [`Self::bind`] presenting a certificate a client can verify — the
+    /// managed relay's, issued for its region name (`floptle/0227`).
+    pub fn bind_with_certificate(port: u16, cert: &ServerCertificate) -> Result<Self, String> {
+        Self::with_transport(QuicServer::bind_with_certificate(port, cert)?)
+    }
+
+    /// Present a renewed certificate from now on. Every lobby stays up: only
+    /// handshakes from here take the new chain (see
+    /// [`QuicServer::set_certificate`]).
+    pub fn set_certificate(&self, cert: &ServerCertificate) -> Result<(), String> {
+        self.transport.set_certificate(cert)
+    }
+
+    fn with_transport(transport: QuicServer) -> Result<Self, String> {
         let port = transport.local_port();
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

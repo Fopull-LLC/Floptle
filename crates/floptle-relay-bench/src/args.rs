@@ -23,6 +23,12 @@ OPTIONS
   --link <mbps>         the relay's link, for the implied ceiling (default 480)
   --key <game-key>      present a game key; required by a MANAGED relay
   --unreliable          send on the unreliable channel (default: reliable)
+  --verify              drive nothing: report which certificate the relay
+                        presents (its SHA-256 fingerprint, openssl's spelling)
+                        and whether it verifies for the NAME in --relay against
+                        the public roots. Exit 0 verified, 1 not. The check a
+                        managed region's certificate is ticked by — openssl
+                        s_client speaks TCP and never reaches a QUIC relay.
   -h, --help            this
 
 WHAT TO READ
@@ -51,6 +57,7 @@ pub struct Args {
     pub link_mbps: f64,
     pub key: Option<String>,
     pub channel: Channel,
+    pub verify: bool,
 }
 
 impl Default for Args {
@@ -68,6 +75,7 @@ impl Default for Args {
             link_mbps: 480.0,
             key: None,
             channel: Channel::Reliable,
+            verify: false,
         }
     }
 }
@@ -86,6 +94,11 @@ impl Args {
             match flag {
                 "--unreliable" => {
                     a.channel = Channel::Unreliable;
+                    i += 1;
+                    continue;
+                }
+                "--verify" => {
+                    a.verify = true;
                     i += 1;
                     continue;
                 }
@@ -177,6 +190,17 @@ mod tests {
     /// The list comes off this file's OWN match arms, so adding a flag and not
     /// documenting it fails here — W has to run this without E present, and an
     /// undocumented flag may as well not exist.
+    /// `--verify` is a mode, not a run: it needs the relay and nothing else,
+    /// and the shape flags do not apply to it.
+    #[test]
+    fn verify_is_a_mode_that_needs_only_the_relay() {
+        let a = Args::parse(&argv(&["--relay", "us-east.relay.fopull.com:7788", "--verify"]))
+            .expect("parses");
+        assert!(a.verify);
+        assert!(Args::parse(&argv(&["--verify"])).is_err(), "a relay is still required");
+        assert!(!Args::parse(&argv(&["--relay", "h:1"])).unwrap().verify);
+    }
+
     #[test]
     fn every_flag_the_parser_takes_is_in_the_help() {
         let src = include_str!("args.rs");
