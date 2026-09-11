@@ -494,6 +494,12 @@ pub(crate) const VERBS: &[Verb] = &[
                  at runtime, whose scene file is a generator and a camera and whose \
                  unplayed picture is therefore an empty room. `run` plays a project and \
                  reports numbers; it writes no picture.\n\n\
+                 **The UI is in the picture.** Every enabled UI layer is drawn the way the \
+                 Game view draws it: world canvases in the scene, screen-space layers over \
+                 the finished frame in z order at the scale their scale mode gives --size. \
+                 Elements a script makes with `ui.make` in `start` exist only once the \
+                 project has played, so they need --after; hand-authored ones are drawn as \
+                 authored. --no-ui gives the world alone.\n\n\
                  The project's post-processing is applied — bloom, vignette, ambient \
                  occlusion, posterise, colour grading, depth of field, its own `stage post` \
                  shaders, and the retro presentation at its own resolution. Motion blur is \
@@ -559,6 +565,16 @@ pub(crate) const VERBS: &[Verb] = &[
                 help: "also report what each render pass cost on the GPU, in milliseconds — \
                        the per-pass split the editor's ⏱ panel shows, without a window. Needs \
                        a device with timestamp queries, and says so when there is none",
+            },
+            Arg {
+                name: "--no-ui",
+                value: Value::Flag,
+                required: false,
+                help: "the world alone: draw no UI layer over the picture. By default every \
+                       enabled layer is drawn as the Game view draws it — screen-space ones \
+                       over the finished frame, world canvases in the scene — so a menu, a \
+                       HUD or a dialogue box is in the picture. Leave it out for a lighting \
+                       comparison or a GI preview",
             },
         ],
         needs_gpu: true,
@@ -1435,6 +1451,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 timing: a.get_flag("timing"),
                 after,
                 seed,
+                no_ui: a.get_flag("no-ui"),
             }))
         }
         Some(("vfx", a)) => {

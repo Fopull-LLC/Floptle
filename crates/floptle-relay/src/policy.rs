@@ -357,8 +357,8 @@ impl CloudPolicy {
         // reach the control plane as a field that is present and meaningless.
         if elapsed_s > 0.0 {
             let (i, o) = std::mem::take(&mut self.bytes_interval);
-            b.ingress_bps = Some((i as f64 / elapsed_s) as u64);
-            b.egress_bps = Some((o as f64 / elapsed_s) as u64);
+            b.ingress_bytes_per_sec = Some((i as f64 / elapsed_s) as u64);
+            b.egress_bytes_per_sec = Some((o as f64 / elapsed_s) as u64);
         } else {
             self.bytes_interval = (0, 0);
         }
@@ -1422,8 +1422,8 @@ mod tests {
 
         // ⚠ The ceiling this box actually reaches. 0.48 Gbps is 60 MB/s, so
         // this number is what says how close the link is — not free memory.
-        let egress = b.egress_bps.expect("egress is the relay's real ceiling");
-        let ingress = b.ingress_bps.expect("ingress");
+        let egress = b.egress_bytes_per_sec.expect("egress is the relay's real ceiling");
+        let ingress = b.ingress_bytes_per_sec.expect("ingress");
         assert!(egress > ingress, "a relay forwards more than it receives: {egress} vs {ingress}");
         assert!(egress > 0, "a megabyte moved and the rate came out zero");
 
@@ -1443,10 +1443,10 @@ mod tests {
         let mut p = policy(fake.clone());
         p.lobby_opened("UABCDE", Some(KEY), None);
         p.forwarded("UABCDE", 100_000, 1_000_000);
-        let busy = flush_box(&mut p, &fake).egress_bps.expect("egress");
+        let busy = flush_box(&mut p, &fake).egress_bytes_per_sec.expect("egress");
         assert!(busy > 0);
 
-        let quiet = flush_box(&mut p, &fake).egress_bps.expect("egress");
+        let quiet = flush_box(&mut p, &fake).egress_bytes_per_sec.expect("egress");
         assert_eq!(quiet, 0, "the busy window was reported twice");
     }
 

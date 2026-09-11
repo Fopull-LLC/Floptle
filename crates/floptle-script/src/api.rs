@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use floptle_core::math::{EulerRot, Quat, Vec3};
 use floptle_core::{Entity, Matter, ParticleSystem, RigidBody, World};
-use mlua::{IntoLua, Lua, Table, Value};
+use mlua::{IntoLua, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
 use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
@@ -3329,6 +3329,29 @@ pub fn mirror_component_strings(
     out
 }
 
+/// Every material's shader knobs on this node — the node's own `Material` and
+/// each per-part override — for read-back through a handle's `:shaderParam` /
+/// `:shaderTexture` (`floptle/0225`). Only materials that carry any, so a
+/// scene with no `.flsl` on anything mirrors nothing here.
+pub fn mirror_shader_state(world: &World, e: Entity) -> HashMap<String, crate::ShaderState> {
+    let mut out = HashMap::new();
+    let knobs = |m: &floptle_core::Material| -> Option<crate::ShaderState> {
+        (!m.shader_params.is_empty() || !m.shader_textures.is_empty())
+            .then(|| (m.shader_params.clone(), m.shader_textures.clone()))
+    };
+    if let Some(k) = world.get::<floptle_core::Material>(e).and_then(knobs) {
+        out.insert("Material".to_string(), k);
+    }
+    if let Some(om) = world.get::<floptle_core::ObjectMaterials>(e) {
+        for (key, m) in &om.0 {
+            if let Some(k) = knobs(m) {
+                out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), k);
+            }
+        }
+    }
+    out
+}
+
 /// Put one **sprite frame** on a node: the image, how it is cut, and which
 /// piece — written together.
 ///
@@ -4161,6 +4184,112 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // writes) and records assignments; the writes are flushed to the ECS after `run`.
     {
         let comp_mt = lua.create_table()?;
+        // **A material handle's shader knobs** (`floptle/0225`): the four
+        // methods below mirror `node:setShaderParam` / `setShaderTexture`, but
+        // address the material the HANDLE names — the node's own for
+        // `node:material()`, one part's override for `node:material("Head#2")`.
+        // The node-level call folds into the node's own Material and could
+        // never reach a part, so a character whose parts wear `.flsl` shaders
+        // had every uniform authored in the scene and not one of them changeable
+        // at runtime. Built once and handed out by `__index`, not created per
+        // lookup: a script calls these every tick.
+        let which_material = |comp: &str| -> Option<Option<String>> {
+            if comp == "Material" {
+                Some(None)
+            } else {
+                comp.strip_prefix(OBJECT_MATERIAL_PREFIX).map(|k| Some(k.to_string()))
+            }
+        };
+        let set_shader_param = {
+            let sets = shared.shader_param_sets.clone();
+            lua.create_function(
+                move |_,
+                      (this, name, x, y, z, w): (
+                    Table,
+                    String,
+                    f32,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                )| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let comp: String = this.raw_get("__comp")?;
+                    let part = which_material(&comp).expect("only handed to a material handle");
+                    sets.borrow_mut().push((
+                        e,
+                        part,
+                        name,
+                        [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
+                    ));
+                    Ok(())
+                },
+            )?
+        };
+        let set_shader_texture = {
+            let sets = shared.shader_texture_sets.clone();
+            lua.create_function(move |_, (this, slot, path): (Table, String, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                if slot.trim().is_empty() {
+                    return Err(mlua::Error::RuntimeError(
+                        "material:setShaderTexture(slot, ref) — slot is the name the shader \
+                         declares, e.g. \"ramp\" for `texture ramp`"
+                            .into(),
+                    ));
+                }
+                let part = which_material(&comp).expect("only handed to a material handle");
+                sets.borrow_mut().push((e, part, slot, path));
+                Ok(())
+            })?
+        };
+        // Read-back: this frame's pending write first, then the mirror — the
+        // same order the numeric fields answer in, so `m:shaderParam("glow")`
+        // is true in the line after `m:setShaderParam("glow", 2)`.
+        let shader_param = {
+            let sets = shared.shader_param_sets.clone();
+            let scene = shared.scene.clone();
+            lua.create_function(move |lua, (this, name): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                let part = which_material(&comp).expect("only handed to a material handle");
+                let pending = sets
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|(qe, qp, qn, _)| *qe == e && *qp == part && *qn == name)
+                    .map(|(_, _, _, v)| *v);
+                let v = pending.or_else(|| {
+                    scene.borrow().shader_state.get(&e)?.get(&comp)?.0.get(&name).copied()
+                });
+                match v {
+                    Some(v) => (v[0], v[1], v[2], v[3]).into_lua_multi(lua),
+                    None => Ok(MultiValue::new()),
+                }
+            })?
+        };
+        let shader_texture = {
+            let sets = shared.shader_texture_sets.clone();
+            let scene = shared.scene.clone();
+            lua.create_function(move |lua, (this, slot): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                let part = which_material(&comp).expect("only handed to a material handle");
+                let pending = sets
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|(qe, qp, qs, _)| *qe == e && *qp == part && *qs == slot)
+                    .map(|(_, _, _, p)| p.clone());
+                let p = pending.or_else(|| {
+                    scene.borrow().shader_state.get(&e)?.get(&comp)?.1.get(&slot).cloned()
+                });
+                match p {
+                    // A cleared slot reads as `""`, the spelling that clears one.
+                    Some(p) => Ok(Value::String(lua.create_string(&p)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?
+        };
         {
             let scene = shared.scene.clone();
             let changes = shared.component_changes.clone();
@@ -4169,6 +4298,18 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
                 let e: u32 = this.raw_get("__id")?;
                 let comp: String = this.raw_get("__comp")?;
+                if which_material(&comp).is_some() {
+                    let method = match key.as_str() {
+                        "setShaderParam" => Some(&set_shader_param),
+                        "setShaderTexture" => Some(&set_shader_texture),
+                        "shaderParam" => Some(&shader_param),
+                        "shaderTexture" => Some(&shader_texture),
+                        _ => None,
+                    };
+                    if let Some(f) = method {
+                        return Ok(Value::Function(f.clone()));
+                    }
+                }
                 // Colours first: a colour field never has a numeric twin.
                 if let Some(c) = colors.borrow().get(&(e, comp.clone(), key.clone())) {
                     return Ok(Value::Table(new_color(lua, *c)?));
@@ -4805,18 +4946,25 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
     // WINDOW physical pixels: the same space input.mouse() reports and
     // camera.worldToScreen() returns, so a docked editor Game tab's rects carry
-    // that tab's offset. 0,0,0,0 when it has no screen-space rect this frame.
-    // Lets a script hit-test the cursor against a panel's ACTUAL rendered
-    // position instead of guessing its geometry.
+    // that tab's offset. Lets a script hit-test the cursor against a panel's
+    // ACTUAL rendered position instead of guessing its geometry.
+    //
+    // **`nil` when it has no screen-space rect this frame** — not a UI
+    // element, not laid out yet, or no surface to lay out against at all,
+    // which is every frame of `floptle run` (`floptle/0224`). It answered
+    // `0, 0, 0, 0` for all three, and under `run` that is a measurement a
+    // script cannot tell from a real one: a four-button menu "verified"
+    // headless was verified against zeros. The reference always said nil,
+    // and every shipped caller already guards for it (`if rx and rw > 1`).
     {
         let ui_rects = shared.ui_rects.clone();
         methods.set(
             "uiRect",
-            lua.create_function(move |_, this: Table| {
+            lua.create_function(move |lua, this: Table| {
                 let e: u32 = this.raw_get("__id")?;
                 match ui_rects.borrow().get(&e).copied() {
-                    Some(r) => Ok((r[0], r[1], r[2], r[3])),
-                    None => Ok((0.0f32, 0.0, 0.0, 0.0)),
+                    Some(r) => (r[0], r[1], r[2], r[3]).into_lua_multi(lua),
+                    None => Ok(MultiValue::new()),
                 }
             })?,
         )?;
@@ -6107,6 +6255,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         let e: u32 = this.raw_get("__id")?;
                         sets.borrow_mut().push((
                             e,
+                            None,
                             name,
                             [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
                         ));
@@ -6139,7 +6288,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                                 .into(),
                         ));
                     }
-                    sets.borrow_mut().push((e, slot, path));
+                    sets.borrow_mut().push((e, None, slot, path));
                     Ok(())
                 })?,
             )?;

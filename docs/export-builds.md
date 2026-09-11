@@ -233,7 +233,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle open [PROJECT]                     # the bare invocation, said out loud
 [x] floptle play [PROJECT]
 [x] floptle run [PROJECT] [--scene S] [--frames N | --seconds T] [--seed N] [--timing] [--alloc] [--json]
-[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--out FILE] [--timing]
+[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--after T] [--no-ui] [--out FILE] [--timing]
 [x] floptle vfx [PROJECT] --effect KEY [--at SECS] [--frames N] [--scene S] [--out DIR]
 [x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
 [x] floptle check [PROJECT] [--json]

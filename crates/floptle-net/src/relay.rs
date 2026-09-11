@@ -613,17 +613,31 @@ struct ParkedHost {
     since: Instant,
 }
 
+/// **What a relay asks the kernel for on its UDP socket**, receive and send
+/// (`floptle/0234`). 8 MiB: the box has 954 MB and the relay peaks at 25 MB,
+/// and the kernel default (212,992 B) overflowed at ~100 CCU while the link
+/// sat under 1% used. What the kernel actually grants is on
+/// [`RelayServer::socket_buffers`]; the binary prints it, because the ask is
+/// silently clamped to `net.core.rmem_max` and only the grant is a fact.
+pub const RELAY_SOCKET_BUFFER: usize = 8 << 20;
+
 impl RelayServer {
     /// Bind on `0.0.0.0:port` (0 = ephemeral; see [`Self::port`]) presenting
     /// the dev self-signed certificate.
     pub fn bind(port: u16) -> Result<Self, String> {
-        Self::with_transport(QuicServer::bind(port)?)
+        Self::bind_with_certificate(port, &ServerCertificate::self_signed()?)
     }
 
     /// [`Self::bind`] presenting a certificate a client can verify — the
     /// managed relay's, issued for its region name (`floptle/0227`).
     pub fn bind_with_certificate(port: u16, cert: &ServerCertificate) -> Result<Self, String> {
-        Self::with_transport(QuicServer::bind_with_certificate(port, cert)?)
+        Self::with_transport(QuicServer::bind_sized(port, cert, Some(RELAY_SOCKET_BUFFER))?)
+    }
+
+    /// The socket buffers the kernel granted against [`RELAY_SOCKET_BUFFER`].
+    /// Always `Some` for a relay that came up through [`Self::bind`].
+    pub fn socket_buffers(&self) -> Option<crate::quic::SocketBuffers> {
+        self.transport.socket_buffers()
     }
 
     /// Present a renewed certificate from now on. Every lobby stays up: only

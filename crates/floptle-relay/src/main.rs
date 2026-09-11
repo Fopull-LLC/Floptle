@@ -225,6 +225,19 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // The inbox, as granted — not as asked (`floptle/0234`). The kernel clamps
+    // the ask to `net.core.rmem_max` without a word, and the only symptom of
+    // the default-sized buffer was players' retransmit latency at ~100 CCU on
+    // a link under 1% used. This is the one place that can say it was clamped.
+    match relay.socket_buffers() {
+        Some(b) => {
+            println!("{}", b.report());
+            if let Some(advice) = b.advice() {
+                eprintln!("floptle-relay: ⚠ {advice}");
+            }
+        }
+        None => println!("socket buffers: kernel default (nothing asked)"),
+    }
     match (&cert_watch, &args.tls) {
         (Some(w), Some((cert_path, _))) => println!(
             "certificate: {} from {} (watched; a renewal is presented within {}s, nobody dropped)",

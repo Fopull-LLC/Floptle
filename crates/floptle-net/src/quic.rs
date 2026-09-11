@@ -176,6 +176,107 @@ pub struct QuicServer {
     port: u16,
     /// A handle on the endpoint, kept for [`Self::set_certificate`].
     endpoint: quinn::Endpoint,
+    /// What the kernel gave the socket when a size was asked for; `None` when
+    /// [`Self::bind`] left the kernel default alone.
+    buffers: Option<SocketBuffers>,
+}
+
+/// **The UDP socket's kernel buffers, as granted** (`floptle/0234`).
+///
+/// A relay's inbox is its receive buffer. Left at the kernel default (212,992
+/// bytes on a stock Linux box — on the order of 100–200 datagrams once the
+/// kernel charges each one's `skb` overhead), the live `us-east` relay began
+/// dropping between 56 and 104 CCU while carrying **under 1% of its link**,
+/// with the loop at 1.2 ms and load at 0.17. Three counters agreed to the unit:
+/// the relay's `rx_drops`, the kernel's `UdpRcvbufErrors`, and the socket's own
+/// `skmem d…`. A bigger machine with the same socket drops at the same point.
+///
+/// ⚠ **Asked and granted differ, and only the second is a fact.** The kernel
+/// silently clamps `SO_RCVBUF` to `net.core.rmem_max` (and `SO_SNDBUF` to
+/// `wmem_max`), so a relay that asked for 8 MiB on a stock box got 425,984
+/// bytes and nothing said so. The sysctl is the operator's half; this struct
+/// exists so the relay — the only thing that knows it was clamped — can say
+/// it at startup. Read back with `getsockopt`, which is also what `ss -m`
+/// prints as `rb`/`tb`.
+///
+/// ⚠ **Linux reports DOUBLE what it applied** — it books the `skb` overhead
+/// in the same number — so an unclamped 8 MiB reads as 16,777,216 here and
+/// in `ss`, and **a clamp to exactly half the ask reads as the ask itself.**
+/// That is not hypothetical: a box with `rmem_max = 4 MiB` answered an 8 MiB
+/// ask with `8388608`, and a comparison against the ask called it granted.
+/// [`Self::usable`] undoes the booking; [`Self::clamped`] compares that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketBuffers {
+    /// Bytes asked for, on each of receive and send.
+    pub asked: usize,
+    /// `SO_RCVBUF` as the kernel reports it after the ask.
+    pub recv: usize,
+    /// `SO_SNDBUF` as the kernel reports it after the ask.
+    pub send: usize,
+}
+
+impl SocketBuffers {
+    /// What a reported figure means in payload terms: half of it on Linux,
+    /// all of it elsewhere.
+    pub fn usable(reported: usize) -> usize {
+        if cfg!(target_os = "linux") {
+            reported / 2
+        } else {
+            reported
+        }
+    }
+
+    /// The kernel gave less than was asked on either side — the sysctl is
+    /// below the ask.
+    pub fn clamped(&self) -> bool {
+        Self::usable(self.recv) < self.asked || Self::usable(self.send) < self.asked
+    }
+
+    /// One line for a startup log: the ask and both grants, in bytes. The
+    /// reported figures are the ones `ss -ulnm` shows as `rb`/`tb`; on
+    /// Linux the usable half follows, so the line reads honestly beside the
+    /// ask without knowing the kernel's bookkeeping.
+    pub fn report(&self) -> String {
+        let mut line = format!(
+            "socket buffers: asked {} B each; kernel reports rx {} B, tx {} B",
+            self.asked, self.recv, self.send
+        );
+        if cfg!(target_os = "linux") {
+            line.push_str(&format!(
+                " (ss's rb/tb; Linux books double, so usable rx {} B, tx {} B)",
+                Self::usable(self.recv),
+                Self::usable(self.send)
+            ));
+        }
+        line
+    }
+
+    /// The operator's half, when [`Self::clamped`]: which sysctl to raise,
+    /// and that a restart is needed because the buffer is fixed at socket
+    /// creation. `None` when nothing was clamped.
+    pub fn advice(&self) -> Option<String> {
+        if !self.clamped() {
+            return None;
+        }
+        let mut which = Vec::new();
+        if Self::usable(self.recv) < self.asked {
+            which.push(format!(
+                "net.core.rmem_max (receive: {} B usable)",
+                Self::usable(self.recv)
+            ));
+        }
+        if Self::usable(self.send) < self.asked {
+            which.push(format!("net.core.wmem_max (send: {} B usable)", Self::usable(self.send)));
+        }
+        Some(format!(
+            "socket buffer CLAMPED below the {} B asked — raise {} to at least {} with sysctl, \
+             then restart: the buffer is fixed when the socket is created. Until then the inbox \
+             overflows long before the link does (rx_drops)",
+            self.asked,
+            which.join(" and "),
+            self.asked
+        ))
+    }
 }
 
 /// **A certificate and its key, for a server that is reached by name.**
@@ -262,7 +363,7 @@ impl ServerCertificate {
 
     /// The dev-trust certificate: fresh, self-signed, for the name
     /// `floptle-dev` that no client verifies.
-    fn self_signed() -> Result<Self, String> {
+    pub(crate) fn self_signed() -> Result<Self, String> {
         install_crypto_provider();
         let cert = rcgen::generate_simple_self_signed(vec!["floptle-dev".into()])
             .map_err(|e| format!("self-signed cert: {e}"))?;
@@ -284,6 +385,39 @@ pub fn fingerprint_of(der: &[u8]) -> String {
         .join(":")
 }
 
+/// Bind a UDP socket by hand, sizing its kernel buffers first when asked.
+///
+/// std's `UdpSocket::bind` cannot set `SO_RCVBUF`, and quinn's own
+/// `Endpoint::server` uses it — so the socket is built through `socket2`,
+/// sized, read back, and only then handed over. The read-back is the point:
+/// the kernel clamps silently, and the number it reports is the only one
+/// that is true (see [`SocketBuffers`]).
+fn bind_udp(
+    addr: SocketAddr,
+    buffer: Option<usize>,
+) -> Result<(std::net::UdpSocket, Option<SocketBuffers>), String> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))
+        .map_err(|e| format!("udp socket: {e}"))?;
+    let buffers = match buffer {
+        None => None,
+        Some(asked) => {
+            // A refused setsockopt is worth a word but not a dead relay: the
+            // socket still works at the kernel default, and `clamped()` will
+            // say so through the read-back.
+            let _ = sock.set_recv_buffer_size(asked);
+            let _ = sock.set_send_buffer_size(asked);
+            Some(SocketBuffers {
+                asked,
+                recv: sock.recv_buffer_size().map_err(|e| format!("SO_RCVBUF: {e}"))?,
+                send: sock.send_buffer_size().map_err(|e| format!("SO_SNDBUF: {e}"))?,
+            })
+        }
+    };
+    sock.bind(&addr.into()).map_err(|e| format!("bind {addr}: {e}"))?;
+    Ok((sock.into(), buffers))
+}
+
 impl QuicServer {
     /// Bind on `0.0.0.0:port` (0 = ephemeral, see [`Self::local_port`]) with a
     /// fresh self-signed certificate (see the module docs' security model).
@@ -302,6 +436,19 @@ impl QuicServer {
 
     /// [`Self::bind`] presenting `cert` instead of a self-signed one.
     pub fn bind_with_certificate(port: u16, cert: &ServerCertificate) -> Result<Self, String> {
+        Self::bind_sized(port, cert, None)
+    }
+
+    /// [`Self::bind_with_certificate`] asking the kernel for `buffer` bytes of
+    /// receive AND send buffer on the socket before quinn takes it. What was
+    /// granted is on [`Self::socket_buffers`]; a relay is expected to print
+    /// it. `None` keeps the kernel default, which is right for a player's own
+    /// listen socket and wrong for a relay (see [`SocketBuffers`]).
+    pub fn bind_sized(
+        port: u16,
+        cert: &ServerCertificate,
+        buffer: Option<usize>,
+    ) -> Result<Self, String> {
         install_crypto_provider();
         let server_config = cert.server_config()?;
 
@@ -311,8 +458,16 @@ impl QuicServer {
             .build()
             .map_err(|e| format!("net runtime: {e}"))?;
         let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+        let (socket, buffers) = bind_udp(addr, buffer)?;
         let endpoint = runtime
-            .block_on(async { quinn::Endpoint::server(server_config, addr) })
+            .block_on(async {
+                quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(server_config),
+                    socket,
+                    Arc::new(quinn::TokioRuntime),
+                )
+            })
             .map_err(|e| format!("bind {addr}: {e}"))?;
         let local_port = endpoint.local_addr().map_err(|e| e.to_string())?.port();
 
@@ -360,12 +515,25 @@ impl QuicServer {
                 }
             });
         }
-        Ok(Self { runtime: Some(runtime), events: events_rx, peers, port: local_port, endpoint })
+        Ok(Self {
+            runtime: Some(runtime),
+            events: events_rx,
+            peers,
+            port: local_port,
+            endpoint,
+            buffers,
+        })
     }
 
     /// The actually-bound UDP port (useful with `bind(0)`).
     pub fn local_port(&self) -> u16 {
         self.port
+    }
+
+    /// What the kernel granted when [`Self::bind_sized`] asked for a buffer;
+    /// `None` when the kernel default was kept.
+    pub fn socket_buffers(&self) -> Option<SocketBuffers> {
+        self.buffers
     }
 
     /// Where this peer's connection comes from — the address a relay rates
@@ -784,6 +952,85 @@ impl Drop for QuicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠ **The buffer a relay gets is the one the kernel reports, not the one
+    /// it asked for** (`floptle/0234`).
+    ///
+    /// Two asks against the real kernel: a small one every box grants, and
+    /// one no box grants (a gibibyte, above any `rmem_max`). The small one
+    /// must read back as APPLIED — on Linux exactly double the ask, which is
+    /// how the kernel books it — and the two must differ, or the setsockopt
+    /// never happened and the read-back is the default wearing a new name.
+    /// The huge one must say `clamped` and name the sysctl, because the
+    /// silent clamp is the whole finding: a relay that asked for 8 MiB on a
+    /// stock box ran at 425,984 B and nothing said so.
+    #[test]
+    fn a_sized_bind_reads_back_what_the_kernel_granted_and_says_when_it_was_clamped() {
+        let cert = ServerCertificate::self_signed().unwrap();
+        assert_eq!(QuicServer::bind(0).unwrap().socket_buffers(), None, "nothing asked");
+
+        let small_ask = 64 << 10;
+        let small = QuicServer::bind_sized(0, &cert, Some(small_ask))
+            .unwrap()
+            .socket_buffers()
+            .expect("asked, so answered");
+        assert_eq!(small.asked, small_ask);
+        assert!(!small.clamped(), "{small:?} — 64 KiB is under every default rmem_max");
+        assert_eq!(small.advice(), None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(small.recv, 2 * small_ask, "Linux reports double what it applied");
+            assert_eq!(small.send, 2 * small_ask);
+        } else {
+            assert!(small.recv >= small_ask && small.send >= small_ask, "{small:?}");
+        }
+
+        let huge = QuicServer::bind_sized(0, &cert, Some(1 << 30))
+            .unwrap()
+            .socket_buffers()
+            .unwrap();
+        assert_ne!(huge.recv, small.recv, "two asks, one answer: the ask is not applied");
+        if cfg!(target_os = "linux") {
+            assert!(huge.clamped(), "{huge:?} — no box grants a gibibyte");
+            let advice = huge.advice().expect("a clamp comes with the sysctl to raise");
+            assert!(advice.contains("net.core.rmem_max"), "{advice}");
+            assert!(advice.contains("net.core.wmem_max"), "{advice}");
+            assert!(advice.contains("restart"), "{advice}");
+        }
+        // The report carries all three numbers, so a journal line is enough
+        // to compare against `ss -ulnm`.
+        let r = huge.report();
+        assert!(r.contains(&format!("asked {} B", 1 << 30)) && r.contains("reports rx"), "{r}");
+    }
+
+    /// ⚠ **A clamp to exactly half the ask read as "granted".** The first cut
+    /// compared the reported figure against the ask; on a box with
+    /// `rmem_max = 4 MiB` an 8 MiB ask reports `8388608` — Linux's doubled
+    /// booking of the 4 MiB it applied — and the comparison passed. That is
+    /// the relay running at half its inbox and saying nothing, which is the
+    /// exact silence the card was opened for. Pure data, so it is asserted
+    /// directly rather than hoping a box with that sysctl runs the suite.
+    #[test]
+    fn a_grant_of_exactly_half_the_ask_is_a_clamp_on_linux() {
+        let asked = 8 << 20;
+        let half = SocketBuffers { asked, recv: asked, send: asked };
+        let full = SocketBuffers { asked, recv: 2 * asked, send: 2 * asked };
+        if cfg!(target_os = "linux") {
+            assert!(half.clamped(), "{half:?} is 4 MiB usable against an 8 MiB ask");
+            let advice = half.advice().unwrap();
+            assert!(advice.contains("4194304 B usable"), "{advice}");
+            assert!(half.report().contains("usable rx 4194304 B"), "{}", half.report());
+            assert!(!full.clamped());
+            assert_eq!(full.advice(), None);
+        } else {
+            assert!(!half.clamped());
+        }
+        // One side short is still a clamp, and the advice names only that side.
+        let rx_only = SocketBuffers { asked, recv: asked, send: 2 * asked };
+        if cfg!(target_os = "linux") {
+            let advice = rx_only.advice().unwrap();
+            assert!(advice.contains("rmem_max") && !advice.contains("wmem_max"), "{advice}");
+        }
+    }
 
     /// Accumulates every polled event so a wait for one kind never discards
     /// another that arrived in the same batch.

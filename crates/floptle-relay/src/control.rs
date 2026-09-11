@@ -372,8 +372,8 @@ fn box_json(b: &RelayBox) -> serde_json::Value {
     num("cores", b.cores.map(Into::into));
     num("mem_free_mb", b.mem_free_mb.map(Into::into));
     num("disk_free_mb", b.disk_free_mb.map(Into::into));
-    num("egress_bps", b.egress_bps.map(Into::into));
-    num("ingress_bps", b.ingress_bps.map(Into::into));
+    num("egress_bytes_per_sec", b.egress_bytes_per_sec.map(Into::into));
+    num("ingress_bytes_per_sec", b.ingress_bytes_per_sec.map(Into::into));
     num("rx_drops", b.rx_drops.map(Into::into));
     num("rx_queue_bytes", b.rx_queue_bytes.map(Into::into));
     num("step_p95_ms", b.step_p95_ms.map(hundredths));
@@ -445,8 +445,8 @@ mod box_tests {
         assert_eq!(o["lobbies"], 0);
         assert_eq!(o["peers"], 0);
         for f in [
-            "load1", "cores", "mem_free_mb", "disk_free_mb", "egress_bps",
-            "ingress_bps", "rx_drops", "rx_queue_bytes", "step_p95_ms", "limit_drops",
+            "load1", "cores", "mem_free_mb", "disk_free_mb", "egress_bytes_per_sec",
+            "ingress_bytes_per_sec", "rx_drops", "rx_queue_bytes", "step_p95_ms", "limit_drops",
         ] {
             assert!(!o.contains_key(f), "{f} was sent as zero rather than omitted: {v}");
         }
@@ -461,8 +461,8 @@ mod box_tests {
             cores: Some(1),
             mem_free_mb: Some(412),
             disk_free_mb: Some(21000),
-            egress_bps: Some(41_000_000),
-            ingress_bps: Some(6_000_000),
+            egress_bytes_per_sec: Some(41_000_000),
+            ingress_bytes_per_sec: Some(6_000_000),
             lobbies: 12,
             peers: 74,
             rx_drops: Some(318),
@@ -481,7 +481,7 @@ mod box_tests {
         );
         assert_eq!(v["limit_drops"], 9);
         assert_eq!(v["cores"], 1, "one OCPU is what makes load1 0.91 alarming");
-        assert_eq!(v["egress_bps"], 41_000_000u64);
+        assert_eq!(v["egress_bytes_per_sec"], 41_000_000u64);
         assert_eq!(v["rx_drops"], 318);
         assert_eq!(v["peers"], 74);
         assert_eq!(v["step_p95_ms"], 7.4);

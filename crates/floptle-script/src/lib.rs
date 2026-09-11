@@ -40,12 +40,23 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material};
 use mlua::{Lua, RegistryKey, Table};
 
-/// Queued `node:setShaderParam(...)` writes: (entity index, uniform name, vec4 lanes).
-type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
-/// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, slot
-/// name, texture ref). The ref is a project-relative image path, an `rt:` render
-/// target, or the empty string to clear the slot.
-type ShaderTextureSets = Rc<RefCell<Vec<(u32, String, String)>>>;
+/// Queued `node:setShaderParam(...)` writes: (entity index, which material,
+/// uniform name, vec4 lanes). The material is `None` for the node's own — the
+/// UI element, sky, post chain or `Material` component, as it always was — or
+/// `Some(part)` for one part's override under `ObjectMaterials`
+/// (`node:material("Head#2"):setShaderParam(...)`, `floptle/0225`).
+type ShaderParamSets = Rc<RefCell<Vec<(u32, Option<String>, String, [f32; 4])>>>;
+/// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, which
+/// material, slot name, texture ref). The ref is a project-relative image path,
+/// an `rt:` render target, or the empty string to clear the slot.
+type ShaderTextureSets = Rc<RefCell<Vec<(u32, Option<String>, String, String)>>>;
+/// A material's shader knobs as mirrored for read-back: its `shader_params`
+/// and `shader_textures`. Keyed by component name (`Material`, `Material:<part>`)
+/// under the entity, and present only for materials that carry any.
+type ShaderState = (
+    std::collections::BTreeMap<String, [f32; 4]>,
+    std::collections::BTreeMap<String, String>,
+);
 /// `node:setScreenShader(name, on)` toggles, queued per frame: (entity, the
 /// screen shader's file stem, on). Its own queue rather than a magic uniform
 /// name, because a shader is free to declare a knob called `enabled` and the
@@ -310,8 +321,8 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{
     apply_component_color, apply_component_field, apply_component_field_str, apply_sprite_frame,
-    effective_cell, mirror_component_strings, read_sprite_frame, set_sprite_cell,
-    mirror_component_colors, mirror_components, HANDLE_KEYS,
+    effective_cell, mirror_component_strings, mirror_shader_state, read_sprite_frame,
+    set_sprite_cell, mirror_component_colors, mirror_components, HANDLE_KEYS,
 };
 pub use input_api::{SharedDomain, SharedInput};
 pub use voice_api::{VoiceCmd, VoiceOpts, VoiceState};
@@ -917,6 +928,11 @@ pub struct ScriptHost {
     /// (eid, script, var) combos already warned about failing the replication
     /// guardrails — so a hot loop doesn't spam the Console every tick.
     synced_warned: std::collections::HashSet<(u32, String, String)>,
+    /// (eid, material, knob) shader writes already reported as having nothing
+    /// to land on — a part with no override, an override wearing no shader —
+    /// so a `setShaderParam` in `update` says so ONCE, not every tick
+    /// (`floptle/0225`).
+    shader_warned: std::collections::HashSet<(u32, String, String)>,
     /// `(script kind, param name)` already reported as stored-but-unread this
     /// session, so a param carried on eighteen instances of the same script is
     /// ONE Console line rather than eighteen (`floptle/0068`).
@@ -1242,6 +1258,10 @@ pub(crate) struct SceneMirror {
     /// ask what a material was wearing — only tell it. Which makes the obvious
     /// swap ("put the shirt on unless it is already on") impossible to write.
     component_strings: HashMap<u32, HashMap<String, HashMap<String, String>>>,
+    /// …and each material's shader knobs — uniforms and texture slots — so a
+    /// part handle's `:shaderParam("glow")` reads back what the part's
+    /// override carries, the way `.color` does (`floptle/0225`).
+    shader_state: HashMap<u32, HashMap<String, ShaderState>>,
     /// Model asset path → the material slots it was imported with, LENT by the
     /// editor (`ScriptHost::set_model_slots`) the way the tilesets are: the host
     /// does no file I/O, and a `.glb`'s parts are the importer's knowledge.
@@ -7306,6 +7326,178 @@ end
         assert_eq!(spec.shader_params.get("nose"), Some(&[0.1, 0.9, 0.2, 0.0]));
         let mat = world.get::<Material>(meshy).unwrap();
         assert_eq!(mat.shader_params.get("glow"), Some(&[2.5, 0.0, 0.0, 0.0]));
+    }
+
+    /// **A shader knob on ONE PART of a model, from a script** (`floptle/0225`).
+    ///
+    /// A model's parts can each wear a `.flsl` — skin here, a face decal there —
+    /// with every uniform authored in the scene, and not one of them changeable
+    /// at runtime: `node:setShaderParam` folded into the node's own Material,
+    /// which on such a model does not exist, and the part handle had no spelling
+    /// for a uniform or a slot at all. The reported case is a character creator
+    /// that wants to swap the face texture on the head.
+    ///
+    /// The card's guard: two parts, a `.flsl` on both, a texture slot set on one
+    /// from Lua — the other's slot is unchanged and the first's resolves. Route
+    /// the write to the node Material instead and it fails. Read-back is asserted
+    /// in the same frame (the pending write) AND the next (the mirror).
+    #[test]
+    fn a_part_handle_writes_its_own_shader_knobs_and_leaves_the_other_parts_alone() {
+        let dir = std::env::temp_dir().join("floptle_script_test_part_shader");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "creator",
+            concat!(
+                "frame = 0\n",
+                "function update(node, dt)\n",
+                "  frame = frame + 1\n",
+                "  local head = node:material(\"Head#2\")\n",
+                "  if frame == 1 then\n",
+                "    head:setShaderTexture(\"face\", \"faces/02.png\")\n",
+                "    head:setShaderParam(\"glow\", 2, 0.5)\n",
+                "    -- the same frame: the pending write answers\n",
+                "    assert(head:shaderTexture(\"face\") == \"faces/02.png\", 'pending texture')\n",
+                "    local x, y, z, w = head:shaderParam(\"glow\")\n",
+                "    assert(x == 2 and y == 0.5 and z == 0 and w == 0, 'pending param')\n",
+                "    assert(node:material(\"Torso#1\"):shaderTexture(\"face\") == \"faces/01.png\", 'torso')\n",
+                "  else\n",
+                "    -- the next frame: the mirror answers\n",
+                "    assert(head:shaderTexture(\"face\") == \"faces/02.png\", 'mirrored texture')\n",
+                "    local x, y = head:shaderParam(\"glow\")\n",
+                "    assert(x == 2 and y == 0.5, 'mirrored param')\n",
+                "    assert(head:shaderParam(\"nothing\") == nil, 'an unset knob is nil')\n",
+                "    print('read back')\n",
+                "  end\n",
+                "end\n",
+            ),
+        );
+        let part = |face: &str| Material {
+            shader: Some("shaders/skin.flsl".into()),
+            shader_textures: [("face".to_string(), face.to_string())].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut world = World::default();
+        let hero = world.spawn();
+        world.insert(hero, Transform::IDENTITY);
+        world.insert(hero, floptle_core::Name("Hero".into()));
+        world.insert(
+            hero,
+            floptle_core::ObjectMaterials(
+                [("Head#2".to_string(), part("faces/01.png")), ("Torso#1".to_string(), part("faces/01.png"))]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        world.insert(
+            hero,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "creator".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let om = world.get::<floptle_core::ObjectMaterials>(hero).unwrap();
+        assert_eq!(om.0["Head#2"].shader_textures.get("face").map(String::as_str), Some("faces/02.png"));
+        assert_eq!(om.0["Head#2"].shader_params.get("glow"), Some(&[2.0, 0.5, 0.0, 0.0]));
+        assert_eq!(
+            om.0["Torso#1"].shader_textures.get("face").map(String::as_str),
+            Some("faces/01.png"),
+            "the other part's slot moved"
+        );
+        assert!(om.0["Torso#1"].shader_params.is_empty());
+        assert!(world.get::<Material>(hero).is_none(), "a node Material was invented");
+
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(said.iter().any(|m| m == "read back"), "{said:?}");
+    }
+
+    /// **The node-level call on a model with part overrides and no node
+    /// Material** fans out to every part that wears a shader — and with none
+    /// to write to, says so ONCE rather than nothing (`floptle/0225`). A part
+    /// write with no override never creates one: an override is a whole
+    /// material, and a uniform must not be able to blank a part.
+    #[test]
+    fn a_node_level_shader_write_fans_out_to_the_parts_that_wear_a_shader_or_says_so_once() {
+        let dir = std::env::temp_dir().join("floptle_script_test_part_shader_fanout");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "tinter",
+            concat!(
+                "function update(node, dt)\n",
+                "  node:setShaderParam(\"tint\", 1)\n",
+                "  node:setShaderTexture(\"ramp\", \"ramps/hot.png\")\n",
+                "  find(\"Bare\"):setShaderParam(\"tint\", 1)\n",
+                "  node:material(\"Nope\"):setShaderParam(\"glow\", 1)\n",
+                "end\n",
+            ),
+        );
+        let shaded = Material { shader: Some("shaders/x.flsl".into()), ..Default::default() };
+        let mut world = World::default();
+        let hero = world.spawn();
+        world.insert(hero, Transform::IDENTITY);
+        world.insert(hero, floptle_core::Name("Hero".into()));
+        world.insert(
+            hero,
+            floptle_core::ObjectMaterials(
+                [
+                    ("Head#2".to_string(), shaded.clone()),
+                    ("Torso#1".to_string(), shaded.clone()),
+                    ("Belt#3".to_string(), Material::default()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        );
+        world.insert(
+            hero,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "tinter".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        // A model whose overrides wear no shader at all.
+        let bare = world.spawn();
+        world.insert(bare, Transform::IDENTITY);
+        world.insert(bare, floptle_core::Name("Bare".into()));
+        world.insert(
+            bare,
+            floptle_core::ObjectMaterials([("Only#1".to_string(), Material::default())].into_iter().collect()),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let om = world.get::<floptle_core::ObjectMaterials>(hero).unwrap();
+        for p in ["Head#2", "Torso#1"] {
+            assert_eq!(om.0[p].shader_params.get("tint"), Some(&[1.0, 0.0, 0.0, 0.0]), "{p}");
+            assert_eq!(om.0[p].shader_textures.get("ramp").map(String::as_str), Some("ramps/hot.png"), "{p}");
+        }
+        assert!(om.0["Belt#3"].shader_params.is_empty(), "a part with no shader was written to");
+        assert!(!om.0.contains_key("Nope"), "a part write invented an override");
+        assert!(world.get::<Material>(hero).is_none());
+
+        // Two frames, two kinds of nowhere, each said exactly once.
+        let warned: Vec<String> = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| matches!(l.level, LogLevel::Warn))
+            .map(|l| l.msg)
+            .collect();
+        assert_eq!(warned.len(), 2, "{warned:#?}");
+        assert!(warned.iter().any(|m| m.contains("\"Bare\"") && m.contains("no part wears a shader")), "{warned:#?}");
+        assert!(warned.iter().any(|m| m.contains("\"Nope\"") && m.contains("no material override")), "{warned:#?}");
     }
 
     /// `floptle/0118`: the sky's uniforms are a THIRD place, and until this they
