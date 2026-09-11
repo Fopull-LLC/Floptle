@@ -13,6 +13,11 @@ driving one from a laptop measures your own upstream, not the relay's link.
 floptle-relay-bench --relay us-east.relay.fopull.com:7788 --ccu 100
 ```
 
+> **Run the relay under test with `--no-address-limits`.** A relay refuses more
+> than ten lobby opens and thirty joins a minute from one address, and a bench
+> run from one machine is exactly that shape. The flag lifts the two
+> per-address rates and nothing else; a relay serving players never needs it.
+
 ## What it prints
 
 ```

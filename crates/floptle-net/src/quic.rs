@@ -247,6 +247,12 @@ impl QuicServer {
     pub fn local_port(&self) -> u16 {
         self.port
     }
+
+    /// Where this peer's connection comes from — the address a relay rates
+    /// lobby opens and joins by. `None` once the peer is gone.
+    pub fn remote_addr(&self, peer: PeerId) -> Option<SocketAddr> {
+        self.peers.lock().unwrap().get(&peer).map(|h| h.conn.remote_address())
+    }
 }
 
 impl Transport for QuicServer {
@@ -349,6 +355,47 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 }
 
+/// **Whose certificate a client checks.**
+///
+/// The open relay and a direct host present a self-signed certificate minted
+/// at startup — the dev-trust model ADR-0022 documents, where the lobby code
+/// is the secret and the transport is not. A MANAGED relay is reached by a
+/// name under `fopull.com`, and a name is something a certificate can be
+/// issued for: that connection is verified against the public roots, with
+/// the name as SNI, so a game key and every packet of a managed session go
+/// to the relay and not to whatever answers at that address on this network.
+///
+/// **Behind a fallback, for now.** Until the managed relay presents a chain
+/// that verifies, a failed verification falls back to the dev-trust model
+/// with a warning the host and the joiner both surface — so a managed session
+/// keeps working the day this ships, and refusing is one line to flip once
+/// the certificate is live (`floptle/0227`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientTrust {
+    /// Verify against the public roots, presenting `server_name`.
+    Verify { server_name: String },
+    /// Accept whatever answers: the open relay, a direct host, an address.
+    AcceptAny,
+}
+
+/// The trust an address gets: a DNS name under `fopull.com` is verified,
+/// everything else — an IP, a self-hosted relay's name — is the dev-trust
+/// model. Decided from the string the developer or the region list wrote,
+/// before anything is resolved.
+pub fn client_trust_for(addr: &str) -> ClientTrust {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return ClientTrust::AcceptAny;
+    }
+    let lower = host.to_ascii_lowercase();
+    if lower == "fopull.com" || lower.ends_with(".fopull.com") {
+        ClientTrust::Verify { server_name: host.to_string() }
+    } else {
+        ClientTrust::AcceptAny
+    }
+}
+
 /// A client endpoint connecting to a [`QuicServer`]. [`QuicClient::connect`]
 /// returns immediately; the handshake completes in the background (reliable
 /// sends queue meanwhile — the session's `Hello` is the first thing through).
@@ -358,11 +405,51 @@ pub struct QuicClient {
     conn: Arc<Mutex<Option<quinn::Connection>>>,
     reliable: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     seq: AtomicU64,
+    /// What the handshake had to say — today, that a managed relay's
+    /// certificate did not verify and the dev-trust fallback was taken.
+    warnings: Arc<Mutex<Vec<String>>>,
+}
+
+/// A TLS client config under one trust model.
+fn tls_config(trust: &ClientTrust) -> Result<quinn::ClientConfig, String> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .ok_or("no crypto provider")?;
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| format!("tls: {e}"))?;
+    let tls = match trust {
+        ClientTrust::Verify { .. } => {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            builder.with_root_certificates(roots).with_no_client_auth()
+        }
+        ClientTrust::AcceptAny => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
+            .with_no_client_auth(),
+    };
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| format!("quic tls: {e}"))?,
+    ));
+    client_config.transport_config(Arc::new(transport_config()));
+    Ok(client_config)
 }
 
 impl QuicClient {
-    /// Connect to `host:port` (an IP or a resolvable name).
+    /// Connect to `host:port` (an IP or a resolvable name), under the trust
+    /// [`client_trust_for`] assigns the address.
     pub fn connect(addr: &str) -> Result<Self, String> {
+        Self::connect_with_trust(addr, client_trust_for(addr))
+    }
+
+    /// The warnings the handshake raised, once each.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.warnings.lock().unwrap())
+    }
+
+    /// [`Self::connect`] under an explicit trust model.
+    pub fn connect_with_trust(addr: &str, trust: ClientTrust) -> Result<Self, String> {
         install_crypto_provider();
         let remote: SocketAddr = addr
             .to_socket_addrs()
@@ -370,20 +457,17 @@ impl QuicClient {
             .next()
             .ok_or_else(|| format!("resolve {addr}: no address"))?;
 
-        let provider = rustls::crypto::CryptoProvider::get_default()
-            .cloned()
-            .ok_or("no crypto provider")?;
-        let tls = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| format!("tls: {e}"))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
-            .with_no_client_auth();
-        let mut client_config = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-                .map_err(|e| format!("quic tls: {e}"))?,
-        ));
-        client_config.transport_config(Arc::new(transport_config()));
+        let client_config = tls_config(&trust)?;
+        let fallback = match &trust {
+            ClientTrust::Verify { .. } => Some(tls_config(&ClientTrust::AcceptAny)?),
+            ClientTrust::AcceptAny => None,
+        };
+        let server_name = match &trust {
+            ClientTrust::Verify { server_name } => server_name.clone(),
+            ClientTrust::AcceptAny => "floptle-dev".to_string(),
+        };
+        let addr_shown = addr.to_string();
+        let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -405,17 +489,47 @@ impl QuicClient {
         let conn_slot: Arc<Mutex<Option<quinn::Connection>>> = Arc::new(Mutex::new(None));
         {
             let conn_slot = conn_slot.clone();
+            let warnings = warnings.clone();
             runtime.spawn(async move {
-                let connecting = match endpoint.connect(remote, "floptle-dev") {
+                let connecting = match endpoint.connect(remote, &server_name) {
                     Ok(c) => c,
                     Err(_) => {
                         let _ = events_tx.send(Incoming::dropped(SERVER));
                         return;
                     }
                 };
-                let Ok(conn) = connecting.await else {
-                    let _ = events_tx.send(Incoming::dropped(SERVER));
-                    return;
+                let conn = match connecting.await {
+                    Ok(c) => c,
+                    // **The verified handshake failed; fall back, and say so.**
+                    // The relay at a managed name did not present a chain this
+                    // build can verify. Until it does, the session goes ahead
+                    // on the dev-trust model — with a warning that reaches the
+                    // Console — rather than every managed game failing today.
+                    Err(e) => {
+                        let Some(any) = fallback else {
+                            let _ = events_tx.send(Incoming::dropped(SERVER));
+                            return;
+                        };
+                        warnings.lock().unwrap().push(format!(
+                            "the relay at {addr_shown} did not present a certificate this build \
+                             can verify ({e}); connecting anyway on the older trust model. A \
+                             future release will refuse this."
+                        ));
+                        let connecting = match endpoint.connect_with(any, remote, &server_name) {
+                            Ok(c) => c,
+                            Err(_) => {
+                                let _ = events_tx.send(Incoming::dropped(SERVER));
+                                return;
+                            }
+                        };
+                        match connecting.await {
+                            Ok(c) => c,
+                            Err(_) => {
+                                let _ = events_tx.send(Incoming::dropped(SERVER));
+                                return;
+                            }
+                        }
+                    }
                 };
                 *conn_slot.lock().unwrap() = Some(conn.clone());
                 let _ = events_tx.send(Incoming::Connected(SERVER));
@@ -442,11 +556,16 @@ impl QuicClient {
             conn: conn_slot,
             reliable: reliable_tx,
             seq: AtomicU64::new(0),
+            warnings,
         })
     }
 }
 
 impl Transport for QuicClient {
+    fn take_notices(&mut self) -> Vec<String> {
+        self.take_warnings()
+    }
+
     fn send(&mut self, _peer: PeerId, channel: Channel, bytes: &[u8]) {
         match channel {
             Channel::Reliable => {
@@ -690,5 +809,63 @@ mod tests {
         assert_eq!(got[0].name, "swing");
         assert_eq!(got[0].sender, 1);
         assert!(got[0].tick.is_some(), "the withInput stamp survives the wire");
+    }
+
+    /// **A managed relay's name is verified; an address or a self-hosted
+    /// relay's name is not.** Decided from the string, before resolving, so a
+    /// name that merely resolves to the managed relay's address gets no
+    /// special trust and a name under `fopull.com` gets no less.
+    #[test]
+    fn a_fopull_name_is_verified_and_everything_else_is_the_dev_trust_model() {
+        assert_eq!(
+            client_trust_for("us-east.relay.fopull.com:7788"),
+            ClientTrust::Verify { server_name: "us-east.relay.fopull.com".into() }
+        );
+        assert_eq!(
+            client_trust_for("FOPULL.COM:7788"),
+            ClientTrust::Verify { server_name: "FOPULL.COM".into() }
+        );
+        for any in ["192.168.1.5:7788", "[::1]:7788", "127.0.0.1:7788", "relay.example.org:7788", "fopull.com.evil.example:7788", "notfopull.com:7788"] {
+            assert_eq!(client_trust_for(any), ClientTrust::AcceptAny, "{any}");
+        }
+    }
+
+    /// **The fallback works and says so.** A client told to VERIFY a server
+    /// that presents the dev self-signed certificate cannot verify it — and
+    /// connects anyway, once, with a warning the transport hands up. Until
+    /// the managed relay's certificate is live this is what every managed
+    /// session does; when it is, the fallback is the line to remove.
+    #[test]
+    fn a_certificate_that_does_not_verify_falls_back_with_a_warning() {
+        let server = QuicServer::bind(0).unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_port());
+        let mut client = QuicClient::connect_with_trust(
+            &addr,
+            ClientTrust::Verify { server_name: "us-east.relay.fopull.com".into() },
+        )
+        .unwrap();
+        let mut connected = false;
+        for _ in 0..200 {
+            if client.poll().iter().any(|i| matches!(i, Incoming::Connected(SERVER))) {
+                connected = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(connected, "the fallback never connected");
+        let warnings = client.take_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("did not present a certificate this build can verify"), "{}", warnings[0]);
+        assert!(warnings[0].contains(&addr), "{}", warnings[0]);
+        assert!(client.take_warnings().is_empty(), "the warning was not once");
+        // The ordinary trust model raises nothing.
+        let mut plain = QuicClient::connect(&addr).unwrap();
+        for _ in 0..200 {
+            if plain.poll().iter().any(|i| matches!(i, Incoming::Connected(SERVER))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(plain.take_warnings().is_empty());
     }
 }

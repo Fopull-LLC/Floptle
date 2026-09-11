@@ -44,8 +44,8 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{
-    HostAdmission, JoinAdmission, LobbyEnd, RelayClient, RelayHost, RelayPolicy, RelayServer,
-    HOST_DECISION_DEADLINE, HOST_GRACE,
+    HostAdmission, JoinAdmission, LobbyEnd, RelayClient, RelayHost, RelayLimits, RelayPolicy,
+    RelayServer, HOST_DECISION_DEADLINE, HOST_GRACE, MAX_CLIENT_RELIABLE, MAX_HOST_RELIABLE,
 };
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};
@@ -234,6 +234,46 @@ mod tests {
         // Guardrails: an oversized arg is rejected at queue time.
         let big = NetValue::Str("x".repeat(MAX_VALUE_BYTES + 1));
         assert!(server.send_rpc("too_big", big, RpcTarget::All).is_err());
+    }
+
+    /// **The host re-validates what a client sends.** The §13.2 guardrails
+    /// were checked at queue time on the SENDER, and a modified client sends
+    /// whatever fits in a frame. An oversized RPC value hand-built onto the
+    /// wire reaches the server and is not handed on; a server-only message —
+    /// a scene switch — from a client changes nothing. Both are counted, so a
+    /// client that is not a stock client shows up as a number.
+    #[test]
+    fn the_server_refuses_what_a_stock_client_could_not_have_sent() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        server.set_scene("scenes/arena.ron");
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        assert_eq!(server.refused_from_clients(), 0, "a stock handshake was refused");
+
+        // An RPC whose value is past the size cap — a stock client refuses to
+        // queue this; a modified one puts it on the wire directly.
+        let big = wire::Msg::Rpc {
+            name: "buy_item".into(),
+            args: NetValue::Str("x".repeat(MAX_VALUE_BYTES + 1)),
+            sender: 1,
+            tick: None,
+        };
+        client.send_raw_to_server(&big.encode());
+        // …and a scene switch, which only a server sends.
+        client.send_raw_to_server(&wire::Msg::Scene { epoch: 9, scene: "scenes/evil.ron".into() }.encode());
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 3, |_, _| {});
+        assert!(server.take_rpcs().is_empty(), "the oversized RPC reached the server's scripts");
+        assert_eq!(server.scene_epoch(), 0, "a client switched the server's scene");
+        assert_eq!(server.refused_from_clients(), 2, "the refusals were not counted");
+
+        // A well-formed RPC still goes through, so the count is the only thing
+        // the check costs a stock client.
+        client.send_rpc("buy_item", NetValue::Num(1.0), RpcTarget::Server).unwrap();
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t + 3, 3, |_, _| {});
+        assert_eq!(server.take_rpcs().len(), 1);
+        assert_eq!(server.refused_from_clients(), 2);
     }
 
     #[test]

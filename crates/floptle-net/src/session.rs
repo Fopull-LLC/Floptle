@@ -157,6 +157,10 @@ const MAX_ANIM_LAYERS: usize = 8;
 /// re-syncs the layer's clock (a seek, a hitch, a rate the predictor missed).
 const ANIM_TIME_TOLERANCE: f32 = 0.1;
 
+/// The longest RPC name a server accepts from a client. A name is a Lua
+/// identifier; two hundred and fifty-six characters is not one.
+const MAX_RPC_NAME: usize = 256;
+
 /// How many recent input ticks ride in every input packet (redundancy: a lost
 /// packet doesn't lose a tick's input — later packets re-carry it). Inputs are
 /// tiny, so the window is deep: an input only goes missing if this many
@@ -273,6 +277,11 @@ pub struct NetSession {
     join_log: Vec<String>,
     /// Peers kicked last tick, whose links close this one — see [`Self::kick`].
     pending_hangup: Vec<PeerId>,
+    /// Messages from clients the server refused to act on: a server-only
+    /// variant a client had no business sending, or an RPC whose value broke
+    /// the guardrails a stock client applies at queue time. Counted rather
+    /// than only ignored, so a modified client shows up as a number.
+    refused_from_clients: u64,
     /// SERVER: who may hear each speaker. `None` (absent) = everyone.
     ///
     /// **This is where proximity voice is enforced, and it has to be here.**
@@ -652,6 +661,7 @@ impl NetSession {
             verifier: Box::new(crate::identity::AssertedOnly),
             join_log: Vec::new(),
             pending_hangup: Vec::new(),
+            refused_from_clients: 0,
             voice_forward: HashMap::new(),
             voice_in: Vec::new(),
             voice_seq: 0,
@@ -2509,6 +2519,15 @@ impl NetSession {
                 }
             }
             Msg::Rpc { name, args, tick: perceived, .. } => {
+                // **Validated on receipt, not only at the sender's queue.** A
+                // stock client refuses to queue a value past the §13.2
+                // guardrails; a modified one sends whatever fits in a frame,
+                // and the host would hand it to Lua. The same rule, applied
+                // here, is what makes the guardrail a guardrail.
+                if args.validate().is_err() || name.len() > MAX_RPC_NAME {
+                    self.refused_from_clients += 1;
+                    return;
+                }
                 // Stamp the true sender — never trust the payload's claim. The
                 // perceived tick is clamped at rewind time, not here.
                 self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived });
@@ -2550,8 +2569,25 @@ impl NetSession {
                 self.state_details.entry(tick).or_default().push((from, entries));
             }
             Msg::Bye => self.drop_peer(from),
-            _ => { /* clients don't send anything else */ }
+            // Everything else is the SERVER's to send — a spawn, a scene switch,
+            // a kick, a snapshot, a roster change. From a client it is ignored,
+            // and counted: a client sending one is not a stock client.
+            _ => self.refused_from_clients += 1,
         }
+    }
+
+    /// How many client messages the server refused to act on — see
+    /// `refused_from_clients`. Zero for every stock client in existence.
+    pub fn refused_from_clients(&self) -> u64 {
+        self.refused_from_clients
+    }
+
+    /// Put raw bytes on the wire to the server, bypassing every queue-time
+    /// guardrail — what a modified client does. Test-only: the guard that
+    /// proves the server checks on its own side needs a client that does not.
+    #[cfg(test)]
+    pub(crate) fn send_raw_to_server(&mut self, bytes: &[u8]) {
+        self.transport.send(SERVER, Channel::Reliable, bytes);
     }
 
     fn drop_peer(&mut self, p: PeerId) {

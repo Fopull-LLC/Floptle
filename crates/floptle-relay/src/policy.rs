@@ -128,6 +128,9 @@ pub struct CloudPolicy {
     /// relay that cannot reach the control plane is a slow leak on a box with
     /// one gigabyte of RAM.
     steps: Vec<f32>,
+    /// What the relay's own limits refused, cumulative — see
+    /// `RelayBox::limit_drops`.
+    limit_drops: u64,
     /// Payload carried since the last usage flush, for the box's own rate.
     /// Separate from `bytes_total`, which is since start and never resets.
     bytes_interval: (u64, u64),
@@ -211,6 +214,7 @@ impl CloudPolicy {
             last_usage: Instant::now(),
             last_tick: None,
             steps: Vec::new(),
+            limit_drops: 0,
             bytes_interval: (0, 0),
             traffic: HashMap::new(),
             closed_keys: HashMap::new(),
@@ -304,6 +308,7 @@ impl CloudPolicy {
         let (q, drops) = boxstats::socket_pressure();
         b.rx_queue_bytes = q;
         b.rx_drops = drops;
+        b.limit_drops = Some(self.limit_drops);
 
         // Occupancy: lobbies the relay is holding, and the players in them
         // counted the ONE way `host_seat` defines (`floptle/0211`) — a
@@ -425,7 +430,7 @@ impl CloudPolicy {
     }
 
     /// The limit in force for a key, and whether it may host at all.
-    fn verdict(&mut self, key: &str) -> HostAdmission {
+    fn verdict(&mut self, key: &str, build: Option<&str>) -> HostAdmission {
         if let Some(row) = self.keys.get(key) {
             if !row.may_host() {
                 return HostAdmission::Refuse {
@@ -451,6 +456,36 @@ impl CloudPolicy {
                 return HostAdmission::Refuse {
                     reason: host_at_cap_notice(row.ccu_limit, &row.tier, &row.game),
                 };
+            }
+            // **A build the control plane has marked** (`floptle/0228`): one
+            // shipped copy of the key being abused is revoked by its build id,
+            // and every other build keeps hosting. Named as what it is — the
+            // developer did this at the portal, and the sentence should send
+            // them back there rather than to their project.ron.
+            if let Some(b) = build
+                && row.blocked_builds.iter().any(|x| x == b)
+            {
+                return HostAdmission::Refuse {
+                    reason: format!(
+                        "Floptle Cloud: hosting from build {b} has been switched off for this \
+                         game at fopull.com/cloud. Ship a new build, or turn it back on there."
+                    ),
+                };
+            }
+            // **Lobbies per key.** The player cap counts people; this counts
+            // lobbies, so a leaked key cannot hold a plan's players hostage
+            // with a thousand empty rooms opened from three addresses.
+            if let Some(max) = row.max_lobbies {
+                let open = self.of_lobby.values().filter(|k| k.as_str() == key).count() as u32;
+                if open >= max {
+                    return HostAdmission::Refuse {
+                        reason: format!(
+                            "Floptle Cloud: this game already has {open} lobbies open, the most \
+                             its plan allows at once. Close one, or raise the limit at \
+                             fopull.com/cloud."
+                        ),
+                    };
+                }
             }
             let deprecated = row.state == KeyState::Deprecated;
             if deprecated && self.warned.insert(key.to_string()) {
@@ -497,7 +532,7 @@ fn short(key: &str) -> String {
 }
 
 impl RelayPolicy for CloudPolicy {
-    fn admit_host(&mut self, key: Option<&str>, _build: Option<&str>) -> HostAdmission {
+    fn admit_host(&mut self, key: Option<&str>, build: Option<&str>) -> HostAdmission {
         let Some(key) = key.filter(|k| !k.is_empty()) else {
             return HostAdmission::Refuse {
                 reason: "This relay is Floptle Cloud. Connect your project to a game at \
@@ -518,7 +553,7 @@ impl RelayPolicy for CloudPolicy {
         if self.keys.get(key).is_none() && !self.floored.contains(key) {
             self.spawn_authorize(key);
         }
-        self.verdict(key)
+        self.verdict(key, build)
     }
 
     fn claim_code(&mut self, key: Option<&str>, code: &str) -> bool {
@@ -622,6 +657,10 @@ impl RelayPolicy for CloudPolicy {
 
     fn lobby_ended(&mut self, code: &str, why: floptle_net::LobbyEnd) {
         self.say(format!("lobby {code} ended: {}", why.as_str()));
+    }
+
+    fn dropped_by_limit(&mut self) {
+        self.limit_drops += 1;
     }
 
     fn orphaned(&mut self, code: &str, bytes: u64) {
@@ -938,6 +977,8 @@ mod tests {
             ccu_limit: limit,
             regions: vec!["us-east".into()],
             account_over_limit: false,
+            max_lobbies: None,
+            blocked_builds: Vec::new(),
         }
     }
 
@@ -1030,6 +1071,45 @@ mod tests {
             p.peer_joined("UABCDE");
         }
         p
+    }
+
+    /// **A key's lobbies are counted, and a marked build is refused**
+    /// (`floptle/0228`). One shipped build being abused is revoked by its id
+    /// and every other build keeps hosting; a key at its lobby ceiling is
+    /// refused the next lobby with the number named, and a closed lobby makes
+    /// room again.
+    #[test]
+    fn a_key_at_its_lobby_ceiling_and_a_blocked_build_are_refused_by_name() {
+        let fake = Arc::new(Fake::default());
+        let mut r = row(KEY, 20);
+        r.max_lobbies = Some(2);
+        r.blocked_builds = vec!["b_leaked".into()];
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![r],
+            removed: vec![],
+            reserved: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
+        // The marked build, and not the others.
+        match p.admit_host(Some(KEY), Some("b_leaked")) {
+            HostAdmission::Refuse { reason } => assert!(reason.contains("b_leaked") && reason.contains("fopull.com/cloud"), "{reason}"),
+            other => panic!("a blocked build hosted: {other:?}"),
+        }
+        assert_eq!(p.admit_host(Some(KEY), Some("b_good")), HostAdmission::Allow { prefix: Some('U') });
+        // Two lobbies open; the third is refused with the count.
+        p.lobby_opened("UAAAAA", Some(KEY));
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
+        p.lobby_opened("UBBBBB", Some(KEY));
+        match p.admit_host(Some(KEY), None) {
+            HostAdmission::Refuse { reason } => assert!(reason.contains("2 lobbies open"), "{reason}"),
+            other => panic!("a third lobby was allowed past the ceiling: {other:?}"),
+        }
+        // Closing one makes room.
+        p.lobby_closed("UAAAAA");
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
     }
 
     /// **The Phase 2 gate, in one test: 20 players get in and the 21st is told
