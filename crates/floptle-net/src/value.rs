@@ -62,6 +62,14 @@ impl NetValue {
         Ok(())
     }
 
+    /// How many bytes this value takes on the wire — and in a save file, which
+    /// is bounded the same way. `usize::MAX` for a value that cannot be
+    /// encoded at all, so a cap compared against it refuses rather than
+    /// admits.
+    pub fn encoded_len(&self) -> usize {
+        postcard::to_allocvec(self).map(|v| v.len()).unwrap_or(usize::MAX)
+    }
+
     /// Nesting depth: scalars are 0, a table is 1 + its deepest child.
     pub fn depth(&self) -> usize {
         match self {

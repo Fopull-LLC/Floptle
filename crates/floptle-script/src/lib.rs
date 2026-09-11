@@ -241,6 +241,7 @@ type UiFrameEvents = Rc<RefCell<Vec<(u32, String)>>>;
 
 pub mod app_api;
 mod account_api;
+pub mod budget;
 mod api;
 mod audio_api;
 mod env;
@@ -864,6 +865,15 @@ pub struct ScriptHost {
     /// The `http.*` bridge: callbacks waiting on a reply, the caps, and the
     /// session generation that keeps a stale reply out of a fresh Play.
     http: Rc<RefCell<http_api::HttpState>>,
+    /// How long one pass into Lua may run — see [`budget`].
+    budget: Rc<budget::Budget>,
+    /// Scripts that ran past the budget. Not called again until their file
+    /// changes: a loop without an exit would otherwise freeze every frame for
+    /// the whole budget, forever.
+    stopped: std::collections::HashSet<String>,
+    /// `print`/`log` lines refused this frame past the per-frame cap — see
+    /// `host::MAX_CONSOLE_LINES_PER_FRAME`.
+    dropped_lines: Rc<std::cell::Cell<usize>>,
     /// The `account.*` bridge: the player's Foverse account and the Cloud calls
     /// waiting on a reply. Built lazily inside — a project that never signs
     /// anybody in never touches the OS keyring.

@@ -13,7 +13,7 @@
 //! plenty for save slots, not a place for anything large.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::DirEntry;
@@ -81,6 +81,11 @@ pub fn open_saves(game: &str) -> Result<(), String> {
 }
 
 /// A file's size in bytes, without copying it out of the bundle.
+/// A bundle has no links.
+pub fn is_symlink<P: AsRef<Path>>(_path: P) -> bool {
+    false
+}
+
 pub fn size<P: AsRef<Path>>(path: P) -> Option<u64> {
     lock().as_ref()?.fs.size(path.as_ref())
 }
@@ -157,4 +162,9 @@ pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
         let _ = st.remove_item(&format!("{}{k}", w.prefix));
     }
     Ok(())
+}
+
+/// A page has no working directory; every bundle path is already absolute.
+pub(crate) fn cwd() -> Option<PathBuf> {
+    None
 }

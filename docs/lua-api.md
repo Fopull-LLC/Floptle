@@ -2877,7 +2877,7 @@ save.get("gold" [, default]) — the stored value, else the default, else nil. s
 
 ### `save.set`
 
-save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values follow the synced-var guardrails (numbers/strings/bools/tables, depth <= 4, <= 1 KB). Flushed on Stop + every few seconds during Play.
+save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values follow the synced-var guardrails (numbers/strings/bools/tables, depth <= 4, <= 1 KB), and a slot holds at most 10 000 keys / 4 MB in all. Flushed on Stop + every few seconds during Play.
 
 ```lua
 save.set("hp", hp)                 -- survives scene loads and quits
@@ -3623,11 +3623,11 @@ Reference files under Assets/ in code: assets.getFile(path), assets.getContents(
 
 ### `assets.getContents`
 
-assets.getContents("models") — an array of every file under that folder (recursive). Build tables of assets with it.
+assets.getContents("models") — an array of every file under that folder (recursive). Build tables of assets with it. Relative to Assets/ and inside it; at most 20 000 files, and it says when it stopped.
 
 ### `assets.getFile`
 
-assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/.
+assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line.
 
 ## debug gizmos
 

@@ -8184,6 +8184,13 @@ impl Editor {
     /// server's whole log IS the Console, drained to stderr every tick, and
     /// echoing here as well would print every line a script writes twice.
     pub(crate) fn adopt_script_logs(&mut self, echo: bool) {
+        // An asset reference that tried to leave the project, said once.
+        for msg in crate::project::take_refused_refs() {
+            if echo {
+                eprintln!("[assets] {msg}");
+            }
+            self.console.push(floptle_script::LogLevel::Warn, msg, None);
+        }
         for l in self.script_host.drain_logs() {
             // On **stderr**: stdout belongs to whatever the caller asked for,
             // and a verb's `--json` document is on it.

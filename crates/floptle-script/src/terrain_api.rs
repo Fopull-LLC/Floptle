@@ -219,6 +219,14 @@ pub(crate) fn install_terrain_api(
         if let Ok(f) = lua.create_function(move |_, path: Option<String>| {
             match path {
                 Some(p) => {
+                    // The same rule as `deleteSaveDir`, for the same reason:
+                    // edited fields are WRITTEN here, and a directory outside
+                    // the project is not a save slot.
+                    if !p.is_empty() && floptle_vfs::contain(std::path::Path::new(""), &p).is_none() {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "terrain.saveDir(\"{p}\"): needs a relative project path with no \"..\""
+                        )));
+                    }
                     *sd.borrow_mut() = if p.is_empty() { None } else { Some(p) };
                     Ok(None)
                 }
