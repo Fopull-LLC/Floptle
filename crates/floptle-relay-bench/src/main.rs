@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use floptle_net::{Incoming, RelayClient, RelayHost, SERVER, Transport};
+use floptle_net::{Incoming, QuicClient, RelayClient, RelayHost, SERVER, Transport};
 
 mod args;
 use args::Args;
@@ -47,10 +47,83 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(e) = run(&args) {
+    let outcome = if args.verify { verify(&args.relay) } else { run(&args) };
+    if let Err(e) = outcome {
         eprintln!("floptle-relay-bench: {e}");
         std::process::exit(1);
     }
+}
+
+/// **Which certificate a relay presents, and whether it verifies**
+/// (`floptle/0227`). Two handshakes: one under the dev-trust model, to read
+/// the leaf whatever it is — so an operator can compare its fingerprint with
+/// the file on the box — and one verified against the public roots for the
+/// name in `--relay`, with no fallback. The second is what every managed
+/// client will run once the fallback is gone, so a relay that fails it here
+/// is one that will refuse every player then.
+fn verify(relay: &str) -> Result<(), String> {
+    let name = relay.rsplit_once(':').map_or(relay, |(h, _)| h);
+    let name = name.trim_start_matches('[').trim_end_matches(']');
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Err(format!(
+            "{relay} is an address; a certificate is issued for a NAME, so give the relay's \
+             name (the one a client would be told)"
+        ));
+    }
+
+    let mut any = QuicClient::connect(relay)?;
+    let presented = loop_until(&mut any, Duration::from_secs(5))?;
+    match &presented {
+        Some(leaf) => println!("{relay} presents {}", floptle_net::quic::fingerprint_of(leaf)),
+        None => return Err(format!("{relay} did not answer a handshake at all within 5 s")),
+    }
+    drop(any);
+
+    let mut strict = QuicClient::connect_verified(relay, name)?;
+    let mut refused: Option<String> = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let verified = loop {
+        for ev in strict.poll() {
+            match ev {
+                Incoming::Connected(SERVER) => break,
+                Incoming::Disconnected(SERVER, why) => refused = Some(why.unwrap_or_default()),
+                _ => {}
+            }
+        }
+        if strict.peer_certificate().is_some() {
+            break true;
+        }
+        if refused.is_some() || Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if verified {
+        println!("VERIFIED — the chain is trusted for {name} by the public roots");
+        Ok(())
+    } else {
+        Err(format!(
+            "NOT VERIFIED for {name}: {}",
+            refused.unwrap_or_else(|| "no answer within 5 s".into())
+        ))
+    }
+}
+
+/// Wait for a dev-trust handshake and return the leaf it presented.
+fn loop_until(client: &mut QuicClient, within: Duration) -> Result<Option<Vec<u8>>, String> {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        for ev in client.poll() {
+            if let Incoming::Disconnected(SERVER, why) = ev {
+                return Err(format!("dropped before the handshake: {}", why.unwrap_or_default()));
+            }
+        }
+        if let Some(leaf) = client.peer_certificate() {
+            return Ok(Some(leaf));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(None)
 }
 
 /// One lobby: a host and the clients attached to it.

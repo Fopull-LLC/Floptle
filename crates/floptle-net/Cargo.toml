@@ -40,4 +40,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # `quic::ClientTrust`. A self-hosted relay keeps the dev-trust model.
 webpki-roots = "0.26"
 rcgen = "0.13"
+# Already under rustls; here for the certificate fingerprint an operator
+# compares against `openssl x509 -fingerprint` (`quic::fingerprint_of`).
+ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }

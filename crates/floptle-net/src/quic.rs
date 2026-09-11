@@ -16,8 +16,13 @@
 //! certificate and clients accept ANY certificate. That makes LAN/self-hosted
 //! play zero-config, and it is exactly as trustworthy as a Minecraft server —
 //! the connection is encrypted, but the server's identity is not verified.
-//! Verified identity (real certs on relay/Cloud hosts) lands with
-//! `floptle-relay`.
+//!
+//! **Verified identity, for a relay reached by name** (`floptle/0227`): a
+//! server can instead be handed a certificate ([`ServerCertificate`], PEM as
+//! certbot writes it) and can be handed a NEWER one while it runs
+//! ([`QuicServer::set_certificate`]) — new handshakes present the new chain
+//! and every live connection keeps the one it agreed, so a renewal on the box
+//! drops nobody. Whether a client checks the chain is [`ClientTrust`]'s call.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -169,22 +174,136 @@ pub struct QuicServer {
     events: mpsc::Receiver<Incoming>,
     peers: Arc<Mutex<HashMap<PeerId, Arc<PeerHandle>>>>,
     port: u16,
+    /// A handle on the endpoint, kept for [`Self::set_certificate`].
+    endpoint: quinn::Endpoint,
 }
 
-impl QuicServer {
-    /// Bind on `0.0.0.0:port` (0 = ephemeral, see [`Self::local_port`]) with a
-    /// fresh self-signed certificate (see the module docs' security model).
-    pub fn bind(port: u16) -> Result<Self, String> {
+/// **A certificate and its key, for a server that is reached by name.**
+///
+/// The dev self-signed certificate is minted at startup and nobody checks it.
+/// A managed relay at `us-east.relay.fopull.com` is different: clients verify
+/// that name against the public roots ([`ClientTrust::Verify`]), so the relay
+/// has to present a chain a CA issued for it — and present the RENEWED one
+/// sixty days later without a restart, because a restart ends every lobby on
+/// the box. This is that chain, loaded from disk; [`QuicServer::set_certificate`]
+/// is the swap.
+pub struct ServerCertificate {
+    /// Leaf first, then intermediates — the order `fullchain.pem` has.
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+}
+
+impl Clone for ServerCertificate {
+    fn clone(&self) -> Self {
+        Self { chain: self.chain.clone(), key: self.key.clone_key() }
+    }
+}
+
+impl std::fmt::Debug for ServerCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the key. The fingerprint is what an operator compares.
+        f.debug_struct("ServerCertificate")
+            .field("chain", &self.chain.len())
+            .field("fingerprint", &self.fingerprint())
+            .finish()
+    }
+}
+
+impl ServerCertificate {
+    /// Load a PEM certificate chain and a PEM private key — certbot's
+    /// `fullchain.pem` and `privkey.pem`, or anything shaped like them. The
+    /// key has to belong to the leaf, and the chain has to hold at least one
+    /// certificate; either failing is an error here rather than a server that
+    /// came up presenting nothing.
+    pub fn load_pem(cert_path: &std::path::Path, key_path: &std::path::Path) -> Result<Self, String> {
+        let cert_pem = std::fs::read(cert_path)
+            .map_err(|e| format!("certificate {}: {e}", cert_path.display()))?;
+        let key_pem =
+            std::fs::read(key_path).map_err(|e| format!("key {}: {e}", key_path.display()))?;
+        Self::from_pem(&cert_pem, &key_pem)
+            .map_err(|e| format!("{} + {}: {e}", cert_path.display(), key_path.display()))
+    }
+
+    /// [`Self::load_pem`] from bytes already read.
+    pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, String> {
+        use rustls::pki_types::pem::PemObject;
+        install_crypto_provider();
+        let chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("certificate PEM: {e}"))?;
+        if chain.is_empty() {
+            return Err("certificate PEM holds no certificate".into());
+        }
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
+            .map_err(|e| format!("key PEM: {e}"))?;
+        let out = Self { chain, key };
+        // A key that does not match its certificate is refused NOW, by the
+        // same check `with_single_cert` runs, so the mismatch is a load error
+        // and never a swap that left the endpoint presenting nothing.
+        out.server_config()?;
+        Ok(out)
+    }
+
+    /// The leaf's SHA-256 fingerprint, `AB:CD:…` — what
+    /// `openssl x509 -noout -fingerprint -sha256` prints for the same file, so
+    /// an operator can tell which certificate a running relay is presenting.
+    pub fn fingerprint(&self) -> String {
+        fingerprint_of(&self.chain[0])
+    }
+
+    fn server_config(&self) -> Result<quinn::ServerConfig, String> {
+        let mut server_config =
+            quinn::ServerConfig::with_single_cert(self.chain.clone(), self.key.clone_key())
+                .map_err(|e| format!("server tls: {e}"))?;
+        server_config.transport_config(Arc::new(transport_config()));
+        Ok(server_config)
+    }
+
+    /// The dev-trust certificate: fresh, self-signed, for the name
+    /// `floptle-dev` that no client verifies.
+    fn self_signed() -> Result<Self, String> {
         install_crypto_provider();
         let cert = rcgen::generate_simple_self_signed(vec!["floptle-dev".into()])
             .map_err(|e| format!("self-signed cert: {e}"))?;
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
             rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
         );
-        let chain = vec![cert.cert.der().clone()];
-        let mut server_config = quinn::ServerConfig::with_single_cert(chain, key)
-            .map_err(|e| format!("server tls: {e}"))?;
-        server_config.transport_config(Arc::new(transport_config()));
+        Ok(Self { chain: vec![cert.cert.der().clone()], key })
+    }
+}
+
+/// SHA-256 of a DER certificate as `AB:CD:…` (openssl's spelling).
+pub fn fingerprint_of(der: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+impl QuicServer {
+    /// Bind on `0.0.0.0:port` (0 = ephemeral, see [`Self::local_port`]) with a
+    /// fresh self-signed certificate (see the module docs' security model).
+    pub fn bind(port: u16) -> Result<Self, String> {
+        Self::bind_with_certificate(port, &ServerCertificate::self_signed()?)
+    }
+
+    /// Present a NEWER certificate to every handshake from now on. Connections
+    /// already up keep the one they agreed — quinn swaps the server config
+    /// for incoming handshakes only — so this is how a renewed certificate
+    /// reaches a relay without ending a single lobby.
+    pub fn set_certificate(&self, cert: &ServerCertificate) -> Result<(), String> {
+        self.endpoint.set_server_config(Some(cert.server_config()?));
+        Ok(())
+    }
+
+    /// [`Self::bind`] presenting `cert` instead of a self-signed one.
+    pub fn bind_with_certificate(port: u16, cert: &ServerCertificate) -> Result<Self, String> {
+        install_crypto_provider();
+        let server_config = cert.server_config()?;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -202,6 +321,7 @@ impl QuicServer {
             Arc::new(Mutex::new(HashMap::new()));
         {
             let peers = peers.clone();
+            let endpoint = endpoint.clone();
             runtime.spawn(async move {
                 let mut next_peer: PeerId = 1;
                 while let Some(incoming) = endpoint.accept().await {
@@ -240,7 +360,7 @@ impl QuicServer {
                 }
             });
         }
-        Ok(Self { runtime: Some(runtime), events: events_rx, peers, port: local_port })
+        Ok(Self { runtime: Some(runtime), events: events_rx, peers, port: local_port, endpoint })
     }
 
     /// The actually-bound UDP port (useful with `bind(0)`).
@@ -450,6 +570,30 @@ impl QuicClient {
 
     /// [`Self::connect`] under an explicit trust model.
     pub fn connect_with_trust(addr: &str, trust: ClientTrust) -> Result<Self, String> {
+        Self::connect_inner(addr, trust, true)
+    }
+
+    /// Verify the server's chain for `server_name` against the public roots
+    /// and take NO fallback: a chain that does not verify is a
+    /// [`Incoming::Disconnected`] carrying the reason, never a connection.
+    /// What `floptle-relay-bench --verify` runs, and what every managed
+    /// connection becomes once the fallback in [`Self::connect_with_trust`]
+    /// is removed (`floptle/0227`).
+    pub fn connect_verified(addr: &str, server_name: &str) -> Result<Self, String> {
+        Self::connect_inner(addr, ClientTrust::Verify { server_name: server_name.into() }, false)
+    }
+
+    /// The leaf certificate the server presented, DER — `None` until the
+    /// handshake completes. For telling WHICH certificate answered: the
+    /// self-signed dev one, the one on disk, or the one before a renewal.
+    pub fn peer_certificate(&self) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().unwrap().clone()?;
+        let identity = conn.peer_identity()?;
+        let chain = identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok()?;
+        chain.first().map(|c| c.as_ref().to_vec())
+    }
+
+    fn connect_inner(addr: &str, trust: ClientTrust, allow_fallback: bool) -> Result<Self, String> {
         install_crypto_provider();
         let remote: SocketAddr = addr
             .to_socket_addrs()
@@ -459,8 +603,8 @@ impl QuicClient {
 
         let client_config = tls_config(&trust)?;
         let fallback = match &trust {
-            ClientTrust::Verify { .. } => Some(tls_config(&ClientTrust::AcceptAny)?),
-            ClientTrust::AcceptAny => None,
+            ClientTrust::Verify { .. } if allow_fallback => Some(tls_config(&ClientTrust::AcceptAny)?),
+            ClientTrust::Verify { .. } | ClientTrust::AcceptAny => None,
         };
         let server_name = match &trust {
             ClientTrust::Verify { server_name } => server_name.clone(),
@@ -507,7 +651,21 @@ impl QuicClient {
                     // Console — rather than every managed game failing today.
                     Err(e) => {
                         let Some(any) = fallback else {
-                            let _ = events_tx.send(Incoming::dropped(SERVER));
+                            // No fallback to take: the reason travels with the
+                            // disconnect, the way a relay's refusal does, so
+                            // whoever asked for a verified connection is told
+                            // WHY there is not one.
+                            let ev = match &trust {
+                                ClientTrust::Verify { server_name } => Incoming::refused(
+                                    SERVER,
+                                    format!(
+                                        "the relay at {addr_shown} did not present a certificate \
+                                         for {server_name} that this build can verify ({e})"
+                                    ),
+                                ),
+                                ClientTrust::AcceptAny => Incoming::dropped(SERVER),
+                            };
+                            let _ = events_tx.send(ev);
                             return;
                         };
                         warnings.lock().unwrap().push(format!(
@@ -867,5 +1025,138 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(plain.take_warnings().is_empty());
+    }
+
+    /// A certificate for `name`, PEM, as certbot would leave it on disk.
+    fn pem_for(name: &str) -> (Vec<u8>, Vec<u8>) {
+        let cert = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
+        (cert.cert.pem().into_bytes(), cert.key_pair.serialize_pem().into_bytes())
+    }
+
+    /// Connect under the dev-trust model and return the leaf the server
+    /// presented, once the handshake is up.
+    fn presented_by(addr: &str) -> (QuicClient, Vec<u8>) {
+        let mut client = QuicClient::connect(addr).unwrap();
+        for _ in 0..200 {
+            if client.poll().iter().any(|i| matches!(i, Incoming::Connected(SERVER))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let leaf = client.peer_certificate().expect("the handshake completed");
+        (client, leaf)
+    }
+
+    /// **A server presents the certificate it was given, not one it minted**
+    /// (`floptle/0227`). The managed relay has to answer with the chain a CA
+    /// issued for its region name; this is the seam that lets it, checked by
+    /// reading the leaf back off a live connection.
+    #[test]
+    fn a_server_presents_the_certificate_it_was_handed() {
+        let (cert_pem, key_pem) = pem_for("us-east.relay.fopull.com");
+        let cert = ServerCertificate::from_pem(&cert_pem, &key_pem).unwrap();
+        let server = QuicServer::bind_with_certificate(0, &cert).unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_port());
+        let (_client, leaf) = presented_by(&addr);
+        assert_eq!(fingerprint_of(&leaf), cert.fingerprint(), "a different certificate answered");
+        // …and the fingerprint is openssl's spelling, so an operator can
+        // compare it against the file on the box.
+        assert_eq!(cert.fingerprint().len(), 32 * 3 - 1, "{}", cert.fingerprint());
+        assert!(cert.fingerprint().chars().all(|c| c == ':' || c.is_ascii_hexdigit()));
+    }
+
+    /// **A renewal reaches new handshakes and ends no live connection.**
+    /// certbot renews on its own schedule; a relay that could only read its
+    /// certificate at startup would turn every renewal into every lobby in
+    /// the region ending at once. So: swap, then check that a client from
+    /// before the swap is still up and one from after sees the new leaf.
+    #[test]
+    fn a_renewed_certificate_is_presented_to_new_connections_and_old_ones_stay_up() {
+        let (c1, k1) = pem_for("us-east.relay.fopull.com");
+        let (c2, k2) = pem_for("us-east.relay.fopull.com");
+        let before = ServerCertificate::from_pem(&c1, &k1).unwrap();
+        let after = ServerCertificate::from_pem(&c2, &k2).unwrap();
+        assert_ne!(before.fingerprint(), after.fingerprint(), "two mints, two certificates");
+
+        let mut server = QuicServer::bind_with_certificate(0, &before).unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_port());
+        let (mut old, leaf_old) = presented_by(&addr);
+        assert_eq!(fingerprint_of(&leaf_old), before.fingerprint());
+        // The server has seen the old client arrive.
+        let mut seen = Polled::new(&mut server);
+        assert_eq!(seen.wait_for(|i| matches!(i, Incoming::Connected(1)), 1).len(), 1, "old client never arrived");
+
+        server.set_certificate(&after).unwrap();
+
+        let (_new, leaf_new) = presented_by(&addr);
+        assert_eq!(fingerprint_of(&leaf_new), after.fingerprint(), "the renewal was not presented");
+        // The old connection still carries traffic on the certificate it
+        // agreed: a frame sent now arrives.
+        old.send(SERVER, Channel::Reliable, b"still here");
+        let mut seen = Polled::new(&mut server);
+        assert_eq!(
+            seen.wait_for(|i| matches!(i, Incoming::Message(1, _, b) if b == b"still here"), 1).len(),
+            1,
+            "the pre-renewal connection went quiet: {:?}",
+            seen.seen
+        );
+        assert!(
+            !seen.seen.iter().any(|i| matches!(i, Incoming::Disconnected(1, _))),
+            "the renewal dropped the old connection: {:?}",
+            seen.seen
+        );
+        assert!(old.peer_certificate().is_some_and(|l| fingerprint_of(&l) == before.fingerprint()));
+    }
+
+    /// **A chain that cannot be loaded is refused at load, never presented as
+    /// nothing.** A key that belongs to another certificate, an empty chain, a
+    /// file that is not PEM: each is an error with the reason in it, so a
+    /// renewal that wrote a torn file leaves the relay on the certificate it
+    /// had (that is the watcher's half, in `floptle-relay`).
+    #[test]
+    fn a_certificate_that_does_not_match_its_key_is_refused_at_load() {
+        let (c1, _k1) = pem_for("us-east.relay.fopull.com");
+        let (_c2, k2) = pem_for("us-east.relay.fopull.com");
+        let e = ServerCertificate::from_pem(&c1, &k2).expect_err("a stranger's key");
+        assert!(e.contains("server tls"), "{e}");
+        let e = ServerCertificate::from_pem(b"", &k2).expect_err("no certificate at all");
+        assert!(e.contains("no certificate"), "{e}");
+        let e = ServerCertificate::from_pem(&c1, b"-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n")
+            .expect_err("not a key");
+        assert!(e.contains("private key"), "{e}");
+        let e = ServerCertificate::from_pem(&c1, b"not pem at all").expect_err("not PEM");
+        assert!(e.contains("key PEM"), "{e}");
+    }
+
+    /// **A verified-only connection refuses, with the reason, and never falls
+    /// back.** This is what `floptle-relay-bench --verify` runs against a
+    /// managed relay, and what every managed connection becomes once the
+    /// fallback goes: the self-signed dev certificate does not verify for the
+    /// region name, so the outcome is a disconnect that says so.
+    #[test]
+    fn a_verified_only_connection_refuses_an_unverifiable_chain_with_the_reason() {
+        let server = QuicServer::bind(0).unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_port());
+        let mut client = QuicClient::connect_verified(&addr, "us-east.relay.fopull.com").unwrap();
+        let mut outcome = None;
+        for _ in 0..300 {
+            for ev in client.poll() {
+                match ev {
+                    Incoming::Connected(SERVER) => outcome = Some(Err("connected".to_string())),
+                    Incoming::Disconnected(SERVER, why) => outcome = Some(Ok(why)),
+                    _ => {}
+                }
+            }
+            if outcome.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let why = outcome.expect("the handshake never resolved").expect("it connected anyway");
+        let why = why.expect("refused with no reason");
+        assert!(why.contains("us-east.relay.fopull.com"), "{why}");
+        assert!(why.contains("did not present a certificate"), "{why}");
+        assert!(client.take_warnings().is_empty(), "a refusal is not a warning");
+        assert!(client.peer_certificate().is_none());
     }
 }

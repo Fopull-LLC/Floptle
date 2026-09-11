@@ -16,3 +16,7 @@ floptle-net = { path = "../floptle-net" }
 ureq = { workspace = true, features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Mints the certificate pairs the watch tests write to disk.
+rcgen = "0.13"

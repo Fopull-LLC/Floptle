@@ -15,6 +15,7 @@
 mod boxstats;
 mod control;
 mod policy;
+mod tls;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +33,9 @@ struct Args {
     /// `--no-address-limits`: lift the per-address rates for a load test run
     /// from one machine. Every other limit stays.
     no_address_limits: bool,
+    /// `--tls-cert` + `--tls-key`: the certificate to present instead of a
+    /// self-signed one, watched for renewal (see `tls`).
+    tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 impl Args {
@@ -71,6 +75,16 @@ FLAGS
                         minute from one address) — for a load test run from one
                         machine, which is the only case that looks like an
                         attacker to a relay. Every other limit stays.
+  --tls-cert <path>     PEM certificate chain to present, leaf first — certbot's
+                        fullchain.pem. Given together with --tls-key. Without
+                        them the relay mints a self-signed certificate at
+                        startup, which is the open relay's dev-trust model and
+                        which no client verifies.
+  --tls-key <path>      PEM private key for --tls-cert — certbot's privkey.pem.
+                        Both files are watched: a renewal written to the same
+                        paths is presented to new connections within ten
+                        seconds and drops nobody. A renewal that will not load
+                        is said once and the old certificate stays.
   --help, -h            this table.
 
 Without --control and --token this is the open relay and nothing else: no keys,
@@ -87,7 +101,10 @@ was missing is the untracked path that refuses to start instead.
             letter: 'U',
             no_address_limits: false,
             token: None,
+            tls: None,
         };
+        let mut tls_cert: Option<String> = None;
+        let mut tls_key: Option<String> = None;
         let mut i = 0;
         while i < argv.len() {
             let a = &argv[i];
@@ -131,6 +148,14 @@ was missing is the untracked path that refuses to start instead.
                     out.no_address_limits = true;
                     i += 1;
                 }
+                "--tls-cert" => {
+                    tls_cert = Some(need(val, "--tls-cert")?);
+                    i += 2;
+                }
+                "--tls-key" => {
+                    tls_key = Some(need(val, "--tls-key")?);
+                    i += 2;
+                }
                 // Printed and exit 0, rather than refused as an unknown flag
                 // or — as the July binary did — parsed as a PORT NUMBER, which
                 // is how the two builds were told apart on the box
@@ -157,6 +182,14 @@ was missing is the untracked path that refuses to start instead.
                     .into(),
             );
         }
+        // The same rule as the token: a relay told half a certificate would
+        // come up self-signed, and every client would then fall back — or,
+        // once the fallback is gone, refuse — without a word on the box.
+        out.tls = match (tls_cert, tls_key) {
+            (Some(c), Some(k)) => Some((c.into(), k.into())),
+            (None, None) => None,
+            _ => return Err("--tls-cert and --tls-key go together".into()),
+        };
         Ok(out)
     }
 }
@@ -170,13 +203,37 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let mut relay = match RelayServer::bind(args.port) {
+    // The certificate, if there is one to present. A relay told to present
+    // one it cannot read does not come up self-signed instead: that is the
+    // half-configuration that refuses to start, like a token with no control
+    // plane.
+    let mut cert_watch: Option<tls::CertWatch> = None;
+    let bound = match &args.tls {
+        None => RelayServer::bind(args.port),
+        Some((cert_path, key_path)) => match tls::CertWatch::load(cert_path, key_path) {
+            Ok((watch, cert)) => {
+                cert_watch = Some(watch);
+                RelayServer::bind_with_certificate(args.port, &cert)
+            }
+            Err(e) => Err(format!("certificate: {e}")),
+        },
+    };
+    let mut relay = match bound {
         Ok(r) => r,
         Err(e) => {
             eprintln!("floptle-relay: {e}");
             std::process::exit(1);
         }
     };
+    match (&cert_watch, &args.tls) {
+        (Some(w), Some((cert_path, _))) => println!(
+            "certificate: {} from {} (watched; a renewal is presented within {}s, nobody dropped)",
+            w.fingerprint(),
+            cert_path.display(),
+            tls::POLL_INTERVAL.as_secs()
+        ),
+        _ => println!("certificate: self-signed (no --tls-cert) — the dev-trust model, unverified"),
+    }
     if args.no_address_limits {
         let limits = floptle_net::RelayLimits {
             opens_per_address: u32::MAX,
@@ -223,6 +280,20 @@ fn main() {
         if now != lobbies {
             println!("lobbies: {now}");
             lobbies = now;
+        }
+        if let Some(w) = &mut cert_watch {
+            match w.poll() {
+                None => {}
+                Some(tls::Reload::Loaded(cert)) => match relay.set_certificate(&cert) {
+                    Ok(()) => println!("certificate: renewed on disk, now presenting {}", w.fingerprint()),
+                    Err(e) => println!("certificate: renewal loaded but NOT applied ({e})"),
+                },
+                Some(tls::Reload::Failed(e)) => println!(
+                    "certificate: the files changed but did not load ({e}); still presenting {} — \
+                     said once, retried when they change again",
+                    w.fingerprint()
+                ),
+            }
         }
         if let Some(status) = &managed {
             // Whatever the policy has to say, as it says it.
@@ -396,5 +467,24 @@ mod arg_tests {
     #[test]
     fn a_region_letter_is_one_character() {
         assert!(Args::parse(&args(&["--letter", "EU"])).is_err());
+    }
+
+    /// **Half a certificate is refused, like half a token** (`floptle/0227`).
+    /// A relay given `--tls-cert` alone would come up self-signed, and the
+    /// first sign would be every client at the region name falling back.
+    #[test]
+    fn a_certificate_without_its_key_refuses_to_start() {
+        let e = Args::parse(&args(&["--tls-cert", "/etc/x/fullchain.pem"])).expect_err("no key");
+        assert!(e.contains("--tls-key"), "{e}");
+        let e = Args::parse(&args(&["--tls-key", "/etc/x/privkey.pem"])).expect_err("no cert");
+        assert!(e.contains("--tls-cert"), "{e}");
+        let a = Args::parse(&args(&[
+            "--tls-cert", "/etc/x/fullchain.pem", "--tls-key", "/etc/x/privkey.pem", "7788",
+        ]))
+        .expect("parses");
+        let (c, k) = a.tls.expect("both paths kept");
+        assert_eq!(c, std::path::Path::new("/etc/x/fullchain.pem"));
+        assert_eq!(k, std::path::Path::new("/etc/x/privkey.pem"));
+        assert!(Args::parse(&args(&["7788"])).unwrap().tls.is_none(), "no flags = self-signed");
     }
 }
