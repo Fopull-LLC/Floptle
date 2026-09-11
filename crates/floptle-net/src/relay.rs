@@ -537,6 +537,14 @@ struct Lobby {
     /// to the match it was already in.
     host_lost_at: Option<Instant>,
     /// Since when the lobby has had no clients — for [`RelayLimits::idle_lobby`].
+    ///
+    /// ⚠ Restarted when a host reclaims the lobby (`floptle/0231`): the
+    /// dedicated marker is per CONNECTION, and a server that restarts arrives
+    /// as a new connection whose marker has not landed yet — so for one sweep
+    /// a reclaimed lobby is a player's, and if this clock still says "empty
+    /// since morning" the reaper ends it in the same second the reclaim
+    /// restored it. A fresh window from the reclaim gives the marker its
+    /// moment, and gives a player's reclaimed lobby what a new one gets.
     empty_since: Instant,
 }
 
@@ -989,6 +997,13 @@ impl RelayServer {
         {
             l.host = from;
             l.host_lost_at = None;
+            // ⚠ **The idle clock restarts at the reclaim** (`floptle/0231`).
+            // The lobby carried its predecessor's `empty_since`, so a
+            // dedicated server that had sat open since morning — which is a
+            // dedicated server's job — was reaped by the sweep after the one
+            // that restored it, before its new connection's dedicated marker
+            // had landed. The new host gets the full window from now.
+            l.empty_since = Instant::now();
             let clients: Vec<u64> = l.clients.keys().copied().collect();
             self.conns.insert(from, Role::Host { code: c.clone() });
             if let Some(p) = self.policy.as_mut() {
@@ -1977,6 +1992,16 @@ mod tests {
             Self::start_with_grace(Some(Box::new(policy)), grace)
         }
 
+        /// [`Self::managed_with_grace`] with its limits replaced too — for a
+        /// reaper that has to fire inside a test (`floptle/0231`).
+        pub(super) fn managed_limited(policy: TablePolicy, grace: Duration, limits: RelayLimits) -> Self {
+            let mut relay = RelayServer::bind(0).expect("relay bind");
+            relay.set_policy(Box::new(policy));
+            relay.set_grace(grace);
+            relay.set_limits(limits);
+            Self::run(relay)
+        }
+
         /// A relay on a **named** port, so a test can stop one and start
         /// another at the same address — which is what a relay upgrade looks
         /// like from a host's point of view (`floptle/0210`).
@@ -2356,8 +2381,19 @@ mod tests {
 mod managed_tests {
     use super::tests::*;
     use super::*;
+    use std::sync::atomic::Ordering;
 
     const KEY: &str = "fk_live_ATESTKEYTHATISNOTREAL0000000";
+
+    /// Poll a host for a moment and return everything it was told.
+    fn drain(host: &mut RelayHost) -> Vec<Incoming> {
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            out.extend(host.poll());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        out
+    }
 
     /// Pump both ends for a moment and return the refusal the client was given,
     /// if it was given one. The host is polled too, so its own leg keeps
@@ -2500,6 +2536,80 @@ mod managed_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         false
+    }
+
+    /// ⚠ **A reclaimed lobby is not reaped in the second it is restored**
+    /// (`floptle/0231`). On the first real use of the reclaim, Forgery's
+    /// server restarted onto a new bundle, asked for its code, was granted it
+    /// with "host is back, players kept" — and the idle reaper ended the lobby
+    /// in the same second, because the restored lobby carried the idle clock
+    /// of a server that had sat open, alone, since morning, and the dedicated
+    /// marker lives on a connection the restart had just replaced. The server
+    /// went on advertising six characters that answered nothing.
+    ///
+    /// The lobby stays open here across the restart, and stays open for
+    /// another whole idle window after it, because it is a server's.
+    #[test]
+    fn a_dedicated_server_that_reclaims_its_code_is_not_reaped_for_having_been_idle() {
+        let idle = Duration::from_millis(120);
+        let relay = TestRelay::managed_limited(
+            TablePolicy::with(KEY, 20).reserving("U5FEFJ", KEY),
+            Duration::from_secs(30),
+            RelayLimits { idle_lobby: idle, ..RelayLimits::default() },
+        );
+        let (mut server, code) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("hosts");
+        server.declare_dedicated();
+        assert_eq!(code, "U5FEFJ");
+        // Open, alone, for longer than the idle window: a server's job.
+        std::thread::sleep(idle * 3);
+        let _ = drain(&mut server);
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the idle server was reaped before the restart");
+
+        // The restart: the process is gone, a new one asks for the same code.
+        drop(server);
+        let (mut again, back) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("re-hosts");
+        again.declare_dedicated();
+        assert_eq!(back, "U5FEFJ");
+        // The sweep after the reclaim, and the whole window after that.
+        std::thread::sleep(idle * 3);
+        let events = drain(&mut again);
+        assert!(
+            !events.iter().any(|e| matches!(e, Incoming::Disconnected(..))),
+            "the reclaimed lobby was ended: {events:?}"
+        );
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the reaper ended the lobby the reclaim restored");
+        assert_eq!(again.lobby_code().as_deref(), Some("U5FEFJ"));
+    }
+
+    /// **And a player's reclaimed lobby gets a fresh idle window**, not the
+    /// remainder of the old one: the clock restarts at the reclaim.
+    #[test]
+    fn a_reclaimed_lobbys_idle_clock_restarts_at_the_reclaim() {
+        let idle = Duration::from_millis(200);
+        let relay = TestRelay::managed_limited(
+            TablePolicy::with(KEY, 20).reserving("U5FEFJ", KEY),
+            Duration::from_secs(30),
+            RelayLimits { idle_lobby: idle, ..RelayLimits::default() },
+        );
+        let (host, _) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("hosts");
+        // Most of the window spent, then the blip.
+        std::thread::sleep(idle / 2);
+        drop(host);
+        let (mut again, back) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("re-hosts");
+        assert_eq!(back, "U5FEFJ", "not a reclaim");
+        // Past the OLD deadline, inside the new one: still open. (No `drain`
+        // here — it polls for 200 ms, which is the whole window.)
+        std::thread::sleep(idle * 3 / 4);
+        let _ = again.poll();
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the old clock was carried over the reclaim");
+        // And a player's lobby still ends once ITS window has run.
+        std::thread::sleep(idle);
+        let _ = drain(&mut again);
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 0, "a reclaimed player lobby became immortal");
     }
 
     /// ⚠ **A host whose connection blips keeps its match** (`floptle/0222`).
