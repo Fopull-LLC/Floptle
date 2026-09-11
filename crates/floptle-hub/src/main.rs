@@ -49,7 +49,7 @@ fn main() -> eframe::Result<()> {
             .rev()
             .find(|i| i.is_valid())
             .map(|i| i.editor_bin());
-        if let Err(e) = floptle_brand::linux::install(&home, &me, editor.as_deref()) {
+        if let Err(e) = floptle_brand::linux::install(&home, &me, editor.as_deref(), true) {
             eprintln!("could not write the desktop entries: {e}");
         }
     }

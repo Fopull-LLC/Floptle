@@ -152,41 +152,70 @@ pub mod linux {
     /// Write the icon set and the two entries under `data_home`. Returns the
     /// paths written or confirmed. `editor` is the currently installed
     /// editor, if there is one; without it only the Hub's entry is written.
-    pub fn install(data_home: &Path, hub: &Path, editor: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+    /// `refresh` asks the running desktop to notice a change (the Hub passes
+    /// `true`; a test writing into a scratch directory passes `false`).
+    pub fn install(data_home: &Path, hub: &Path, editor: Option<&Path>, refresh: bool) -> Result<Vec<PathBuf>, String> {
         let mut done = Vec::new();
+        let mut changed = false;
         for size in super::ICON_SIZES {
             let Some(png) = super::icon_png(size) else { continue };
             let dir = data_home.join(format!("icons/hicolor/{size}x{size}/apps"));
             let path = dir.join(format!("{}.png", super::ICON_NAME));
-            write_if_changed(&path, png)?;
+            changed |= write_if_changed(&path, png)?;
             done.push(path);
         }
         let apps = data_home.join("applications");
         let hub_entry = apps.join(format!("{}.desktop", super::HUB_APP_ID));
-        write_if_changed(
+        changed |= write_if_changed(
             &hub_entry,
             desktop_entry(super::HUB_APP_ID, "Floptle Hub", "Install and open Floptle projects", hub).as_bytes(),
         )?;
         done.push(hub_entry);
         if let Some(editor) = editor {
             let entry = apps.join(format!("{}.desktop", super::APP_ID));
-            write_if_changed(
+            changed |= write_if_changed(
                 &entry,
                 desktop_entry(super::APP_ID, "Floptle", "The Floptle game engine editor", editor).as_bytes(),
             )?;
             done.push(entry);
         }
+        if changed && refresh {
+            refresh_caches(data_home);
+        }
         Ok(done)
     }
 
-    fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    /// Ask the desktop to notice, best-effort: the entry database (every
+    /// desktop), the icon cache (GTK desktops), the sycoca (KDE). Each is a
+    /// detached process that may not exist; none is waited on, none can fail
+    /// the install — a desktop that has none of them still finds the files,
+    /// at the latest at the next login.
+    fn refresh_caches(data_home: &Path) {
+        let spawn = |program: &str, args: &[&std::ffi::OsStr]| {
+            let _ = std::process::Command::new(program)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        };
+        spawn("update-desktop-database", &[data_home.join("applications").as_os_str()]);
+        spawn(
+            "gtk-update-icon-cache",
+            &["-f".as_ref(), "-t".as_ref(), data_home.join("icons/hicolor").as_os_str()],
+        );
+        spawn("kbuildsycoca6", &[]);
+    }
+
+    /// Returns whether anything was written.
+    fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, String> {
         if std::fs::read(path).is_ok_and(|old| old == bytes) {
-            return Ok(());
+            return Ok(false);
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(true)
     }
 }
 
@@ -238,7 +267,7 @@ mod tests {
 
         let home = std::env::temp_dir().join(format!("brand-xdg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let written = linux::install(&home, Path::new("/x/floptle-hub"), Some(Path::new("/x/floptle"))).unwrap();
+        let written = linux::install(&home, Path::new("/x/floptle-hub"), Some(Path::new("/x/floptle")), false).unwrap();
         assert!(home.join("applications/floptle-hub.desktop").is_file());
         assert!(home.join("applications/floptle.desktop").is_file());
         assert!(home.join("icons/hicolor/256x256/apps/floptle.png").is_file());
@@ -246,7 +275,7 @@ mod tests {
         // Idempotent: the second run rewrites nothing (mtimes untouched).
         let before = std::fs::metadata(home.join("applications/floptle.desktop")).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        linux::install(&home, Path::new("/x/floptle-hub"), Some(Path::new("/x/floptle"))).unwrap();
+        linux::install(&home, Path::new("/x/floptle-hub"), Some(Path::new("/x/floptle")), false).unwrap();
         let after = std::fs::metadata(home.join("applications/floptle.desktop")).unwrap().modified().unwrap();
         assert_eq!(before, after, "an unchanged entry was rewritten");
         let _ = std::fs::remove_dir_all(&home);

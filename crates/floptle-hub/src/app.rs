@@ -50,7 +50,6 @@ mod ico {
     pub const GLOBE: &str = "🌐";
     pub const BUG: &str = "🐛";
     pub const BOOK: &str = "📖";
-    pub const ROCKET: &str = "🚀";
     pub const ACCOUNT: &str = "👤";
     pub const SIGNIN: &str = "🔑";
 }
@@ -190,6 +189,8 @@ pub struct HubApp {
     installs: Vec<Install>,
     /// The logo, uploaded once for the About page.
     logo: Option<egui::TextureHandle>,
+    /// The icon mark, uploaded once for the title bar.
+    mark: Option<egui::TextureHandle>,
     tab: Tab,
     manifest: ManifestState,
     job: Option<InstallJob>,
@@ -289,6 +290,7 @@ impl HubApp {
             config,
             installs,
             logo: None,
+            mark: None,
             tab: Tab::Projects,
             manifest: ManifestState::Idle,
             job: None,
@@ -1141,7 +1143,10 @@ impl eframe::App for HubApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(format!("{} Floptle Hub", ico::ROCKET));
+                // The mark, then the name — the logo is the Hub's icon here too.
+                let mark = self.mark_texture(ui.ctx());
+                ui.add(egui::Image::new((mark.id(), egui::vec2(22.0, 22.0))));
+                ui.heading("Floptle Hub");
                 // THE HUB'S OWN VERSION, ALWAYS IN VIEW. Three different things share one
                 // version number here — the Hub, the engine, and the engine a project is
                 // pinned to — and until this line the only one with its name attached was
@@ -2137,6 +2142,17 @@ impl HubApp {
         }
         ui.separator();
         ui.small("Token is used only this session (a keyring store is a later hardening step). Point the manifest URL at a local releases.json to test against a locally-packaged bundle.");
+    }
+
+    /// The app icon as a texture, uploaded on first use.
+    fn mark_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        self.mark
+            .get_or_insert_with(|| {
+                let i = floptle_brand::Icon::at(64).expect("the committed icon decodes");
+                let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
+                ctx.load_texture("floptle-mark", img, egui::TextureOptions::LINEAR)
+            })
+            .clone()
     }
 
     fn about_tab(&mut self, ui: &mut egui::Ui) {
