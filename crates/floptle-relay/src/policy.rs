@@ -39,6 +39,11 @@ use crate::control::{ControlError, ControlPlane, KeyRow, KeyState, KeyTable, Usa
 /// How often the key snapshot refreshes. Revocation propagates within this,
 /// comfortably inside the contract's 60 s.
 pub const PULL_INTERVAL: Duration = Duration::from_secs(30);
+/// The first retry after a failed pull; doubles per failure, capped at
+/// [`PULL_INTERVAL`] — an outage is pulled at the healthy cadence, not faster.
+pub const RETRY_MIN: Duration = Duration::from_secs(1);
+/// How often a continuing failure is written to the log after the first line.
+pub const FAIL_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Usage is coalesced to at most one POST per this interval, per region.
 ///
@@ -90,6 +95,21 @@ pub struct CloudPolicy {
     cursor: Option<String>,
     last_pull_ok: Option<Instant>,
     pull_in_flight: bool,
+    /// **When a failed pull may be tried again** (`floptle/0223`). `None` when
+    /// the last pull succeeded, and the healthy cadence applies. A failure
+    /// used to leave `last_pull_ok` old and the loop re-pulling the instant
+    /// the previous attempt returned — fifteen a second for nine hours, each
+    /// one logged, until the relay's own lines evicted its journal.
+    retry_at: Option<Instant>,
+    /// The current retry interval: doubles per failure from
+    /// [`RETRY_MIN`] up to [`PULL_INTERVAL`], resets on success.
+    retry_after: Duration,
+    /// Since when pulls have been failing, and how stale the served snapshot
+    /// already was at that moment — for the one line written on recovery.
+    failing_since: Option<(Instant, Option<u64>)>,
+    /// When the failure was last written to the log, so it is said once at
+    /// the start, then at most once per [`FAIL_LOG_INTERVAL`].
+    last_fail_log: Option<Instant>,
     /// key → the cold-path lookup running for it.
     cold: HashMap<String, InFlight>,
     /// Keys the cold path could not settle in time; allowed at the free floor
@@ -203,6 +223,10 @@ impl CloudPolicy {
             cursor: None,
             last_pull_ok: None,
             pull_in_flight: false,
+            retry_at: None,
+            retry_after: RETRY_MIN,
+            failing_since: None,
+            last_fail_log: None,
             cold: HashMap::new(),
             floored: HashSet::new(),
             of_lobby: HashMap::new(),
@@ -391,25 +415,65 @@ impl CloudPolicy {
                     // this process lives.
                     self.reserved =
                         snap.reserved.iter().map(|r| (r.code.clone(), r.clone())).collect();
+                    // **One line on recovery, with the window in it**: how
+                    // long the pulls failed and how stale what was served had
+                    // got, so the whole outage reads off a single line later.
+                    if let Some((since, stale_at_start)) = self.failing_since.take() {
+                        let served = self.snapshot_age_s().unwrap_or(0);
+                        let from = stale_at_start.map(|s| format!("{s}s")).unwrap_or("never".into());
+                        self.say(format!(
+                            "key snapshot: recovered after {}s of failed pulls — the served \
+                             snapshot was {from} old when they started and {served}s old at the end",
+                            since.elapsed().as_secs()
+                        ));
+                    }
                     self.last_pull_ok = Some(Instant::now());
+                    self.retry_at = None;
+                    self.retry_after = RETRY_MIN;
+                    self.last_fail_log = None;
                     // A key we had to floor is now properly known.
                     self.floored.retain(|k| self.keys.get(k).is_none());
                 }
                 Done::Pulled(Err(e)) => {
                     self.pull_in_flight = false;
                     self.denied = matches!(e, ControlError::Denied(_));
-                    let age =
-                        self.snapshot_age_s().map(|s| s.to_string()).unwrap_or("never".into());
+                    // **Back off** (`floptle/0223`): the next attempt waits,
+                    // doubling up to the healthy cadence. Not failing closed —
+                    // the served snapshot stands throughout — just not
+                    // hammering an edge that is already answering 530.
+                    self.retry_at = Some(Instant::now() + self.retry_after);
+                    self.retry_after = (self.retry_after * 2).min(PULL_INTERVAL);
+                    let age = self.snapshot_age_s();
+                    let now = Instant::now();
+                    let first = self.failing_since.is_none();
+                    if first {
+                        self.failing_since = Some((now, age));
+                    }
+                    // Said once when it starts, then at most once a minute.
+                    // A token refusal is the one that does not clear up on
+                    // its own — somebody has to re-mint — so it is said on
+                    // the same schedule with its own sentence, rather than
+                    // per attempt.
+                    let say_now = first
+                        || self.last_fail_log.is_none_or(|t| now.duration_since(t) >= FAIL_LOG_INTERVAL);
+                    if !say_now {
+                        continue;
+                    }
+                    self.last_fail_log = Some(now);
+                    let age_s = age.map(|s| s.to_string()).unwrap_or("never".into());
                     if self.denied {
-                        // Said every time, not once. This does not clear up on
-                        // its own and somebody has to go and re-mint the token.
                         self.say(format!(
                             "⚠ CONTROL PLANE REFUSED THIS RELAY'S TOKEN ({e:?}). Re-mint it \
                              with `php artisan floptle:box-token mint --region=…` and restart."
                         ));
+                    } else if first {
+                        self.say(format!(
+                            "key snapshot: {e:?} — serving the last one ({age_s}s old); retrying \
+                             with backoff, and saying so again at most once a minute"
+                        ));
                     } else {
                         self.say(format!(
-                            "key snapshot: {e:?} — serving the last one ({age}s old)"
+                            "key snapshot: still failing ({e:?}) — serving the last one ({age_s}s old)"
                         ));
                     }
                 }
@@ -732,7 +796,11 @@ impl RelayPolicy for CloudPolicy {
             self.cold.remove(&k);
             self.floored.insert(k);
         }
-        let due = self.last_pull_ok.map(|t| t.elapsed() >= PULL_INTERVAL).unwrap_or(true);
+        // The healthy cadence, or — after a failure — the backed-off retry.
+        let due = match self.retry_at {
+            Some(at) => Instant::now() >= at,
+            None => self.last_pull_ok.map(|t| t.elapsed() >= PULL_INTERVAL).unwrap_or(true),
+        };
         if due {
             self.spawn_pull();
         }
@@ -1679,6 +1747,74 @@ mod tests {
             HostAdmission::Pending,
             "with no snapshot, every key is a question"
         );
+    }
+
+    /// **A failing pull backs off and is logged on a schedule, and recovery
+    /// says how long it was** (`floptle/0223`). The live relay retried about
+    /// fifteen times a second through a nine-hour edge outage and logged every
+    /// one, until its own lines evicted its journal — the primary evidence for
+    /// every incident on that box. Serving the stale snapshot was right; the
+    /// rate was the defect.
+    #[test]
+    fn a_failing_pull_backs_off_logs_once_a_minute_and_reports_the_window_on_recovery() {
+        let fake = Arc::new(Fake::default());
+        // A good snapshot first, so there is something to serve.
+        *fake.snapshot.lock().unwrap() = Some(KeySnapshot {
+            cursor: Some("c1".into()),
+            full: true,
+            keys: vec![row(KEY, 20)],
+            removed: vec![],
+            reserved: vec![],
+        });
+        let mut p = policy(fake.clone());
+        assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
+        let pulls_before = fake.cursors_seen.lock().unwrap().len();
+
+        // The edge starts answering 530. Tick as the binary does — every
+        // millisecond — for a third of a second.
+        *fake.pull_err.lock().unwrap() = Some(ControlError::Unavailable("HTTP 530".into()));
+        due_now(&mut p);
+        for _ in 0..300 {
+            p.tick();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pulls = fake.cursors_seen.lock().unwrap().len() - pulls_before;
+        assert_eq!(pulls, 1, "a failing pull was retried {pulls} times in 300 ms — the storm");
+        assert!(p.retry_after >= Duration::from_secs(2), "the retry interval did not grow: {:?}", p.retry_after);
+        // Lines about the failure — the "full resync" line is not one.
+        let failure_lines = |p: &CloudPolicy| -> usize {
+            fake_log(p).lines().filter(|l| l.contains("530") || l.contains("recovered after")).count()
+        };
+        let log = fake_log(&p);
+        assert_eq!(failure_lines(&p), 1, "one line per failure, not per attempt:\n{log}");
+        assert!(log.contains("serving the last one") && log.contains("backoff"), "{log}");
+        // Still serving, still hosting: failing open is the design.
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
+
+        // Two more failures, retried at once: still no new line — the next one
+        // is due a minute after the first.
+        for _ in 0..2 {
+            p.retry_at = Some(Instant::now());
+            assert!(settle(&mut p, |p| !p.pull_in_flight && p.retry_at.is_some_and(|t| t > Instant::now())));
+        }
+        assert_eq!(failure_lines(&p), 1, "{}", fake_log(&p));
+        assert!(p.retry_after <= PULL_INTERVAL, "the backoff grew past the healthy cadence");
+
+        // The minute passes: one more line, and it says "still".
+        p.last_fail_log = Some(Instant::now() - FAIL_LOG_INTERVAL);
+        p.retry_at = Some(Instant::now());
+        assert!(settle(&mut p, |p| failure_lines(p) == 2));
+        assert!(fake_log(&p).contains("still failing"), "{}", fake_log(&p));
+
+        // The edge recovers: one line with the window in it, and the cadence
+        // is back to normal.
+        *fake.pull_err.lock().unwrap() = None;
+        p.retry_at = Some(Instant::now());
+        assert!(settle(&mut p, |p| p.retry_at.is_none()));
+        let log = fake_log(&p);
+        assert!(log.contains("recovered after") && log.contains("failed pulls") && log.contains("old at the end"), "{log}");
+        assert_eq!(p.retry_after, RETRY_MIN);
+        assert_eq!(failure_lines(&p), 3, "{log}");
     }
 
     /// **Rule 3.** A `full` page replaces. A relay that merged one would keep
