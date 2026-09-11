@@ -398,6 +398,16 @@ Connection: close\r\n\r\n\
 <body style=\"font:16px system-ui;padding:3rem;text-align:center\">\
 <p>You can close this tab and go back to the editor.</p>";
 
+/// The agent every package request goes through. A package runs in the
+/// developer's own editor, so loopback and the LAN are its to reach — the
+/// browser sign-in above depends on it — but link-local addresses are refused
+/// here as everywhere else (`floptle_script::http_policy`): a cloud box's
+/// metadata service is nobody's API. Every address a request resolves to,
+/// including a redirect's, passes through the same resolver.
+fn package_agent() -> ureq::AgentBuilder {
+    floptle_script::http_policy::agent_builder(floptle_script::HttpPolicy { allow_local: true })
+}
+
 fn run_request(
     method: &str,
     url: &str,
@@ -405,7 +415,7 @@ fn run_request(
     headers: &[(String, String)],
     timeout: f64,
 ) -> Reply {
-    let agent = ureq::AgentBuilder::new()
+    let agent = package_agent()
         .timeout(Duration::from_secs_f64(timeout.clamp(1.0, 120.0)))
         .build();
     let mut req = agent.request(method, url);
@@ -450,7 +460,7 @@ fn run_stream(
     stop: &AtomicBool,
     tx: &Sender<Envelope>,
 ) -> Reply {
-    let agent = ureq::AgentBuilder::new()
+    let agent = package_agent()
         // Two different deadlines, and they are not interchangeable.
         //
         // CONNECT is the caller's timeout: how long to wait for the server to

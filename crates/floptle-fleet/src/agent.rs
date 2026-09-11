@@ -170,6 +170,9 @@ impl Agent {
         host: &mut dyn Host,
         d: &Deployment,
     ) -> Result<DeploymentStatus, String> {
+        // Before anything is fetched, unpacked or written: a row that could
+        // put a line of its own into the unit file is refused whole.
+        d.refuse_unsafe()?;
         let bundle_dir = bundle::dir_for(&args.root, &d.sha256);
         if !bundle::present(&args.root, &d.sha256) {
             bundle::log_line(&format!("fetching bundle for {}", d.redacted()));
@@ -858,6 +861,37 @@ mod tests {
         // Nothing at all, as when systemctl itself fails.
         h.active = String::new();
         assert_eq!(unit_memory(&mut h, "x.service"), (None, None));
+    }
+
+    /// **A row that could write a line of its own into the unit is refused
+    /// whole.** Every string in `/desired` becomes text in a file the agent
+    /// writes as root, and a scene name with a newline in it would end
+    /// `ExecStart=` and begin whatever directive followed. Refused before
+    /// anything is fetched: `failed`, the field named, no unit on disk.
+    #[test]
+    fn a_row_carrying_a_control_character_is_refused_and_no_unit_is_written() {
+        let dir = tmp("ctrl");
+        let a = args_in(&dir);
+        seed(&a, "aa", "0.85.0-rc6", "scenes/lobby.ron");
+        let mut bad = dep("d_1");
+        bad.args.scene = Some("scenes/lobby.ron\nUser=root\nExecStartPre=/bin/sh -c id".into());
+        let mut h = FakeHost::default();
+        let mut agent = Agent::default();
+        let r = agent.cycle(&a, &mut h, &Desired { deployments: vec![bad] }).unwrap();
+        assert_eq!(r.deployments[0].state, "failed");
+        assert!(
+            r.deployments[0].last_lines.iter().any(|l| l.contains("args.scene") && l.contains("control")),
+            "the reason names the field: {:?}",
+            r.deployments[0].last_lines
+        );
+        assert!(!a.units.join("floptle-d-d_1.service").exists(), "a unit was written");
+        assert!(!h.calls.iter().any(|c| c.contains("enable")), "it was started: {:?}", h.calls);
+
+        // Length is refused the same way, and an ordinary row is not.
+        let mut long = dep("d_2");
+        long.game = "g".repeat(300);
+        assert!(long.refuse_unsafe().unwrap_err().contains("game"));
+        assert!(dep("d_3").refuse_unsafe().is_ok());
     }
 
     /// `--dry-run` touches nothing.

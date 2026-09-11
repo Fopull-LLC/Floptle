@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use mlua::{Function, Lua, Table, Value};
 
+use crate::http_policy::{self, HttpPolicy};
 use crate::{LogLevel, ScriptLog};
 
 /// How many requests may be in flight at once. Past this, calls fail fast with
@@ -50,10 +51,11 @@ const MAX_IN_FLIGHT: usize = 8;
 /// How many may be STARTED per second. A script calling `http.get` every frame
 /// is a bug; this is where it finds out.
 const MAX_PER_SECOND: usize = 20;
-/// Largest response body accepted, in bytes. Past this the request fails with
-/// an error instead of buying a script an unbounded allocation. Only the native
-/// transport reads a body, so only it has one to bound.
-#[cfg(not(target_arch = "wasm32"))]
+/// Largest body accepted in EITHER direction, in bytes. A reply past this fails
+/// with an error instead of buying a script an unbounded allocation; a request
+/// body past it is refused at the call, for the same reason from the other
+/// end — a script assembling a gigabyte to POST is a script that has gone
+/// wrong, and the worker thread should not be the place it finds out.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Default per-request timeout, seconds.
 const DEFAULT_TIMEOUT: f64 = 15.0;
@@ -71,6 +73,9 @@ pub(crate) struct HttpReply {
     error: Option<String>,
     /// Whether the server said the body is JSON.
     said_json: bool,
+    /// A 3xx's `Location`, handed to the script rather than followed — see
+    /// [`dispatch`].
+    location: Option<String>,
 }
 
 /// One request the main thread is still waiting on.
@@ -101,6 +106,13 @@ pub(crate) struct HttpState {
     now: f64,
     /// Play only — set by the driver. Edit mode never opens a socket.
     playing: bool,
+    /// Where a request may go — set by the driver, never by a script. See
+    /// [`crate::http_policy`]. The default REFUSES local addresses; only the
+    /// editor's Play opens them.
+    policy: HttpPolicy,
+    /// The first request the editor lets through to a local address says,
+    /// once, that an exported game would not.
+    warned_local: bool,
 }
 
 impl HttpState {
@@ -117,7 +129,14 @@ impl HttpState {
             warned_fixed: false,
             now: 0.0,
             playing: false,
+            policy: HttpPolicy::default(),
+            warned_local: false,
         }
+    }
+
+    /// The driver's one knob: see [`HttpPolicy`].
+    pub(crate) fn set_policy(&mut self, policy: HttpPolicy) {
+        self.policy = policy;
     }
 
     /// Stop / scene load: forget every callback and disown every reply still on
@@ -128,6 +147,7 @@ impl HttpState {
         self.generation = self.generation.wrapping_add(1);
         self.warned_rate = false;
         self.warned_fixed = false;
+        self.warned_local = false;
     }
 
     pub(crate) fn set_playing(&mut self, playing: bool) {
@@ -172,6 +192,11 @@ fn read_opts(
                 Value::Boolean(b) => b.to_string(),
                 _ => continue,
             };
+            if let Some(h) = http_policy::refused_header([pair.0.as_str()]) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "{call}: the {h} header is the transport's to set, not the script's"
+                )));
+            }
             headers.push((pair.0, v));
         }
         // Deterministic order: a header map is a hash, and a request that
@@ -325,7 +350,11 @@ pub(crate) fn make_reply_table(
 }
 
 fn reply_table(lua: &Lua, r: &HttpReply, want_json: bool) -> mlua::Result<Table> {
-    make_reply_table(lua, r.status, &r.body, r.error.as_deref(), want_json || r.said_json)
+    let t = make_reply_table(lua, r.status, &r.body, r.error.as_deref(), want_json || r.said_json)?;
+    if let Some(l) = &r.location {
+        t.set("location", l.as_str())?;
+    }
+    Ok(t)
 }
 
 /// Deliver every reply that has arrived. Called from the host's FRAME pass —
@@ -401,6 +430,41 @@ fn send(
             method.to_ascii_lowercase()
         )));
     }
+    if body.as_ref().is_some_and(|b| b.len() > MAX_BODY) {
+        return Err(mlua::Error::RuntimeError(format!(
+            "http.{}: the body is larger than the {MAX_BODY} byte limit",
+            method.to_ascii_lowercase()
+        )));
+    }
+    // The address policy, applied to what the developer WROTE: a literal or a
+    // local name is refused here, at the call, with the hostname in the
+    // message. What a name RESOLVES to is the resolver's job (`dispatch`), on
+    // the worker thread, where a redirect's hop is checked the same way.
+    let policy = s.policy;
+    let host = url_host(&url);
+    if let Some(why) = http_policy::refuse_host(host, policy) {
+        return Err(mlua::Error::RuntimeError(http_policy::explain(&why, policy)));
+    }
+    // The editor lets a local address through and says so, once: the same
+    // script in an exported game or on a dedicated server is refused, and a
+    // developer who only ever pressed Play would otherwise learn that from a
+    // player.
+    if policy.allow_local
+        && !s.warned_local
+        && http_policy::refuse_host(host, HttpPolicy::default()).is_some()
+    {
+        s.warned_local = true;
+        drop(s);
+        log(
+            logs,
+            LogLevel::Warn,
+            format!(
+                "http: {host} is a local address. The editor allows it; an exported game and \
+                 a dedicated server refuse local and private addresses."
+            ),
+        );
+        s = state.borrow_mut();
+    }
     // A call from fixedUpdate warns ONCE. It is not an error — the request will
     // work — but it can never be replayed, so a rollback match that depends on
     // it will diverge, and that is worth saying out loud exactly one time.
@@ -453,11 +517,25 @@ fn send(
     // and a request that never left would otherwise sit in `pending` for the
     // life of the play session — one of `MAX_IN_FLIGHT`, held by nothing,
     // with a script callback that never fires and nothing said about it.
-    if let Err(e) = dispatch(id, generation, tx, method, url, headers, body, timeout) {
+    if let Err(e) = dispatch(id, generation, tx, method, url, headers, body, timeout, policy) {
         state.borrow_mut().pending.remove(&id);
         return Err(e);
     }
     Ok(())
+}
+
+/// The host part of an `http(s)://` URL, as written: no scheme, userinfo,
+/// port or path. A v6 literal keeps its brackets, which is how the policy
+/// expects it.
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if hostport.starts_with('[') {
+        hostport.find(']').map_or(hostport, |i| &hostport[..=i])
+    } else {
+        hostport.split(':').next().unwrap_or("")
+    }
 }
 
 /// Put one request on the wire.
@@ -476,13 +554,21 @@ fn dispatch(
     headers: Vec<(String, String)>,
     body: Option<String>,
     timeout: f64,
+    policy: HttpPolicy,
 ) -> mlua::Result<()> {
     // One thread per request, bounded by MAX_IN_FLIGHT above. A pool would save
     // a few hundred microseconds of spawn and cost a lifetime of shutdown
     // bookkeeping; at eight concurrent requests this is the right trade.
+    //
+    // **Redirects are not followed.** A 3xx reaches the script as an ordinary
+    // reply with `res.location`, and it decides. Following them here would
+    // mean the address a script asked for is not the one it reached, and the
+    // policy resolver — which every hop would still pass through — would then
+    // be refusing an address the script never wrote.
     let agent = Arc::new(
-        ureq::AgentBuilder::new()
+        http_policy::agent_builder(policy)
             .timeout(std::time::Duration::from_secs_f64(timeout))
+            .redirects(0)
             .build(),
     );
     std::thread::Builder::new()
@@ -509,6 +595,9 @@ fn dispatch(
                     let said_json = r
                         .header("content-type")
                         .is_some_and(|c| c.to_ascii_lowercase().contains("json"));
+                    let location = ((300..400).contains(&status))
+                        .then(|| r.header("location").map(str::to_string))
+                        .flatten();
                     use std::io::Read as _;
                     let mut buf = String::new();
                     let read =
@@ -521,7 +610,7 @@ fn dispatch(
                         }
                         Ok(_) => None,
                     };
-                    HttpReply { id, generation, status, body: buf, error, said_json }
+                    HttpReply { id, generation, status, body: buf, error, said_json, location }
                 }
                 Err(e) => HttpReply {
                     id,
@@ -530,6 +619,7 @@ fn dispatch(
                     body: String::new(),
                     error: Some(e.to_string()),
                     said_json: false,
+                    location: None,
                 },
             };
             // The receiver is gone only when the host itself has: nothing to do.
@@ -560,6 +650,7 @@ fn dispatch(
     _headers: Vec<(String, String)>,
     _body: Option<String>,
     _timeout: f64,
+    _policy: HttpPolicy,
 ) -> mlua::Result<()> {
     Err(mlua::Error::RuntimeError(format!(
         "http.{} is not available in a browser build yet — the request was not sent, and your \
@@ -956,6 +1047,7 @@ mod tests {
                 body: "{}".into(),
                 error: None,
                 said_json: false,
+                location: None,
             })
             .unwrap();
         }
@@ -984,6 +1076,7 @@ mod tests {
             body: "{}".into(),
             error: None,
             said_json: false,
+            location: None,
         })
         .unwrap();
         drop(s);
@@ -1005,6 +1098,7 @@ mod tests {
                 body: body.into(),
                 error: None,
                 said_json,
+                location: None,
             };
             reply_table(&lua, &r, want_json).unwrap()
         };
@@ -1036,6 +1130,189 @@ mod tests {
 /// (floptle-platform `tasks/floptle/0054`). `#[ignore]`d: they need the
 /// network, so CI never runs them — `cargo test -p floptle-script -- --ignored
 /// --nocapture live_` when you want to prove the chain by hand.
+/// Where a request may GO — proved against a real socket on this machine, not
+/// against the classifier alone. Native only: the browser transport refuses
+/// every request before it has an address to judge.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod policy_tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A one-line HTTP server on loopback that counts the connections it
+    /// accepted and answers every one with `reply`. The count is the guard:
+    /// "the script saw an error" is not the same as "no socket was opened".
+    fn serve(reply: &'static str) -> (u16, Arc<AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let n = accepted.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                n.fetch_add(1, Ordering::SeqCst);
+                let mut c = c;
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(reply.as_bytes());
+            }
+        });
+        (port, accepted)
+    }
+
+    /// `(ok, status, error, location)` — the `res` fields a policy test reads.
+    type Seen = (bool, u16, String, String);
+
+    /// Run `code`, drain until the callback lands, and hand back what it saw.
+    fn fetch(policy: HttpPolicy, code: &str) -> Seen {
+        let (lua, state, logs) = super::tests::lua_with_http();
+        state.borrow_mut().set_policy(policy);
+        state.borrow_mut().set_playing(true);
+        let got: Rc<RefCell<Option<Seen>>> = Rc::new(RefCell::new(None));
+        {
+            let g = got.clone();
+            let cb = lua
+                .create_function(move |_, res: Table| {
+                    *g.borrow_mut() = Some((
+                        res.get::<bool>("ok").unwrap_or(false),
+                        res.get::<u16>("status").unwrap_or(0),
+                        res.get::<String>("error").unwrap_or_default(),
+                        res.get::<String>("location").unwrap_or_default(),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+            lua.globals().set("__cb", cb).unwrap();
+        }
+        // A refusal at the CALL is an error the script sees at once; one the
+        // resolver makes arrives through the callback. Both count.
+        if let Err(e) = lua.load(code).exec() {
+            return (false, 0, e.to_string(), String::new());
+        }
+        for _ in 0..200 {
+            drain(&lua, &state, &logs);
+            if got.borrow().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        got.borrow().clone().expect("no reply within 5 s")
+    }
+
+    const REFUSING: HttpPolicy = HttpPolicy { allow_local: false };
+    const EDITOR: HttpPolicy = HttpPolicy { allow_local: true };
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
+
+    /// The whole point: under the refusing policy the listener on this
+    /// machine ACCEPTS NOTHING, and the script is told which rule said so.
+    #[test]
+    fn a_game_cannot_reach_a_loopback_port_and_the_listener_sees_no_connection() {
+        let (port, accepted) = serve(OK);
+        for host in ["127.0.0.1", "localhost", "[::ffff:127.0.0.1]"] {
+            let (ok, _, err, _) =
+                fetch(REFUSING, &format!("http.get('http://{host}:{port}/', __cb)"));
+            assert!(!ok, "{host}: reached it");
+            assert!(err.contains("http: refused"), "{host}: the rule is not named: {err}");
+            assert!(err.contains(host) || err.contains("loopback"), "{host}: {err}");
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 0, "a socket was opened");
+    }
+
+    /// The editor's Play is the one place a local address works — and the
+    /// same listener proves the request really went out.
+    #[test]
+    fn the_editor_reaches_a_loopback_port_and_says_once_that_a_build_would_not() {
+        let (port, accepted) = serve(OK);
+        let (lua, state, logs) = super::tests::lua_with_http();
+        state.borrow_mut().set_policy(EDITOR);
+        state.borrow_mut().set_playing(true);
+        let code = format!("http.get('http://127.0.0.1:{port}/', function(r) __ok = r.ok end)");
+        lua.load(&code).exec().unwrap();
+        lua.load(&code).exec().unwrap();
+        for _ in 0..200 {
+            drain(&lua, &state, &logs);
+            if lua.globals().get::<bool>("__ok").unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(lua.globals().get::<bool>("__ok").unwrap_or(false), "the editor was refused");
+        assert!(accepted.load(Ordering::SeqCst) >= 1, "nothing connected");
+        let notices = logs
+            .borrow()
+            .iter()
+            .filter(|l| l.msg.contains("an exported game and a dedicated server refuse"))
+            .count();
+        assert_eq!(notices, 1, "the notice is once per session, not per call");
+    }
+
+    /// Link-local is refused in the editor too: there is no development
+    /// reason to reach a metadata service, so `allow_local` does not open it.
+    #[test]
+    fn link_local_is_refused_even_where_local_is_allowed() {
+        let (_, _, err, _) = fetch(EDITOR, "http.get('http://169.254.169.254/latest/', __cb)");
+        assert!(err.contains("link-local"), "{err}");
+        let (_, _, err, _) = fetch(EDITOR, "http.get('http://[fe80::1]/', __cb)");
+        assert!(err.contains("link-local"), "{err}");
+    }
+
+    /// A redirect is HANDED to the script, not followed: the 302 arrives as an
+    /// ordinary reply with `res.location`, and the server it points at is
+    /// never contacted.
+    #[test]
+    fn a_redirect_is_delivered_to_the_script_and_not_followed() {
+        let (target_port, target_hits) = serve(OK);
+        let redirect: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/secret\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_boxed_str(),
+        );
+        let (port, _) = serve(redirect);
+        let (ok, status, err, location) =
+            fetch(EDITOR, &format!("http.get('http://127.0.0.1:{port}/', __cb)"));
+        assert_eq!(status, 302, "{err}");
+        assert!(!ok);
+        assert_eq!(location, format!("http://127.0.0.1:{target_port}/secret"));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0, "the redirect was followed");
+    }
+
+    /// The headers the transport owns cannot be set from Lua, and a request
+    /// body is bounded the way a reply is.
+    #[test]
+    fn framing_headers_and_an_oversized_body_are_refused_at_the_call() {
+        let (lua, state, _) = super::tests::lua_with_http();
+        state.borrow_mut().set_playing(true);
+        for h in ["Host", "content-length", "Transfer-Encoding", "CONNECTION"] {
+            let e = lua
+                .load(format!(
+                    "http.get('https://example.com', {{ headers = {{ ['{h}'] = 'x' }} }}, print)"
+                ))
+                .exec()
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(h) && e.contains("transport"), "{h}: {e}");
+        }
+        let e = lua
+            .load("http.post('https://example.com', string.rep('x', 8 * 1024 * 1024 + 1), print)")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("byte limit"), "{e}");
+    }
+
+    #[test]
+    fn the_host_of_a_url_is_read_the_way_the_policy_expects() {
+        assert_eq!(url_host("http://localhost:3000/x?y=1"), "localhost");
+        assert_eq!(url_host("https://user:pw@nas.local/"), "nas.local");
+        assert_eq!(url_host("http://[::1]:8080/"), "[::1]");
+        assert_eq!(url_host("https://fopull.com"), "fopull.com");
+        assert_eq!(url_host("http://10.0.0.1"), "10.0.0.1");
+    }
+}
+
 #[cfg(test)]
 mod live_tests {
     use super::*;

@@ -613,20 +613,45 @@ fn write_status(
     started: Instant,
     ticks_ms: &TickWindow,
 ) {
+    let doc = status_document(args, ed, ticks, started.elapsed().as_secs(), ticks_ms);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, doc).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// The status document itself, as text — split from the write so a test can
+/// read what a keyed server would put in the file without running one.
+///
+/// **The game key is not in it.** The file sits in a runtime directory on a
+/// box that runs other developers' servers too, and a key is a credential; what
+/// the portal wants from it is *which* key is live, and the first twelve
+/// characters (`game_key_prefix`) say that. The agent that wrote the unit
+/// already holds the whole key.
+#[cfg(not(target_arch = "wasm32"))]
+fn status_document(
+    args: &ServerArgs,
+    ed: &Editor,
+    ticks: u64,
+    uptime_s: u64,
+    ticks_ms: &TickWindow,
+) -> String {
     let peers = ed.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
     let where_reachable = reachable(args);
-    let doc = format!(
-        "{{\n  \"peers\": {peers},\n  \"max_players\": {},\n  \"uptime_s\": {},\n  \
+    format!(
+        "{{\n  \"peers\": {peers},\n  \"max_players\": {},\n  \"uptime_s\": {uptime_s},\n  \
          \"ticks\": {ticks},\n  \"tick_hz\": {},\n  \"scene\": {:?},\n  \
-         \"project\": {:?},\n  \"game_key\": {},\n  \"lobby_code\": {},\n  \
+         \"project\": {:?},\n  \"game_key_prefix\": {},\n  \"lobby_code\": {},\n  \
          \"port\": {},\n  \"relay\": {},\n  \
          \"tick_p95_ms\": {}\n}}\n",
         args.max_players.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
-        started.elapsed().as_secs(),
         args.tick_hz,
         ed.scene_rel_or_default(),
         args.project.to_string_lossy(),
-        args.game_key.as_deref().map(|k| format!("{k:?}")).unwrap_or_else(|| "null".into()),
+        args.game_key
+            .as_deref()
+            .map(|k| format!("{:?}", key_prefix(k)))
+            .unwrap_or_else(|| "null".into()),
         ed.net_lobby_code.as_deref().map(|c| format!("{c:?}")).unwrap_or_else(|| "null".into()),
         // **Where this server is reachable, measured rather than derived**
         // (`floptle/0209`). A control plane that builds an address out of the
@@ -637,11 +662,14 @@ fn write_status(
         // `null` rather than 0 before the window has a sample: a zero would be
         // read as a perfect tick time on a server that has not run one yet.
         ticks_ms.p95().map(|v| format!("{v:.3}")).unwrap_or_else(|| "null".into()),
-    );
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, doc).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
+    )
+}
+
+/// The part of a game key that says which key it is and nothing else: the
+/// `fk_live_` tag and the first four characters after it.
+fn key_prefix(key: &str) -> &str {
+    let end = key.char_indices().nth(12).map_or(key.len(), |(i, _)| i);
+    &key[..end]
 }
 
 /// The headless engine this server is: a project, a scene, its packages, its
@@ -863,7 +891,7 @@ mod tests {
     use super::*;
 
     /// A `ServerArgs` with nothing set, for a test about one field.
-    fn blank_args() -> ServerArgs {
+    pub(super) fn blank_args() -> ServerArgs {
         ServerArgs {
             project: PathBuf::new(),
             scene: None,
@@ -1548,6 +1576,80 @@ mod server_tests {
             said.contains("server=true dedicated=true"),
             "a dedicated server did not report itself as one. Server said:\n{said}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The status file does not carry the game key.** It sits in a runtime
+    /// directory on a box that runs other developers' servers, and the agent
+    /// that reads it already holds the key. The prefix says which key is live;
+    /// the whole key is asserted ABSENT — a test that only checked the prefix
+    /// was present would pass with the key beside it.
+    #[test]
+    fn the_status_file_names_the_keys_prefix_and_never_the_key() {
+        let root = temp("statuskey");
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "scripts/rules.lua", "function update(node) end\n");
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+        let s = serve(&root, "scenes/arena.ron");
+        let mut args = super::tests::blank_args();
+        args.game_key = Some("fk_live_SECRETSECRETSECRET".into());
+        let doc = super::status_document(&args, &s.ed, 0, 0, &TickWindow::default());
+        assert!(!doc.contains("SECRET"), "the key is in the status file:\n{doc}");
+        assert!(!doc.contains("\"game_key\""), "the key field is still written:\n{doc}");
+        assert!(doc.contains("\"game_key_prefix\": \"fk_live_SECR\""), "{doc}");
+        // A keyless server says so, and a short key is its own prefix.
+        args.game_key = None;
+        let doc = super::status_document(&args, &s.ed, 0, 0, &TickWindow::default());
+        assert!(doc.contains("\"game_key_prefix\": null"), "{doc}");
+        assert_eq!(key_prefix("fk_live_ab"), "fk_live_ab");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A dedicated server's scripts cannot reach the box they run on.** The
+    /// address policy is the driver's to set (`floptle_script::http_policy`),
+    /// and this driver never opens local addresses: a game's `http.get` at a
+    /// loopback port is refused with the rule named, and the port sees no
+    /// connection. The listener's count is the guard — an error in the
+    /// script and a socket opened anyway would read the same in the Console.
+    #[test]
+    fn a_dedicated_servers_scripts_are_refused_the_boxs_own_ports() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+        {
+            let n = accepted.clone();
+            std::thread::spawn(move || {
+                for _ in listener.incoming().flatten() {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+        let root = temp("httppolicy");
+        write(
+            &root,
+            "scripts/rules.lua",
+            &format!(
+                "local asked = false\n\
+                 function update(node)\n\
+                 \x20 if asked then return end\n\
+                 \x20 asked = true\n\
+                 \x20 local ok, why = pcall(http.get, 'http://127.0.0.1:{port}/', \
+                 function(r) print('reply=' .. tostring(r.error)) end)\n\
+                 \x20 print('called=' .. tostring(ok) .. ' why=' .. tostring(why))\n\
+                 end\n"
+            ),
+        );
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+
+        let mut s = serve(&root, "scenes/arena.ron");
+        s.pump(SETTLE, &mut []);
+        let said = s.console();
+        assert!(said.contains("called=false"), "the call was accepted. Server said:\n{said}");
+        assert!(said.contains("http: refused"), "the rule is not named. Server said:\n{said}");
+        assert!(said.contains("loopback"), "the class is not named. Server said:\n{said}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 0, "the server's script opened a socket");
         let _ = std::fs::remove_dir_all(&root);
     }
 

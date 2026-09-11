@@ -144,7 +144,16 @@ every status report come from. It is deliberately not under the agent's own
 runtime directory: systemd removes a unit's runtime directory when that unit
 stops, so an agent restart would otherwise delete every running server's
 status file and the portal would show zeros with nothing in the journal to say
-why.
+why. The directory is the server's alone (`0750`, and the process runs with a
+`0077` umask): a box hosts more than one developer's servers, and one server's
+status — its lobby code, the prefix of its key — is not another's to read.
+
+**The unit denies the process link-local addresses** (`IPAddressDeny=`), which
+is where a cloud box's instance-metadata service answers. A game server has no
+business there, and the developer's own Lua runs inside that process. Loopback
+and the private ranges are left open at the unit level because the relay may
+share the box; what a script may reach inside the process is decided by the
+engine, not the unit.
 
 ### Checking it before you commit to it
 

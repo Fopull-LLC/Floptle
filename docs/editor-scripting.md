@@ -911,6 +911,11 @@ and the body with `ok` false rather than a transport error.
 
 Eight requests may be in flight at once and a reply is capped at 8 MB.
 
+A package runs in the developer's own editor, so it may reach `localhost` and
+the local network — the browser sign-in above depends on it. Link-local
+addresses (`169.254.x`, `fe80::`) are refused, as they are for a game's
+`http.*`: nothing a package needs lives there.
+
 ### Signing in through a browser
 
 ```lua

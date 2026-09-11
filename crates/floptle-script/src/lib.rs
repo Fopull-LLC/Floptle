@@ -247,6 +247,8 @@ mod env;
 mod host;
 mod http_api;
 pub use http_api::open_in_browser;
+pub mod http_policy;
+pub use http_policy::HttpPolicy;
 mod input_api;
 pub mod json_array;
 pub mod load_error;

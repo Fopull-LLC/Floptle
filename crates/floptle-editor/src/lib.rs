@@ -1647,6 +1647,7 @@ pub fn run() {
     let mut editor = Editor {
         show_gizmos: !player_mode,
         player_mode,
+        http_allow_local: !player_mode,
         auto_bake_gi: bake_gi_on_load.then_some(false),
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
@@ -2814,6 +2815,12 @@ struct Editor {
     player_mode: bool,
     /// The window title in player mode (the export manifest's `title`).
     game_title: String,
+    /// May a script's `http.*` reach loopback and private addresses? Only the
+    /// interactive editor says yes — a developer hitting `localhost:3000`
+    /// during Play is the ordinary case. A shipped game, a dedicated server
+    /// and `floptle run` leave it at the default, which refuses; the policy
+    /// is `floptle_script::http_policy`, and it is applied at Play start.
+    http_allow_local: bool,
     /// The retro target's dimensions as last applied, so any change to them —
     /// Project Settings, a window resize, or a script's `app.setRetroHeight` —
     /// is noticed by one comparison rather than by whichever watcher happened to
