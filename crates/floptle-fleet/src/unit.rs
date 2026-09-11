@@ -67,15 +67,26 @@ pub struct UnitPlan<'a> {
     /// `status_file` is in a directory the server's own dynamic user owns.
     /// `None` only when `--run` is somewhere systemd cannot create it.
     pub runtime_dir: Option<String>,
+    /// The `0600 root` file holding `FLOPTLE_GAME_KEY=…`, written by the
+    /// agent for this unit's `EnvironmentFile=` — `None` for a keyless
+    /// deployment (`floptle/0229`).
+    pub key_file: Option<PathBuf>,
 }
 
 /// Render the unit file.
 ///
-/// **`game_key` goes in through the environment, never the command line.**
-/// A key on an `ExecStart` is readable by every `ps` on the box and is copied
-/// into the journal by systemd's own "Starting…" line — which this agent then
-/// ships to the control plane as `last_lines` and W renders on a web page. The
-/// same reasoning the relay applies to `--token-file`.
+/// **`game_key` goes in through the environment, never the command line —
+/// and never through this file either** (`floptle/0229`). A key on an
+/// `ExecStart` is readable by every `ps` on the box and is copied into the
+/// journal by systemd's own "Starting…" line — which this agent then ships to
+/// the control plane as `last_lines` and W renders on a web page. And a unit
+/// under `/etc/systemd/system` is world-readable, as units are, on a box that
+/// runs more than one developer's server: `Environment=FLOPTLE_GAME_KEY=…`
+/// here was the credential at 0644, persisting across reboots. It lives in a
+/// `0600 root` file the agent writes ([`crate::Args::key_file`]) that the
+/// unit names with `EnvironmentFile=`; systemd reads that as the manager,
+/// before the service's own user exists, so the server never needs to open
+/// it. The same reasoning the relay applies to `--token-file`.
 pub fn render(plan: &UnitPlan<'_>) -> String {
     let d = plan.dep;
     let mut exec = format!(
@@ -114,9 +125,9 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     s.push_str("[Service]\n");
     s.push_str("Type=simple\n");
     s.push_str(&format!("ExecStart={exec}\n"));
-    // The key, out of the command line and out of the journal.
-    if let Some(k) = &d.game_key {
-        s.push_str(&format!("Environment=FLOPTLE_GAME_KEY={}\n", systemd_escape(k)));
+    // The key: out of the command line, out of the journal, out of this file.
+    if let Some(f) = &plan.key_file {
+        s.push_str(&format!("EnvironmentFile={}\n", f.display()));
     }
     // **Which deployment this process is.** The server has never been told its
     // own id: it knows a port, a project and a key, and every one of those can
@@ -233,7 +244,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// Escape a value for `Environment=`, which is one line and cannot hold one.
-fn systemd_escape(s: &str) -> String {
+pub fn systemd_escape(s: &str) -> String {
     let clean: String = s.chars().filter(|c| !c.is_control()).collect();
     if clean.contains(' ') { format!("\"{clean}\"") } else { clean }
 }
@@ -288,6 +299,7 @@ mod tests {
             scene: Some("scenes/lobby.ron".into()),
             relay: Some("relay.fopull.com:7788".into()),
             runtime_dir: Some("floptle-d/d_1".into()),
+            key_file: d.game_key.as_ref().map(|_| PathBuf::from("/etc/floptle/keys/d_1.env")),
         }
     }
 
@@ -353,6 +365,10 @@ mod tests {
     /// systemd — which this agent ships to the control plane as `last_lines`
     /// and W renders on a public page. Three ways out of the box for one
     /// mistake, so this is asserted rather than reviewed.
+    ///
+    /// And a fourth (`floptle/0229`): the unit file itself is 0644 under
+    /// `/etc/systemd/system`, so the key must not be in it at all — it is
+    /// named by `EnvironmentFile=`, in a file the agent writes `0600 root`.
     #[test]
     fn the_game_key_is_in_the_environment_and_not_the_command_line() {
         let d = dep();
@@ -362,7 +378,18 @@ mod tests {
             !exec.contains("fk_live_secret"),
             "the key is in the command line, where `ps` and the journal both read it: {exec}"
         );
-        assert!(u.contains("Environment=FLOPTLE_GAME_KEY=fk_live_secret"), "{u}");
+        assert!(
+            !u.contains("fk_live_secret"),
+            "the key is in the unit, which is world-readable on a shared box:\n{u}"
+        );
+        assert!(u.contains("EnvironmentFile=/etc/floptle/keys/d_1.env\n"), "{u}");
+        // A keyless deployment names no file, rather than naming one that is
+        // not there — systemd refuses to start a unit whose EnvironmentFile
+        // is missing unless the path is prefixed `-`.
+        let keyless = Deployment { game_key: None, ..dep() };
+        let mut plan = plan_for(&keyless);
+        plan.key_file = None;
+        assert!(!render(&plan).contains("EnvironmentFile="));
     }
 
     /// **A server is told which deployment it is, and its lobby code when there

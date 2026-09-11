@@ -312,6 +312,11 @@ pub struct UsageSample {
 fn box_json(b: &RelayBox) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     o.insert("host".into(), b.host.clone().into());
+    // **This binary's version**, compiled in (`floptle/0232`): the control
+    // plane could not see a relay's version at all, so nothing — the lobby
+    // code reclaim, the certificate fallback — could be gated on what the
+    // relay on a box actually is. Never read from a file or a unit.
+    o.insert("version".into(), env!("CARGO_PKG_VERSION").into());
     // Occupancy is always known — the relay is holding the lobbies.
     o.insert("lobbies".into(), b.lobbies.into());
     o.insert("peers".into(), b.peers.into());
@@ -375,6 +380,7 @@ mod box_tests {
         let v = box_json(&RelayBox { host: "relay-1".into(), ..Default::default() });
         let o = v.as_object().expect("an object");
         assert_eq!(o["host"], "relay-1");
+        assert!(o.contains_key("version"), "a version is always known: {v}");
         // Occupancy is always known — the relay holds the lobbies itself.
         assert_eq!(o["lobbies"], 0);
         assert_eq!(o["peers"], 0);
@@ -405,6 +411,14 @@ mod box_tests {
             limit_drops: Some(9),
         });
         assert_eq!(v["host"], "us-east-relay-1");
+        // The relay's own version rides every report, and it is the crate's —
+        // not a constant somebody has to remember to bump (`floptle/0232`).
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            v["version"].as_str().unwrap().split('.').count() == 3,
+            "a version W can compare: {}",
+            v["version"]
+        );
         assert_eq!(v["limit_drops"], 9);
         assert_eq!(v["cores"], 1, "one OCPU is what makes load1 0.91 alarming");
         assert_eq!(v["egress_bps"], 41_000_000u64);
