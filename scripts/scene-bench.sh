@@ -7,7 +7,7 @@
 #   scripts/scene-bench.sh solar system
 #   scripts/scene-bench.sh solar system 900 5      # steps, repeats
 #
-# Which VMs to compare comes from $VMS (default "luajit luau"); the FIRST is the
+# Which VMs to compare comes from $VMS (default "luau luau-codegen"); the FIRST is the
 # baseline every other is reported against. Any name `scripts/vm.sh` accepts
 # works, so the code-generator lever is a third column rather than a second run:
 #
@@ -24,8 +24,8 @@
 #
 # ## Why the whole editor gets built once per VM
 #
-# `vm-luajit` and `vm-luau` are mutually exclusive Cargo features and two Luas
-# cannot link into one process, so there is no in-process comparison to make.
+# A VM configuration is a Cargo feature and two Luas cannot link into one
+# process, so there is no in-process comparison to make.
 # Each VM gets its own release binary, copied aside, and the runs are
 # INTERLEAVED (a, b, a, b…) rather than run in blocks — a machine that warms up,
 # throttles, or picks up a background job partway through would otherwise hand
@@ -81,7 +81,7 @@ mkdir -p "$OUT"
 
 # Which VMs to compare. The FIRST is the baseline; every other is reported as a
 # ratio against it.
-read -r -a VM_LIST <<<"${VMS:-luajit luau}"
+read -r -a VM_LIST <<<"${VMS:-luau luau-codegen}"
 if [ "${#VM_LIST[@]}" -lt 2 ]; then
   echo "scene-bench: \$VMS needs at least two VMs to compare (got '${VMS:-}')" >&2
   exit 2

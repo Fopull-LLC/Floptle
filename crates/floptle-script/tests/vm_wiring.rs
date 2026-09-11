@@ -1,14 +1,14 @@
 //! The workspace can only ask for one script VM, and this is what keeps it able to.
 //!
-//! `mlua` links exactly one Lua, and Cargo features are additive. So the whole
-//! `vm-luajit` / `vm-luau` switch (ADR-0028) rests on one rule that is invisible
-//! in the code and easy to leave out of a new manifest:
+//! `mlua` links exactly one Lua, and Cargo features are additive. So the
+//! `vm-luau` feature (ADR-0028) rests on one rule that is invisible in the
+//! code and easy to leave out of a new manifest:
 //!
 //! > **every dependency on a crate that carries a VM feature must pass
 //! > `default-features = false`.**
 //!
-//! Leave it out and that crate's default (`vm-luau`) is back in the graph, so
-//! a build asking for LuaJIT gets both — and what the developer sees is
+//! Leave it out and that crate's default is back in the graph whatever the
+//! build asked for — and, should a second VM ever return, what the developer sees is
 //! `mlua-sys`'s own build script saying *"You can enable only one of the
 //! features: lua54, lua53, …"*, which names none of the features anybody wrote
 //! and reads identically to having selected none at all. That diagnosis cost
@@ -77,42 +77,35 @@ fn no_dependency_smuggles_a_second_script_vm_into_the_graph() {
     }
     assert!(
         bad.is_empty(),
-        "{} dependency line(s) on a VM-carrying crate keep its default features, so a build \
-         asking for `vm-luau` gets LuaJIT back as well and mlua-sys refuses to link:\n  {}\n\n\
-         Add `default-features = false` to each, and forward `vm-luajit`/`vm-luau` from the \
-         depending crate if it actually needs a VM.",
+        "{} dependency line(s) on a VM-carrying crate keep its default features, so the \
+         feature cannot be switched off for a build that needs to:\n  {}\n\n\
+         Add `default-features = false` to each, and forward `vm-luau` from the depending \
+         crate if it actually needs a VM.",
         bad.len(),
         bad.join("\n  ")
     );
 }
 
-/// **Rule 2** — the pair is a pair, and every carrier agrees on which half is
-/// the default.
+/// **Rule 2** — every carrier defaults to `vm-luau`, and the LuaJIT half is
+/// gone for good.
 ///
-/// Half a pair is a build that cannot be asked for: `--features vm-luajit` on a
-/// crate that only forwards `vm-luau` silently does nothing at all.
-///
-/// And the default has to be the SAME on all four. They are separate manifests
-/// with no shared switch, so flipping three of them and missing the fourth is a
-/// one-line mistake that produces a graph with both VMs in it — reported by
-/// `mlua-sys` as a message naming neither feature. The assertion is written
-/// against the expected value rather than merely "they match", because "all
-/// four agree on LuaJIT" is also a way to have missed the flip entirely.
-///
-/// **`vm-luajit` stays a required half for exactly one release** (ADR-0028's
-/// escape hatch). When it goes, this test goes with the feature — and the
-/// grep-before-you-delete rule applies: removing `vm-luajit` without removing
-/// this leaves a guard asserting a feature nobody ships.
+/// The default has to be the SAME on every carrier. They are separate
+/// manifests with no shared switch, so a carrier that quietly stops
+/// defaulting to a VM leaves anything depending on it with no Lua — reported
+/// by `mlua-sys` as a message naming neither feature. And `vm-luajit` was the
+/// one-release escape hatch ADR-0028 scheduled (v0.84.x); a manifest that
+/// grows it back is a build that hands every script `io`, and this is where
+/// that is refused rather than reviewed.
 #[test]
-fn every_vm_carrier_declares_both_halves_and_defaults_to_luau() {
+fn every_vm_carrier_defaults_to_luau_and_none_carries_luajit() {
     let all = manifests();
     let mut bad = Vec::new();
     for name in vm_carriers(&all) {
         let body = &all[&name];
-        if !body.contains("\nvm-luajit = [") {
+        if body.contains("\nvm-luajit = [") || body.contains("mlua/luajit") {
             bad.push(format!(
-                "crates/{name}/Cargo.toml — has `vm-luau` but no `vm-luajit`. The escape hatch \
-                 is buildable for one release; it is removed deliberately, not by omission"
+                "crates/{name}/Cargo.toml — declares a LuaJIT feature. The escape hatch was \
+                 removed in v0.89.0 (ADR-0028); a LuaJIT build exposes `io` to every script"
             ));
         }
         // **Which VM the default selects**, not the exact text of the list.
@@ -123,16 +116,15 @@ fn every_vm_carrier_declares_both_halves_and_defaults_to_luau() {
         // about something else entirely. What must never drift is the VM.
         let default_line =
             body.lines().find(|l| l.trim_start().starts_with("default = [")).unwrap_or("");
-        if !default_line.contains("\"vm-luau\"") || default_line.contains("\"vm-luajit\"") {
+        if !default_line.contains("\"vm-luau\"") {
             bad.push(format!(
-                "crates/{name}/Cargo.toml — `default` must select `vm-luau` and not \
-                 `vm-luajit`: Luau is the default as of v0.84.0, and a carrier still \
-                 defaulting to LuaJIT puts both VMs in the graph of anything that depends \
-                 on it. Found: {default_line:?}"
+                "crates/{name}/Cargo.toml — `default` must select `vm-luau`: a carrier that \
+                 does not leaves whatever depends on it with no Lua at all. Found: \
+                 {default_line:?}"
             ));
         }
     }
-    assert!(bad.is_empty(), "the VM feature pair is incomplete:\n  {}", bad.join("\n  "));
+    assert!(bad.is_empty(), "the VM feature wiring is off:\n  {}", bad.join("\n  "));
 }
 
 /// **Rule 3** — the switch has to stay readable in one place.

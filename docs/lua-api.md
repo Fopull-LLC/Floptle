@@ -1736,7 +1736,7 @@ account.error() — why the last sign-in failed, as a sentence you can put on sc
 
 ### `account.get`
 
-account.get("/wallet", function(res) end) — a Floptle Cloud call with the player's bearer token attached for you. Takes a PATH, not a URL: there is exactly one host it can reach, which is what makes attaching a token to it safe. Bare paths get the /api/floptle/v1 prefix; /userinfo and /oauth/* stay at the root. res is the same table http.* gives you.
+account.get("/wallet", function(res) end) — a Floptle Cloud call with the player's bearer token attached for you. Takes a PATH, not a URL: there is exactly one host it can reach, which is what makes attaching a token to it safe. Bare paths get the /api/floptle/v1 prefix. A script acts as the PLAYER: /wallet, /missions, /games/... and /me/... are callable; the developer surface under /cloud/... and the identity endpoints are refused at the call. res is the same table http.* gives you.
 
 ### `account.inFlight`
 

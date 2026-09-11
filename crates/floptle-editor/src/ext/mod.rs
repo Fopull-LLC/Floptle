@@ -49,6 +49,7 @@ pub(crate) mod handles;
 pub(crate) mod http;
 pub(crate) mod prefs;
 pub(crate) mod scene_mirror;
+pub(crate) mod trust;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -340,6 +341,10 @@ pub(crate) struct PkgState {
     pub(crate) version: String,
     pub(crate) root: PathBuf,
     pub(crate) permissions: Vec<Permission>,
+    /// What the manifest asked for and the project's trust state withheld —
+    /// see [`trust`]. The API this would have unlocked errors with the trust
+    /// rule named rather than being absent as if never asked for.
+    pub(crate) withheld: Vec<Permission>,
     /// Set when something in this package raised: it stops being called, and the
     /// list says why.
     pub(crate) failed: Option<String>,
@@ -599,13 +604,23 @@ impl ExtHost {
     /// the Lua state, so a reload cannot leave a callback from the old copy of a
     /// file running beside the new one. Open panels are remembered by title and
     /// reopened.
-    pub(crate) fn reload(&mut self, project_root: &Path, engine: &floptle_package::Version) {
+    ///
+    /// `trusted` decides, from what resolved, whether the packages get the
+    /// permissions their manifests ask for (see [`trust`]); a `false` loads
+    /// every package with none, withheld rather than absent.
+    pub(crate) fn reload(
+        &mut self,
+        project_root: &Path,
+        engine: &floptle_package::Version,
+        trusted: impl FnOnce(&[Loaded]) -> bool,
+    ) {
         // Remember what was open, keyed by the same key the new registration
         // will compute.
         for w in &self.windows {
             self.reopen.insert(w.key.clone(), w.open);
         }
         let report = floptle_package::resolve(project_root, engine);
+        let trusted = trusted(&report.loaded);
         self.teardown();
         self.report = report;
         self.dynamic = self
@@ -615,7 +630,7 @@ impl ExtHost {
             .ok();
 
         for (i, pkg) in self.report.loaded.clone().iter().enumerate() {
-            self.load_package(i, pkg, project_root);
+            self.load_package(i, pkg, project_root, trusted);
         }
         self.drain_pending();
     }
@@ -660,6 +675,7 @@ impl ExtHost {
                 floptle_package::Permission::Files,
                 floptle_package::Permission::Browser,
             ],
+            withheld: Vec::new(),
             failed: None,
         });
         self.shared.prefs.borrow_mut().open("com.floptle.exec", project_root);
@@ -714,14 +730,17 @@ impl ExtHost {
         self.report = LoadReport::default();
     }
 
-    fn load_package(&mut self, idx: usize, pkg: &Loaded, project_root: &Path) {
+    fn load_package(&mut self, idx: usize, pkg: &Loaded, project_root: &Path, trusted: bool) {
         let scripts = pkg.editor_scripts();
+        let asked = pkg.manifest.permissions.clone();
+        let (permissions, withheld) = if trusted { (asked, Vec::new()) } else { (Vec::new(), asked) };
         let state = PkgState {
             id: pkg.id().to_string(),
             name: pkg.manifest.name.clone(),
             version: pkg.manifest.version.to_string(),
             root: pkg.root.clone(),
-            permissions: pkg.manifest.permissions.clone(),
+            permissions,
+            withheld,
             failed: None,
         };
         self.packages.push(state);

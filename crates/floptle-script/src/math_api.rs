@@ -38,20 +38,18 @@ pub(crate) fn mode(lua: &Lua) -> Vec3Mode {
     lua.app_data_ref::<Vec3Mode>().map(|m| *m).unwrap_or_default()
 }
 
-/// Choose the vec3 backing for a state, refusing what this build cannot do.
+/// Choose the vec3 backing for a state.
 ///
-/// `Fast` needs Luau's native vectors, so it is not merely slower under
-/// `vm-luajit` — it does not exist there. That returns an error rather than
-/// quietly downgrading: a project that asked for `fast` and got `exact` without
-/// being told would be a silent behaviour difference across a build flag, and
-/// the caller is expected to say so and carry on in `exact`.
+/// Still a `Result`: `Fast` installs a Lua-side wrapper that can fail to
+/// load, and a caller that asked for `fast` and got `exact` without being told
+/// would be a silent behaviour difference — it is expected to say so and
+/// carry on in `exact`.
 pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
     match m {
         Vec3Mode::Exact => {
             lua.set_app_data(Vec3Mode::Exact);
             Ok(())
         }
-        #[cfg(feature = "vm-luau")]
         Vec3Mode::Fast => {
             lua.set_app_data(Vec3Mode::Fast);
             // The editor keeps ONE host across project opens, so this can be
@@ -64,12 +62,6 @@ pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
             }
             Ok(())
         }
-        #[cfg(not(feature = "vm-luau"))]
-        Vec3Mode::Fast => Err(mlua::Error::runtime(
-            "this project's script_vec3 is `fast`, which needs Luau's native vectors, and this \
-             build embeds LuaJIT. Running in `exact` instead — the scripts behave as they \
-             always have, only slower than the project asked for.",
-        )),
     }
 }
 
@@ -79,10 +71,8 @@ pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
 /// 2^17 / 2^23 = 1/64 — about 1.6 cm at metre scale. Past here a position is
 /// being rounded by more than the size of the things standing on it, and the
 /// symptom is jitter that no amount of reading the movement code explains.
-#[cfg(feature = "vm-luau")]
 pub(crate) const FAST_PRECISION_LIMIT: f64 = 131_072.0; // 2^17
 
-#[cfg(feature = "vm-luau")]
 fn far_from_origin(v: glam::DVec3) -> bool {
     v.x.abs() > FAST_PRECISION_LIMIT
         || v.y.abs() > FAST_PRECISION_LIMIT
@@ -95,14 +85,12 @@ fn far_from_origin(v: glam::DVec3) -> bool {
 /// rather than having to invent somewhere to write. Keyed by SCRIPT: a game
 /// that is genuinely far from the origin would otherwise emit this once per
 /// vector per frame, and a warning at that rate is noise somebody turns off.
-#[cfg(feature = "vm-luau")]
 pub(crate) struct PrecisionWatch {
     pub sink: std::rc::Rc<std::cell::RefCell<Vec<crate::ScriptLog>>>,
     pub warned: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 /// Say — once per script — that this project's vec3 cannot hold where it is.
-#[cfg(feature = "vm-luau")]
 #[cold]
 fn warn_precision(lua: &Lua, v: glam::DVec3) {
     let Some(watch) = lua.app_data_ref::<PrecisionWatch>() else { return };
@@ -136,7 +124,6 @@ fn warn_precision(lua: &Lua, v: glam::DVec3) {
 /// a native vector in that mode, so the methods are unreachable rather than
 /// wrong, and tearing a metatable back down is a good deal more dangerous than
 /// leaving a few functions nobody can reach.
-#[cfg(feature = "vm-luau")]
 struct FastInstalled;
 
 /// Teach Luau's native vector the engine's `vec3` surface.
@@ -150,7 +137,6 @@ struct FastInstalled;
 /// **`__index` WRAPS Luau's own rather than replacing it.** That function is
 /// what resolves `.x`, `.y` and `.z`; drop it and every component read on every
 /// vector in the project returns nil, with nothing raised and nothing logged.
-#[cfg(feature = "vm-luau")]
 fn install_fast_vec3(lua: &Lua) -> mlua::Result<()> {
     let mt: Table = lua.load("return getmetatable(vector.create(0, 0, 0))").eval()?;
     let was_readonly = mt.is_readonly();
@@ -227,7 +213,6 @@ fn install_fast_vec3(lua: &Lua) -> mlua::Result<()> {
 /// Arguments go through [`vec3_of`], so a method still accepts a `vec3` in
 /// either backing, a `vec2`, a node handle or an `{x=, y=, z=}` table, exactly
 /// as `exact` does.
-#[cfg(feature = "vm-luau")]
 fn fast_methods(lua: &Lua) -> mlua::Result<Table> {
     fn d(v: mlua::Vector) -> glam::DVec3 {
         glam::DVec3::new(v.x().into(), v.y().into(), v.z().into())
@@ -355,7 +340,6 @@ impl mlua::IntoLua for LuaVec3 {
     fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
         match mode(lua) {
             Vec3Mode::Exact => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
-            #[cfg(feature = "vm-luau")]
             Vec3Mode::Fast => {
                 // Three compares on the way past, and nothing else unless one
                 // trips. This is the most-travelled conversion in the engine —
@@ -372,12 +356,6 @@ impl mlua::IntoLua for LuaVec3 {
                     self.0.z as f32,
                 )))
             }
-            // No native vector exists to build. Unreachable in practice —
-            // `set_mode` refuses `Fast` on this build — but stated rather than
-            // silently downgraded, because a vec3 that quietly changed backing
-            // is the failure this phase is written to avoid.
-            #[cfg(not(feature = "vm-luau"))]
-            Vec3Mode::Fast => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
         }
     }
 }
@@ -405,7 +383,6 @@ pub struct LuaVec2(pub glam::DVec2);
 /// call sites edited: a native vector arrives here like anything else.
 pub(crate) fn vec3_of(v: &Value) -> Option<glam::DVec3> {
     match v {
-        #[cfg(feature = "vm-luau")]
         Value::Vector(v) => {
             Some(glam::DVec3::new(v.x().into(), v.y().into(), v.z().into()))
         }
@@ -1540,33 +1517,12 @@ mod helper_tests {
         ),
     ];
 
-    /// **The two backings answer the same questions the same way.**
-    ///
-    /// On the `vm-luajit` escape hatch there is no second backing to compare
-    /// against, so the same corpus is used the only way it still means
-    /// something: every case is run against `exact` and required to produce an
-    /// answer. That is deliberately not a skip — a corpus that compiles out
-    /// stops being maintained, and this one is the definition of the surface.
+    /// **The two backings answer the same questions the same way.** This
+    /// corpus is the definition of the surface.
     #[test]
     fn exact_and_fast_agree_on_the_documented_surface() {
         let exact = lua_in(super::Vec3Mode::Exact);
 
-        #[cfg(not(feature = "vm-luau"))]
-        {
-            // No `fast` here — but the surface itself must still hold up, and
-            // the expected `exact` answers in the divergence list must still be
-            // the ones this VM gives.
-            for (name, src) in PARITY {
-                let r: mlua::Result<String> = exact.load(*src).eval();
-                assert!(r.is_ok(), "`{name}` does not even run in exact: {r:?}");
-            }
-            for (name, src, want_exact, _) in DIVERGENT {
-                let e: String = exact.load(*src).eval().expect(name);
-                assert_eq!(&e, want_exact, "exact changed on `{name}`");
-            }
-        }
-
-        #[cfg(feature = "vm-luau")]
         {
             let fast = lua_in(super::Vec3Mode::Fast);
             let mut disagreed = Vec::new();
@@ -1602,7 +1558,6 @@ mod helper_tests {
     /// **`fast` really is Luau's native vector**, not a userdata wearing its
     /// name — otherwise the whole point of the mode is missing and every test
     /// above would still pass.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn fast_is_the_native_vector_and_exact_is_not() {
         let fast = lua_in(super::Vec3Mode::Fast);
@@ -1625,7 +1580,6 @@ mod helper_tests {
     /// them: two `load` calls of the same text are two different scripts to the
     /// VM, which is right, and would otherwise make this test's own scaffolding
     /// look like a bug in the throttle.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn fast_warns_once_per_script_when_a_position_outgrows_f32() {
         use std::{cell::RefCell, rc::Rc};
@@ -1687,7 +1641,6 @@ mod helper_tests {
     /// lets an incremental collection eat the delta and produces numbers that
     /// look like per-op differences and are noise — the same artefact the card
     /// records having chased once already.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn fast_allocates_nothing_per_operation_and_exact_allocates() {
         const OPS: usize = 2000;
@@ -1727,7 +1680,6 @@ mod helper_tests {
 
     /// A state with nowhere to report must not panic — the bare `Lua` in every
     /// probe and unit test is exactly that.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn a_far_vector_without_a_watch_is_silent_rather_than_fatal() {
         let lua = lua_in(super::Vec3Mode::Fast);
@@ -1740,7 +1692,6 @@ mod helper_tests {
     /// The one genuinely breaking semantic of the mode, so the message is part
     /// of the contract: it has to name the replacement, or somebody reads
     /// "attempt to index vector" and concludes the vector is broken.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn mutating_a_fast_vector_names_the_helper_that_replaces_it() {
         let fast = lua_in(super::Vec3Mode::Fast);

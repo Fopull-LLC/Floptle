@@ -276,9 +276,15 @@ because every Cloud endpoint answers JSON, including its errors.
 
 **A path, not a URL** — and that is the whole security model. There is exactly
 one host these can reach, which is what makes attaching the player's token to
-them safe. A bare path gets the `/api/floptle/v1` prefix; `/userinfo` and
-`/oauth/*` stay at the domain root where the contract pins them. A URL where a
-path belongs raises at the call site, with the reason.
+them safe. A bare path gets the `/api/floptle/v1` prefix. A URL where a path
+belongs raises at the call site, with the reason.
+
+**A script acts as the player, not as the developer.** The paths a game may call
+are the player's: `/wallet`, `/missions`, `/games/…` and `/me/…`. The developer
+surface under `/cloud/…` — keys, builds, usage — and the identity endpoints
+(`/userinfo`, `/oauth/…`) are refused at the call with the rule named. The token
+behind these calls belongs to whoever is signed in to the Hub on that machine,
+and a game is not the place their keys get rotated from.
 
 **There is no `account.token()`, and there will not be.** A shipped game's Lua
 is readable — anything a script can hold, somebody can read out of the file and

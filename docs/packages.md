@@ -133,6 +133,20 @@ Listing on the catalogue is automatic once a submission passes its checks, so th
 moment you tick that box is the last point at which anybody looks at what a
 package wants. Read the list.
 
+**A project that arrives with packages already inside it is asked about too.**
+A folder or a zip somebody sent you can carry `packages/` with manifests that
+declare `Files` or `Network`, and nobody ticked a box for those. So the first
+time you open a project whose permission-asking packages you have not seen, they
+load with **no permissions** and a banner across the top of the editor names each
+one and what it asks for. *Trust this project* grants them what their manifests
+say and remembers that set of packages for that project; *Keep them restricted*
+leaves them loaded with nothing for the session. A withheld API is still there —
+`http.get` raises with the trust rule named, rather than reading as a package
+that forgot its manifest. Change a manifest and the project asks again.
+
+`floptle exec` is not held to this: a script you named on your own command line
+is your own code, and it runs with everything.
+
 ---
 
 ## Who made this, and was it any good

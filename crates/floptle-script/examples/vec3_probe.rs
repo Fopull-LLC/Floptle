@@ -32,23 +32,7 @@
 //! the `a misspelled component` entry in `math_api`'s divergence list.
 //!
 //! Run: `cargo run -p floptle-script --example vec3_probe`
-//!
-//! There is no vector type under `vm-luajit` at all — `mlua::Vector` does not
-//! exist to compile against — so the body below is Luau-only and the other
-//! build says so and exits. That is also why the whole thing is `#[cfg]`-split
-//! rather than branching on [`floptle_script::vm::VM_NAME`] at runtime.
 
-#[cfg(feature = "vm-luajit")]
-fn main() {
-    println!("VM = {}", floptle_script::vm::VM_NAME);
-    println!(
-        "\nLuaJIT has no native vector type — `mlua::Vector` is compiled out entirely.\n\
-         Nothing here to measure; `fast` vec3 is a Luau-only backing by construction,\n\
-         which is itself one of Phase 3's constraints (ADR-0028)."
-    );
-}
-
-#[cfg(feature = "vm-luau")]
 fn main() {
     let lua = mlua::Lua::new();
     println!("VM = {}", floptle_script::vm::VM_NAME);
@@ -100,7 +84,6 @@ fn main() {
 
 /// An error is a RESULT here, not a crash: two of the questions above are
 /// "does this raise?", and the answer is the whole point.
-#[cfg(feature = "vm-luau")]
 fn say(label: &str, r: mlua::Result<String>) {
     match r {
         Ok(v) => println!("  {label:<34} {v}"),
@@ -116,7 +99,6 @@ fn say(label: &str, r: mlua::Result<String>) {
 ///
 /// This is the step that corrected the probe's first conclusion: components
 /// still read, and it is the unknown-key ERROR that is lost.
-#[cfg(feature = "vm-luau")]
 fn without_index(lua: &mlua::Lua) -> mlua::Result<String> {
     let mt: mlua::Table = lua.load("return getmetatable(vector.create(1,2,3))").eval()?;
     mt.set_readonly(false);
@@ -134,7 +116,6 @@ fn without_index(lua: &mlua::Lua) -> mlua::Result<String> {
 
 /// The route Phase 3 will actually take, in miniature: one method, installed
 /// over Luau's own `__index` rather than in place of it.
-#[cfg(feature = "vm-luau")]
 fn attach_from_rust(lua: &mlua::Lua) -> mlua::Result<String> {
     let mt: mlua::Table = lua.load("return getmetatable(vector.create(1,2,3))").eval()?;
     println!("  {:<34} {}", "metatable is_readonly", mt.is_readonly());

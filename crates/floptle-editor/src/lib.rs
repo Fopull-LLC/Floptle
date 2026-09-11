@@ -359,6 +359,9 @@ struct EditorCmd {
     autosave_action: Option<bool>,
     /// Crash-report prompt answered: true = open the tracker, false = dismiss.
     crash_report: Option<bool>,
+    /// The trust banner's answer, if a button was pressed this frame.
+    #[cfg(feature = "editor-ui")]
+    project_trust: Option<ext::trust::Answer>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
     /// Save a material as a named preset under assets/materials/.
@@ -1922,6 +1925,13 @@ struct Editor {
     /// with nothing installed, where every entry point is a no-op.
     #[cfg(feature = "editor-ui")]
     ext: ext::ExtHost,
+    /// Whether this project's packages have the permissions they ask for —
+    /// see `ext::trust`. Set on every package reload; the banner reads it.
+    #[cfg(feature = "editor-ui")]
+    project_trust: ext::trust::Trust,
+    /// The user's list of trusted projects.
+    #[cfg(feature = "editor-ui")]
+    trust_store: ext::trust::TrustStore,
     /// Native file pickers a package opened, and who to hand the answer to.
     /// More than one may be in flight — they are different packages' dialogs.
     ext_picks: Vec<(std::sync::mpsc::Receiver<Vec<PathBuf>>, mlua::RegistryKey)>,

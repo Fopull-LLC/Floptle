@@ -70,12 +70,39 @@ pub fn resolve(base: &str, path: &str) -> Result<String, String> {
     let base = base.trim_end_matches('/');
     // A bare path gets the game-data prefix; an explicit `/oauth/...` or
     // `/userinfo` is left alone, because those are pinned to the domain root.
-    let full = if path.starts_with(API_PREFIX) || is_root_endpoint(path) {
-        format!("{base}{path}")
+    let (full, rel) = if let Some(rest) = path.strip_prefix(API_PREFIX) {
+        (format!("{base}{path}"), rest.to_string())
+    } else if is_root_endpoint(path) {
+        (format!("{base}{path}"), path.to_string())
     } else {
-        format!("{base}{API_PREFIX}{path}")
+        (format!("{base}{API_PREFIX}{path}"), path.to_string())
     };
+    script_may_call(&rel)?;
     Ok(full)
+}
+
+/// The paths a game's script may reach under the API, by first segment.
+///
+/// **A script acts as the player, not as the developer.** The token behind
+/// `account.*` is the one the Hub signed in with, and that token can also
+/// rotate a game's keys, read its usage and list its builds — for whoever is
+/// signed in on the machine the game is running on. Nothing under `/cloud/`,
+/// `/oauth/` or `/userinfo` is a thing a game has any business asking on a
+/// player's behalf, so those are refused here, at the call, with the rule
+/// named. The player-facing surface — wallet, missions, a game's own events
+/// and saves, the player's own profile — is what a script gets.
+pub const SCRIPT_PREFIXES: &[&str] = &["wallet", "games", "me", "missions"];
+
+/// Is `rel` (the path below the API prefix) one a script may call?
+pub fn script_may_call(rel: &str) -> Result<(), String> {
+    let head = rel.trim_start_matches('/').split(['/', '?', '#']).next().unwrap_or("");
+    if SCRIPT_PREFIXES.contains(&head) {
+        return Ok(());
+    }
+    Err(format!(
+        "'{rel}' is not a path a game may call — a script acts as the player, and reaches \
+         /wallet, /missions, /games/... and /me/... only"
+    ))
 }
 
 /// The identity endpoints the contract pins to the domain root, so they don't
@@ -169,17 +196,32 @@ mod tests {
         );
     }
 
+    /// **A script reaches the player's surface and nothing else.** The
+    /// developer endpoints under `/cloud/` are refused at the call with the
+    /// rule named — whichever spelling of the prefix is used — and so are the
+    /// identity endpoints at the root. `/wallet` and the rest still resolve.
     #[test]
-    fn the_identity_endpoints_stay_at_the_root() {
-        // The contract pins these; prefixing them would 404 in a way that reads
-        // like the account is broken rather than like the URL is wrong.
-        for p in ["/userinfo", "/entitlements", "/oauth/token", "/.well-known/jwks.json"] {
-            assert_eq!(
-                resolve(DEFAULT_BASE, p).unwrap(),
-                format!("https://fopull.com{p}"),
-                "{p} should not be prefixed"
-            );
+    fn a_script_cannot_reach_developer_or_identity_endpoints() {
+        for bad in [
+            "/cloud/games",
+            "/cloud/games/fofighter/key",
+            "/api/floptle/v1/cloud/games/fofighter/key",
+            "/cloud",
+            "/userinfo",
+            "/entitlements",
+            "/oauth/token",
+            "/.well-known/jwks.json",
+            "/admin/anything",
+        ] {
+            let e = resolve(DEFAULT_BASE, bad).unwrap_err();
+            assert!(e.contains("not a path a game may call"), "{bad}: {e}");
         }
+        for ok in ["/wallet", "/missions?game=x", "/games/x/events", "/me/profile", "/api/floptle/v1/games/x/saves/1"] {
+            resolve(DEFAULT_BASE, ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        // The head is the whole first segment: `/gamesX` is not `/games/`.
+        assert!(resolve(DEFAULT_BASE, "/gamesX/y").is_err());
+        assert!(resolve(DEFAULT_BASE, "/cloudy").is_err());
     }
 
     #[test]

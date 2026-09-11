@@ -10,15 +10,19 @@
 //! Forgery-shaped first-person scene 13.99 ms -> 12.38 ms, frame p95; see
 //! `scripts/scene-bench.sh`).
 //!
-//! `vm-luajit` remains buildable for exactly **one release** — the escape hatch,
-//! announced as such — and is removed the release after.
+//! The `vm-luajit` escape hatch stayed buildable for one release after the
+//! default flipped (v0.84.x), as ADR-0028 scheduled, and was removed in
+//! v0.89.0: a LuaJIT build exposed `io` to every script it ran, and a build
+//! nobody ships is one `--features` away from being run on somebody's
+//! project. What remains of the switch is the `vm-luau` feature name, which
+//! every dependent forwards, and the checks below.
 //!
 //! ## The wiring, and the mistake it is easy to make
 //!
 //! `mlua` links exactly one Lua. Cargo features are **additive**, so a crate
-//! that depends on this one and forgets `default-features = false` puts
-//! `vm-luajit` back into the graph even when the build asked for `vm-luau` —
-//! and both arrive at `mlua` together.
+//! that depends on this one and names a second `mlua/...` VM feature — or a
+//! browser build that reaches `mlua/luau` through a target-specific dependency
+//! while the desktop switch says something else — puts two Luas in the graph.
 //!
 //! **What you see when that happens is not our error.** `mlua-sys`'s build
 //! script runs before this crate compiles at all, and it says:
@@ -32,27 +36,17 @@
 //! this paragraph exists: it is what somebody will paste into a search, and
 //! this is where it should land them.
 //!
-//! The `compile_error!`s below state the invariant, but they are a backstop,
-//! not the diagnostic — in every combination reachable today `mlua-sys` fails
-//! first. The guard that actually fires is `tests/vm_wiring.rs`, which reads
-//! every crate manifest in the workspace and fails on a dependency that would
-//! smuggle a second VM in. Watched failing on all three of its rules.
+//! The `compile_error!` below states the invariant, but it is a backstop, not
+//! the diagnostic — `mlua-sys` fails first. The guard that actually fires is
+//! `tests/vm_wiring.rs`, which reads every crate manifest in the workspace and
+//! fails on a dependency that would smuggle a second VM in.
 //!
 //! `scripts/vm.sh luau <cargo args>` is the short way to say the whole thing.
 
-#[cfg(all(feature = "vm-luajit", feature = "vm-luau"))]
+#[cfg(not(feature = "vm-luau"))]
 compile_error!(
-    "floptle-script: both `vm-luajit` and `vm-luau` are enabled, and mlua links exactly one Lua.\n\
-     A dependent almost certainly selected `vm-luajit` without turning the default off: write\n\
-     `floptle-script = { path = \"…\", default-features = false }` and forward the feature.\n\
-     `scripts/vm.sh luajit <cargo args>` does this for the whole workspace."
-);
-
-#[cfg(not(any(feature = "vm-luajit", feature = "vm-luau")))]
-compile_error!(
-    "floptle-script: no script VM selected. Enable exactly one of `vm-luau` (the default —\n\
-     Luau, ADR-0028, and the only one that reaches the browser) or `vm-luajit` (the escape\n\
-     hatch, buildable for one more release).\n\
+    "floptle-script: no script VM selected. Enable `vm-luau` (the default — Luau, ADR-0028,\n\
+     and the only VM the engine embeds since v0.89.0).\n\
      `--no-default-features` on its own leaves the engine with no Lua at all."
 );
 
@@ -62,22 +56,19 @@ compile_error!(
 /// A string rather than an enum on purpose: every consumer of it is printing
 /// it, and a `match` over two variants that both stringify is ceremony. It is
 /// lowercase and stable — the harness keys its per-VM snapshots on it.
-pub const VM_NAME: &str = if cfg!(feature = "vm-luau") { "luau" } else { "luajit" };
+pub const VM_NAME: &str = "luau";
 
 /// Whether this build has a code generator behind the interpreter.
 ///
-/// LuaJIT always does. Luau does only with `vm-luau-codegen`, and never on
-/// wasm. Reported rather than acted on: it is the first thing to check when a
-/// benchmark comes back slower than the last one.
-pub const VM_HAS_CODEGEN: bool = cfg!(feature = "vm-luajit")
-    || cfg!(all(feature = "vm-luau-codegen", not(target_arch = "wasm32")));
+/// Luau does only with `vm-luau-codegen`, and never on wasm. Reported rather
+/// than acted on: it is the first thing to check when a benchmark comes back
+/// slower than the last one.
+pub const VM_HAS_CODEGEN: bool = cfg!(all(feature = "vm-luau-codegen", not(target_arch = "wasm32")));
 
-/// Fill in what this VM is missing so the *documented* Lua surface is the same
-/// on both.
+/// Fill in what Luau is missing so the *documented* Lua surface — the one the
+/// docs were written against, on LuaJIT — is the same here.
 ///
-/// Call it on a fresh state before anything else touches the globals. Under
-/// `vm-luajit` it does nothing at all — LuaJIT is the surface the docs were
-/// written against.
+/// Call it on a fresh state before anything else touches the globals.
 ///
 /// ## What it fills in, and why this one is not optional
 ///
@@ -99,12 +90,6 @@ pub const VM_HAS_CODEGEN: bool = cfg!(feature = "vm-luajit")
 ///
 /// [`editor-scripting.md`]: https://github.com/Fopull-LLC/Floptle/blob/main/docs/editor-scripting.md
 pub fn install_compat(lua: &mlua::Lua) -> mlua::Result<()> {
-    #[cfg(feature = "vm-luajit")]
-    {
-        let _ = lua;
-        Ok(())
-    }
-    #[cfg(feature = "vm-luau")]
     lua.load(BIT_COMPAT_LUA).set_name("=[floptle vm compat]").exec()
 }
 
@@ -112,7 +97,6 @@ pub fn install_compat(lua: &mlua::Lua) -> mlua::Result<()> {
 ///
 /// Public so a test can read the same source the host runs, rather than a copy
 /// of it that could drift.
-#[cfg(feature = "vm-luau")]
 pub const BIT_COMPAT_LUA: &str = r#"
 -- LuaJIT's `bit`, on top of Luau's `bit32`.
 --
@@ -166,14 +150,9 @@ bit = {
 mod tests {
     use super::*;
 
-    /// The constants describe *this* build, so the assertion has to be written
-    /// per-feature or it is asserting whichever VM the author happened to run.
     #[test]
     fn the_build_knows_which_vm_it_embeds() {
-        #[cfg(feature = "vm-luau")]
         assert_eq!(VM_NAME, "luau");
-        #[cfg(feature = "vm-luajit")]
-        assert_eq!(VM_NAME, "luajit");
         assert!(VM_NAME.chars().all(|c| c.is_ascii_lowercase()), "{VM_NAME} is a snapshot key");
     }
 

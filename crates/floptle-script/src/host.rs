@@ -101,7 +101,6 @@ fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
         // in both modes. Not `Value::to_string`: mlua formats a vector itself
         // (`vector(1, 2, 3)`) rather than through the metatable, and not
         // `<value>`, which is what this arm's absence printed.
-        #[cfg(feature = "vm-luau")]
         Value::Vector(vec) => format!(
             "vec3({}, {}, {})",
             f64::from(vec.x()),
@@ -2258,11 +2257,10 @@ impl ScriptHost {
     /// `script_vec3` setting (ADR-0028, Phase 3).
     ///
     /// Called when a project is opened, before its scripts run. Answering `Err`
-    /// rather than quietly falling back is the point: `fast` needs Luau's
-    /// native vectors and does not exist on a `vm-luajit` build, and a project
-    /// that asked for it and silently got `exact` would be a behaviour
-    /// difference nobody was told about. The caller is expected to surface the
-    /// message and carry on in `exact`, which is what the state is left in.
+    /// rather than quietly falling back is the point: a project that asked for
+    /// `fast` and silently got `exact` would be a behaviour difference nobody
+    /// was told about. The caller is expected to surface the message and carry
+    /// on in `exact`, which is what the state is left in.
     /// Which `vec3` this host's scripts currently get — see
     /// [`set_vec3_mode`](Self::set_vec3_mode).
     pub fn vec3_mode(&self) -> crate::Vec3Mode {
@@ -2274,7 +2272,6 @@ impl ScriptHost {
         // rather than inside `math_api` because this is where the Console feed
         // lives; a state without one simply never warns, which is what makes
         // the bare `Lua` states in tests and probes usable.
-        #[cfg(feature = "vm-luau")]
         if mode == crate::Vec3Mode::Fast {
             self.lua.set_app_data(crate::math_api::PrecisionWatch {
                 sink: self.logs.clone(),
@@ -6662,7 +6659,6 @@ mod host_tests {
     /// 50 ms budget, `while true do end` in `update` returns the frame, the
     /// error names the budget, the script is `broken`, and the next frame does
     /// not call it. Luau only: LuaJIT has no interrupt (ADR-0028).
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn a_script_that_runs_past_its_budget_is_stopped_and_not_called_again() {
         let dir = std::env::temp_dir().join(format!("floptle-budget-{}", std::process::id()));
@@ -6717,7 +6713,6 @@ mod host_tests {
 
     /// **A script that eats memory fails in its own call, and the host goes
     /// on.** The failure is Luau's "not enough memory"; the next script runs.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn a_script_that_exhausts_memory_errors_and_the_host_is_still_usable() {
         let dir = std::env::temp_dir().join(format!("floptle-memory-{}", std::process::id()));

@@ -459,11 +459,37 @@ mod tests {
         assert!(e.contains("fopull.com"), "the reason should be in the message, got {e}");
     }
 
+    /// **A script acts as the player, never as the developer.** The token
+    /// behind `account.*` is the Hub's, and it can rotate keys; a game's Lua
+    /// asking for `/cloud/...` is refused at the call with the rule named and
+    /// nothing is left pending. The player's surface still works.
+    #[test]
+    fn a_script_is_refused_the_developer_endpoints_at_the_call() {
+        let (lua, state) = harness();
+        state.borrow_mut().set_playing(true);
+        for call in [
+            "account.get('/cloud/games', function() end)",
+            "account.post('/cloud/games/fofighter/key', {}, function() end)",
+            "account.get('/userinfo', function() end)",
+        ] {
+            let e = lua.load(call).exec().unwrap_err().to_string();
+            assert!(e.contains("not a path a game may call"), "{call} gave {e}");
+        }
+        assert_eq!(state.borrow().in_flight(), 0, "a refused call left something pending");
+        // `/wallet` gets past the path check (and stops at the sign-in gate,
+        // which is the NEXT thing a request meets — not the path rule).
+        let e = lua.load("account.get('/wallet', function() end)").exec().err().map(|e| e.to_string());
+        assert!(
+            e.as_deref().is_none_or(|e| !e.contains("not a path a game may call")),
+            "/wallet was refused by the path rule: {e:?}"
+        );
+    }
+
     #[test]
     fn a_missing_callback_is_refused_rather_than_dropped() {
         let (lua, state) = harness();
         state.borrow_mut().set_playing(true);
-        for call in ["account.get('/wallet')", "account.post('/x', {})"] {
+        for call in ["account.get('/wallet')", "account.post('/games/x/events', {})"] {
             let e = lua.load(call).exec().unwrap_err().to_string();
             assert!(e.contains("callback"), "{call} gave {e}");
         }

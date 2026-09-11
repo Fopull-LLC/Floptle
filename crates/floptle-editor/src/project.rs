@@ -606,10 +606,10 @@ impl Editor {
     /// that is a real state, not a fault.
     /// Point the script host at this project's `vec3` backing.
     ///
-    /// Loud on refusal rather than silent: `fast` needs Luau's native vectors,
-    /// so an escape-hatch (`vm-luajit`) build cannot honour it. Such a project
-    /// still opens and still runs — in `exact`, which is what its scripts were
-    /// written against anyway — but the Console says so, because a project
+    /// Loud on refusal rather than silent: `fast` installs a wrapper that can
+    /// fail to load. Such a project still opens and still runs — in `exact`,
+    /// which is what its scripts were written against anyway — but the
+    /// Console says so, because a project
     /// whose stated setting is being ignored should never have to be guessed at.
     pub(crate) fn apply_script_vec3_mode(&mut self) {
         let mode = match self.project.script_vec3_resolved() {

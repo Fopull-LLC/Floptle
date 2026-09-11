@@ -278,12 +278,7 @@ mod tests {
                 // exercised only in `exact` (the host's default) would be tested
                 // under the one mode no new project has — and `v.x = n` in a
                 // template raises only in `fast`.
-                let modes: &[floptle_script::Vec3Mode] = if cfg!(feature = "vm-luau") {
-                    &[floptle_script::Vec3Mode::Exact, floptle_script::Vec3Mode::Fast]
-                } else {
-                    &[floptle_script::Vec3Mode::Exact]
-                };
-                for &mode in modes {
+                for mode in [floptle_script::Vec3Mode::Exact, floptle_script::Vec3Mode::Fast] {
                 let mut world = World::default();
                 let e = world.spawn();
                 world.insert(e, Transform::IDENTITY);
