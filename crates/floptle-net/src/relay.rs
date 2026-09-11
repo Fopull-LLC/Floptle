@@ -411,9 +411,12 @@ pub trait RelayPolicy: Send {
         true
     }
 
-    /// A lobby opened, under the key that was admitted. The policy owns the
-    /// code → key mapping; the relay does not know what a key means.
-    fn lobby_opened(&mut self, _code: &str, _key: Option<&str>) {}
+    /// A lobby opened, under the key that was admitted, from the host's
+    /// address. The policy owns the code → key mapping; the relay does not
+    /// know what a key means. The address is what lets a developer be told
+    /// "your key is hosting from somewhere you are not" (`floptle/0228`);
+    /// `None` only when the transport cannot say.
+    fn lobby_opened(&mut self, _code: &str, _key: Option<&str>, _from: Option<std::net::IpAddr>) {}
     fn lobby_closed(&mut self, _code: &str) {}
 
     /// **A lobby's host dropped and its grace window has started**
@@ -422,7 +425,8 @@ pub trait RelayPolicy: Send {
 
     /// **A lobby's host came back inside its grace window** and reclaimed it,
     /// with its players still attached (`floptle/0222`).
-    fn lobby_host_returned(&mut self, _code: &str) {}
+    /// The host is back — possibly from a different address than it left.
+    fn lobby_host_returned(&mut self, _code: &str, _from: Option<std::net::IpAddr>) {}
 
     /// **A lobby ended, and why.**
     ///
@@ -1006,8 +1010,9 @@ impl RelayServer {
             l.empty_since = Instant::now();
             let clients: Vec<u64> = l.clients.keys().copied().collect();
             self.conns.insert(from, Role::Host { code: c.clone() });
+            let addr = self.transport.remote_addr(from).map(|a| a.ip());
             if let Some(p) = self.policy.as_mut() {
-                p.lobby_host_returned(&c);
+                p.lobby_host_returned(&c, addr);
             }
             // The host is new to these players even though they never left, so
             // it needs the roster it is now responsible for.
@@ -1062,8 +1067,9 @@ impl RelayServer {
             },
         );
         self.conns.insert(from, Role::Host { code: code.clone() });
+        let addr = self.transport.remote_addr(from).map(|a| a.ip());
         if let Some(p) = self.policy.as_mut() {
-            p.lobby_opened(&code, key);
+            p.lobby_opened(&code, key, addr);
             // The marker may have arrived while this host was parked.
             if self.dedicated.contains(&from) {
                 p.host_is_dedicated(&code);
@@ -1957,7 +1963,7 @@ mod tests {
             JoinAdmission::Allow
         }
 
-        fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
+        fn lobby_opened(&mut self, code: &str, key: Option<&str>, _from: Option<std::net::IpAddr>) {
             self.live.insert(code.to_string(), 0);
             if let Some(k) = key {
                 self.of_lobby.insert(code.to_string(), k.to_string());

@@ -268,6 +268,13 @@ impl ReservedState {
 /// the control plane already accepted the first two. They are extra keys on a
 /// JSON object a control plane that ignores them keeps parsing, which is the §8
 /// rule and why this is not a schema bump.
+/// One address a key's lobbies are hosted from, and how many (`floptle/0228`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostAddress {
+    pub address: std::net::IpAddr,
+    pub lobbies: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageSample {
     pub key: String,
@@ -299,6 +306,35 @@ pub struct UsageSample {
     /// had matched to the byte in every other bucket ever recorded. Anything
     /// above zero means somebody is sending into a lobby that is gone.
     pub orphan_bytes: u64,
+    /// **Where this key's live lobbies are hosted from** (`floptle/0228`):
+    /// one entry per address, `lobbies` summing to the sample's `lobbies`.
+    /// The developer's question is "is my key being used by someone who is
+    /// not me", and the control plane's first move on it is to count and
+    /// show, not to refuse — a CI runner, a LAN party and a whole ISP behind
+    /// CGNAT all look like "many lobbies from one address" and are honest.
+    /// Empty on a relay whose transport cannot name addresses; absent on a
+    /// relay too old to send it.
+    pub hosts: Vec<HostAddress>,
+}
+
+/// One key's row of the usage POST.
+fn usage_row(s: &UsageSample) -> serde_json::Value {
+    serde_json::json!({
+        "key": s.key,
+        "ccu": s.ccu,
+        "lobbies": s.lobbies,
+        "bytes_in": s.bytes_in,
+        "bytes_out": s.bytes_out,
+        "refused_joins": s.refused_joins,
+        "orphan_bytes": s.orphan_bytes,
+        // Addresses as strings — v4 and v6 both — and always present, so an
+        // empty list means "hosted from nowhere the relay could name" and a
+        // missing key means a relay too old to say (`floptle/0228`).
+        "hosts": s.hosts.iter().map(|h| serde_json::json!({
+            "address": h.address.to_string(),
+            "lobbies": h.lobbies,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// The `box` object, built by hand so the omission rule is visible in one place.
@@ -373,6 +409,30 @@ mod box_tests {
         // wakes nothing — a newer control plane must not be able to make an
         // older relay hand somebody's code away.
         assert!(!S::Unknown.wakes_on_join());
+    }
+
+    /// **A key's row says where its lobbies are hosted from** (`floptle/0228`):
+    /// the developer's question is "is somebody who is not me using my key",
+    /// and the control plane cannot count what the relay does not send.
+    #[test]
+    fn a_usage_row_names_the_addresses_a_key_is_hosting_from() {
+        let row = usage_row(&UsageSample {
+            key: "fk_live_X".into(),
+            lobbies: 3,
+            hosts: vec![
+                HostAddress { address: "203.0.113.5".parse().unwrap(), lobbies: 2 },
+                HostAddress { address: "2001:db8::7".parse().unwrap(), lobbies: 1 },
+            ],
+            ..Default::default()
+        });
+        assert_eq!(row["hosts"][0]["address"], "203.0.113.5");
+        assert_eq!(row["hosts"][0]["lobbies"], 2);
+        assert_eq!(row["hosts"][1]["address"], "2001:db8::7");
+        let sum: u64 = row["hosts"].as_array().unwrap().iter().map(|h| h["lobbies"].as_u64().unwrap()).sum();
+        assert_eq!(sum, row["lobbies"].as_u64().unwrap(), "hosts partitions lobbies");
+        // Present and empty is a fact; absent would be an old relay.
+        let bare = usage_row(&UsageSample { key: "fk_live_Y".into(), ..Default::default() });
+        assert_eq!(bare["hosts"], serde_json::json!([]));
     }
 
     #[test]
@@ -580,20 +640,7 @@ impl ControlPlane for HttpControl {
         box_: &RelayBox,
         samples: &[UsageSample],
     ) -> Result<(), ControlError> {
-        let rows: Vec<_> = samples
-            .iter()
-            .map(|s| {
-                ureq::json!({
-                    "key": s.key,
-                    "ccu": s.ccu,
-                    "lobbies": s.lobbies,
-                    "bytes_in": s.bytes_in,
-                    "bytes_out": s.bytes_out,
-                    "refused_joins": s.refused_joins,
-                    "orphan_bytes": s.orphan_bytes,
-                })
-            })
-            .collect();
+        let rows: Vec<_> = samples.iter().map(usage_row).collect();
         Self::body(
             self.agent()
                 .post(&self.url("/cloud/relay/usage"))
