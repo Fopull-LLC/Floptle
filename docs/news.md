@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.90.1 — "A Face".** The Floptle logo is the app icon: on the editor's, the
+player's and the Hub's windows, on the Windows executables, in the Hub's title
+bar and About page, and — on Linux — in your application menu, where the Hub
+now writes launcher entries for itself and for the editor it installs. Update
+the Hub and install this engine from it; the editor's icon comes with the
+editor.
+
 **v0.90.0 — "Say Who You Are".** A relay can be handed a real certificate and
 picks up its renewal without ending a lobby: `floptle-relay --tls-cert
 --tls-key`, the files watched, new connections on the new chain within ten
