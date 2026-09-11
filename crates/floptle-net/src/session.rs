@@ -2602,6 +2602,29 @@ impl NetSession {
             if !rep.transform {
                 continue;
             }
+            // ⚠ **In a rollback session, a rollback node's transform is bytes
+            // nobody will read** (`floptle/0218`).
+            //
+            // Every peer simulates these locally from inputs, and the receiving
+            // side already refuses them — `driven_locally` returns true for
+            // exactly this case and `drop_locally_driven_buffers` throws away
+            // anything that slipped in before the match began. The server was
+            // packing them into every snapshot regardless, so the most
+            // expensive thing on the wire was state that was discarded on
+            // arrival.
+            //
+            // A real match measured **234 kbps per player — 487 bytes a frame**
+            // for a game whose whole netcode is a handful of input bits. This
+            // is where it went.
+            //
+            // Gated on `self.rollback` and nothing else, so the two sides stay
+            // symmetric by construction: the server sends precisely what the
+            // client will accept. Before the match starts the flag is false and
+            // these nodes replicate normally, which is what puts a late joiner
+            // in the right place before its driver takes over.
+            if self.rollback && rep.mode.is_rollback() {
+                continue;
+            }
             let Some(&id) = self.ent_to_net.get(&e) else { continue };
             let Some(tr) = world.get::<Transform>(e) else { continue };
             let pos = [tr.translation.x, tr.translation.y, tr.translation.z];
@@ -3360,6 +3383,64 @@ mod tests {
         assert!(
             matches!(s.join_state(), JoinState::Refused(_)),
             "a refusal was reopened by a stray wake notice"
+        );
+    }
+
+    /// ⚠ **A rollback session does not ship state nobody will read**
+    /// (`floptle/0218`).
+    ///
+    /// A real ten-minute match measured **234 kbps per player — 487 bytes a
+    /// frame** for a game whose netcode is a handful of input bits. The cause
+    /// was here: the server packed every rollback node's transform into every
+    /// snapshot, and the receiving side threw all of it away, because those
+    /// nodes are simulated locally on every peer.
+    ///
+    /// The asymmetry is what made it invisible. Nothing was wrong on the wire
+    /// and nothing desynced — it just cost an order of magnitude more bandwidth
+    /// than it needed to, and every capacity figure for the relay was derived
+    /// from the inflated number.
+    #[test]
+    fn a_rollback_session_stops_sending_state_its_peers_already_simulate() {
+        use floptle_core::{ReplicationMode, Transform};
+
+        fn session_with(mode: ReplicationMode, rollback: bool) -> (NetSession, World) {
+            let hub = crate::MemoryHub::new();
+            let mut s = NetSession::client(Box::new(hub.connect()), 0);
+            let mut w = World::default();
+            let e = w.spawn();
+            w.insert(e, Transform::IDENTITY);
+            w.insert(e, Replicated { mode, ..Default::default() });
+            s.ent_to_net.insert(e, 1);
+            s.net_to_ent.insert(1, e);
+            s.rollback = rollback;
+            (s, w)
+        }
+
+        // The entry is there when the session is NOT a rollback one…
+        let (mut s, w) = session_with(ReplicationMode::Rollback, false);
+        let before = s.build_snapshot(&w, 1, true);
+        assert!(
+            matches!(&before, Some(Msg::Snapshot { entries, .. }) if !entries.is_empty()),
+            "a rollback NODE outside a rollback SESSION still replicates — that is what \
+             puts a late joiner in the right place before its driver takes over"
+        );
+
+        // …and gone once the match is actually running.
+        let (mut s, w) = session_with(ReplicationMode::Rollback, true);
+        let during = s.build_snapshot(&w, 1, true);
+        let entries = match &during {
+            Some(Msg::Snapshot { entries, .. }) => entries.len(),
+            None => 0,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(entries, 0, "a rollback session is still shipping locally-simulated state");
+
+        // ⚠ And an ordinary networked node is UNTOUCHED. Skipping those would
+        // not be a saving, it would be a desync.
+        let (mut s, w) = session_with(ReplicationMode::Authority, true);
+        assert!(
+            matches!(s.build_snapshot(&w, 1, true), Some(Msg::Snapshot { entries, .. }) if !entries.is_empty()),
+            "an authority-replicated node stopped replicating inside a rollback session"
         );
     }
 
