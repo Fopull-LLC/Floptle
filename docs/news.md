@@ -1,5 +1,17 @@
 ## Just shipped
 
+**v0.89.0-rc1 — "Stay In Your Lane"** (beta channel). A script's paths stay
+inside its project: an absolute path or a `..` that would leave it resolves to
+nothing, and the Console says which rule refused it. A loop without an exit stops
+the script rather than the editor — a pass into your scripts may run for two
+seconds (half a second on a dedicated server), and the script that overran is
+stopped with the budget named until you edit it. `http.*` from a game reaches
+public addresses only; the editor's Play still allows `localhost` and says so.
+The editor no longer goes down with the terminal it was launched from, and the
+Hub keeps its output in a log file. A release candidate: nothing changes how you
+write a game, but it draws lines a game could previously cross, so play yours on
+it before it goes stable.
+
 **v0.88.2** — **a server that could not keep its lobby code now says so.** When
 `floptle serve --lobby-code` asks a relay for a code the relay will not hand back —
 reserved for a different game, already in use, or a relay too old to understand
