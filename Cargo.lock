@@ -1678,6 +1678,7 @@ dependencies = [
  "ron",
  "rustls",
  "serde",
+ "socket2",
  "tokio",
  "webpki-roots 0.26.11",
 ]

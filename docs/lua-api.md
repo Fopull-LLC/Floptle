@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 97
+- [components — getcomponent](#components--getcomponent) — 101
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
@@ -960,7 +960,7 @@ post:setShaderParam("inkOutline.thickness", 1 + rage * 2)
 
 ### `node:setShaderParam`
 
-node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick), the Skybox's sky shader, or — on the Post Processing node — its SCREEN shaders: name one with `"inkOutline.thickness"`, or leave the prefix off to set that knob on every pass. Unset lanes are 0.
+node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick), the Skybox's sky shader, or — on the Post Processing node — its SCREEN shaders: name one with `"inkOutline.thickness"`, or leave the prefix off to set that knob on every pass. Unset lanes are 0. On a MODEL with per-part material overrides and no node Material it fans out to every part that wears a shader; to reach ONE part, go through its handle: node:material("Head#2"):setShaderParam(...). A write with nothing to land on is said once in the Console rather than lost silently.
 
 ```lua
 -- a live uniform write: safe every tick, never recompiles
@@ -1009,7 +1009,7 @@ node:sound() — the handle for this node's Audio Source component. :play() (res
 
 ### `node:uiRect`
 
-node:uiRect() -> x, y, w, h — where this UI element was actually laid out on screen this frame, in pixels, or nil if it is not a UI element or has not been drawn yet. The layout is the engine's, so this is the only way to find out where a Stack or a Pin put something — for a tooltip that follows a button, an arrow pointing at it, or a hit test of your own.
+node:uiRect() -> x, y, w, h — where this UI element was actually laid out on screen this frame, in pixels, or nil if it is not a UI element or has not been drawn yet. The layout is the engine's, so this is the only way to find out where a Stack or a Pin put something — for a tooltip that follows a button, an arrow pointing at it, or a hit test of your own. Under `floptle run` there is no surface, so nothing is ever laid out and this is always nil — `floptle shot` is the headless way to see a screen; guard the call (`if x then`) in anything that also runs headless.
 
 ## vectors, directions & easing
 
@@ -3311,6 +3311,22 @@ mat.texture — the base-colour image, project-relative ("art/shirt.png"). Assig
 ### `mat.unlit`
 
 mat.unlit — draw at full brightness, ignoring every light. Reads back as a BOOLEAN.
+
+### `mat:setShaderParam`
+
+mat:setShaderParam("glow", 2.5) / mat:setShaderParam("nose", x, y, z) — drive a .flsl uniform on THIS material every tick: the node's own for node:material(), ONE PART's override for node:material("Head#2"). The node-level node:setShaderParam folds into the node's own Material and cannot reach a part, which is what this exists for — a character whose parts wear shaders (skin here, a face decal there) can now have a part's knobs driven at runtime. A GPU uniform write, never a recompile; unset lanes are 0. The write lands only on a part that already HAS an override wearing a .flsl — it never creates one (an override is a whole material, and a uniform must not blank a part), and a part with nowhere to put it is said once in the Console.
+
+### `mat:setShaderTexture`
+
+mat:setShaderTexture(slot, ref) — point one of THIS material's .flsl texture slots somewhere else, at runtime — on one part of a model when the handle came from node:material("Head#2"). `slot` is the name the shader declares (`texture face` -> "face"); `ref` is a project-relative image path, an `rt:<name>` render target, or "" to clear it. The character creator's face swap is this one line: node:material("Head#2"):setShaderTexture("face", "faces/02.png"). Same rule as setShaderParam: it lands on an existing override that wears a shader, and never creates one.
+
+### `mat:shaderParam`
+
+mat:shaderParam("glow") -> x, y, z, w — read a uniform back off this material: what you set this frame, else what the material carries. nil when it has no such knob. Reads in the same frame as the write, the way mat.color does.
+
+### `mat:shaderTexture`
+
+mat:shaderTexture(slot) -> ref — which image a texture slot points at: what you set this frame, else what the material carries; "" for a slot you cleared, nil for one nothing has named.
 
 ### `node:getComponent`
 

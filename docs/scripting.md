@@ -1078,6 +1078,29 @@ if shirt.texture ~= wanted then shirt.texture = wanted end
 `node:material()` with no name is the node's **own** Material — see the rule
 below before reaching for it.
 
+**A part's shader knobs go through the same handle.** A part that wears a
+`.flsl` — skin on the head, a face decal, a cloth overlay on the torso — has
+uniforms and texture slots of its own, and `node:setShaderParam` cannot reach
+them: it writes the node's own Material, which on such a model usually does not
+exist. The handle can:
+
+```lua
+local head = node:material("Head#2")
+head:setShaderTexture("face", "faces/02.png")   -- the character creator's face swap
+head:setShaderParam("blush", 0.6)
+if head:shaderTexture("face") ~= "faces/02.png" then ... end   -- reads back, same frame
+```
+
+Two rules keep a typo from wrecking a part. A shader write lands only on an
+override that **already exists and wears a shader** — it never creates one,
+because an override is a whole material and creating one for a uniform would
+blank the part to default white with nothing for the uniform to drive. And a
+write with nowhere to land is said once in the Console rather than lost. Which
+`.flsl` a part wears is authoring — set it in ◑ Model materials — and the
+knobs are the runtime half. The node-level `node:setShaderParam` on a model
+with overrides and no node Material fans out to every part that wears a shader,
+which is the "everything glows" case.
+
 ### One material over a whole model
 
 **A Material on a model supersedes the model's own materials.** Every part draws

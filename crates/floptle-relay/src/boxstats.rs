@@ -21,7 +21,7 @@
 //! actually reaches is **the link**, and the fields that see it coming are, in
 //! order:
 //!
-//! 1. `egress_bps` against 0.48 Gbps. A relay multiplies traffic — one datagram
+//! 1. `egress_bytes_per_sec` against 0.48 Gbps. A relay multiplies traffic — one datagram
 //!    into an eight-player lobby leaves seven times — so egress saturates while
 //!    ingress still looks quiet, and it is egress that is metered and capped.
 //! 2. `rx_drops`, which is not a proxy for anything: it is datagrams the kernel
@@ -55,9 +55,9 @@ pub struct RelayBox {
     pub disk_free_mb: Option<u64>,
     /// Payload bytes per second **sent on** over the interval just reported —
     /// the half that is metered, capped, and reached first.
-    pub egress_bps: Option<u64>,
+    pub egress_bytes_per_sec: Option<u64>,
     /// Payload bytes per second received over the same interval.
-    pub ingress_bps: Option<u64>,
+    pub ingress_bytes_per_sec: Option<u64>,
     /// Lobbies open right now, and players in them.
     pub lobbies: u32,
     pub peers: u32,
@@ -81,7 +81,7 @@ pub struct RelayBox {
 
 /// Read everything this module can measure about the machine.
 ///
-/// The relay's own counters (`egress_bps`, `lobbies`, `step_p95_ms`, …) are
+/// The relay's own counters (`egress_bytes_per_sec`, `lobbies`, `step_p95_ms`, …) are
 /// filled in by the policy, which is the only thing that knows them.
 pub fn host_metrics() -> RelayBox {
     RelayBox {

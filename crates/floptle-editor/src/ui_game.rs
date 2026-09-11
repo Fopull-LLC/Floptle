@@ -768,6 +768,117 @@ impl Editor {
         out
     }
 
+    /// **Draw the game's screen-space UI over a finished frame** — every
+    /// enabled screen-space layer in `z` order at the scale its `scale_mode`
+    /// gives this viewport, then the script's `draw.*` rects and text, then
+    /// captions. `target` is the composited picture, `w`×`h` its size in
+    /// physical pixels; `target_samplable` says whether it can be bound as a
+    /// texture, which is what `backdrop()` UI shaders read (a swapchain that
+    /// was not offered the flag — a browser canvas — cannot, and gets black).
+    ///
+    /// One function, three callers: the docked Game view, and `floptle shot`
+    /// (`floptle/0224`). Before it was shared, `shot` ran the world passes,
+    /// post and the retro upscale and stopped — so a project whose scenes ARE
+    /// screens (a main menu, a character creator, a dialogue box) had no
+    /// headless way to be looked at, and `run` reported "nothing raised" for
+    /// a `ui.make` tree that had put four buttons in one corner. The value of
+    /// a picture is being believed; a picture missing the layer the scene is
+    /// about is worse than none.
+    pub(crate) fn draw_game_ui_overlay(
+        &mut self,
+        target: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        target_samplable: bool,
+    ) {
+        let vp = [w.max(1) as f32, h.max(1) as f32];
+        let ui_layers = self.gather_game_ui(vp);
+        if ui_layers.is_empty() {
+            return;
+        }
+        let (Some(gpu), Some(raster), Some(uir)) =
+            (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
+        else {
+            return;
+        };
+        let mut ui_instances = Vec::new();
+        let mut ui_batches = Vec::new();
+        for (dl, scale) in &ui_layers {
+            let reg = &self.texture_registry;
+            let uic = &self.ui_flsl_cache;
+            let uib = &self.ui_flsl_binds;
+            uir.pack(
+                gpu,
+                dl,
+                [0.0, 0.0],
+                *scale,
+                &mut |p| reg.get(p).copied(),
+                &|id| raster.texture_size(id),
+                &mut |p, owner| {
+                    let shader = uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
+                    Some((shader, uib.get(&owner)?.binding))
+                },
+                &mut ui_instances,
+                &mut ui_batches,
+            );
+        }
+        // Capture the composited scene (now in `target`, before the UI draws
+        // on top) into the backdrop, so `backdrop()` UI shaders can frost it.
+        //
+        // Only where the target can be SAMPLED. A build draws the game
+        // straight into the swapchain, and a swapchain is samplable only if
+        // the surface offered the flag — which a browser's canvas does not.
+        // Binding it anyway is a validation error per frame and the whole
+        // backdrop pass is dropped, so ask first and fall back to the black
+        // backdrop the UI already has for this case.
+        if target_samplable {
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") });
+            uir.capture_backdrop(gpu, &mut enc, target, w.max(1), h.max(1));
+            gpu.queue.submit(Some(enc.finish()));
+        } else {
+            uir.clear_backdrop();
+        }
+        uir.draw(gpu, target, vp, &ui_instances, &ui_batches, raster);
+    }
+
+    /// **Draw the world-space UI canvases into the scene** — real geometry,
+    /// so they go into the scene target with its depth, before post. Only
+    /// [`UiSpace::World`] layers: this is a BUILD's view, and screen-space
+    /// layers belong in the flat overlay ([`Self::draw_game_ui_overlay`]),
+    /// not hanging in the world as authoring holograms. Shared by the docked
+    /// Game view and `floptle shot` for the reason the overlay is.
+    pub(crate) fn draw_world_canvases(
+        &mut self,
+        scene_target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        cam: &floptle_render::RenderCamera,
+        aspect: f32,
+    ) {
+        let canvases = self.gather_ui_world(aspect, false);
+        if canvases.is_empty() {
+            return;
+        }
+        let (Some(gpu), Some(raster), Some(uir)) =
+            (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
+        else {
+            return;
+        };
+        draw_ui_world(
+            gpu,
+            raster,
+            uir,
+            &self.texture_registry,
+            (&self.ui_flsl_cache, &self.ui_flsl_binds),
+            scene_target,
+            depth,
+            cam.world_position,
+            cam.view_proj(aspect),
+            &canvases,
+        );
+    }
+
     /// UI layers rendered as WORLD CANVASES — a flat quad at each layer node's
     /// transform: origin = translation (canvas top-left), plane axes from its
     /// rotation, `canvas_scale` world units per design unit. Returns per layer:

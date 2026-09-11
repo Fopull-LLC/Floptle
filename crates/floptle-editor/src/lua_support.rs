@@ -144,7 +144,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field setLighting2D fun(self: Node, t: table) 2D lighting, from a script. Keys: mode (auto/2d/3d), layers (the sorting layers a light reaches), blocks (auto/on/off, whether a receiver occludes), inner, falloff, shadows.
 ---@field setPointLight fun(self: Node, t: table) Construction API: make this node a light, or retune one. Keys (all optional, each keeping what the node had, INCLUDING its emitter shape): color, intensity, range.
 ---@field setScreenShader fun(self: Node, name: string, on: boolean) Switch one of the Post Processing node's screen shaders on or off. The name is the file without its extension, the one the Inspector lists.
----@field uiRect fun(self: Node): number, number, number, number Where this UI element was actually laid out on screen this frame \u{2014} x, y, w, h in pixels \u{2014} or nil if it is not a UI element or has not been drawn yet.
+---@field uiRect fun(self: Node): number|nil, number|nil, number|nil, number|nil Where this UI element was actually laid out on screen this frame \u{2014} x, y, w, h in pixels \u{2014} or nil if it is not a UI element or has not been drawn yet (always nil under `floptle run`, which has no surface).
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.
@@ -1321,6 +1321,10 @@ function findTagged(tag) end
 ---@field unlit boolean Draw at full brightness, ignoring the scene's lights.
 ---@field fog boolean Does the scene's fog reach this surface?
 ---@field cell number Which cell of the spritesheet draws.
+---@field setShaderParam fun(self: MaterialHandle, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on THIS material — one part's, when the handle came from `node:material(\"Head#2\")`. Lands only on an override that wears a shader; never creates one.
+---@field setShaderTexture fun(self: MaterialHandle, slot: string, ref: string) Point one of this material's shader texture slots at an image, an `rt:` target, or `\"\"` to clear it.
+---@field shaderParam fun(self: MaterialHandle, name: string): number|nil, number|nil, number|nil, number|nil Read a uniform back — this frame's write, else what the material carries; nil for a knob nothing has set.
+---@field shaderTexture fun(self: MaterialHandle, slot: string): string|nil Which image a slot points at; `\"\"` once cleared, nil if nothing named it.
 
 ---One sprite node's drawing numbers, as `node:sprite()` hands them over.
 ---

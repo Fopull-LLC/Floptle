@@ -245,6 +245,52 @@ thread_local! {
     pub(crate) static PARAMS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// `node:setShaderParam` on a model that has per-part overrides and no node
+/// Material: the uniform goes to every part that wears a shader
+/// (`floptle/0225`). `false` when no part does — the caller says so.
+fn fan_out_param(world: &mut World, ent: Entity, name: &str, v: [f32; 4]) -> bool {
+    let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(ent) else { return false };
+    let mut landed = false;
+    for m in om.0.values_mut().filter(|m| m.shader.is_some()) {
+        m.shader_params.insert(name.to_string(), v);
+        landed = true;
+    }
+    landed
+}
+
+/// A shader write with nothing to land on, said ONCE per (node, material,
+/// knob) — it is written from `update`, so anything louder is a Console full
+/// of the same line. Silence was the bug: `setShaderTexture("face", …)` on a
+/// model with part overrides did nothing and said nothing.
+fn shader_nowhere(
+    warned: &mut std::collections::HashSet<(u32, String, String)>,
+    logs: &RefCell<Vec<ScriptLog>>,
+    names: &HashMap<u32, String>,
+    eid: u32,
+    part: &str,
+    knob: &str,
+    why: &str,
+) {
+    if !warned.insert((eid, part.to_string(), knob.to_string())) {
+        return;
+    }
+    let node = names.get(&eid).cloned().unwrap_or_else(|| format!("#{eid}"));
+    let target = if part.is_empty() {
+        format!("node {node:?}")
+    } else {
+        format!("part {part:?} of {node:?}")
+    };
+    logs.borrow_mut().push(ScriptLog {
+        level: LogLevel::Warn,
+        msg: format!(
+            "setShaderParam/setShaderTexture({knob:?}): {target} {why}, so there is nothing for \
+             it to drive. Give the part a material with a .flsl shader in the Inspector \
+             (per-part shader assignment is authoring, not a script call); said once."
+        ),
+        source: None,
+    });
+}
+
 impl ScriptHost {
     pub fn new() -> Self {
         let lua = Lua::new();
@@ -2148,6 +2194,7 @@ impl ScriptHost {
             voice,
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
+            shader_warned: std::collections::HashSet::new(),
             param_warned: std::collections::HashSet::new(),
             handle_key_warned: std::collections::HashSet::new(),
             load_failure_reported: std::collections::HashSet::new(),
@@ -4919,8 +4966,34 @@ impl ScriptHost {
             // (when it has a `stage ui` shader), the sky, or its Material's
             // params. The per-frame shader drivers see the change and upload a
             // uniform write — never a recompile.
-            for (eid, name, v) in self.shader_param_sets.borrow_mut().drain(..) {
+            let param_sets: Vec<_> = self.shader_param_sets.borrow_mut().drain(..).collect();
+            for (eid, part, name, v) in param_sets {
                 let Some(&ent) = scene.ents.get(&eid) else { continue };
+                // **One part of a model** (`floptle/0225`): the write lands on
+                // that part's EXISTING override, and only on one that wears a
+                // shader. It never creates an override — an override is a whole
+                // material, so creating one for a uniform would blank the part
+                // to default white with nothing for the uniform to drive, and
+                // report nothing. A write with nowhere to land is said once.
+                if let Some(part) = part {
+                    let target = world
+                        .get_mut::<floptle_core::ObjectMaterials>(ent)
+                        .and_then(|om| om.0.get_mut(&part));
+                    match target {
+                        Some(m) if m.shader.is_some() => {
+                            m.shader_params.insert(name, v);
+                        }
+                        Some(_) => shader_nowhere(
+                            &mut self.shader_warned, &self.logs, &scene.names,
+                            eid, &part, &name, "wears no .flsl shader",
+                        ),
+                        None => shader_nowhere(
+                            &mut self.shader_warned, &self.logs, &scene.names,
+                            eid, &part, &name, "has no material override",
+                        ),
+                    }
+                    continue;
+                }
                 let on_ui = world
                     .get::<floptle_ui::ElementSpec>(ent)
                     .is_some_and(|s| !s.shader.is_empty());
@@ -4970,6 +5043,14 @@ impl ScriptHost {
                     }
                 } else if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
                     mat.shader_params.insert(name, v);
+                } else if !fan_out_param(world, ent, &name, v) {
+                    // A model with per-part overrides and no node Material:
+                    // the write fans out to every part that wears a shader
+                    // (above), and with none it was silently lost until now.
+                    shader_nowhere(
+                        &mut self.shader_warned, &self.logs, &scene.names,
+                        eid, "", &name, "has no Material and no part wears a shader",
+                    );
                 }
             }
             // `node:setShaderTexture(slot, ref)`: point one of the shader's
@@ -4984,13 +5065,50 @@ impl ScriptHost {
             // Empty CLEARS the slot rather than binding an empty path: a slot
             // pointed at "" would otherwise fail to resolve every frame and the
             // shader would read whatever the fallback is, silently.
-            for (eid, slot, path) in self.shader_texture_sets.borrow_mut().drain(..) {
+            let texture_sets: Vec<_> = self.shader_texture_sets.borrow_mut().drain(..).collect();
+            for (eid, part, slot, path) in texture_sets {
                 let Some(&ent) = scene.ents.get(&eid) else { continue };
-                if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
+                let write = |mat: &mut floptle_core::Material| {
                     if path.is_empty() {
                         mat.shader_textures.remove(&slot);
                     } else {
-                        mat.shader_textures.insert(slot, path);
+                        mat.shader_textures.insert(slot.clone(), path.clone());
+                    }
+                };
+                // One part: the same rule as a uniform — the existing override
+                // that wears a shader, and nothing is created (`floptle/0225`).
+                if let Some(part) = part {
+                    let target = world
+                        .get_mut::<floptle_core::ObjectMaterials>(ent)
+                        .and_then(|om| om.0.get_mut(&part));
+                    match target {
+                        Some(m) if m.shader.is_some() => write(m),
+                        Some(_) => shader_nowhere(
+                            &mut self.shader_warned, &self.logs, &scene.names,
+                            eid, &part, &slot, "wears no .flsl shader",
+                        ),
+                        None => shader_nowhere(
+                            &mut self.shader_warned, &self.logs, &scene.names,
+                            eid, &part, &slot, "has no material override",
+                        ),
+                    }
+                    continue;
+                }
+                if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
+                    write(mat);
+                } else {
+                    let mut landed = false;
+                    if let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(ent) {
+                        for m in om.0.values_mut().filter(|m| m.shader.is_some()) {
+                            write(m);
+                            landed = true;
+                        }
+                    }
+                    if !landed {
+                        shader_nowhere(
+                            &mut self.shader_warned, &self.logs, &scene.names,
+                            eid, "", &slot, "has no Material and no part wears a shader",
+                        );
                     }
                 }
             }
@@ -5329,6 +5447,10 @@ impl ScriptHost {
             let strs = crate::mirror_component_strings(world, e);
             if !strs.is_empty() {
                 s.component_strings.insert(id, strs);
+            }
+            let knobs = crate::mirror_shader_state(world, e);
+            if !knobs.is_empty() {
+                s.shader_state.insert(id, knobs);
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
@@ -6558,6 +6680,41 @@ mod host_tests {
             }]),
         );
         world
+    }
+
+    /// **`node:uiRect()` is `nil` until something has laid the element out**
+    /// (`floptle/0224`) — not `0, 0, 0, 0`, which under `floptle run` (no
+    /// surface, so nothing ever lays out) is a measurement a script cannot
+    /// tell from a real one. The reference always said nil; this makes it so,
+    /// and the same call answers the real rect once one is published.
+    #[test]
+    fn ui_rect_is_nil_rather_than_four_zeros_until_the_element_is_laid_out() {
+        let dir = std::env::temp_dir().join(format!("floptle-uirect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/probe.lua"),
+            "function update(node, dt)\n\
+             \x20 local x, y, w, h = node:uiRect()\n\
+             \x20 if x == nil then print('nil') else print(x .. ',' .. y .. ',' .. w .. ',' .. h) end\n\
+             \x20 print(select('#', node:uiRect()))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("probe");
+        let e = world.query::<floptle_core::Name>().map(|(e, _)| e).next().unwrap();
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert_eq!(said, ["nil", "0"], "an unlaid-out element answered something: {said:?}");
+
+        host.set_ui_rects(HashMap::from([(e.index(), [12.0, 34.0, 100.0, 50.0])]));
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0 / 60.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert_eq!(said, ["12,34,100,50", "4"], "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`assets.*` stays inside the project.** `getFile("../project.ron")` is

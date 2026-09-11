@@ -167,11 +167,16 @@ pub(crate) struct Args<'a> {
     /// `--seed`: pin the game's randomness, so a project that generates its
     /// world produces the same picture twice.
     pub(crate) seed: Option<u32>,
+    /// `--no-ui`: the world alone, with no UI layer over it — for a lighting
+    /// comparison or a GI preview, where a HUD would be in the way. The
+    /// default draws every enabled layer, because a scene whose whole point is
+    /// a screen is otherwise photographed as its backdrop (`floptle/0224`).
+    pub(crate) no_ui: bool,
 }
 
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(args: Args) -> i32 {
-    let Args { root, scene, camera, size, out, json, timing, after, seed } = args;
+    let Args { root, scene, camera, size, out, json, timing, after, seed, no_ui } = args;
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -334,7 +339,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // the character floating over flat grey (`floptle/0166`).
     ed.sync_map_meshes();
     ed.sync_map_paint();
-    let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask) else {
+    let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui) else {
         floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
@@ -407,6 +412,11 @@ pub(crate) fn run(args: Args) -> i32 {
 /// second verb assembling its own post chain would be a sixth place for the
 /// picture to quietly stop being the editor's.
 ///
+/// `ui` draws the game's UI as the Game view does: world canvases into the
+/// scene before post, every screen-space layer over the finished picture
+/// (`floptle/0224`). `false` is the world alone — `shot --no-ui`, and `vfx`,
+/// which photographs an effect and has no screen to show.
+///
 /// `None` means no device — this machine has no adapter floptle can render on.
 pub(crate) fn render_frame_pixels(
     ed: &mut crate::Editor,
@@ -414,6 +424,7 @@ pub(crate) fn render_frame_pixels(
     w: u32,
     h: u32,
     cull_mask: u32,
+    ui: bool,
 ) -> Option<Vec<u8>> {
     let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
@@ -478,6 +489,11 @@ pub(crate) fn render_frame_pixels(
             ..Default::default()
         },
     );
+    // World-space UI canvases are geometry: into the scene, with its depth,
+    // before post — exactly where the Game view puts them.
+    if ui {
+        ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
+    }
 
     // **The whole chain, not the tonemap.** This used to pass tonemap alone and
     // default everything else, so a project with bloom, vignette, AO, posterise
@@ -530,6 +546,22 @@ pub(crate) fn render_frame_pixels(
         }
     }
 
+    // **The UI, last, over the finished picture** — every enabled
+    // screen-space layer in `z` order at the scale its `scale_mode` gives
+    // this size, the script's `draw.*`, captions: the same composite the Game
+    // view shows. After the retro upscale on purpose, because that is where
+    // the game draws it: a pixel-art project's HUD is crisp at window
+    // resolution, not chunky with the world. The picture's own texture was
+    // made samplable above, so `backdrop()` shaders frost the real scene.
+    //
+    // Nothing was drawn here before this call existed, and nothing said so:
+    // three of four scenes in the project that reported it were UI-first,
+    // every one "verified" by `run` and wrong on first sight.
+    if ui {
+        ed.draw_game_ui_overlay(&color_view, w, h, true);
+    }
+
+    let gpu = ed.gpu.as_ref()?;
     if ed.gpu_timing_headless
         && let Some(t) = ed.gpu_timer.as_mut()
     {

@@ -705,24 +705,7 @@ impl Editor {
         // BUILD, so screen-space layers belong in the flat overlay below, not
         // hanging in the world as authoring holograms. Without this the docked
         // tab drew no diegetic UI at all while still happily hit-testing it.
-        let canvases = self.gather_ui_world(aspect, false);
-        if !canvases.is_empty()
-            && let (Some(gpu), Some(raster), Some(uir)) =
-                (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
-        {
-            crate::ui_game::draw_ui_world(
-                gpu,
-                raster,
-                uir,
-                &self.texture_registry,
-                (&self.ui_flsl_cache, &self.ui_flsl_binds),
-                &scene_target,
-                &depth,
-                cam.world_position,
-                cam.view_proj(aspect),
-                &canvases,
-            );
-        }
+        self.draw_world_canvases(&scene_target, &depth, &cam, aspect);
         // Post composites into the retro color (retro) or the game_vp color (non-retro).
         if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
             let post_shaders = self.post_shaders.as_ref();
@@ -765,53 +748,7 @@ impl Editor {
             }
         }
         // ---- game UI: the docked Game view shows exactly what a build shows ----
-        let ui_layers = self.gather_game_ui([w.max(1) as f32, h.max(1) as f32]);
-        if !ui_layers.is_empty()
-            && let (Some(gpu), Some(raster), Some(uir)) =
-                (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
-        {
-            let vp = [w.max(1) as f32, h.max(1) as f32];
-            let mut ui_instances = Vec::new();
-            let mut ui_batches = Vec::new();
-            for (dl, scale) in &ui_layers {
-                let reg = &self.texture_registry;
-                let uic = &self.ui_flsl_cache;
-                let uib = &self.ui_flsl_binds;
-                uir.pack(
-                    gpu,
-                    dl,
-                    [0.0, 0.0],
-                    *scale,
-                    &mut |p| reg.get(p).copied(),
-                                &|id| raster.texture_size(id),
-                    &mut |p, owner| {
-                        let shader = uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
-                        Some((shader, uib.get(&owner)?.binding))
-                    },
-                    &mut ui_instances,
-                    &mut ui_batches,
-                );
-            }
-            // Capture the composited scene (now in `cv`, before the UI draws on
-            // top) into the backdrop, so `backdrop()` UI shaders can frost it.
-            //
-            // Only where the target can be SAMPLED. A build draws the game
-            // straight into the swapchain, and a swapchain is samplable only
-            // if the surface offered the flag — which a browser's canvas does
-            // not. Binding it anyway is a validation error per frame and the
-            // whole backdrop pass is dropped, so ask first and fall back to
-            // the black backdrop the UI already has for this case.
-            if target_samplable {
-                let mut enc = gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") });
-                uir.capture_backdrop(gpu, &mut enc, &cv, w.max(1), h.max(1));
-                gpu.queue.submit(Some(enc.finish()));
-            } else {
-                uir.clear_backdrop();
-            }
-            uir.draw(gpu, &cv, vp, &ui_instances, &ui_batches, raster);
-        }
+        self.draw_game_ui_overlay(&cv, w.max(1), h.max(1), target_samplable);
     }
 
     /// What the Inspector should draw for the current selection's preview.

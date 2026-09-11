@@ -41,7 +41,7 @@ pub use interest::{
 };
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 #[cfg(not(target_arch = "wasm32"))]
-pub use quic::{QuicClient, QuicServer, ServerCertificate};
+pub use quic::{QuicClient, QuicServer, ServerCertificate, SocketBuffers};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{
     HostAdmission, JoinAdmission, LobbyEnd, RelayClient, RelayHost, RelayLimits, RelayPolicy,

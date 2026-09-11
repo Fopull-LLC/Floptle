@@ -44,3 +44,7 @@ rcgen = "0.13"
 # compares against `openssl x509 -fingerprint` (`quic::fingerprint_of`).
 ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
+# The relay's UDP socket is built by hand so its kernel buffers can be sized
+# before quinn takes it (`floptle/0234`). Already under quinn; here for
+# `SO_RCVBUF`/`SO_SNDBUF`, which std's `UdpSocket` cannot set.
+socket2 = "0.6"

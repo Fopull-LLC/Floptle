@@ -670,6 +670,32 @@ checks the result from outside, with the same handshake a player's build runs:
 it prints the fingerprint of the certificate the relay actually presents and
 whether it verifies for the name.
 
+### The box under a relay
+
+A relay's ceiling on a small box is not its link. Left at the kernel default, a
+UDP socket's receive buffer holds a couple of hundred datagrams, and one
+synchronised burst from a hundred players fills it while the link sits under
+one percent used — the only symptom being retransmit latency that reads as
+"the internet". So the relay asks for an 8 MiB buffer, receive and send, and
+prints what it was actually given on its first line of output:
+
+```
+socket buffers: asked 8388608 B each; kernel reports rx 16777216 B, tx 16777216 B
+```
+
+The kernel silently caps the ask at `net.core.rmem_max` (and `wmem_max`), so
+on a stock Linux box that line instead says `CLAMPED` and names the sysctl.
+Raise both and restart the relay — the buffer is fixed when the socket is
+created, and a relay restart ends every lobby on it, so pair it with a release:
+
+```
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+```
+
+Linux reports double what it applied (it books its own overhead in the same
+number), which is why an unclamped 8 MiB reads as sixteen here and in `ss -m`.
+
 ### What it costs you if it is down
 
 Nothing that is already running, and nothing about joining. The relay decides
