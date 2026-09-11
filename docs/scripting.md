@@ -995,7 +995,10 @@ a whole wardrobe of looks.
 ### `assets` — referencing files in code
 
 `assets` resolves files by a path written **relative to `Assets/`** (the same path the
-Asset Browser shows; right-click any asset ▸ **Copy asset path** to grab it).
+Asset Browser shows; right-click any asset ▸ **Copy asset path** to grab it). A path
+that would leave the project — absolute, or through `..` — answers `nil` (or an
+empty list) and one Console line naming the rule. `getContents` walks at most
+20 000 files and says so if it had to stop.
 
 | Call | Returns |
 |---|---|
@@ -2382,6 +2385,18 @@ The same list lives on the tab's **§ Docs** page.
   script name + line — double-click to jump to the source.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
+- **A loop without an exit stops the script, not the editor.** A pass into your
+  scripts may run for **2 seconds** (500 ms on a dedicated server, see
+  `--script-budget-ms`); past that the script that overran is stopped with an
+  error naming the budget, and it is not called again until you edit its file.
+  Everything else keeps running. The scripts share **512 MB** between them —
+  a table that only grows hits "not enough memory" in its own call, and the
+  rest of the game goes on.
+- **A path is relative to the project and stays inside it.** `assets.getFile`,
+  `assets.getContents`, `node.model =`, a texture, a clip, a scene, a script
+  name on a node: an absolute path or a `..` that would leave the project
+  resolves to nothing, and the Console says which rule refused it.
+  `assets.getContents` lists at most 20 000 files and says so when it stops.
 
 ## 16. Networking: `net.*`, `synced`, `onRpc`
 
@@ -3751,7 +3766,8 @@ save.slot("slot2")                 -- separate profile; save.slot() reads the na
 
 Values follow the `synced`-var guardrails: numbers, strings, booleans, tables up
 to depth 4 and ≤ 1 KB each — no functions/userdata. A violation is a script
-error, not silent data loss.
+error, not silent data loss. A slot holds at most **10 000 keys** and **4 MB**
+in all; a `save.set` past either is the same kind of error.
 
 **Multiplayer**: this is *local* storage. For server-authoritative progress,
 call `save.*` inside server-side paths (`net.isServer()`) and hand results to

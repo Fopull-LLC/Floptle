@@ -79,6 +79,72 @@ impl DirEntry {
     }
 }
 
+/// Join a **relative** path onto `root` such that the result cannot leave it:
+/// an absolute path, a `..`, a root or a drive prefix anywhere in `rel` is
+/// refused with `None`. Purely lexical — nothing is read — so it answers the
+/// same in a browser, for a bundle, and for a directory that does not exist
+/// yet.
+///
+/// This is the one rule for every path a script or a scene file supplies and
+/// the engine then opens on its behalf: the reference is relative to the
+/// project, or it is not a reference.
+pub fn contain(root: &Path, rel: &str) -> Option<PathBuf> {
+    let p = Path::new(rel);
+    if p.is_absolute() || rel.starts_with(['/', '\\']) {
+        return None;
+    }
+    for c in p.components() {
+        if matches!(
+            c,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
+            return None;
+        }
+    }
+    // A Windows spelling on any platform: `C:\x` is a prefix on Windows and
+    // an ordinary file name everywhere else, where `Component::Prefix` never
+    // fires — so it is refused by shape as well.
+    let b = rel.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return None;
+    }
+    Some(root.join(p))
+}
+
+/// Is `candidate` inside `root`? Lexical, after both are made absolute against
+/// the current directory and `.`/`..` are folded — so a relative project root
+/// (`assets`) and an absolute reference into it compare as the same tree.
+/// A path that climbs out through `..` and back in is judged by where it
+/// lands. Symlinks are not followed: this asks where a path POINTS, not what
+/// is at the other end, and it must answer for a file that is not there.
+pub fn is_within(root: &Path, candidate: &Path) -> bool {
+    normalize(candidate).starts_with(normalize(root))
+}
+
+/// Absolute and folded, lexically. A path that cannot be made absolute (no
+/// current directory, as in a browser) is folded as it is — every path a
+/// bundle serves is already absolute.
+pub fn normalize(p: &Path) -> PathBuf {
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd().map(|c| c.join(p)).unwrap_or_else(|| p.to_path_buf())
+    };
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Read a whole file as UTF-8, the way `std::fs::read_to_string` does.
 pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
     let bytes = read(path.as_ref())?;
@@ -101,6 +167,33 @@ mod tests {
         assert_eq!(e.file_name(), OsString::from("first.ron"));
         assert!(e.is_file() && !e.is_dir());
         assert_eq!(e.path(), PathBuf::from("scenes/first.ron"));
+    }
+
+    /// The rule for every script-supplied path: relative and inside, or refused.
+    #[test]
+    fn contain_refuses_every_way_out_of_the_root() {
+        let root = Path::new("/proj");
+        for bad in ["../etc/passwd", "/etc/passwd", "a/../../b", "..", "\\\\server\\share", "C:\\x", "c:/x", "/"] {
+            assert_eq!(contain(root, bad), None, "{bad:?} escaped");
+        }
+        assert_eq!(contain(root, "sub/file.lua"), Some(PathBuf::from("/proj/sub/file.lua")));
+        assert_eq!(contain(root, "a/./b"), Some(PathBuf::from("/proj/a/./b")));
+        assert_eq!(contain(root, ""), Some(PathBuf::from("/proj")));
+    }
+
+    /// `is_within` judges where a path LANDS, whatever route it took.
+    #[test]
+    fn is_within_folds_dots_and_compares_absolute_trees() {
+        let root = Path::new("/proj");
+        assert!(is_within(root, Path::new("/proj/models/x.glb")));
+        assert!(is_within(root, Path::new("/proj/a/../models/x.glb")));
+        assert!(!is_within(root, Path::new("/proj/../etc/passwd")));
+        assert!(!is_within(root, Path::new("/etc/passwd")));
+        assert!(!is_within(root, Path::new("/project2/x")), "a sibling sharing a prefix");
+        // A relative root and a relative candidate resolve against the same cwd.
+        assert!(is_within(Path::new("assets"), Path::new("assets/textures/a.png")));
+        assert!(!is_within(Path::new("assets"), Path::new("solar/scenes/x.ron")));
+        assert!(!is_within(Path::new("assets"), Path::new("assets/../solar/x.ron")));
     }
 
     #[test]

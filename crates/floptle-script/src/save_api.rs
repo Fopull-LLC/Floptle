@@ -22,16 +22,66 @@ use std::rc::Rc;
 use floptle_net::NetValue;
 use mlua::{Lua, Value};
 
+/// How many keys one slot may hold, and how many bytes between them. A value
+/// is already capped at 1 KB; without these the COUNT was unbounded, and the
+/// flush serialises the whole store every few seconds — a slot that only grew
+/// was a stall that only grew with it.
+pub const MAX_SAVE_KEYS: usize = 10_000;
+pub const MAX_SAVE_BYTES: usize = 4 * 1024 * 1024;
+
 pub(crate) struct SaveState {
     pub slot: String,
     pub store: HashMap<String, NetValue>,
     pub loaded: bool,
     pub dirty: bool,
+    /// The store's size on the wire, kept alongside it so a `set` can answer
+    /// "would this fit" without re-encoding ten thousand values.
+    pub bytes: usize,
 }
 
 impl Default for SaveState {
     fn default() -> Self {
-        Self { slot: "main".into(), store: HashMap::new(), loaded: false, dirty: false }
+        Self { slot: "main".into(), store: HashMap::new(), loaded: false, dirty: false, bytes: 0 }
+    }
+}
+
+impl SaveState {
+    /// Put one value in, or say why it does not fit. The caps are on the slot
+    /// as a whole, so a key that replaces one already there is charged the
+    /// difference.
+    pub(crate) fn insert(&mut self, key: String, nv: NetValue) -> Result<(), String> {
+        let incoming = nv.encoded_len();
+        let outgoing = self.store.get(&key).map_or(0, NetValue::encoded_len);
+        let keys_after = self.store.len() + usize::from(outgoing == 0 && !self.store.contains_key(&key));
+        if keys_after > MAX_SAVE_KEYS {
+            return Err(format!(
+                "the slot already holds {MAX_SAVE_KEYS} keys. A save is for what the player \
+                 did, not for everything the game computed — put a table under one key, or \
+                 delete what is stale"
+            ));
+        }
+        let bytes_after = self.bytes.saturating_sub(outgoing).saturating_add(incoming);
+        if bytes_after > MAX_SAVE_BYTES {
+            return Err(format!(
+                "the slot would be {bytes_after} bytes, more than the {MAX_SAVE_BYTES} it may hold"
+            ));
+        }
+        self.store.insert(key, nv);
+        self.bytes = bytes_after;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Take one value out, keeping the byte count honest.
+    pub(crate) fn remove(&mut self, key: &str) -> Option<NetValue> {
+        let gone = self.store.remove(key)?;
+        self.bytes = self.bytes.saturating_sub(gone.encoded_len());
+        self.dirty = true;
+        Some(gone)
+    }
+
+    fn recount(&mut self) {
+        self.bytes = self.store.values().map(NetValue::encoded_len).sum();
     }
 }
 
@@ -55,6 +105,7 @@ fn ensure_loaded(state: &mut SaveState, root: &std::path::Path) {
         .ok()
         .and_then(|text| ron::from_str(&text).ok())
         .unwrap_or_default();
+    state.recount();
 }
 
 /// Write the slot to disk if dirty. Returns an error string for the caller to log.
@@ -91,9 +142,8 @@ pub(crate) fn install_save_api(
                 .map_err(|e| mlua::Error::RuntimeError(format!("save.set(\"{key}\"): {e}")))?;
             let mut s = state.borrow_mut();
             ensure_loaded(&mut s, &root.borrow());
-            s.store.insert(key, nv);
-            s.dirty = true;
-            Ok(())
+            s.insert(key.clone(), nv)
+                .map_err(|e| mlua::Error::RuntimeError(format!("save.set(\"{key}\"): {e}")))
         }) {
             let _ = t.set("set", f);
         }
@@ -122,9 +172,7 @@ pub(crate) fn install_save_api(
         if let Ok(f) = lua.create_function(move |_, key: String| {
             let mut s = state.borrow_mut();
             ensure_loaded(&mut s, &root.borrow());
-            let had = s.store.remove(&key).is_some();
-            s.dirty |= had;
-            Ok(had)
+            Ok(s.remove(&key).is_some())
         }) {
             let _ = t.set("delete", f);
         }
@@ -147,6 +195,7 @@ pub(crate) fn install_save_api(
             let mut s = state.borrow_mut();
             if name == s.slot {
                 s.store.clear();
+                s.bytes = 0;
                 s.loaded = true; // a fresh, empty store — nothing to lazily read back
                 s.dirty = false;
             }
@@ -181,6 +230,7 @@ pub(crate) fn install_save_api(
                 s.slot = name;
                 s.loaded = false;
                 s.store.clear();
+                s.bytes = 0;
                 s.dirty = false;
             }
             Ok(s.slot.clone())
@@ -210,4 +260,48 @@ pub(crate) fn install_save_api(
     }
 
     let _ = lua.globals().set("save", t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lua_with_save(root: &std::path::Path) -> (Lua, Rc<RefCell<SaveState>>) {
+        let lua = Lua::new();
+        let state = Rc::new(RefCell::new(SaveState::default()));
+        let logs = Rc::new(RefCell::new(Vec::new()));
+        install_save_api(&lua, state.clone(), Rc::new(RefCell::new(root.to_path_buf())), logs);
+        (lua, state)
+    }
+
+    /// **A slot has a ceiling on keys and on bytes**, and both are the same
+    /// kind of loud error a too-big value already was. Deleting makes room
+    /// again, and replacing a key is charged the difference, not the sum.
+    #[test]
+    fn a_slot_refuses_the_key_and_the_byte_past_its_ceiling_and_frees_on_delete() {
+        let root = std::env::temp_dir().join(format!("floptle-savecap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, state) = lua_with_save(&root);
+        lua.load(format!("for i = 1, {MAX_SAVE_KEYS} do save.set('k' .. i, i) end")).exec().unwrap();
+        assert_eq!(state.borrow().store.len(), MAX_SAVE_KEYS);
+        let e = lua.load("save.set('one_more', 1)").exec().unwrap_err().to_string();
+        assert!(e.contains("save.set(\"one_more\")") && e.contains("10000 keys"), "{e}");
+        // Replacing an existing key is fine; so is one more after a delete.
+        lua.load("save.set('k1', 'replaced')").exec().unwrap();
+        lua.load("save.delete('k2') save.set('one_more', 1)").exec().unwrap();
+        assert_eq!(state.borrow().store.len(), MAX_SAVE_KEYS);
+
+        // Bytes: values just under the per-value cap, until the slot is full.
+        let (lua, state) = lua_with_save(&root);
+        let r = lua
+            .load("for i = 1, 100000 do save.set('big' .. i, string.rep('x', 1000)) end")
+            .exec();
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("more than the") && e.contains("bytes"), "{e}");
+        let bytes = state.borrow().bytes;
+        assert!(bytes <= MAX_SAVE_BYTES && bytes > MAX_SAVE_BYTES - 2048, "{bytes}");
+        let counted: usize = state.borrow().store.values().map(NetValue::encoded_len).sum();
+        assert_eq!(bytes, counted, "the running total drifted from the store");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -1448,6 +1448,7 @@ impl Editor {
     pub(crate) fn open_project(&mut self, root: PathBuf) {
         self.reset_anim_bindings();
         self.project_root = root;
+        reset_refused_refs();
         self.seed_project_dirs();
         let (path, doc) = self.load_active_scene();
         self.set_scene_file(&path);
@@ -2090,7 +2091,63 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
 /// and nothing says why (the 2026-09-05 browser playtest). Windows spellings
 /// (`C:\…`) walk the same way, since on any other platform they are not
 /// even absolute. Only the miss path pays for it.
+///
+/// **Whatever the chain answers, it must land inside the project** (or a
+/// linked package's folder). A reference that resolves anywhere else — an
+/// absolute path, a `../..` that happens to exist — is "missing": it resolves
+/// to a path that is not there, and the Console says so once per distinct
+/// reference. Scenes and scripts are data that may have been written by
+/// somebody else, and "load this texture from `/etc`" is not a texture.
 pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
+    let resolved = resolve_asset_path_anywhere(project_root, path);
+    if is_inside_project(project_root, &resolved) {
+        return resolved;
+    }
+    REFUSED_REFS.with(|r| {
+        if r.borrow_mut().insert(path.to_string()) {
+            PENDING_REFUSALS.with(|p| {
+                p.borrow_mut().push(format!(
+                    "{path:?} resolves outside the project and was not loaded — an asset \
+                     reference is relative to the project folder and stays inside it"
+                ));
+            });
+        }
+    });
+    outside_sentinel(project_root, path)
+}
+
+/// Inside the project's own tree, or inside a linked package's.
+fn is_inside_project(project_root: &Path, p: &Path) -> bool {
+    floptle_vfs::is_within(project_root, p)
+        || PACKAGE_ROOTS.with(|m| m.borrow().values().any(|root| floptle_vfs::is_within(root, p)))
+}
+
+/// A path under the project that cannot exist, so every loader downstream
+/// reports "missing" the way it does for a typo. Built without `join`ing the
+/// refused text itself — `Path::join` discards its base for an absolute
+/// argument, which is the very shape being refused.
+fn outside_sentinel(project_root: &Path, path: &str) -> PathBuf {
+    let flat: String = path.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
+    project_root.join("__outside_project__").join(flat)
+}
+
+/// The Console lines the containment rule produced since the last call —
+/// drained by the editor once a frame, and by the headless drivers with the
+/// rest of the Console.
+pub(crate) fn take_refused_refs() -> Vec<String> {
+    PENDING_REFUSALS.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Forget which references have been reported, so a re-opened project says
+/// them again. Called from `open_project`.
+pub(crate) fn reset_refused_refs() {
+    REFUSED_REFS.with(|r| r.borrow_mut().clear());
+    let _ = take_refused_refs();
+}
+
+/// The resolution chain itself, with no containment — see
+/// [`resolve_asset_path`], which is the only caller.
+fn resolve_asset_path_anywhere(project_root: &Path, path: &str) -> PathBuf {
     // `pkg://<id>/<rest>` — a package's own file, addressed by the package's
     // IDENTITY rather than by where its folder happens to be. That is the whole
     // point of the scheme: the same reference works whether the package was
@@ -2178,6 +2235,13 @@ pub(crate) fn resolve_pkg_ref(project_root: &Path, path: &str) -> Option<PathBuf
 }
 
 thread_local! {
+    /// Every reference the containment rule has refused this session, so the
+    /// Console line is said once per distinct reference rather than once per
+    /// frame per node that carries it.
+    static REFUSED_REFS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+    /// The lines not yet handed to the Console.
+    static PENDING_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Where each loaded package's folder is, by id.
     ///
     /// Global rather than threaded through `resolve_asset_path` because that
@@ -2540,13 +2604,54 @@ mod path_tests {
         assert_eq!(resolve_asset_path(&root, "C:\\Users\\ty\\Forgery\\models\\items\\key.glb"), want);
         // An absolute path that EXISTS is still taken as written.
         assert_eq!(resolve_asset_path(&root, want.to_str().unwrap()), want);
-        // No tail of it in the project: as written, so the miss is reported by name.
-        assert_eq!(
-            resolve_asset_path(&root, "/old/disk/Forgery/models/items/missing.glb"),
-            PathBuf::from("/old/disk/Forgery/models/items/missing.glb"),
-        );
+        // No tail of it in the project: missing — under the root, so every
+        // loader reports it the way it reports a typo, and never as-written.
+        let miss = resolve_asset_path(&root, "/old/disk/Forgery/models/items/missing.glb");
+        assert!(miss.starts_with(&root) && !floptle_vfs::exists(&miss), "{}", miss.display());
         assert!(looks_absolute("/x/y.glb") && looks_absolute("C:/x/y.glb") && looks_absolute("D:\\y.glb"));
         assert!(!looks_absolute("models/y.glb") && !looks_absolute("y.glb") && !looks_absolute(""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A reference that resolves outside the project is missing, and the
+    /// Console says so once.** `node.model = "/etc/hostname"` names a file
+    /// that exists; it is not an asset. Same for a `../..` that climbs out. A
+    /// linked package's folder is the one place outside the root a reference
+    /// may land, because that is where a linked package IS.
+    #[test]
+    fn a_reference_outside_the_project_is_missing_and_said_once() {
+        let dir = std::env::temp_dir().join(format!("floptle-contain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("Game");
+        floptle_vfs::create_dir_all(root.join("models")).unwrap();
+        floptle_vfs::write(root.join("models/ok.glb"), b"glb").unwrap();
+        floptle_vfs::write(dir.join("outside.glb"), b"glb").unwrap();
+        let linked = dir.join("linked-pkg");
+        floptle_vfs::create_dir_all(linked.join("art")).unwrap();
+        floptle_vfs::write(linked.join("art/p.png"), b"png").unwrap();
+        reset_refused_refs();
+        set_package_roots(vec![("pkg".into(), linked.clone())]);
+
+        // Inside: as before.
+        assert_eq!(resolve_asset_path(&root, "models/ok.glb"), root.join("models/ok.glb"));
+        assert_eq!(resolve_asset_path(&root, "pkg://pkg/art/p.png"), linked.join("art/p.png"));
+        assert!(take_refused_refs().is_empty());
+
+        // Outside, three spellings — every one lands under the root and is not there.
+        let outside = dir.join("outside.glb").to_string_lossy().to_string();
+        for r in ["/etc/hostname", outside.as_str(), "../outside.glb", "models/../../outside.glb"] {
+            let p = resolve_asset_path(&root, r);
+            assert!(p.starts_with(&root), "{r}: {}", p.display());
+            assert!(!floptle_vfs::exists(&p), "{r}: resolved to something real: {}", p.display());
+        }
+        // Said once per distinct reference, naming the rule — not once per call.
+        let _ = resolve_asset_path(&root, "/etc/hostname");
+        let said = take_refused_refs();
+        assert_eq!(said.len(), 4, "{said:?}");
+        assert!(said[0].contains("/etc/hostname") && said[0].contains("stays inside it"), "{said:?}");
+        assert!(take_refused_refs().is_empty(), "the second call was reported again");
+
+        set_package_roots(Vec::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

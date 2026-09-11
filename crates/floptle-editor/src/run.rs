@@ -979,6 +979,134 @@ mod alloc_window_tests {
 mod tests {
     use super::*;
 
+    /// **No loader echoes the contents of a file it was pointed at.** A scene
+    /// or a script can name any path the engine then opens; if a loader's
+    /// error quoted what it read, "point a texture at a file and read the
+    /// Console" would be a way to read that file. So: files whose only line is
+    /// a canary, named as a model, a texture, a tileset, a sky texture, an
+    /// audio clip, a scene, a shader, a shader texture and a script — from
+    /// inside the project (the loaders open them) and from outside it (the
+    /// containment rule refuses them) — and afterwards no Console line, no
+    /// script error and no loader's own error text carries the canary.
+    ///
+    /// The model and texture loaders need a GPU to be reached through the
+    /// editor, so those two are asked directly as well.
+    #[test]
+    fn no_loader_quotes_the_contents_of_a_file_it_was_pointed_at() {
+        const CANARY: &str = "CANARY-7f3a9";
+        let d = std::env::temp_dir().join(format!(
+            "flrun-canary-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        let root = d.join("proj");
+        for sub in ["scenes", "scripts", "shaders", "audio", "models", "textures", "tiles"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let body = format!("{CANARY}\n");
+        let inside = [
+            "models/canary.glb",
+            "textures/canary.png",
+            "tiles/canary.tileset.ron",
+            "audio/canary.wav",
+            "scenes/canary.ron",
+            "shaders/canary.flsl",
+            "scripts/canary.lua",
+        ];
+        for rel in inside {
+            std::fs::write(root.join(rel), &body).unwrap();
+        }
+        std::fs::write(d.join("canary.txt"), &body).unwrap();
+        let outside = d.join("canary.txt").to_string_lossy().to_string();
+        std::fs::write(
+            root.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
+        )
+        .unwrap();
+        // Inside refs by the extension each loader expects; outside refs are
+        // the one file, which the containment rule turns away before any
+        // loader sees it.
+        let refs: [[&str; 7]; 2] = [
+            inside,
+            [&outside, &outside, &outside, &outside, &outside, &outside, &outside],
+        ];
+        let mut scene = String::from("(name: \"s\", nodes: [");
+        for (i, [model, tex, tiles, clip, sc, shader, script]) in refs.iter().enumerate() {
+            let script_kind = if i == 0 { "canary".to_string() } else { script.to_string() };
+            scene.push_str(&format!(
+                "(name: \"Mesh{i}\", matter: Mesh(asset_path: {model:?}), material: Some((texture: Some({tex:?}))), \
+                   scripts: [(kind: \"prober{i}\")]), \
+                 (name: \"Tiles{i}\", matter: Tilemap(cols: 1, rows: 1, tileset: {tiles:?})), \
+                 (name: \"Sky{i}\", matter: Skybox(texture: Some({tex:?}))), \
+                 (name: \"Post{i}\", matter: PostProcess(screen_shaders: [(shader: {shader:?})])), \
+                 (name: \"Bad{i}\", scripts: [(kind: {script_kind:?})]), "
+            ));
+            std::fs::write(
+                root.join(format!("scripts/prober{i}.lua")),
+                format!(
+                    "function start(node)\n\
+                     \x20 node.model = {model:?}\n\
+                     \x20 node:setShaderTexture('ramp', {tex:?})\n\
+                     \x20 audio.play({clip:?})\n\
+                     \x20 scene.load({sc:?})\n\
+                     end\n"
+                ),
+            )
+            .unwrap();
+        }
+        scene.push_str("])");
+        std::fs::write(root.join("scenes/first.ron"), scene).unwrap();
+
+        let mut ed = crate::Editor {
+            console: ConsoleState { mirror_to_stderr: false, ..Default::default() },
+            ..Default::default()
+        };
+        ed.open_project(root.clone());
+        ed.toggle_play();
+        assert!(ed.playing, "the fixture must enter play mode");
+        for _ in 0..30 {
+            ed.pump_world_streaming();
+            ed.play_step(DT, true);
+        }
+        ed.drain_script_logs();
+        let console: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).collect();
+        let errors = ed.script_host.errors().join("\n");
+        // The fixture did what it claims: the outside refs were refused and
+        // the inside script was opened and failed to compile.
+        assert!(
+            console.iter().any(|m| m.contains("outside the project")),
+            "the outside reference was never refused — did the loaders run?\n{console:#?}"
+        );
+        assert!(
+            console.iter().any(|m| m.contains("canary") && !m.contains("not found") && !m.contains("outside")),
+            "the inside script was never compiled:\n{console:#?}"
+        );
+        assert!(!errors.contains(CANARY), "a script error quoted the file:\n{errors}");
+        for line in &console {
+            assert!(!line.contains(CANARY), "a Console line quoted the file: {line}");
+        }
+
+        // The loaders a headless editor cannot reach, asked directly, plus
+        // the ones it can — each formats its own error, and none may quote.
+        let said = [
+            floptle_assets::import(&root.join("models/canary.glb")).err().map(|e| e.to_string()),
+            floptle_assets::import_rigged(&root.join("models/canary.glb")).err().map(|e| e.to_string()),
+            floptle_scene::load(&root.join("scenes/canary.ron")).err().map(|e| e.to_string()),
+            floptle_audio::decode::load_clip(&root.join("audio/canary.wav")).err(),
+            floptle_shader::text::parse(&body).err().map(|e| e.message),
+        ];
+        assert!(
+            floptle_assets::load_texture(&root.join("textures/canary.png")).is_none(),
+            "a text file decoded as an image"
+        );
+        for (i, e) in said.iter().enumerate() {
+            let e = e.as_deref().unwrap_or_else(|| panic!("loader {i} accepted a text file"));
+            assert!(!e.contains(CANARY), "loader {i} quoted the file: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// `floptle/0193`: `run` could HOST a real session and nothing could JOIN
     /// it, so everything that is only true across the wire was untestable
     /// except by a person clicking in a GUI or by two machines.

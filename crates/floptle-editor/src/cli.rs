@@ -1019,6 +1019,14 @@ pub(crate) const VERBS: &[Verb] = &[
                        — the server is told it by the relay at registration and has no other \
                        way to report it",
             },
+            Arg {
+                name: "--script-budget-ms",
+                value: Value::Text,
+                required: false,
+                help: "how long one tick's scripts may run before the script that overran is \
+                       stopped, in milliseconds. Default 500. The editor and a player build \
+                       allow 2000; a server has nobody at the keyboard to press Stop",
+            },
         ],
         needs_gpu: false,
         writes_project: false,

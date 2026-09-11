@@ -98,6 +98,10 @@ pub struct ServerArgs {
     /// Write a small JSON status document here every few seconds, for whatever
     /// is watching the box.
     pub status_file: Option<PathBuf>,
+    /// How long one tick's scripts may run before the offending script is
+    /// stopped, in milliseconds. `None` is the server default
+    /// (`floptle_script::budget::SERVER_BUDGET`).
+    pub script_budget_ms: Option<u64>,
     /// The Floptle Cloud game key this server belongs to. **Recorded and
     /// reported, not checked** — a dedicated server is reached directly, so
     /// there is nothing here for a key to authorize. It is in the status file
@@ -134,6 +138,7 @@ impl ServerArgs {
             budget: None,
             max_players: None,
             status_file: None,
+            script_budget_ms: None,
             game_key: None,
         };
         // A leading positional is the project directory. Everything after is
@@ -199,6 +204,15 @@ impl ServerArgs {
                 }
                 "--lobby-code" => self.lobby_code = Some(need(val, "--lobby-code")?.to_uppercase()),
                 "--status-file" => self.status_file = Some(PathBuf::from(need(val, "--status-file")?)),
+                "--script-budget-ms" => {
+                    let ms: u64 = need(val, "--script-budget-ms")?
+                        .parse()
+                        .map_err(|_| "--script-budget-ms must be a whole number of milliseconds")?;
+                    if ms == 0 {
+                        return Err("--script-budget-ms wants at least one millisecond".into());
+                    }
+                    self.script_budget_ms = Some(ms);
+                }
                 "--game-key" => self.game_key = Some(need(val, "--game-key")?),
                 other => return Err(format!("unknown flag {other}")),
             }
@@ -705,6 +719,14 @@ pub(crate) fn open(root: &Path, scene_path: &Path, tick_hz: f32) -> Editor {
 /// a guard can call.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn apply_server_opts(ed: &mut Editor, args: &ServerArgs) {
+    // A server's scripts get less rope than an editor's: a tick that ran for
+    // half a second is a server nobody is playing on, and the developer is
+    // not at this keyboard to press Stop.
+    let budget = args
+        .script_budget_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(floptle_script::budget::SERVER_BUDGET);
+    ed.script_host.set_script_budget(budget);
     let Some(s) = ed.net_server.as_mut() else { return };
     // The operator's ceiling, if they set one. Refused at the door — a limit
     // that removed somebody already playing would read as a crash to whoever
@@ -903,6 +925,7 @@ mod tests {
             budget: None,
             max_players: None,
             status_file: None,
+            script_budget_ms: None,
             game_key: None,
         }
     }
@@ -1097,7 +1120,7 @@ mod tests {
         // ⚠ Without this the guard passes by finding NOTHING the day the parser
         // is reformatted — measuring nothing while reporting success.
         assert!(
-            parsed.len() >= 9,
+            parsed.len() >= 10,
             "the scrape found {parsed:?} — it has stopped seeing the match arms, so this \
              guard is measuring nothing"
         );
@@ -1786,6 +1809,44 @@ mod server_tests {
             heard.iter().any(|w| w.contains("shutting down")),
             "the player was dropped without being told why: {heard:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A server's scripts run on a shorter budget than the editor's, and the
+    /// flag reaches the host.** The same `apply_server_opts` the binary runs;
+    /// watched failing with the wiring removed.
+    #[test]
+    fn a_dedicated_server_runs_its_scripts_on_the_server_budget() {
+        use std::time::Duration;
+        let root = temp("scriptbudget");
+        write(&root, "scripts/rules.lua", "-- nothing to do\n");
+        write(&root, "scenes/arena.ron", &scene_with("rules"));
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+        let mut s = serve(&root, "scenes/arena.ron");
+        let bare = super::ServerArgs::parse_argv(&[root.to_string_lossy().into_owned()]).unwrap();
+        super::apply_server_opts(&mut s.ed, &bare);
+        assert_eq!(s.ed.script_host.script_budget(), floptle_script::budget::SERVER_BUDGET);
+        assert!(
+            floptle_script::budget::SERVER_BUDGET < floptle_script::budget::DEFAULT_BUDGET,
+            "a server's budget is meant to be the shorter one"
+        );
+        let args = super::ServerArgs::parse_argv(&[
+            root.to_string_lossy().into_owned(),
+            "--script-budget-ms".into(),
+            "120".into(),
+        ])
+        .unwrap();
+        super::apply_server_opts(&mut s.ed, &args);
+        assert_eq!(s.ed.script_host.script_budget(), Duration::from_millis(120));
+        for bad in ["0", "soon"] {
+            let e = super::ServerArgs::parse_argv(&[
+                root.to_string_lossy().into_owned(),
+                "--script-budget-ms".into(),
+                bad.into(),
+            ])
+            .unwrap_err();
+            assert!(e.contains("--script-budget-ms"), "{bad}: {e}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

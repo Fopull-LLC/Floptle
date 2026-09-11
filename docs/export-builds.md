@@ -347,6 +347,7 @@ floptle-server <project-dir> [--scene scenes/arena.ron]
 | `--build` | the same thing as the positional, said about an exported server folder |
 | `--max-players` | refuse a join past this many players. Nobody already playing is ever dropped for it |
 | `--status-file` | write a small JSON document here every 5 seconds: `peers`, `uptime_s`, `ticks`, `tick_hz`, `scene`, `lobby_code`, `tick_p95_ms`, and `game_key_prefix` — the first twelve characters of the key, enough to say which one; the key itself is never written to disk. Written and renamed, so a watcher never reads half a file. The directory has to be one the server's user can write — under systemd, a `RuntimeDirectory=` of its own |
+| `--script-budget-ms` | how long one tick's scripts may run before the script that overran is stopped. Default 500 ms on a server (the editor and a player build allow 2 s). The stopped script's error names the budget; it runs again once its file changes |
 | `--game-key` | which Floptle Cloud game this process belongs to. Recorded and reported, not checked — a dedicated server is reached directly. Also read from `FLOPTLE_GAME_KEY`, which is how a service manager should pass it: a command line is readable by every process on the machine and is copied into the system log |
 
 See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.

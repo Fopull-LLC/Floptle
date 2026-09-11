@@ -1,7 +1,7 @@
 //! The desktop: `std::fs`, one call deep.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::DirEntry;
 
@@ -23,6 +23,12 @@ pub fn is_file<P: AsRef<Path>>(path: P) -> bool {
 
 pub fn is_dir<P: AsRef<Path>>(path: P) -> bool {
     path.as_ref().is_dir()
+}
+
+/// Is the path itself a symbolic link? Asked of the link, not of what it
+/// points at — the one question `is_dir`/`is_file` cannot answer.
+pub fn is_symlink<P: AsRef<Path>>(path: P) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
 }
 
 pub(crate) fn modified_impl(path: &Path) -> Option<floptle_core::time::SystemTime> {
@@ -63,4 +69,9 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
 /// Remove an EMPTY directory, as `std::fs::remove_dir` does.
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     std::fs::remove_dir(path)
+}
+
+/// The working directory a relative path is relative to.
+pub(crate) fn cwd() -> Option<PathBuf> {
+    std::env::current_dir().ok()
 }

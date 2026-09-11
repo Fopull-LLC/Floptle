@@ -3,7 +3,7 @@
 //! `start`/`update`, apply node writes), and log/error capture.
 
 use crate::{seed_fingerprint, source_writes_params, Hooks};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -249,6 +249,12 @@ thread_local! {
 impl ScriptHost {
     pub fn new() -> Self {
         let lua = Lua::new();
+        // The two limits a script runs under, before it can run at all: how
+        // long a pass may take (`budget`) and how much the state may hold. The
+        // memory limit is Luau's; LuaJIT's allocator is not ours to bound, and
+        // that build is on its way out (ADR-0028).
+        let budget = crate::budget::Budget::new();
+        budget.install(&lua);
         // Before anything else touches the globals: make the documented Lua
         // surface the same on both VMs (ADR-0028). No-op under LuaJIT.
         if let Err(e) = crate::vm::install_compat(&lua) {
@@ -258,6 +264,9 @@ impl ScriptHost {
             panic!("the {} compatibility layer failed to install: {e}", crate::vm::VM_NAME);
         }
         let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
+        // Lines `print`/`log` were refused this frame past the cap — see
+        // `MAX_CONSOLE_LINES_PER_FRAME`; reported as one line at the drain.
+        let dropped_lines: Rc<Cell<usize>> = Rc::new(Cell::new(0));
         // The current script's `(name, line)` taken from the Lua call stack, so a
         // Console line can jump to where it was logged.
         let caller = |lua: &Lua| -> Option<(String, u32)> {
@@ -269,6 +278,7 @@ impl ScriptHost {
         // `log("...")` and Lua's stdlib `print(...)` both feed the engine Console.
         {
             let sink = logs.clone();
+            let dropped = dropped_lines.clone();
             if let Ok(log) = lua.create_function(move |lua, msg: String| {
                 // Pushed, not printed. Whoever owns this host mirrors the drained
                 // feed to stderr itself (`Editor::drain_script_logs`), so an
@@ -276,7 +286,7 @@ impl ScriptHost {
                 // while `print(...)` — which only pushes — appeared once. Two
                 // copies of one line reads as the code having run twice, which
                 // is a bad thing for a logging call to imply.
-                sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+                push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
                 Ok(())
             }) {
                 let _ = lua.globals().set("log", log);
@@ -284,6 +294,7 @@ impl ScriptHost {
         }
         {
             let sink = logs.clone();
+            let dropped = dropped_lines.clone();
             if let Ok(print) = lua.create_function(move |lua, args: Variadic<Value>| {
                 // Deep, Console-ready rendering of ANY value: nested tables,
                 // node/component/script handles, vec3s — see `pretty_value`.
@@ -297,7 +308,7 @@ impl ScriptHost {
                     parts.join("\t")
                 };
                 // Pushed, not printed — see the note on `log` above.
-                sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+                push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
                 Ok(())
             }) {
                 let _ = lua.globals().set("print", print);
@@ -805,13 +816,23 @@ impl ScriptHost {
         // getFile returns the full asset path (or nil if missing); getContents returns an
         // array of every file's path under a directory (recursive), for building tables of
         // assets. The returned strings are exactly what `node.model` / `node.material` accept.
+        //
+        // **Both stay inside the project.** The path is relative to the project
+        // root or it is nothing: an absolute path or a `..` answers `nil` / an
+        // empty list and one Console line naming the rule. A game runs on a
+        // machine that is not the developer's, and "list everything under
+        // `../../..`" is not a question about its assets.
         let project_root: Rc<RefCell<PathBuf>> = Rc::new(RefCell::new(PathBuf::from("assets")));
         if let Ok(t) = lua.create_table() {
             let pr = project_root.clone();
+            let sink = logs.clone();
             let _ = t.set(
                 "getFile",
                 lua.create_function(move |lua, path: String| {
-                    let full = pr.borrow().join(&path);
+                    let Some(full) = floptle_vfs::contain(&pr.borrow(), &path) else {
+                        refuse_outside(&sink, "assets.getFile", &path);
+                        return Ok(Value::Nil);
+                    };
                     Ok(if floptle_vfs::is_file(&full) {
                         Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
                     } else {
@@ -821,26 +842,26 @@ impl ScriptHost {
                 .ok(),
             );
             let pr2 = project_root.clone();
+            let sink = logs.clone();
             let _ = t.set(
                 "getContents",
                 lua.create_function(move |lua, dir: String| {
-                    let base = pr2.borrow().join(&dir);
-                    let mut files: Vec<String> = Vec::new();
-                    let mut stack = vec![base];
-                    while let Some(d) = stack.pop() {
-                        if let Ok(rd) = floptle_vfs::read_dir(&d) {
-                            for entry in rd {
-                                let p = entry.path();
-                                if entry.is_dir() {
-                                    stack.push(p);
-                                } else {
-                                    files.push(p.to_string_lossy().to_string());
-                                }
-                            }
-                        }
-                    }
-                    files.sort();
                     let arr = lua.create_table()?;
+                    let Some(base) = floptle_vfs::contain(&pr2.borrow(), &dir) else {
+                        refuse_outside(&sink, "assets.getContents", &dir);
+                        return Ok(arr);
+                    };
+                    let (files, stopped) = list_files_under(&base);
+                    if stopped {
+                        sink.borrow_mut().push(ScriptLog {
+                            level: LogLevel::Warn,
+                            msg: format!(
+                                "assets.getContents(\"{dir}\"): stopped at {MAX_LISTED_FILES} \
+                                 files — narrow the folder"
+                            ),
+                            source: None,
+                        });
+                    }
                     for (i, f) in files.iter().enumerate() {
                         arr.set(i + 1, lua.create_string(f.as_bytes())?)?;
                     }
@@ -2138,6 +2159,9 @@ impl ScriptHost {
             replaying,
             replay_marks: None,
             http,
+            budget,
+            stopped: std::collections::HashSet::new(),
+            dropped_lines,
             account,
             http_in_fixed,
             platform,
@@ -2415,6 +2439,7 @@ impl ScriptHost {
     /// away once the thing it was covering exists, so being told early would be
     /// worse than not being told.
     pub fn fire_scene_loaded(&mut self, world: &mut World, name: &str, additive: bool) {
+        let _budget = self.budget.arm();
         let subs: Vec<(u32, mlua::RegistryKey)> =
             std::mem::take(&mut *self.scene_loaded.borrow_mut());
         if subs.is_empty() {
@@ -3116,6 +3141,18 @@ impl ScriptHost {
         std::mem::take(&mut *self.draw_rects.borrow_mut())
     }
 
+    /// How long one pass into Lua may run before the script is stopped —
+    /// see [`crate::budget`]. The editor and the player use the default; a
+    /// dedicated server sets a shorter one.
+    pub fn set_script_budget(&self, limit: std::time::Duration) {
+        self.budget.set_limit(limit);
+    }
+
+    /// The budget in force — see [`Self::set_script_budget`].
+    pub fn script_budget(&self) -> std::time::Duration {
+        self.budget.limit()
+    }
+
     /// Where `http.*` may connect — see [`crate::http_policy`]. The driver
     /// sets it once, before Play: `allow_local` for the editor's own Play and
     /// nothing else. A host that is never told refuses local addresses.
@@ -3371,6 +3408,7 @@ impl ScriptHost {
         eid: u32,
         new: &[floptle_core::Entity],
     ) {
+        let _budget = self.budget.arm();
         self.sync_new_entities(world, new);
         let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
         let Ok(node) = new_node_handle(&self.lua, eid) else { return };
@@ -3411,6 +3449,7 @@ impl ScriptHost {
     /// flushed back to the ECS here (the next `run` would otherwise wipe them
     /// when it re-syncs the mirror).
     pub fn call_function(&mut self, world: &mut World, eid: u32, func: &str) {
+        let _budget = self.budget.arm();
         let targets: Vec<(String, Table)> = self
             .envs
             .borrow()
@@ -3452,6 +3491,7 @@ impl ScriptHost {
         kind: &str,
         func: &str,
     ) -> bool {
+        let _budget = self.budget.arm();
         self.sync_scene(world);
         let Some(e) = self.scene.borrow().ents.get(&eid).copied() else {
             self.record_error(kind, format!("{kind}: editor action target node #{eid} not found"));
@@ -3512,6 +3552,7 @@ impl ScriptHost {
         point: [f64; 3],
         normal: [f32; 3],
     ) {
+        let _budget = self.budget.arm();
         let targets: Vec<(String, Table)> = self
             .envs
             .borrow()
@@ -3598,6 +3639,7 @@ impl ScriptHost {
         args: &floptle_net::NetValue,
         sender: u64,
     ) {
+        let _budget = self.budget.arm();
         let targets: Vec<((u32, String), Table)> =
             self.envs.borrow().iter().filter_map(|(k, key)| Some((k.clone(), self.env_of(key)?))).collect();
         let mut called = false;
@@ -3633,6 +3675,7 @@ impl ScriptHost {
     /// "disconnected" and "opponent quit" all reached them as the same thing:
     /// the game closed the match. Which is what they reported. floptle/0045.
     pub fn fire_desync(&mut self, world: &mut World, tick: u64, node: Option<&str>) {
+        let _budget = self.budget.arm();
         let payload = self.lua.create_table().ok().inspect(|t| {
             let _ = t.set("tick", tick);
             if let Some(n) = node {
@@ -3676,6 +3719,7 @@ impl ScriptHost {
         peer: Option<u64>,
         reason: Option<&str>,
     ) {
+        let _budget = self.budget.arm();
         let handlers: Vec<(u32, String, mlua::Function)> = {
             let hs = self.net.handlers.borrow();
             hs.iter()
@@ -4023,6 +4067,7 @@ impl ScriptHost {
     /// Runs every tick under rollback, so it must stay cheap; the conversion is
     /// linear in the size of what the script actually returns.
     pub fn snapshot_scripts(&mut self, eid: u32) -> crate::rollback_api::ScriptState {
+        let _budget = self.budget.arm();
         let mut out = crate::rollback_api::ScriptState::default();
         for (kind, env) in self.script_kinds_on(eid) {
             let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("snapshot") else { continue };
@@ -4077,6 +4122,7 @@ impl ScriptHost {
     /// it came from — which would otherwise make the second replay of a tick
     /// disagree with the first.
     pub fn restore_scripts(&mut self, eid: u32, state: &crate::rollback_api::ScriptState) {
+        let _budget = self.budget.arm();
         for (kind, env) in self.script_kinds_on(eid) {
             let Some((_, nv)) = state.entries.iter().find(|(k, _)| *k == kind) else { continue };
             let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("restore") else { continue };
@@ -4283,7 +4329,20 @@ impl ScriptHost {
 
     /// Take the script log lines captured since the last call (Console feed).
     pub fn drain_logs(&self) -> Vec<ScriptLog> {
-        std::mem::take(&mut self.logs.borrow_mut())
+        let mut out = std::mem::take(&mut *self.logs.borrow_mut());
+        let dropped = self.dropped_lines.replace(0);
+        if dropped > 0 {
+            out.push(ScriptLog {
+                level: LogLevel::Warn,
+                msg: format!(
+                    "…and {dropped} more line(s) this frame. The Console keeps \
+                     {MAX_CONSOLE_LINES_PER_FRAME} a frame from scripts; a print inside a loop \
+                     is nearly always the cause"
+                ),
+                source: None,
+            });
+        }
+        out
     }
 
     /// Record a script error: into `errors` (the Scripting tab) and the Console feed
@@ -4321,6 +4380,7 @@ impl ScriptHost {
     /// project's `scripts/` folder (script names resolve to `<dir>/<name>.lua`);
     /// `dt` is the frame delta and `time` is seconds since play started.
     pub fn run(&mut self, world: &mut World, scripts_dir: &Path, dt: f32, time: f32) {
+        let _budget = self.budget.arm();
         self.errors.clear();
         // Gizmos are immediate mode — a fresh frame starts empty even if the last
         // frame's batch was never drained. Sprite-batch draws are the same
@@ -4401,6 +4461,7 @@ impl ScriptHost {
     /// skipped (its `start` fires in the next frame pass first). Errors accumulate onto
     /// the frame's list rather than clearing it.
     pub fn run_fixed(&mut self, world: &mut World, dt: f32, time: f32) {
+        let _budget = self.budget.arm();
         // Re-mirror the scene: earlier ticks this frame moved transforms/physics, and
         // handles must read post-step state, not the frame-start snapshot.
         self.sync_scene(world);
@@ -4429,6 +4490,7 @@ impl ScriptHost {
     /// in `update` reads the PREVIOUS frame's pose — a follow error of
     /// `velocity × dt` that turns frame-time noise into visible jitter.
     pub fn run_late(&mut self, world: &mut World, dt: f32, time: f32) {
+        let _budget = self.budget.arm();
         // Re-mirror: physics writeback just moved transforms.
         self.sync_scene(world);
         // A switched-off node's scripts do not run — not its `update`, not its
@@ -4462,6 +4524,7 @@ impl ScriptHost {
     }
 
     fn run_one(&mut self, world: &mut World, eid: u32, dt: f32, time: f32, fixed: bool) {
+        let _budget = self.budget.arm();
         self.sync_scene(world);
         let work: Vec<(Entity, Scripts)> = world
             .query::<Scripts>()
@@ -4976,6 +5039,7 @@ impl ScriptHost {
     /// Call AFTER [`run`](Self::run) each frame — the events were detected
     /// against this frame's layout, and the writes flush here.
     pub fn run_ui_hooks(&mut self, world: &mut World, events: &[(u32, &str)]) {
+        let _budget = self.budget.arm();
         if events.is_empty() {
             return;
         }
@@ -5419,6 +5483,7 @@ impl ScriptHost {
                     if self.broken.borrow_mut().remove(name) {
                         self.broken_read_warned.borrow_mut().retain(|(k, _)| k != name);
                     }
+                    self.stopped.remove(name);
                     self.warn_upvalue_pressure(name, generation, &src);
                     if let Some(old) = self.instances.remove(&key) {
                         let _ = self.lua.remove_registry_value(old.env);
@@ -5700,6 +5765,10 @@ impl ScriptHost {
         // then, and a script with no refs never pays for it.
         let structure = if refs.is_empty() { 0 } else { self.scene.borrow().synced_non_transform_rev };
         let fp = seed_fingerprint(params, refs, strs, structure);
+        // A script that ran past its budget waits for an edit — see `fail`.
+        if self.stopped.contains(name) {
+            return false;
+        }
         let (first, env, mut node_slot, rebuild, writes_params) = {
             let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
@@ -6242,9 +6311,23 @@ impl ScriptHost {
     /// so this is not [`fail_load`](Self::fail_load): nothing here touches
     /// `broken`, and the Console wants every occurrence.
     fn fail(&mut self, name: &str, msg: String) {
+        // Past the memory limit: what the script was holding is unreachable
+        // now that its call has unwound, so collect it here, outside Lua, or
+        // every script after it trips the same limit on the same garbage.
+        if msg.contains("not enough memory") {
+            self.lua.gc_collect().ok();
+        }
         let msg = self.explain_runtime(name, msg);
         if let Some(src) = self.sources.get_mut(name) {
             src.error = Some(msg.clone());
+        }
+        // Past the budget: the script is not called again until its file
+        // changes. Calling it next frame would freeze the frame for the whole
+        // budget again, every frame, which is the freeze the budget exists to
+        // end — and `broken` so a handle reading it says why it is silent.
+        if crate::budget::Budget::is_timeout(&msg) {
+            self.stopped.insert(name.to_string());
+            self.broken.borrow_mut().insert(name.to_string());
         }
         self.record_error(name, msg);
     }
@@ -6342,18 +6425,105 @@ impl ScriptHost {
 ///
 /// A name that resolves nowhere comes back as the project-relative path it
 /// would have had, so the error names the file somebody meant to write.
+/// How many lines `print`/`log` may put on the Console between two drains —
+/// one frame. Past this they are counted and the count is one line at the
+/// drain. A `print` in a hot loop is the other way a script eats memory, and
+/// with the time budget it has two seconds to do it in.
+pub const MAX_CONSOLE_LINES_PER_FRAME: usize = 1_000;
+
+/// Push a script's line, or count it as dropped once the frame is full.
+fn push_capped(sink: &Rc<RefCell<Vec<ScriptLog>>>, dropped: &Rc<Cell<usize>>, line: ScriptLog) {
+    let mut s = sink.borrow_mut();
+    if s.len() >= MAX_CONSOLE_LINES_PER_FRAME {
+        dropped.set(dropped.get() + 1);
+        return;
+    }
+    s.push(line);
+}
+
+/// How many files `assets.getContents` will list before it stops and says so.
+/// A project has thousands of assets, not tens of thousands; the walk that
+/// needs more is a walk that has left the project or was pointed at `/`.
+const MAX_LISTED_FILES: usize = 20_000;
+/// How deep it descends. Thirty-two levels is more than any asset tree has and
+/// less than a symlink loop produces.
+const MAX_LIST_DEPTH: usize = 32;
+
+/// Every file under `base`, sorted, and whether the walk was cut short by
+/// [`MAX_LISTED_FILES`]. A directory reached through a symlink is not
+/// descended: `read_dir` reports what an entry IS rather than what it points
+/// at, so a link to a directory is listed as one entry and its contents —
+/// wherever they are — are not.
+fn list_files_under(base: &Path) -> (Vec<String>, bool) {
+    let mut files: Vec<String> = Vec::new();
+    // The base is asked the same question as every directory under it:
+    // `read_dir` on a link lists the target, wherever that is.
+    if floptle_vfs::is_symlink(base) {
+        return (files, false);
+    }
+    let mut stack = vec![(base.to_path_buf(), 0usize)];
+    let mut stopped = false;
+    'walk: while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = floptle_vfs::read_dir(&d) else { continue };
+        for entry in rd {
+            let p = entry.path();
+            if entry.is_dir() {
+                if depth + 1 < MAX_LIST_DEPTH {
+                    stack.push((p, depth + 1));
+                }
+            } else if floptle_vfs::is_file(&p) {
+                if files.len() >= MAX_LISTED_FILES {
+                    stopped = true;
+                    break 'walk;
+                }
+                files.push(p.to_string_lossy().to_string());
+            }
+        }
+    }
+    files.sort();
+    (files, stopped)
+}
+
+/// One Console line for a path that tried to leave the project. Once per
+/// distinct `(call, path)` is what a script that asks every frame deserves,
+/// and `ScriptLog` de-duplicates identical lines downstream.
+fn refuse_outside(sink: &Rc<RefCell<Vec<ScriptLog>>>, call: &str, path: &str) {
+    sink.borrow_mut().push(ScriptLog {
+        level: LogLevel::Warn,
+        msg: format!(
+            "{call}(\"{path}\"): a path is relative to the project and stays inside it — an \
+             absolute path or `..` is refused"
+        ),
+        source: None,
+    });
+}
+
+/// Where a script named on a node lives: `<scripts>/<name>.lua`, or the same
+/// under a package's script folder. A name that would leave those folders —
+/// `../../x`, an absolute path — resolves to a file that does not exist under
+/// `scripts/`, so the node reports "script not found" with the name it wrote.
 fn resolve_script_path(scripts_dir: &Path, extra: &[PathBuf], name: &str) -> PathBuf {
+    // A path that cannot exist, built so that `join` cannot be handed an
+    // absolute name and discard the base — which is exactly the shape being
+    // refused.
+    let missing = || {
+        let flat: String = name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
+        scripts_dir.join("__outside_project__").join(format!("{flat}.lua"))
+    };
     for dir in std::iter::once(scripts_dir).chain(extra.iter().map(|p| p.as_path())) {
-        let direct = dir.join(format!("{name}.lua"));
+        let Some(direct) = floptle_vfs::contain(dir, &format!("{name}.lua")) else {
+            return missing();
+        };
         if floptle_vfs::exists(&direct) {
             return direct;
         }
-        let nested = dir.join(name).with_extension("lua");
+        let Some(nested) = floptle_vfs::contain(dir, name) else { return missing() };
+        let nested = nested.with_extension("lua");
         if floptle_vfs::exists(&nested) {
             return nested;
         }
     }
-    scripts_dir.join(format!("{name}.lua"))
+    floptle_vfs::contain(scripts_dir, &format!("{name}.lua")).unwrap_or_else(missing)
 }
 
 #[cfg(test)]
@@ -6370,6 +6540,299 @@ mod host_tests {
         let path = resolve_script_path(&dir.join("scripts"), &[], "fighterScripts/attack");
         assert_eq!(path, dir.join("scripts/fighterScripts/attack.lua"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A world with one scripted node named `kind`, so a test can run one
+    /// script file through the real `run` pass.
+    fn world_with_script(kind: &str) -> World {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        world.insert(e, floptle_core::Name(kind.into()));
+        world.insert(
+            e,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        world
+    }
+
+    /// **`assets.*` stays inside the project.** `getFile("../project.ron")` is
+    /// `nil` and one Console line naming the rule; `getContents("../..")` is
+    /// an empty list and the same line. The project's own files still answer.
+    #[test]
+    fn assets_refuse_to_leave_the_project_and_say_which_rule() {
+        let dir = std::env::temp_dir().join(format!("floptle-assets-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("proj");
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::create_dir_all(root.join("models")).unwrap();
+        floptle_vfs::write(root.join("models/a.glb"), "").unwrap();
+        floptle_vfs::write(dir.join("secret.txt"), "outside").unwrap();
+        let abs_secret = dir.join("secret.txt").to_string_lossy().to_string();
+        floptle_vfs::write(
+            root.join("scripts/lister.lua"),
+            format!(
+                "function start()\n\
+                 \x20 print('up=' .. tostring(assets.getFile('../secret.txt')))\n\
+                 \x20 print('abs=' .. tostring(assets.getFile({abs_secret:?})))\n\
+                 \x20 print('in=' .. tostring(assets.getFile('models/a.glb') ~= nil))\n\
+                 \x20 print('upn=' .. #assets.getContents('../..'))\n\
+                 \x20 print('absn=' .. #assets.getContents('/'))\n\
+                 \x20 print('inn=' .. #assets.getContents('models'))\n\
+                 end\n"
+            ),
+        )
+        .unwrap();
+        let mut world = world_with_script("lister");
+        let mut host = ScriptHost::new();
+        host.set_project_root(root.clone());
+        host.set_playing(true);
+        host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let joined = said.join("\n");
+        for want in ["up=nil", "abs=nil", "in=true", "upn=0", "absn=0", "inn=1"] {
+            assert!(said.iter().any(|m| m == want), "missing {want} in:\n{joined}");
+        }
+        let rule = said.iter().filter(|m| m.contains("stays inside it")).count();
+        assert_eq!(rule, 4, "one line per refused call, naming the rule:\n{joined}");
+        assert!(joined.contains("assets.getFile(\"../secret.txt\")"), "{joined}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`getContents` stops at the cap and says so**, and a symlinked
+    /// directory contributes nothing — the two halves of "a walk that cannot
+    /// leave the project cannot be made to take the whole disk either".
+    #[test]
+    fn get_contents_is_capped_and_does_not_follow_a_symlinked_directory() {
+        let dir = std::env::temp_dir().join(format!("floptle-assets-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("proj");
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("elsewhere")).unwrap();
+        for i in 0..3 {
+            floptle_vfs::write(dir.join(format!("elsewhere/{i}.txt")), "").unwrap();
+        }
+        // Many small files, in one folder: over the cap by a margin that a
+        // depth or ordering quirk could not hide.
+        let many = root.join("many");
+        floptle_vfs::create_dir_all(&many).unwrap();
+        for i in 0..(MAX_LISTED_FILES + 500) {
+            floptle_vfs::write(many.join(format!("{i:05}.bin")), "").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("elsewhere"), root.join("linked")).unwrap();
+        #[cfg(not(unix))]
+        floptle_vfs::create_dir_all(root.join("linked")).unwrap();
+        floptle_vfs::write(
+            root.join("scripts/lister.lua"),
+            "function start()\n\
+             \x20 print('many=' .. #assets.getContents('many'))\n\
+             \x20 print('linked=' .. #assets.getContents('linked'))\n\
+             \x20 print('all=' .. #assets.getContents(''))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("lister");
+        let mut host = ScriptHost::new();
+        host.set_project_root(root.clone());
+        host.set_playing(true);
+        host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let joined = said.join("\n");
+        assert!(said.iter().any(|m| m == &format!("many={MAX_LISTED_FILES}")), "{joined}");
+        assert!(said.iter().any(|m| m == "linked=0"), "the link was followed:\n{joined}");
+        assert!(said.iter().any(|m| m == &format!("all={MAX_LISTED_FILES}")), "{joined}");
+        assert!(
+            said.iter().any(|m| m.contains("stopped at") && m.contains("narrow the folder")),
+            "the cap was silent:\n{joined}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A loop without an exit stops the script, not the editor.** With a
+    /// 50 ms budget, `while true do end` in `update` returns the frame, the
+    /// error names the budget, the script is `broken`, and the next frame does
+    /// not call it. Luau only: LuaJIT has no interrupt (ADR-0028).
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn a_script_that_runs_past_its_budget_is_stopped_and_not_called_again() {
+        let dir = std::env::temp_dir().join(format!("floptle-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/spinner.lua"),
+            "calls = 0\n\
+             function update(node, dt)\n\
+             \x20 calls = calls + 1\n\
+             \x20 print('called ' .. calls)\n\
+             \x20 while true do end\n\
+             end\n",
+        )
+        .unwrap();
+        floptle_vfs::write(dir.join("scripts/fine.lua"), "function update() print('fine') end\n").unwrap();
+        let mut world = world_with_script("spinner");
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("fine".into()));
+        world.insert(
+            e,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "fine".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_script_budget(std::time::Duration::from_millis(50));
+        host.set_playing(true);
+        let t0 = std::time::Instant::now();
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let took = t0.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "the frame did not come back: {took:?}");
+        let errors = host.errors().join("\n");
+        assert!(errors.contains("ran for more than 50 ms"), "the budget is not named:\n{errors}");
+        assert!(errors.contains("stopped until it is edited"), "{errors}");
+        assert!(host.broken.borrow().contains("spinner"), "the script did not join `broken`");
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(said.iter().any(|m| m == "called 1"), "{said:?}");
+
+        // The second frame: the spinner is not called; everything else is.
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0 / 60.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(!said.iter().any(|m| m.starts_with("called")), "the stopped script ran again: {said:?}");
+        assert!(said.iter().any(|m| m == "fine"), "a healthy script was stopped too: {said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A script that eats memory fails in its own call, and the host goes
+    /// on.** The failure is Luau's "not enough memory"; the next script runs.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn a_script_that_exhausts_memory_errors_and_the_host_is_still_usable() {
+        let dir = std::env::temp_dir().join(format!("floptle-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/hog.lua"),
+            "function start()\n\
+             \x20 local t = {}\n\
+             \x20 -- Distinct strings: Luau interns equal ones, so a loop of\n\
+             \x20 -- identical reps costs one megabyte total and never fills anything.\n\
+             \x20 while true do t[#t + 1] = string.rep('x', 1000000) .. #t end\n\
+             end\n",
+        )
+        .unwrap();
+        floptle_vfs::write(dir.join("scripts/after.lua"), "function update() print('still here') end\n").unwrap();
+        let mut world = world_with_script("hog");
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let errors = host.errors().join("\n");
+        assert!(errors.to_lowercase().contains("not enough memory"), "the limit is not named:\n{errors}");
+        // Afterwards: a fresh script on a fresh node runs and prints.
+        let mut world = world_with_script("after");
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(said.iter().any(|m| m == "still here"), "the host was not usable after: {said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The Console keeps a thousand script lines a frame and counts the
+    /// rest.** A `print` in a loop is the other way to eat memory, and the
+    /// summary line says how many were dropped rather than pretending the
+    /// script went quiet.
+    #[test]
+    fn a_print_storm_is_capped_per_frame_and_the_count_is_reported() {
+        let dir = std::env::temp_dir().join(format!("floptle-printcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/noisy.lua"),
+            "function update()\n\
+             \x20 for i = 1, 5000 do print('line ' .. i) end\n\
+             \x20 for i = 1, 10 do log('logged ' .. i) end\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("noisy");
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert_eq!(said.len(), MAX_CONSOLE_LINES_PER_FRAME + 1, "{}", said.len());
+        assert_eq!(said[0], "line 1");
+        let last = said.last().unwrap();
+        assert!(last.starts_with("…and 4010 more line(s) this frame"), "{last}");
+        // The next frame starts fresh.
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0 / 60.0);
+        let again: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert_eq!(again.len(), MAX_CONSOLE_LINES_PER_FRAME + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`terrain.saveDir` is a directory the engine WRITES into**, so it is
+    /// held to the same rule as `deleteSaveDir`: relative, inside, no `..`.
+    #[test]
+    fn terrain_save_dir_cannot_point_outside_the_project() {
+        let dir = std::env::temp_dir().join(format!("floptle-savedir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/saver.lua"),
+            "function start()\n\
+             \x20 for _, p in ipairs({'/tmp/x', '../x', 'saves/../../x', 'C:\\\\x'}) do\n\
+             \x20   local ok, why = pcall(terrain.saveDir, p)\n\
+             \x20   print(p .. ' ok=' .. tostring(ok) .. ' dir=' .. tostring(terrain.saveDir()))\n\
+             \x20 end\n\
+             \x20 terrain.saveDir('saves/slot1/terrain')\n\
+             \x20 print('in=' .. tostring(terrain.saveDir()))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("saver");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let joined = said.join("\n");
+        for p in ["/tmp/x", "../x", "saves/../../x", "C:\\x"] {
+            assert!(said.iter().any(|m| m == &format!("{p} ok=false dir=nil")), "{p}:\n{joined}");
+        }
+        assert!(said.iter().any(|m| m == "in=saves/slot1/terrain"), "{joined}");
+        assert_eq!(host.terrain_save_dir().as_deref(), Some("saves/slot1/terrain"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A script name on a node cannot climb out of `scripts/`.** A scene
+    /// file is data somebody else may have written, and `../../x` as a script
+    /// name would run any `.lua` on the disk. It resolves to nothing instead.
+    #[test]
+    fn a_script_name_that_leaves_the_scripts_folder_resolves_to_nothing() {
+        let dir = std::env::temp_dir().join(format!("floptle-host-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(dir.join("outside.lua"), "return {}\n").unwrap();
+        let scripts = dir.join("scripts");
+        for name in ["../outside", "../outside.lua", "/etc/hostname"] {
+            let path = resolve_script_path(&scripts, &[], name);
+            assert!(!floptle_vfs::exists(&path), "{name} resolved to {}", path.display());
+            assert!(path.starts_with(&scripts), "{name} left scripts/: {}", path.display());
+        }
+        let abs = dir.join("outside").to_string_lossy().to_string();
+        let path = resolve_script_path(&scripts, &[], &abs);
+        assert!(!floptle_vfs::exists(&path), "an absolute name resolved: {}", path.display());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
