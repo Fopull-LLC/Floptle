@@ -1,23 +1,19 @@
 ## Just shipped
 
-**v0.89.0-rc2** (beta channel) adds the rest: `account.*` from a game reaches
-only the player's endpoints, a project that arrives with packages inside it asks
-before they get their permissions, every relay — self-hosted too — refuses the
-shapes an abuser makes (per-address rates, per-connection budgets, idle lobbies),
-a host checks what a client sends, a managed relay is verified by name, and the
-last LuaJIT build is gone.
-
-**v0.89.0-rc1 — "Stay In Your Lane"** (beta channel). A script's paths stay
-inside its project: an absolute path or a `..` that would leave it resolves to
-nothing, and the Console says which rule refused it. A loop without an exit stops
-the script rather than the editor — a pass into your scripts may run for two
-seconds (half a second on a dedicated server), and the script that overran is
-stopped with the budget named until you edit it. `http.*` from a game reaches
-public addresses only; the editor's Play still allows `localhost` and says so.
-The editor no longer goes down with the terminal it was launched from, and the
-Hub keeps its output in a log file. A release candidate: nothing changes how you
-write a game, but it draws lines a game could previously cross, so play yours on
-it before it goes stable.
+**v0.89.0 — "Stay In Your Lane".** A script's paths stay inside its project: an
+absolute path or a `..` that would leave it resolves to nothing, and the Console
+says which rule refused it. A loop without an exit stops the script rather than
+the editor — two seconds a pass, half a second on a dedicated server, and the
+script that overran is stopped with the budget named until you edit it. `http.*`
+from a game reaches public addresses only (the editor's Play still allows
+`localhost`, and says so), and `account.*` reaches only the player's endpoints.
+A project that arrives with packages inside it asks before they get their
+permissions. The editor no longer goes down with the terminal it was launched
+from, and the Hub keeps its output in a log file. Every relay — self-hosted too
+— refuses the shapes an abuser makes, a host checks what a client sends, a
+managed relay is verified by name and backs off when it cannot refresh its keys,
+and the last LuaJIT build is gone. Nothing changes how you write a game; it draws
+lines a game could previously cross.
 
 **v0.88.2** — **a server that could not keep its lobby code now says so.** When
 `floptle serve --lobby-code` asks a relay for a code the relay will not hand back —
