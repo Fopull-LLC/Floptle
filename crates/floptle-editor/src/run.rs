@@ -767,6 +767,29 @@ fn report(
         if !ghosts.is_empty() {
             doc["clients"] = serde_json::Value::Array(ghost_report(ghosts));
         }
+        // **What the session actually put on the wire, by message kind**
+        // (`floptle/0218`).
+        //
+        // ⚠ Absent on a run with no session rather than an empty list: "this
+        // game sends nothing" and "nothing was measured" are opposite facts,
+        // and a capacity figure derived from the second would be a guess
+        // wearing a measurement's clothes.
+        //
+        // A real match measured 487 bytes per player per frame — far too much
+        // for a rollback game, which should be sending inputs. This is the
+        // reading that says which kind of message is spending it, without a
+        // human at the editor.
+        let traffic = floptle_net::traffic_since_last_read(true);
+        if !traffic.is_empty() {
+            doc["traffic"] = serde_json::json!(
+                traffic
+                    .iter()
+                    .map(|(kind, count, bytes)| {
+                        serde_json::json!({"kind": kind, "count": count, "bytes": bytes})
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
         // Present only under `--timing`, and absent rather than zeroed when it
         // was not asked for: a reader who finds `p95_ms: 0` in a document has
         // been told a frame took no time, which is the "reads as zero, means
