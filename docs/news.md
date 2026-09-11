@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.88.1** — **a rollback match was sending state nobody was reading.** Every
+peer already simulates rollback nodes locally from the same inputs, and the
+receiving side was correctly discarding the positions the server sent for them —
+but the server kept sending them anyway, about 43 bytes per rollback node per
+frame. Nothing desynced and nothing looked wrong; it just cost an order of
+magnitude more bandwidth than it needed to. A real two-player match measured 234
+kbps per player before this, and almost all of it was this. Nothing to change in
+your game.
+
 **v0.88.0 — "Hold The Line".** Two players fought over a relay for ten minutes,
 and three times the host's connection blipped for a few seconds — each time the
 lobby was destroyed and the other player was quietly cut off, watching everything
