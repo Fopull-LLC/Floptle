@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.88.2** — **a server that could not keep its lobby code now says so.** When
+`floptle serve --lobby-code` asks a relay for a code the relay will not hand back —
+reserved for a different game, already in use, or a relay too old to understand
+the request — the server was silently given a fresh code, and the players holding
+the old one could not join. It now prints a line naming both codes and the relay
+it asked, the moment it happens.
+
 **v0.88.1** — **a rollback match was sending state nobody was reading.** Every
 peer already simulates rollback nodes locally from the same inputs, and the
 receiving side was correctly discarding the positions the server sent for them —
