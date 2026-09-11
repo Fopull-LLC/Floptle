@@ -1242,6 +1242,31 @@ impl Transport for RelayHost {
             match inc {
                 Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
                     Some(RelayMsg::Hosted { code }) => {
+                    // ⚠ **A reclaim that failed says so HERE, on the side that
+                    // asked** (`floptle/0217`).
+                    //
+                    // The control plane detects a mismatch one report later and
+                    // deliberately keeps its reservation rather than adopting
+                    // the new code — adopting it looks helpful and produces a
+                    // restart loop, which is how a live server was stopped for
+                    // two minutes. So the only other evidence is a silence, and
+                    // the process that actually knows is this one.
+                    //
+                    // Every reason is on the relay's side and none is
+                    // actionable from here: the code may have been reserved for
+                    // a different key, already be in use, or the relay may be
+                    // too old to have heard of the request at all. So this
+                    // reports rather than retries.
+                    if let Some(wanted) = &self.wanted
+                        && *wanted != code
+                    {
+                        self.notices.push(format!(
+                            "asked the relay at {} to reclaim lobby code {wanted} and was \
+                             given {code} instead — players holding {wanted} cannot join. \
+                             The relay did not agree that this game owns it.",
+                            self.relay_addr
+                        ));
+                    }
                     // A re-host after an outage: the relay lost every lobby, so
                     // this is a NEW code and the old one is gone for good. Said
                     // out loud because a developer who read the old one to a
@@ -2252,6 +2277,53 @@ mod managed_tests {
         let (_t, code) =
             RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("hosts");
         assert_eq!(code, "U5FEFJ", "the server was handed a new code instead of its own");
+    }
+
+    /// ⚠ **A server that could not reclaim its code says so itself**
+    /// (`floptle/0217`).
+    ///
+    /// W's control plane detects the mismatch one report later and deliberately
+    /// KEEPS its reservation rather than adopting the new code — adopting it
+    /// looks helpful and produced a restart loop that stopped a live server for
+    /// two minutes. So on this side a failed reclaim would otherwise be a
+    /// silence, and the process that actually knows is this one.
+    #[test]
+    fn a_server_that_could_not_reclaim_its_code_says_so_rather_than_going_quiet() {
+        let mut keys = TablePolicy::with(KEY, 20).reserving("U5FEFJ", "fk_live_SOMEONE_ELSE");
+        keys.allow_key("fk_live_MINE", 20);
+        let relay = TestRelay::managed(keys);
+        let (mut host, code) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), "fk_live_MINE", None, "U5FEFJ")
+                .expect("an unowned claim still hosts");
+        assert_ne!(code, "U5FEFJ");
+
+        let mut said = Vec::new();
+        for _ in 0..200 {
+            said.extend(host.take_notices());
+            if !said.is_empty() {
+                break;
+            }
+            let _ = host.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let all = said.join(" | ");
+        assert!(
+            all.contains("U5FEFJ") && all.contains("cannot join"),
+            "a failed reclaim was silent on the side that asked: {all:?}"
+        );
+    }
+
+    /// And a reclaim that **worked** says nothing — a line per successful host
+    /// is a line nobody reads, which is how the one that matters gets missed.
+    #[test]
+    fn a_reclaim_that_worked_is_not_announced() {
+        let relay = TestRelay::managed(TablePolicy::with(KEY, 20).reserving("U5FEFJ", KEY));
+        let (mut host, code) =
+            RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("hosts");
+        assert_eq!(code, "U5FEFJ");
+        let _ = host.poll();
+        let said = host.take_notices().join(" | ");
+        assert!(said.is_empty(), "a successful reclaim chattered: {said:?}");
     }
 
     /// ⚠ **A stranger asking for somebody else's code is simply given a fresh
