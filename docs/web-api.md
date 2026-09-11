@@ -61,7 +61,8 @@ http.delete(url [, opts], function(res) end)
 | `res.status` | the HTTP status (`0` if the request never got there) |
 | `res.body` | the reply as a string, **always** — including on a 404 |
 | `res.json` | the parsed body, when the server said JSON or you asked for it |
-| `res.error` | what went wrong: a transport failure, a timeout, malformed JSON |
+| `res.error` | what went wrong: a transport failure, a timeout, malformed JSON, a refused address |
+| `res.location` | on a 3xx, where the server pointed — see below |
 
 A 4xx or 5xx is **not** an error — it's an answer. `res.ok` is false, and
 `res.body` still holds whatever the server said, because that is where an API
@@ -78,7 +79,35 @@ end)
 ```
 
 A **table body** is encoded as JSON for you. Pass a string when you need
-something else (a form body, XML, a signed blob).
+something else (a form body, XML, a signed blob). A body, sent or received, is
+capped at 8 MB.
+
+**Redirects are not followed.** A 301/302/307 arrives as an ordinary reply:
+`res.ok` is false, `res.status` is the code, and `res.location` is where the
+server pointed. Follow it yourself if you mean to — a request that quietly ends
+up somewhere other than the address you wrote is not one you can reason about.
+
+**Headers you cannot set:** `Host`, `Content-Length`, `Transfer-Encoding` and
+`Connection` belong to the transport; naming one in `opts.headers` is an error
+at the call.
+
+### Where a request may go
+
+A game reaches **public addresses only**. Loopback (`localhost`, `127.0.0.1`),
+private networks (`10.x`, `172.16–31.x`, `192.168.x`), mDNS names (`*.local`),
+`*.internal` and link-local addresses are refused, whether you write them as a
+name, an address, or a hostname that resolves to one. The refusal is
+`res.error` (or an error at the call when the name itself says so), and it
+names the rule.
+
+The **editor's Play** is the one exception: it allows loopback and private
+addresses, so `http://localhost:3000` works while you develop, and the Console
+says once per session that an exported game and a dedicated server will refuse
+it. Link-local addresses are refused everywhere, the editor included.
+
+A shipped game runs on a machine that is not yours, and a dedicated server runs
+on one that is not your player's either; neither should be able to reach what is
+listening on it.
 
 ---
 

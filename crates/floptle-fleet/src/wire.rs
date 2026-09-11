@@ -119,6 +119,42 @@ impl Deployment {
             self.deployment_id, self.game, self.build_id, self.engine_version, self.port
         )
     }
+
+    /// **Every string in a row becomes text in a unit file the agent writes as
+    /// root**, and a unit file is lines: a value carrying a newline is a value
+    /// that ends one directive and starts another. The control plane validates
+    /// what a developer types, and this refuses anyway — a row that fails here
+    /// is reported `failed` with the field named, and no unit is written.
+    ///
+    /// Lengths are capped too: none of these is prose, and a kilobyte of scene
+    /// name is not a scene name.
+    pub fn refuse_unsafe(&self) -> Result<(), String> {
+        let fields: [(&str, Option<&str>, usize); 11] = [
+            ("deployment_id", Some(&self.deployment_id), 256),
+            ("name", Some(&self.name), 256),
+            ("game", Some(&self.game), 256),
+            ("game_key", self.game_key.as_deref(), 256),
+            ("build_id", Some(&self.build_id), 256),
+            // A signed download URL is the one long value a row legitimately
+            // carries.
+            ("build_url", Some(&self.build_url), 4096),
+            ("sha256", Some(&self.sha256), 256),
+            ("engine_version", Some(&self.engine_version), 256),
+            ("project", Some(&self.project), 256),
+            ("lobby_code", self.lobby_code.as_deref(), 256),
+            ("args.scene", self.args.scene.as_deref(), 256),
+        ];
+        for (name, value, max) in fields {
+            let Some(v) = value else { continue };
+            if v.chars().any(char::is_control) {
+                return Err(format!("{name} contains a control character; refused"));
+            }
+            if v.len() > max {
+                return Err(format!("{name} is {} bytes, more than the {max} allowed; refused", v.len()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// What a deployment is doing, in the control plane's words.

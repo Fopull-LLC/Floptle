@@ -970,7 +970,12 @@ impl Editor {
             // what makes that sentence true rather than "on the next open".
             self.apply_script_vec3_mode();
             self.playing = true;
-            // `http.*` and `openUrl` come alive with the session and not before.
+            // `http.*` and `openUrl` come alive with the session and not before —
+            // and where they may go is decided here, by the driver, never by
+            // the script (`floptle_script::http_policy`).
+            self.script_host.set_http_policy(floptle_script::HttpPolicy {
+                allow_local: self.http_allow_local,
+            });
             self.script_host.set_playing(true);
             // Outside a session, only player slot #1 takes input: extra
             // Predicted nodes (multiplayer slots) idle instead of mirroring

@@ -3116,6 +3116,13 @@ impl ScriptHost {
         std::mem::take(&mut *self.draw_rects.borrow_mut())
     }
 
+    /// Where `http.*` may connect — see [`crate::http_policy`]. The driver
+    /// sets it once, before Play: `allow_local` for the editor's own Play and
+    /// nothing else. A host that is never told refuses local addresses.
+    pub fn set_http_policy(&self, policy: crate::HttpPolicy) {
+        self.http.borrow_mut().set_policy(policy);
+    }
+
     /// Play started / stopped. `http.*` and `openUrl` refuse outside Play, and
     /// Stop cancels every request in flight — a callback from the last session
     /// closes over nodes that no longer exist, so delivering it into a fresh

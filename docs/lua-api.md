@@ -1650,7 +1650,7 @@ http.delete(url [, opts], function(res) end) — as http.get, with DELETE.
 
 ### `http.get`
 
-http.get(url [, opts], function(res) end) — fetch a URL. NON-BLOCKING: the callback runs on a later tick on the MAIN thread, so it is safe to touch nodes from it and a slow server can never stall a frame. opts = { headers = {...}, timeout = 10, json = true }. res = { ok, status, body, json, error } — `ok` is a 2xx with no error; a 404 still hands you `body`, because that is where an API explains itself. Play only.
+http.get(url [, opts], function(res) end) — fetch a URL. NON-BLOCKING: the callback runs on a later tick on the MAIN thread, so it is safe to touch nodes from it and a slow server can never stall a frame. opts = { headers = {...}, timeout = 10, json = true }. res = { ok, status, body, json, error, location } — `ok` is a 2xx with no error; a 404 still hands you `body`, because that is where an API explains itself; a 3xx is NOT followed — `location` says where it pointed. Public addresses only: loopback, private-network and link-local addresses are refused (the editor's Play allows loopback and private ones, and says so once). Play only.
 
 ```lua
 -- non-blocking: the callback runs on a later tick, on the main thread

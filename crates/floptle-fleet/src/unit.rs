@@ -185,6 +185,27 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     s.push_str("LockPersonality=yes\n");
     s.push_str("MemoryDenyWriteExecute=no\n");
     s.push_str("SystemCallFilter=@system-service\n");
+    // **A game server runs a developer's Lua, on a box the developer does not
+    // own.** What a script can reach inside the process is the engine's job
+    // (`floptle_script::http_policy`); what the PROCESS can reach is this
+    // unit's. Link-local is where a cloud box's metadata service answers, and
+    // there is nothing at that address a game server has any business with.
+    // Not loopback or the private ranges: the relay may share the box.
+    s.push_str("IPAddressDeny=link-local multicast\n");
+    // The status file names the lobby code and the key's prefix; the state
+    // directory holds saves. Neither is another dynamic user's to read.
+    s.push_str("RuntimeDirectoryMode=0750\n");
+    s.push_str("StateDirectoryMode=0750\n");
+    s.push_str("UMask=0077\n");
+    s.push_str("ProtectProc=invisible\n");
+    s.push_str("ProcSubset=pid\n");
+    s.push_str("RestrictSUIDSGID=yes\n");
+    s.push_str("RemoveIPC=yes\n");
+    s.push_str("CapabilityBoundingSet=\n");
+    s.push_str("SystemCallArchitectures=native\n");
+    s.push_str("RestrictRealtime=yes\n");
+    s.push_str("TasksMax=256\n");
+    s.push_str("LimitNOFILE=4096\n");
     s.push('\n');
 
     s.push_str("[Install]\nWantedBy=multi-user.target\n");
@@ -196,9 +217,16 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
 /// systemd splits `ExecStart` on whitespace itself, so a path with a space in
 /// it becomes two arguments and the server is started against a directory that
 /// does not exist. Double quotes are systemd's own quoting.
+///
+/// **Control characters are dropped, not quoted.** A unit file is lines, and no
+/// quoting makes a newline safe inside one — a value that carries one would
+/// close the `ExecStart=` and open whatever directive followed. The agent
+/// refuses such a row before it gets here (`Deployment::refuse_unsafe`); this
+/// is the second lock on the same door.
 pub fn shell_quote(s: &str) -> String {
+    let s: String = s.chars().filter(|c| !c.is_control()).collect();
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=".contains(c)) {
-        s.to_string()
+        s
     } else {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
@@ -408,6 +436,54 @@ mod tests {
         assert_eq!(unit_name("../../etc/systemd/system/evil"), "floptle-d-______etc_systemd_system_evil.service");
         assert!(!unit_name("a/b").contains('/'), "a path separator would escape the unit dir");
         assert_eq!(sanitize(""), "unnamed");
+    }
+
+    /// **The process cannot reach the box's metadata service, and its files
+    /// are its own.** Asserted by SECTION, the lesson of the start-limit keys:
+    /// a directive in the wrong section is logged and ignored.
+    #[test]
+    fn the_unit_denies_link_local_and_keeps_its_directories_private() {
+        let d = dep();
+        let u = render(&plan_for(&d));
+        let service = section(&u, "Service");
+        for key in [
+            "IPAddressDeny=link-local multicast",
+            "RuntimeDirectoryMode=0750",
+            "StateDirectoryMode=0750",
+            "UMask=0077",
+            "ProtectProc=invisible",
+            "ProcSubset=pid",
+            "RestrictSUIDSGID=yes",
+            "RemoveIPC=yes",
+            "CapabilityBoundingSet=",
+            "SystemCallArchitectures=native",
+            "RestrictRealtime=yes",
+            "TasksMax=256",
+            "LimitNOFILE=4096",
+        ] {
+            assert!(service.contains(&key), "{key} is missing from [Service]:\n{u}");
+        }
+        // Not loopback and not the private ranges: the relay may share the box.
+        assert!(!u.contains("IPAddressDeny=any"), "{u}");
+    }
+
+    /// **A newline in a quoted value is not a quoted newline; it is a new
+    /// directive.** The agent refuses such a row first; the quoter drops the
+    /// character regardless, so the unit stays one `ExecStart=` and no
+    /// `User=` whatever reaches it.
+    #[test]
+    fn a_control_character_in_a_value_cannot_add_a_directive() {
+        assert_eq!(shell_quote("a\nUser=root"), "aUser=root");
+        assert_eq!(shell_quote("scenes/x.ron\r\n"), "scenes/x.ron");
+        assert_eq!(shell_quote("tab\there"), "tabhere");
+        assert_eq!(shell_quote("a b\n"), "\"a b\"");
+        let mut d = dep();
+        d.args.scene = Some("arena\nUser=root".into());
+        let mut plan = plan_for(&d);
+        plan.scene = d.args.scene.clone();
+        let u = render(&plan);
+        assert_eq!(u.lines().filter(|l| l.starts_with("ExecStart=")).count(), 1, "{u}");
+        assert!(!u.lines().any(|l| l.starts_with("User=")), "{u}");
     }
 
     /// The unit restarts a crash, and eventually stops trying.
