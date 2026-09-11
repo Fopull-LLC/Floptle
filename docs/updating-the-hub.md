@@ -84,6 +84,12 @@ If you'd like it on your PATH so `floptle-hub` works from any terminal:
 mkdir -p ~/.local/bin && mv floptle-hub ~/.local/bin/
 ```
 
+The first time it runs from its new place, the Hub writes a launcher entry for
+itself and for the editor it installs — under `~/.local/share/applications`,
+with the Floptle icon under `~/.local/share/icons` — so both show up in your
+app menu and dock with the logo rather than a placeholder. It rewrites them
+whenever the binary moves, and touches nothing else.
+
 ## macOS
 
 Quit the Hub first. Download from the page above and double-click the `.tar.gz`

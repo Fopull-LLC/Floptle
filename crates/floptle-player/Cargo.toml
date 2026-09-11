@@ -21,3 +21,7 @@ path = "src/main.rs"
 # `devices` because somebody is sitting at this one: it is a game, so it wants
 # the audio device and the gamepads. `floptle-server` is the build that does not.
 floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau", "devices"] }
+
+# The Windows executable icon (`build.rs`); a no-op build script elsewhere.
+[build-dependencies]
+winresource = "0.1"

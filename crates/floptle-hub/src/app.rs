@@ -188,6 +188,8 @@ pub struct HubApp {
     paths: Paths,
     config: HubConfig,
     installs: Vec<Install>,
+    /// The logo, uploaded once for the About page.
+    logo: Option<egui::TextureHandle>,
     tab: Tab,
     manifest: ManifestState,
     job: Option<InstallJob>,
@@ -286,6 +288,7 @@ impl HubApp {
             paths,
             config,
             installs,
+            logo: None,
             tab: Tab::Projects,
             manifest: ManifestState::Idle,
             job: None,
@@ -2139,7 +2142,13 @@ impl HubApp {
     fn about_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new(ico::ROCKET).size(40.0));
+            // The logo — white line art, so it wants the dark ground the Hub has.
+            let logo = self.logo.get_or_insert_with(|| {
+                let l = floptle_brand::Icon::logo();
+                let img = egui::ColorImage::from_rgba_unmultiplied([l.width as usize, l.height as usize], &l.rgba);
+                ui.ctx().load_texture("floptle-logo", img, egui::TextureOptions::LINEAR)
+            });
+            ui.add(egui::Image::new((logo.id(), egui::vec2(180.0, 180.0))));
             ui.heading("Floptle Hub");
             let v = env!("CARGO_PKG_VERSION");
             ui.label(if v == "0.0.0" { "dev build".to_string() } else { format!("version {v}") });

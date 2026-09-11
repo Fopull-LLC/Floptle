@@ -38,6 +38,7 @@ members = [
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-relay-bench", # load-generator for the relay: Mbps per CCU, where drops start (bin)
     "crates/floptle-fleet",    # fleet agent: desired deployments -> running dedicated servers (bin)
+    "crates/floptle-brand",    # the logo + app icons, embedded; desktop integration (Linux .desktop, icons)
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
     "crates/floptle-services", # platform capability boundary: Platform trait + NullPlatform (steam plan, Phase 0)
     "crates/floptle-steam",    # Steamworks-backed Platform impl, behind the `steam` feature (steam plan, Phase 0)

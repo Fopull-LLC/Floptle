@@ -36,9 +36,30 @@ fn main() -> eframe::Result<()> {
         Paths::at(std::path::Path::new("./.floptle-hub"))
     });
 
+    // The desktop learns what this window is BEFORE it opens (Linux): a
+    // Wayland compositor shows the icon of the `.desktop` entry whose name is
+    // the window's app_id, and nothing else — a window icon handed to it is
+    // ignored. The Hub is the thing that is installed, so it writes the
+    // entries for itself and for the editor it launches, every start,
+    // rewriting nothing that is already right.
+    #[cfg(target_os = "linux")]
+    if let (Some(home), Ok(me)) = (floptle_brand::linux::data_home(), std::env::current_exe()) {
+        let editor = registry::scan_installs(&paths.versions_dir())
+            .into_iter()
+            .rev()
+            .find(|i| i.is_valid())
+            .map(|i| i.editor_bin());
+        if let Err(e) = floptle_brand::linux::install(&home, &me, editor.as_deref()) {
+            eprintln!("could not write the desktop entries: {e}");
+        }
+    }
+
+    let icon = floptle_brand::Icon::at(256).expect("the committed icon decodes");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Floptle Hub")
+            .with_app_id(floptle_brand::HUB_APP_ID)
+            .with_icon(eframe::egui::IconData { rgba: icon.rgba, width: icon.width, height: icon.height })
             .with_inner_size([880.0, 620.0])
             .with_min_inner_size([560.0, 400.0]),
         ..Default::default()
