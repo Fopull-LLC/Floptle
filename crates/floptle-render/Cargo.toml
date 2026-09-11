@@ -19,7 +19,6 @@ rust-version.workspace = true
 # leaked, a dependent selecting the other VM would get both, and mlua would
 # refuse to link.
 default = ["vm-luau"]
-vm-luajit = ["floptle-script/vm-luajit"]
 vm-luau = ["floptle-script/vm-luau"]
 vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen"]
 

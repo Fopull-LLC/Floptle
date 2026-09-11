@@ -2,14 +2,14 @@
 #
 # Run a cargo command against a chosen script VM (ADR-0028).
 #
-#   scripts/vm.sh luajit test -p floptle-script
-#   scripts/vm.sh luau   test -p floptle-editor --test docs_index
-#   scripts/vm.sh luajit clippy --all-targets          # every VM-carrying crate
+#   scripts/vm.sh luau         test -p floptle-editor --test docs_index
+#   scripts/vm.sh luau-codegen clippy --all-targets    # every VM-carrying crate
 #
-# Why this exists: `vm-luajit` and `vm-luau` are mutually exclusive, and Cargo
-# features are additive — so selecting the VM that is NOT the default means
-# turning defaults OFF and naming the feature again. (Luau is the default as of
-# v0.84.0, so these days the interesting invocation is `vm.sh luajit`.)
+# Why this exists: a VM feature is selected by turning defaults OFF and naming
+# the feature again, on every crate that carries it, and Cargo features are
+# additive. Luau is the only VM since v0.89.0 (the `vm-luajit` escape hatch was
+# removed on ADR-0028's schedule); what the script still switches is the code
+# generator (`luau-codegen`), which is a benchmarking lever.
 #
 # Get it wrong and the error you see is mlua-sys's ("You can enable only one of
 # the features: lua54, lua53, …"), which names none of the features you wrote
@@ -36,10 +36,15 @@ case "$VM" in
   # `vm-luau-codegen` — the same `vm-$VM` substitution reaches it, and it
   # implies `vm-luau` in every carrier. It is a benchmarking lever, not a
   # third VM.
-  luajit|luau|luau-codegen) ;;
+  luau|luau-codegen) ;;
+  luajit)
+    echo "scripts/vm.sh: the vm-luajit escape hatch was removed in v0.89.0 (ADR-0028);" >&2
+    echo "  Luau is the only VM the engine embeds. Use: scripts/vm.sh luau <cargo args...>" >&2
+    exit 2
+    ;;
   *)
-    echo "usage: scripts/vm.sh <luajit|luau|luau-codegen> <cargo args...>" >&2
-    echo "   eg: scripts/vm.sh luajit test -p floptle-script" >&2
+    echo "usage: scripts/vm.sh <luau|luau-codegen> <cargo args...>" >&2
+    echo "   eg: scripts/vm.sh luau-codegen test -p floptle-script" >&2
     exit 2
     ;;
 esac

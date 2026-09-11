@@ -53,7 +53,7 @@ fn host_for(proj: &Path) -> ExtHost {
         Snapshot { project_root: proj.to_path_buf(), ..Snapshot::default() },
         SceneMirror::default(),
     );
-    host.reload(proj, &engine());
+    host.reload(proj, &engine(), |_| true);
     host
 }
 
@@ -80,7 +80,7 @@ fn a_package_registers_a_dock_tab_and_its_key_survives_a_reload() {
     // The key is what a saved layout holds, so it has to be the same number
     // after a reload — the runtime id is not.
     let before = host.tabs[0].key;
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     assert_eq!(host.tabs.len(), 1);
     assert_eq!(host.tabs[0].key, before, "a reload must not move the tab");
     assert_eq!(host.tab_title(before), Some("Settings"));
@@ -708,7 +708,7 @@ fn a_reload_replaces_everything_the_package_registered() {
         r#"ed.window("Two", function() end)"#,
     )
     .unwrap();
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     assert_eq!(host.windows.len(), 1);
     assert_eq!(host.windows[0].title, "Two");
     let _ = std::fs::remove_dir_all(&proj);
@@ -1413,7 +1413,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
     );
     let mut host = ExtHost::new();
     host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     // The walk above is written by hand, so it can quietly fall behind the
     // environment it is meant to cover — a whole new table would simply not be
     // visited and every name in it would pass undocumented. This builds the
@@ -1427,6 +1427,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
             version: "1.0.0".into(),
             root: proj.clone(),
             permissions: vec![Permission::Network, Permission::Browser, Permission::Files],
+            withheld: Vec::new(),
             failed: None,
         };
         let env = super::api::build_env(&lua, &shared, 0, &state, None).unwrap();
@@ -1529,7 +1530,7 @@ fn returned_table_fields_are_documented_too() {
     let mut host = ExtHost::new();
     host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
     host.set_nav_mesh(Some(mesh));
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
 
     let log = host.take_log();
     assert!(!log.is_empty(), "the package did not run");
@@ -1651,7 +1652,7 @@ fn the_example_package_loads_draws_and_survives_every_hook() {
     );
     // The example declares `engine: ">=0.55.0"`, so it must load on the build
     // that ships it — this is also the check that the two never drift.
-    host.reload(&proj, &crate::Editor::engine_version());
+    host.reload(&proj, &crate::Editor::engine_version(), |_| true);
     assert!(
         host.report.errors().next().is_none(),
         "{:?}",
@@ -1859,7 +1860,7 @@ fn a_package_reads_a_tilemaps_grid_and_solidity() {
 
     let mut host = ExtHost::new();
     host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
 
     let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
     assert!(!log.is_empty(), "the package did not run: {log:?}");
@@ -1882,7 +1883,7 @@ fn host_with_a_navmesh(proj: &Path) -> ExtHost {
     );
     // Before the reload, because a package reads the level while it loads.
     host.set_nav_mesh(Some(a_baked_floor()));
-    host.reload(proj, &engine());
+    host.reload(proj, &engine(), |_| true);
     host
 }
 
@@ -2260,11 +2261,11 @@ fn a_reload_replaces_the_font_set_rather_than_adding_to_it() {
     "#);
     let mut host = host_for(&proj);
     assert_eq!(host.fonts.len(), 1);
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     assert_eq!(host.fonts.len(), 1, "one package, one face, however many reloads");
 
     floptle_package::install::set_enabled(&proj, "com.t.brand", false).unwrap();
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     assert!(host.fonts.is_empty(), "a switched-off package's face must go with it");
     assert!(host.fonts_dirty, "and the atlas has to be rebuilt without it");
     let _ = std::fs::remove_dir_all(&proj);
@@ -2279,7 +2280,7 @@ fn a_project_with_no_package_fonts_never_rebuilds_the_atlas() {
     let mut host = host_for(&proj);
     assert!(host.fonts.is_empty());
     assert!(!host.fonts_dirty, "nothing to register, so nothing to rebuild");
-    host.reload(&proj, &engine());
+    host.reload(&proj, &engine(), |_| true);
     assert!(!host.fonts_dirty);
     let _ = std::fs::remove_dir_all(&proj);
 }
@@ -2854,5 +2855,85 @@ fn a_package_points_the_camera_at_a_place_without_touching_the_selection() {
         !cmds.iter().any(|c| matches!(c, ExtCmd::SelectionSet(_))),
         "looking at a place must not change what is selected: {cmds:?}"
     );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// **A project that arrives with packages inside it does not get their
+/// permissions until the user says so** (`ext::trust`). Opened fresh: the
+/// packages load with nothing, the banner is up with the asks on it, and a
+/// call into a withheld API errors with the trust rule named rather than
+/// "attempt to index nil". Trusted: the same call is the ordinary one, the
+/// store remembers, and a second open asks nothing. A changed manifest asks
+/// again. Watched failing with the trust decision replaced by `true`.
+#[test]
+fn a_projects_packages_run_with_no_permissions_until_the_project_is_trusted() {
+    use super::trust::{Answer, Trust, TrustStore};
+    let proj = temp("trust");
+    std::fs::write(proj.join("project.ron"), "()").unwrap();
+    install(
+        &proj,
+        "com.t.net",
+        "Network, Files",
+        r#"
+        local ok, err = pcall(function() http.get("https://example.com/", function() end) end)
+        ed.log("http: " .. tostring(ok) .. " " .. tostring(err))
+        local ok2, err2 = pcall(function() return ed.read("project.ron") end)
+        ed.log("read: " .. tostring(ok2) .. " " .. tostring(err2))
+        "#,
+    );
+    let store = TrustStore::at(proj.join("trust-store.txt"));
+    let mut ed = crate::Editor { trust_store: store.clone(), ..Default::default() };
+    ed.open_project(proj.clone());
+
+    let said = |ed: &crate::Editor| -> String {
+        ed.console.entries.iter().map(|e| e.msg.as_str()).collect::<Vec<_>>().join("\n")
+    };
+    match &ed.project_trust {
+        Trust::Untrusted { asks, .. } => {
+            assert_eq!(asks.len(), 1);
+            assert_eq!(asks[0].0, "com.t.net");
+            assert_eq!(asks[0].1, vec![Permission::Network, Permission::Files]);
+        }
+        other => panic!("a fresh project with a Network package opened as {other:?}"),
+    }
+    assert!(ed.ext.packages[0].permissions.is_empty(), "the package got its permissions untrusted");
+    let s = said(&ed);
+    let line = |tag: &str| s.lines().find(|l| l.contains(tag)).unwrap_or("").to_string();
+    let http = line("http: ");
+    assert!(http.contains("http: false") && http.contains("not trusted yet") && http.contains("Network"), "http did not name the trust rule: {http}");
+    let read = line("read: ");
+    assert!(read.contains("read: false") && read.contains("not trusted yet") && read.contains("Files"), "ed.read did not name the trust rule: {read}");
+
+    // The banner is drawn, with the package on it.
+    let ctx = crate::icons::test_context();
+    let mut drawn = (false, None);
+    let trust = ed.project_trust.clone();
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| drawn = super::trust::banner(ui, &trust));
+    assert_eq!(drawn, (true, None), "no banner for an untrusted project");
+
+    // Trust it: the store remembers, the packages reload with what they asked for.
+    ed.answer_project_trust(Answer::Trust);
+    assert_eq!(ed.project_trust, Trust::Trusted);
+    assert_eq!(ed.ext.packages[0].permissions, vec![Permission::Network, Permission::Files]);
+    let s = said(&ed);
+    assert!(s.contains("read: true"), "a trusted package still could not read:\n{s}");
+    // (`http.get` is refused for another reason once trusted — the editor is
+    // not in Play and the package request path is asynchronous — what matters
+    // is that the trust rule is no longer the reason.)
+    let last_http = s.lines().rfind(|l| l.contains("http: ")).unwrap_or("");
+    assert!(!last_http.contains("not trusted yet"), "{last_http}");
+
+    // A second open of the same project asks nothing.
+    let mut again = crate::Editor { trust_store: store.clone(), ..Default::default() };
+    again.open_project(proj.clone());
+    assert_eq!(again.project_trust, Trust::Trusted);
+
+    // A manifest that changed asks again.
+    let manifest = proj.join("packages/com.t.net/package.ron");
+    let text = std::fs::read_to_string(&manifest).unwrap().replace("Network, Files", "Network, Files, Browser");
+    std::fs::write(&manifest, text).unwrap();
+    let mut changed = crate::Editor { trust_store: store, ..Default::default() };
+    changed.open_project(proj.clone());
+    assert!(matches!(changed.project_trust, Trust::Untrusted { .. }), "a changed manifest was still trusted: {:?}", changed.project_trust);
     let _ = std::fs::remove_dir_all(&proj);
 }

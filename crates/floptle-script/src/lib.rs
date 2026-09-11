@@ -6807,7 +6807,6 @@ end
     /// **`print(v)` reads the same in both vec3 modes.** A `fast` vector is the
     /// VM's own value type, which the deep printer did not know and rendered
     /// as `<value>` — bare, and inside every table it was printed in.
-    #[cfg(feature = "vm-luau")]
     #[test]
     fn a_fast_vec3_prints_as_a_vec3_and_not_as_a_value() {
         let dir = std::env::temp_dir().join(format!("floptle_fast_print_{}", std::process::id()));
@@ -9811,10 +9810,7 @@ end
     /// `{x=, y=, z=}` table is what to send, and it still crosses.
     #[test]
     fn a_vec3_that_cannot_replicate_is_named_and_the_fix_is_too() {
-        // Both backings where the build has both; `fast` is Luau-only.
-        let modes: &[Vec3Mode] =
-            if cfg!(feature = "vm-luau") { &[Vec3Mode::Exact, Vec3Mode::Fast] } else { &[Vec3Mode::Exact] };
-        for &mode in modes {
+        for mode in [Vec3Mode::Exact, Vec3Mode::Fast] {
             let lua = mlua::Lua::new();
             crate::math_api::install(&lua).unwrap();
             crate::math_api::set_mode_checked(&lua, mode).unwrap();

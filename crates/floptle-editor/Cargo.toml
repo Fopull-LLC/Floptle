@@ -35,11 +35,9 @@ path = "examples/glyph_probe.rs"
 required-features = ["editor-ui"]
 
 [features]
-# The script VM, forwarded rather than chosen — exactly one. This crate embeds
-# mlua directly as well as through `floptle-script`, so it names both; they must
-# agree or mlua links two Luas. `default-features = false` on the forwarded
-# dependencies is what makes `--features vm-luajit` mean LuaJIT instead of
-# LuaJIT *and* Luau. See `floptle-script/src/vm.rs` and ADR-0028.
+# The script VM, forwarded rather than chosen. This crate embeds mlua directly
+# as well as through `floptle-script`, so it names both; they must agree or mlua
+# links two Luas. See `floptle-script/src/vm.rs` and ADR-0028.
 default = ["vm-luau", "editor-ui", "devices"]
 # **The authoring application.** Off, this crate is just the engine: the World,
 # the script host, the sim, the renderer and the play loop — everything a
@@ -63,13 +61,12 @@ editor-ui = [
     "dep:tokio",
     "dep:clap",
 ]
-vm-luajit = ["floptle-script/vm-luajit", "mlua/luajit", "mlua/vendored"]
 vm-luau = ["floptle-script/vm-luau", "mlua/luau"]
 # Luau's code generator on the architectures that have one (x64/aarch64, never
 # wasm). Off by default: it is a performance lever, and the real-game bench
 # reached its verdict WITHOUT it, so the shipped default is the configuration
 # that was measured. `mlua/luau-jit` implies `mlua/luau`, so this is additive
-# over `vm-luau` and cannot be combined with `vm-luajit`.
+# over `vm-luau`.
 vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "mlua/luau-jit"]
 # **The machine's audio device and its gamepads.** On for anything a person
 # sits at; off for a dedicated server, which has neither.

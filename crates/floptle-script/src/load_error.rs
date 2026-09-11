@@ -24,20 +24,14 @@
 /// [`UPVALUE_LIMIT`] whether *this build* has a ceiling at all.
 const LUAJIT_UPVALUE_LIMIT: usize = 60;
 
-/// The upvalue ceiling this build's VM enforces — `None` where there is none.
+/// The upvalue ceiling this build's VM enforces — `None`, because Luau has
+/// none: a function closing over 4096 file-scope locals compiles, runs, and
+/// returns the right answer (`tests/vm_dialect.rs` measures it). LuaJIT
+/// refused past 60, which is where the number below comes from.
 ///
-/// **Measured, not quoted** (`tests/vm_dialect.rs`, which is the only thing
-/// allowed to set this number): LuaJIT refuses a function closing over more
-/// than 60, and refuses a chunk declaring more than 200 file-scope locals
-/// besides. **Luau enforces neither** — a function closing over 4096 file-scope
-/// locals compiles, runs, and returns the right answer.
-///
-/// `None` rather than a very large number on purpose. A warning threshold of
-/// `usize::MAX` is a warning that silently never fires, and every consumer
-/// below would keep telling the reader about a limit that is not there. An
-/// `Option` makes each of them say what it does when the ceiling is gone.
-pub const UPVALUE_LIMIT: Option<usize> =
-    if cfg!(feature = "vm-luau") { None } else { Some(LUAJIT_UPVALUE_LIMIT) };
+/// Kept as an `Option` rather than dropped, on purpose: every consumer says
+/// what it does when the ceiling is gone, and a VM with one could come back.
+pub const UPVALUE_LIMIT: Option<usize> = None;
 
 /// Warn once a function is within ten upvalues of the ceiling, where there is
 /// one. A script that close is one ordinary edit — one more file-level `local`

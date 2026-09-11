@@ -21,8 +21,7 @@ wgpu = { workspace = true }
 
 # Everything below exists only in the browser. Cargo's resolver ignores a
 # target-specific dependency's features when that target is not being built,
-# so `mlua/luau` here cannot collide with the desktop's VM switch — and the
-# `vm-luajit` escape hatch (one release, then gone) still builds the workspace.
+# so `mlua/luau` here cannot collide with the desktop's VM feature.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The engine, with the editor half compiled out — exactly what `floptle-player`
 # is on the desktop (see crates/floptle-player/Cargo.toml). `play()` below is

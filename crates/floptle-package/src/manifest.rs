@@ -85,6 +85,16 @@ impl Permission {
         }
     }
 
+    /// The word as it appears in `package.ron` — what a banner or an error
+    /// names so the reader can find it in the manifest.
+    pub fn name(self) -> &'static str {
+        match self {
+            Permission::Network => "Network",
+            Permission::Files => "Files",
+            Permission::Browser => "Browser",
+        }
+    }
+
     pub const ALL: &'static [Permission] =
         &[Permission::Network, Permission::Files, Permission::Browser];
 }

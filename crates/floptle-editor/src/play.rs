@@ -1790,9 +1790,7 @@ mod water_streaming_tests {
     }
 }
 
-// `fast` needs Luau, so on the `vm-luajit` escape hatch there is no second
-// mode to switch to and the whole module — import included — stays out.
-#[cfg(all(test, feature = "vm-luau"))]
+#[cfg(test)]
 mod script_vec3_tests {
     use crate::Editor;
 

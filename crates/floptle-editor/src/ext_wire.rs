@@ -38,7 +38,35 @@ impl Editor {
         // next tick to rebuild rather than trusting a mirror built for the
         // packages that were loaded a moment ago.
         self.ext_mirror_rev = 0;
-        self.ext.reload(&self.project_root, &Self::engine_version());
+        // Whether the packages get what their manifests ask for is decided
+        // here, from what resolved, against the user's trust list — see
+        // `ext::trust`. Untrusted loads them with nothing and puts the banner
+        // up; a manifest that changed since the project was trusted asks
+        // again.
+        let root = self.project_root.clone();
+        let store = self.trust_store.clone();
+        let mut trust = ext::trust::Trust::NothingToAsk;
+        self.ext.reload(&root, &Self::engine_version(), |loaded| {
+            match ext::trust::fingerprint(loaded) {
+                None => true,
+                Some((fingerprint, _)) if store.is_trusted(&root, &fingerprint) => {
+                    trust = ext::trust::Trust::Trusted;
+                    true
+                }
+                Some((fingerprint, asks)) => {
+                    trust = match &self.project_trust {
+                        // "Keep them restricted" holds for the session, at
+                        // that same package set; a changed set asks again.
+                        ext::trust::Trust::Restricted { fingerprint: f } if *f == fingerprint => {
+                            ext::trust::Trust::Restricted { fingerprint }
+                        }
+                        _ => ext::trust::Trust::Untrusted { asks, fingerprint },
+                    };
+                    false
+                }
+            }
+        });
+        self.project_trust = trust;
         // Two things outside the host now depend on what loaded: where a
         // `pkg://` reference points, and where a script name may resolve. A
         // player build has no host but still needs both, so they live in
@@ -48,6 +76,32 @@ impl Editor {
         self.ext.report.loaded = loaded;
         self.ext_report_problems();
         self.drain_ext_log();
+    }
+
+    /// The trust banner's button, pressed. Trusting records the package set
+    /// and reloads so the packages come back with their permissions; keeping
+    /// them restricted takes the banner down for the session and leaves them
+    /// as they are.
+    pub(crate) fn answer_project_trust(&mut self, answer: ext::trust::Answer) {
+        let fingerprint = match &self.project_trust {
+            ext::trust::Trust::Untrusted { fingerprint, .. } => fingerprint.clone(),
+            _ => return,
+        };
+        match answer {
+            ext::trust::Answer::Trust => {
+                self.trust_store.trust(&self.project_root, &fingerprint);
+                self.ext_reload();
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    "📦 project trusted — its packages have the permissions their manifests ask for"
+                        .into(),
+                    None,
+                );
+            }
+            ext::trust::Answer::KeepRestricted => {
+                self.project_trust = ext::trust::Trust::Restricted { fingerprint };
+            }
+        }
     }
 
     /// Put the load report's errors and warnings into the Console once, in the

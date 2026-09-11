@@ -13,9 +13,6 @@
 //! loop interrupts tens of millions of times a second, and `Instant::now()`
 //! at each would be the slowest thing in it.
 //!
-//! **Luau only.** LuaJIT has no interrupt; its build is scheduled for removal
-//! (ADR-0028) and stays unbounded for its last release rather than gaining a
-//! second implementation nobody will ship.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -116,17 +113,11 @@ impl Budget {
         msg.contains(MARKER)
     }
 
-    /// Hang [`check`](Self::check) on the state's interrupt. On a VM with no
-    /// interrupt this installs nothing, and says so in the docs above rather
-    /// than here.
-    #[cfg(feature = "vm-luau")]
+    /// Hang [`check`](Self::check) on the state's interrupt.
     pub fn install(self: &Rc<Self>, lua: &mlua::Lua) {
         let b = self.clone();
         lua.set_interrupt(move |lua| b.check(lua));
     }
-
-    #[cfg(not(feature = "vm-luau"))]
-    pub fn install(self: &Rc<Self>, _lua: &mlua::Lua) {}
 }
 
 /// The armed deadline; dropping it restores what was there before.

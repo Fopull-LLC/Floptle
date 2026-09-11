@@ -3436,6 +3436,7 @@ impl Editor {
         let export_done = self.export_done.clone();
         let autosave_prompt = self.autosave_prompt.clone();
         let crash_prompt = self.crash_prompt.clone();
+        let project_trust = self.project_trust.clone();
         let scene_name_now = self.scene_name.clone();
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -3480,6 +3481,12 @@ impl Editor {
             frame_pointer_down = pointer_down;
             // ---- top menu bar (never in a build) ----
             if !player_mode {
+            // Above the menu bar, so it is the first thing seen: this
+            // project's packages are running with no permissions until the
+            // user says otherwise (`ext::trust`).
+            if let (true, Some(answer)) = crate::ext::trust::banner(ui, &project_trust) {
+                cmd.project_trust = Some(answer);
+            }
             egui::Panel::top("menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
@@ -9777,6 +9784,9 @@ impl Editor {
                 crate::open_issue_tracker(Some(&note));
             }
             self.crash_prompt = None;
+        }
+        if let Some(answer) = cmd.project_trust {
+            self.answer_project_trust(answer);
         }
         if let Some(restore) = cmd.autosave_action {
             if restore {

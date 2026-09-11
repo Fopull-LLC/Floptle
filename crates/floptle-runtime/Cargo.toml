@@ -17,13 +17,9 @@ name = "floptle-runtime"
 path = "src/main.rs"
 
 [features]
-# The script VM, forwarded rather than chosen — exactly one, and this crate
-# never picks for whoever depends on it. `default-features = false` on the
-# `floptle-script` and `floptle-editor` dependencies below is what makes
-# `--features vm-luajit` mean LuaJIT instead of LuaJIT *and* Luau. See
-# `floptle-script/src/vm.rs` and ADR-0028.
+# The script VM, forwarded rather than chosen — this crate never picks for
+# whoever depends on it. See `floptle-script/src/vm.rs` and ADR-0028.
 default = ["vm-luau"]
-vm-luajit = ["floptle-script/vm-luajit", "floptle-editor/vm-luajit"]
 vm-luau = ["floptle-script/vm-luau", "floptle-editor/vm-luau"]
 # Luau's code generator, forwarded so a native build can ask for it. Off by
 # default; see floptle-script's manifest for why.

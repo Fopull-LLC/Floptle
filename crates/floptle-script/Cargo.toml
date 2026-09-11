@@ -18,13 +18,11 @@ rust-version.workspace = true
 # **Luau is the default as of v0.84.0.** The dual-VM diff harness went green on
 # the whole suite, every shipped game script and every tutorial project, and the
 # real-game bench came back FASTER on both (Solar 4.81 -> 4.15 ms, a
-# Forgery-shaped scene 13.99 -> 12.38 ms, frame p95). `vm-luajit` stays
-# buildable for exactly one release as the escape hatch, and is removed the
-# release after — grep the path before removing it, deleting a thing can delete
-# its test. Both are built in CI; `src/vm.rs` turns "both" or "neither" into a
-# build failure with a message that names the fix.
+# Forgery-shaped scene 13.99 -> 12.38 ms, frame p95). The `vm-luajit` escape
+# hatch stayed buildable for the release after (v0.84.x) and was removed in
+# v0.89.0, as ADR-0028 scheduled; `src/vm.rs` turns "no VM" into a build
+# failure with a message that names the fix.
 default = ["vm-luau"]
-vm-luajit = ["mlua/luajit", "mlua/vendored"]
 vm-luau = ["mlua/luau"]
 # Luau's own code generator, on the architectures that have one. Off by default
 # because it is a performance lever to be benchmarked, not a correctness one —

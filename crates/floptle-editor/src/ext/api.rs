@@ -61,11 +61,18 @@ pub(crate) fn build_env(
     env.set("mesh", mesh_table_api(lua, shared)?)?;
     env.set("tilemap", tilemap_table(lua, shared)?)?;
 
+    // A permission the manifest asked for and the project's trust state
+    // withheld is present as a table whose every call names the trust rule —
+    // not absent, which reads as "the manifest forgot it".
     if state.permissions.contains(&Permission::Network) {
         env.set("http", http_table(lua, shared)?)?;
+    } else if state.withheld.contains(&Permission::Network) {
+        env.set("http", withheld_table(lua, &state.id, Permission::Network, &["get", "post", "put", "delete", "patch", "stream", "listen"])?)?;
     }
     if state.permissions.contains(&Permission::Browser) {
         env.set("sys", sys_table(lua, shared)?)?;
+    } else if state.withheld.contains(&Permission::Browser) {
+        env.set("sys", withheld_table(lua, &state.id, Permission::Browser, &["openUrl"])?)?;
     }
     // `require` reaches only inside this package. A package's second file is
     // the first thing anybody wants and `dofile` would be a hole.
@@ -1178,11 +1185,25 @@ fn store_table(
 /// permission. Anywhere else in the project only with [`Permission::Files`].
 /// Outside the project, never — an extension is a tool for a project, and a
 /// package that wants somebody's home directory has left what this API is for.
+/// A stand-in for an API the project's trust state withheld: every function
+/// raises with the rule named. See `ext::trust`.
+fn withheld_table(lua: &Lua, pkg: &str, perm: Permission, names: &[&str]) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    for name in names {
+        let msg = super::trust::withheld_message(pkg, perm);
+        t.set(*name, lua.create_function(move |_, _: mlua::MultiValue| Err::<(), _>(mlua::Error::runtime(msg.clone())))?)?;
+    }
+    Ok(t)
+}
+
 #[derive(Clone)]
 struct FileScope {
     root: PathBuf,
     shared: Rc<Shared>,
     allow_files: bool,
+    /// `Files` was asked for and the project's trust state withheld it — the
+    /// refusal then names the trust rule rather than the manifest.
+    files_withheld: Option<String>,
 }
 
 impl FileScope {
@@ -1191,6 +1212,10 @@ impl FileScope {
             root: state.root.clone(),
             shared: shared.clone(),
             allow_files: state.permissions.contains(&Permission::Files),
+            files_withheld: state
+                .withheld
+                .contains(&Permission::Files)
+                .then(|| super::trust::withheld_message(&state.id, Permission::Files)),
         }
     }
 
@@ -1202,6 +1227,9 @@ impl FileScope {
             return Ok(p);
         }
         if !self.allow_files {
+            if let Some(why) = &self.files_withheld {
+                return Err(format!("`{rel}` is not in this package, and {why}"));
+            }
             return Err(format!(
                 "`{rel}` is not in this package, and reading elsewhere needs the `Files` \
                  permission — add it to package.ron"
@@ -1238,6 +1266,9 @@ impl FileScope {
     /// chose.
     fn write_path(&self, rel: &str) -> Result<PathBuf, String> {
         if !self.allow_files {
+            if let Some(why) = &self.files_withheld {
+                return Err(format!("ed.write: {why}"));
+            }
             return Err("ed.write needs the `Files` permission — add it to package.ron".into());
         }
         let project = self.shared.snap.borrow().project_root.clone();

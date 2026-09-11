@@ -1,10 +1,11 @@
 //! The dialect-delta corpus: one case per known difference between the VMs.
 //!
-//! ADR-0028 moves the engine from LuaJIT to Luau. This file is where every
-//! difference anybody finds between them gets written down as an executable
-//! statement, and it runs under **both** — `cargo test -p floptle-script
-//! --test vm_dialect` and `scripts/vm.sh luau test -p floptle-script --test
-//! vm_dialect`.
+//! ADR-0028 moved the engine from LuaJIT to Luau. This file is where every
+//! difference anybody found between them was written down as an executable
+//! statement. It ran under **both** while both were buildable; since v0.89.0
+//! only Luau is, so the LuaJIT branches below are the record of what was
+//! measured, and the Luau side is what still runs — `cargo test -p
+//! floptle-script --test vm_dialect`.
 //!
 //! Two rules, and they are what make this file worth having:
 //!
