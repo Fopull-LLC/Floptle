@@ -359,7 +359,7 @@ pub(crate) struct Args<'a> {
 pub(crate) fn run(args: Args<'_>) -> i32 {
     let Args { root, effect, scene, camera, at, frames, size, background, out, json } = args;
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
     let (w, h) = (size.0.max(1), size.1.max(1));
@@ -369,11 +369,11 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     // for a device.
     let gpu = Gpu::headless_hdr(w, h);
     gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        eprintln!(
+        floptle_say::say_err!(
             "this machine's graphics driver could not build the renderer, so there is no \
              picture to write:\n  {e}"
         );
-        eprintln!(
+        floptle_say::say_err!(
             "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
              shaders need Vulkan, Metal or DirectX 12."
         );
@@ -394,7 +394,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     // room it plays in"), and it answers it in the room.
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
-            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
         ed.open_scene_file(&path.to_string_lossy());
@@ -407,12 +407,12 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     }
 
     let Some(doc) = ed.vfx.doc(effect).cloned() else {
-        eprintln!("no effect called {effect} in {}", root.display());
+        floptle_say::say_err!("no effect called {effect} in {}", root.display());
         let known: Vec<&str> = ed.vfx.effects.iter().map(|(k, _)| k.as_str()).collect();
         if known.is_empty() {
-            eprintln!("this project has no .vfx.ron effects in it at all");
+            floptle_say::say_err!("this project has no .vfx.ron effects in it at all");
         } else {
-            eprintln!("this project has: {}", known.join(", "));
+            floptle_say::say_err!("this project has: {}", known.join(", "));
         }
         return 1;
     };
@@ -465,8 +465,8 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
             Some(c) => Some(c),
             None => {
                 match camera {
-                    Some(name) => eprintln!("this scene has no camera called {name}"),
-                    None => eprintln!(
+                    Some(name) => floptle_say::say_err!("this scene has no camera called {name}"),
+                    None => floptle_say::say_err!(
                         "this scene has no camera, so there is no view to render it in"
                     ),
                 }
@@ -510,7 +510,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
         None => match window {
             Some((from, to)) => spread(from, to, frames.max(1)),
             None => {
-                eprintln!(
+                floptle_say::say_err!(
                     "{effect} never puts anything on the screen in the {ceiling:.3}s its \
                      timeline and clips cover, so there is nothing to photograph. Check the \
                      effect has a clip with an emit on it."
@@ -520,7 +520,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
         },
     };
     if times.is_empty() {
-        eprintln!("--frames 0 asks for no pictures");
+        floptle_say::say_err!("--frames 0 asks for no pictures");
         return 2;
     }
     let span = window.map(|(_, to)| to).unwrap_or(ceiling);
@@ -540,7 +540,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     if total <= 0.0 {
         // Only reachable through `--at`: a spread is measured off the moments
         // something IS visible, so it cannot land entirely in the gaps.
-        eprintln!(
+        floptle_say::say_err!(
             "{effect} shows nothing at any of the {} moment(s) asked for — the pictures would \
              all be an empty stage. Drop --at and it will find the moments the effect is \
              actually visible in.",
@@ -559,14 +559,14 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
 
     let dir = out.unwrap_or_else(|| root.to_path_buf());
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("could not create {}: {e}", dir.display());
+        floptle_say::say_err!("could not create {}: {e}", dir.display());
         return 1;
     }
     let stem = stem_of(effect);
     // The same view with the effect switched off, so each frame can be measured
     // against what was already there rather than against its own background.
     let Some(baseline) = baseline_frame(&mut ed, &cam, host, w, h) else {
-        eprintln!("no GPU: this machine has no adapter floptle can render on");
+        floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
     let mut written: Vec<Frame> = Vec::new();
@@ -577,16 +577,16 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
         ed.vfx.instances.insert(host, (effect.to_string(), inst));
 
         let Some(px) = crate::shot::render_frame_pixels(&mut ed, &cam, w, h, u32::MAX) else {
-            eprintln!("no GPU: this machine has no adapter floptle can render on");
+            floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
             return 1;
         };
         let path = dir.join(frame_name(&stem, t));
         let Some(buf) = image::RgbaImage::from_raw(w, h, px.clone()) else {
-            eprintln!("the render came back the wrong size");
+            floptle_say::say_err!("the render came back the wrong size");
             return 1;
         };
         if let Err(e) = buf.save(&path) {
-            eprintln!("could not write {}: {e}", path.display());
+            floptle_say::say_err!("could not write {}: {e}", path.display());
             return 1;
         }
         let coverage = coverage_against(&px, &baseline);
@@ -601,18 +601,18 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     let blank = written.iter().filter(|f| f.coverage <= 0.0).count();
     if blank == written.len() {
         match scene {
-            Some(name) => eprintln!(
+            Some(name) => floptle_say::say_err!(
                 "{effect} changes nothing in any of these frames. It was rendered where {name} \
                  puts it, through that scene's camera — most likely that camera is not looking \
                  at it. Drop --scene to see the effect on its own."
             ),
-            None => eprintln!(
+            None => floptle_say::say_err!(
                 "{effect} changes nothing in any of these frames — every picture is the empty \
                  stage. That is the effect, not the renderer."
             ),
         }
     } else if blank > 0 {
-        eprintln!(
+        floptle_say::say_err!(
             "note: {blank} of {} frames have nothing in them — see the percentages above for \
              which.",
             written.len()
@@ -627,13 +627,13 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     if let Some(path) = &sheet {
         let img = contact_sheet(&pixels, w, h, background.unwrap_or(DEFAULT_BACKGROUND));
         if let Err(e) = img.save(path) {
-            eprintln!("could not write {}: {e}", path.display());
+            floptle_say::say_err!("could not write {}: {e}", path.display());
             return 1;
         }
     }
 
     if json {
-        println!(
+        floptle_say::say!(
             "{}",
             serde_json::json!({
                 "ok": true,
@@ -651,9 +651,9 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
             })
         );
     } else {
-        println!("{effect}: visible over {:.3}s, {} frame(s) at {w}x{h}", span, written.len());
+        floptle_say::say!("{effect}: visible over {:.3}s, {} frame(s) at {w}x{h}", span, written.len());
         for f in &written {
-            println!(
+            floptle_say::say!(
                 "  t={:>7.3}s  {:>5.1}% of frame  {}",
                 millis(f.t) as f64 / 1000.0,
                 f.coverage * 100.0,
@@ -661,7 +661,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
             );
         }
         if let Some(p) = &sheet {
-            println!("  all of them: {}", p.display());
+            floptle_say::say!("  all of them: {}", p.display());
         }
     }
     0

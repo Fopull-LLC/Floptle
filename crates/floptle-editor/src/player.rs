@@ -50,7 +50,7 @@ use crate::Editor;
 pub fn run_player() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
+        floptle_say::say!(
             "{} player v{}\n\n\
              Usage: {} [PROJECT]\n\n\
              With no argument, plays the game described by the floptle-game.ron\n\
@@ -91,7 +91,7 @@ pub fn run_player() {
             (m.title, project, m.steam, true)
         }
         (None, None) => {
-            eprintln!(
+            floptle_say::say_err!(
                 "no game to play: there is no floptle-game.ron beside this binary, and no \
                  project path was given.\n\
                  An exported build ships both; to play a project directly, pass its folder."
@@ -100,7 +100,7 @@ pub fn run_player() {
         }
     };
     if !floptle_vfs::is_file(project.join("project.ron")) {
-        eprintln!(
+        floptle_say::say_err!(
             "{} is not a project folder (no project.ron) — this build's assets are missing \
              or were moved away from the binary",
             project.display()
@@ -115,7 +115,7 @@ pub fn run_player() {
         None => None,
     };
 
-    println!("{title} — {} v{}", floptle_core::ENGINE_NAME, crate::distribution_version());
+    floptle_say::say!("{title} — {} v{}", floptle_core::ENGINE_NAME, crate::distribution_version());
 
     let event_loop = crate::build_event_loop(steam_platform.is_some());
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -128,7 +128,7 @@ pub fn run_player() {
         app.ed.script_host.set_platform(platform);
     }
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("the game's window loop ended with an error: {e}");
+        floptle_say::say_err!("the game's window loop ended with an error: {e}");
     }
     if app.exit_code != 0 {
         std::process::exit(app.exit_code);
@@ -247,7 +247,7 @@ impl ApplicationHandler for Player {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                eprintln!("could not open a window: {e}");
+                floptle_say::say_err!("could not open a window: {e}");
                 event_loop.exit();
                 return;
             }
@@ -501,7 +501,7 @@ impl Player {
     fn write_shot(&mut self, shot: Option<(Vec<u8>, u32, u32)>) {
         let Some(path) = self.shot.clone() else { return };
         let Some((px, w, h)) = shot else {
-            eprintln!(
+            floptle_say::say_err!(
                 "--shot: this device's surface cannot be copied from, so there is no frame \
                  to write (the game itself is unaffected)"
             );
@@ -509,14 +509,14 @@ impl Player {
             return;
         };
         let Some(buf) = image::RgbaImage::from_raw(w, h, px) else {
-            eprintln!("--shot: the frame came back the wrong size");
+            floptle_say::say_err!("--shot: the frame came back the wrong size");
             self.exit_code = 1;
             return;
         };
         match buf.save(&path) {
-            Ok(()) => println!("wrote {} ({w}x{h}, frame {})", path.display(), self.frames),
+            Ok(()) => floptle_say::say!("wrote {} ({w}x{h}, frame {})", path.display(), self.frames),
             Err(e) => {
-                eprintln!("--shot: could not write {}: {e}", path.display());
+                floptle_say::say_err!("--shot: could not write {}: {e}", path.display());
                 self.exit_code = 1;
             }
         }

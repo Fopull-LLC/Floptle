@@ -24,6 +24,7 @@ vm-luau = ["floptle-script/vm-luau"]
 vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen"]
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
 floptle-gi = { path = "../floptle-gi" }

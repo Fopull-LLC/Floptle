@@ -1705,7 +1705,7 @@ json.isArray(v) -> bool — would json.encode write this as a JSON array? True f
 
 ### `openUrl`
 
-openUrl(url) — open an http:// or https:// address in the player's own browser. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there.
+openUrl(url) — open an http:// or https:// address in the player's own browser. The address is parsed first: one with a username in it, whitespace, or a character a shell would read is refused at the call, with the reason. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there.
 
 ```lua
 -- the player approves the pairing on your real site

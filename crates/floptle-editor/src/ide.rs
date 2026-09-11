@@ -3269,26 +3269,26 @@ pub(crate) fn cli_reference(query: Option<&str>, json: bool) -> i32 {
             "matched": hits.len(),
             "entries": hits.iter().map(|(_, e)| entry_json(e)).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(hits.is_empty());
     }
 
     if hits.is_empty() {
-        println!("nothing in the API matches {q}");
+        floptle_say::say!("nothing in the API matches {q}");
         return 1;
     }
     for (_, e) in &hits {
-        println!("{}", e.label);
-        println!("  {}", e.doc);
+        floptle_say::say!("{}", e.label);
+        floptle_say::say!("  {}", e.doc);
         if let Some(ex) = api_example(e.label) {
             for line in ex.lines() {
-                println!("    {line}");
+                floptle_say::say!("    {line}");
             }
         }
-        println!("  ({})", api_category(e.label));
-        println!();
+        floptle_say::say!("  ({})", api_category(e.label));
+        floptle_say::say!();
     }
-    println!("{} entr(ies) matched {q}", hits.len());
+    floptle_say::say!("{} entr(ies) matched {q}", hits.len());
     0
 }
 
@@ -3313,7 +3313,7 @@ fn reference_index(json: bool) -> i32 {
             "count": LUA_API.len(),
             "entries": LUA_API.iter().map(entry_json).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return 0;
     }
     for cat in API_CATEGORIES {
@@ -3325,13 +3325,13 @@ fn reference_index(json: bool) -> i32 {
         if names.is_empty() {
             continue;
         }
-        println!("{cat}");
+        floptle_say::say!("{cat}");
         for chunk in names.chunks(4) {
-            println!("  {}", chunk.join("  "));
+            floptle_say::say!("  {}", chunk.join("  "));
         }
-        println!();
+        floptle_say::say!();
     }
-    println!("{} name(s). `floptle api <query>` for what one of them does.", LUA_API.len());
+    floptle_say::say!("{} name(s). `floptle api <query>` for what one of them does.", LUA_API.len());
     0
 }
 
@@ -4079,7 +4079,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "account.put", insert: "account.put(", doc: "account.put(\"/games/mygame/saves/slot1\", { data = t, expected_version = v }, function(res) end) — a cloud save. expected_version is optimistic concurrency: send the version you last read and a stale write gets 409 instead of silently clobbering the player's other machine." },
     ApiEntry { label: "account.delete", insert: "account.delete(", doc: "account.delete(\"/games/mygame/saves/slot1\", function(res) end) — remove something from Floptle Cloud." },
     ApiEntry { label: "account.inFlight", insert: "account.inFlight()", doc: "account.inFlight() — how many account calls are still waiting on a reply (cap 6). A spinner, or a guard against firing the same request every frame." },
-    ApiEntry { label: "openUrl", insert: "openUrl(", doc: "openUrl(url) — open an http:// or https:// address in the player\'s own browser. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there." },
+    ApiEntry { label: "openUrl", insert: "openUrl(", doc: "openUrl(url) — open an http:// or https:// address in the player\'s own browser. The address is parsed first: one with a username in it, whitespace, or a character a shell would read is refused at the call, with the reason. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there." },
     ApiEntry { label: "draw.text", insert: "draw.text(", doc: "draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is \"left\" (default) | \"center\" | \"right\", and x is that edge. font is a project-relative .ttf/.otf; leave it out and you get the project\'s UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it." },
     ApiEntry { label: "draw.circle", insert: "draw.circle(", doc: "draw.circle(x, y, radius, r,g,b [, a]) — a filled circle in screen pixels, x/y its CENTRE. draw.circleOutline(..., [px]) is the hollow twin. Same immediate-mode rules as draw.rect: over the scene, over the HUD, one frame each." },
     ApiEntry { label: "draw.circleOutline", insert: "draw.circleOutline(", doc: "draw.circleOutline(x, y, radius, r,g,b [, a] [, px]) — a hollow circle, `px` thick (default 2)." },

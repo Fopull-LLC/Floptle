@@ -45,6 +45,10 @@ impl Paths {
     pub fn cache_dir(&self) -> PathBuf {
         self.data.join("cache")
     }
+    /// Where a launched editor's terminal output goes — see `launch::launch`.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data.join("logs")
+    }
     pub fn config_file(&self) -> PathBuf {
         self.config.join("hub.json")
     }

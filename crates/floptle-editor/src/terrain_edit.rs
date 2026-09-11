@@ -2749,7 +2749,7 @@ impl Editor {
                 static WARNED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!(
+                    floptle_say::say_err!(
                         "[terrain] a rotated/scaled terrain skips SDF sun-shadow/AO \
                          casting (v1 limitation — rendering & collision are exact)"
                     );

@@ -318,23 +318,23 @@ pub fn run(args: ServerArgs) -> i32 {
     let scene_path = match resolve_scene(root, args.scene.as_deref()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("  {e}");
+            floptle_say::say_err!("  {e}");
             return 2;
         }
     };
     let doc = match floptle_scene::load(&scene_path) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("  cannot load {}: {e}", scene_path.display());
+            floptle_say::say_err!("  cannot load {}: {e}", scene_path.display());
             return 2;
         }
     };
     if let Err(e) = check_servable(&doc, &scene_path) {
-        eprintln!("  {e}");
+        floptle_say::say_err!("  {e}");
         return 2;
     }
     if args.relay.is_none() && args.port.is_none() {
-        eprintln!("  a dedicated server needs somewhere to listen: --port <n> or --relay <addr>");
+        floptle_say::say_err!("  a dedicated server needs somewhere to listen: --port <n> or --relay <addr>");
         return 2;
     }
 
@@ -346,7 +346,7 @@ pub fn run(args: ServerArgs) -> i32 {
     drain_console(&mut ed);
     ed.toggle_play();
     if !ed.playing {
-        eprintln!("  the project did not enter play mode");
+        floptle_say::say_err!("  the project did not enter play mode");
         return 2;
     }
 
@@ -358,7 +358,7 @@ pub fn run(args: ServerArgs) -> i32 {
     if args.relay.is_some()
         && let Some(port) = args.port
     {
-        println!(
+        floptle_say::say!(
             "  --port {port} is not being listened on: this server is reachable through the \
              relay, by lobby code, and has no socket of its own"
         );
@@ -379,20 +379,20 @@ pub fn run(args: ServerArgs) -> i32 {
         return 3;
     }
     if let Some(code) = &ed.net_lobby_code {
-        println!("  LOBBY CODE {code}");
+        floptle_say::say!("  LOBBY CODE {code}");
     }
     apply_server_opts(&mut ed, &args);
     if let Some(max) = args.max_players {
-        println!("  at most {max} player(s); the next arrival is refused, nobody is dropped");
+        floptle_say::say!("  at most {max} player(s); the next arrival is refused, nobody is dropped");
     }
     if let Some(key) = &args.game_key {
         // Recorded and reported, not checked: a dedicated server is reached
         // directly, so there is nothing here for a key to authorize. It says
         // which game this process belongs to.
-        println!("  game key {} (recorded, not checked — see docs/multiplayer.md §6c)", redact(key));
+        floptle_say::say!("  game key {} (recorded, not checked — see docs/multiplayer.md §6c)", redact(key));
     }
     if let Some(radius) = args.interest {
-        println!(
+        floptle_say::say!(
             "  interest management on — {radius:.0} m, {} KB/s per client",
             args.budget.unwrap_or(floptle_net::InterestConfig::default().budget_bytes_per_sec)
                 / 1024
@@ -400,7 +400,7 @@ pub fn run(args: ServerArgs) -> i32 {
     }
 
     let step = 1.0 / args.tick_hz;
-    println!(
+    floptle_say::say!(
         "  serving {} — {} node(s), {} networked, {:.0} Hz tick. Ctrl-C to stop.",
         scene_path.display(),
         ed.world.query::<Transform>().count(),
@@ -436,7 +436,7 @@ pub fn run(args: ServerArgs) -> i32 {
         // server that is wedged look identical from the outside.
         if ticks.is_multiple_of(args.tick_hz.max(1.0) as u64 * 30) {
             let peers = ed.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
-            println!("  tick {ticks} — {peers} peer(s) connected");
+            floptle_say::say!("  tick {ticks} — {peers} peer(s) connected");
         }
 
         if let Some(path) = &args.status_file
@@ -458,7 +458,7 @@ pub fn run(args: ServerArgs) -> i32 {
         }
     }
     say_goodbye(&mut ed, step);
-    println!("  server stopped after {ticks} tick(s)");
+    floptle_say::say!("  server stopped after {ticks} tick(s)");
     0
 }
 
@@ -488,7 +488,7 @@ fn say_goodbye(ed: &mut Editor, step: f32) {
     if peers.is_empty() {
         return;
     }
-    println!("  telling {} player(s) the server is stopping", peers.len());
+    floptle_say::say!("  telling {} player(s) the server is stopping", peers.len());
     if let Some(s) = ed.net_server.as_mut() {
         for p in &peers {
             s.kick(*p, GOODBYE);
@@ -766,8 +766,8 @@ fn drain_console(ed: &mut Editor) {
         };
         let times = if e.count > 1 { format!(" (x{})", e.count) } else { String::new() };
         match &e.source {
-            Some((file, line)) => eprintln!("  {tag}{file}:{line}: {}{times}", e.msg),
-            None => eprintln!("  {tag}{}{times}", e.msg),
+            Some((file, line)) => floptle_say::say_err!("  {tag}{file}:{line}: {}{times}", e.msg),
+            None => floptle_say::say_err!("  {tag}{}{times}", e.msg),
         }
     }
 }
@@ -861,7 +861,7 @@ fn install_stop_watcher(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     if !std::io::stdin().is_terminal() {
         return;
     }
-    println!("  (press enter to stop)");
+    floptle_say::say!("  (press enter to stop)");
     std::thread::spawn(move || {
         let mut buf = String::new();
         let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf);

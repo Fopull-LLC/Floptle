@@ -227,7 +227,7 @@ fn parse_filter(name: Option<&str>) -> BindFilter {
 pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
     // Player 1's functions live directly on `input`.
     if let Err(e) = install_for_slot(lua, t, sys, domain, 0) {
-        eprintln!("[lua] failed to install the input action API: {e}");
+        floptle_say::say_err!("[lua] failed to install the input action API: {e}");
         return;
     }
 

@@ -1434,6 +1434,7 @@ dependencies = [
  "floptle-anim",
  "floptle-core",
  "floptle-render",
+ "floptle-say",
  "floptle-vfs",
  "gltf",
  "image",
@@ -1524,6 +1525,7 @@ dependencies = [
  "floptle-physics",
  "floptle-render",
  "floptle-rules",
+ "floptle-say",
  "floptle-scene",
  "floptle-script",
  "floptle-services",
@@ -1570,6 +1572,7 @@ name = "floptle-fleet"
 version = "0.88.2"
 dependencies = [
  "flate2",
+ "floptle-say",
  "serde",
  "serde_json",
  "sha2",
@@ -1739,6 +1742,7 @@ dependencies = [
  "floptle-gi",
  "floptle-nav",
  "floptle-rules",
+ "floptle-say",
  "floptle-scene",
  "floptle-script",
  "floptle-shader",
@@ -1778,6 +1782,7 @@ dependencies = [
  "floptle-physics",
  "floptle-render",
  "floptle-rules",
+ "floptle-say",
  "floptle-scene",
  "floptle-script",
  "floptle-shader",
@@ -1786,6 +1791,10 @@ dependencies = [
  "log",
  "winit",
 ]
+
+[[package]]
+name = "floptle-say"
+version = "0.88.2"
 
 [[package]]
 name = "floptle-scene"
@@ -1812,6 +1821,7 @@ dependencies = [
  "floptle-nav",
  "floptle-net",
  "floptle-physics",
+ "floptle-say",
  "floptle-services",
  "floptle-tiles",
  "floptle-ui",
@@ -1822,7 +1832,9 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+ "url",
  "web-sys",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1847,6 +1859,7 @@ dependencies = [
 name = "floptle-steam"
 version = "0.88.2"
 dependencies = [
+ "floptle-say",
  "floptle-services",
  "steamworks",
 ]

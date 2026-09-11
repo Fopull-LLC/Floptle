@@ -296,7 +296,7 @@ fn pump_ghosts(ed: &mut crate::Editor, ghosts: &mut Vec<Ghost>, want: usize) {
                 floptle_scene::spawn_into(&doc, &mut g.world);
                 g.session.rebind_scene(&g.world);
             }
-            None => eprintln!("ghost {i}: could not load \"{scene}\" — it is now out of the game"),
+            None => floptle_say::say_err!("ghost {i}: could not load \"{scene}\" — it is now out of the game"),
         }
     }
 }
@@ -363,7 +363,7 @@ pub(crate) struct Options {
 pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -> i32 {
     let Options { json, steam, timing, alloc, seed, ghosts: want_ghosts, join } = opts;
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
 
@@ -395,7 +395,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     }
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
-            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
         ed.open_scene_file(&path.to_string_lossy());
@@ -412,7 +412,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
 
     ed.toggle_play();
     if !ed.playing {
-        eprintln!("the project did not enter play mode");
+        floptle_say::say_err!("the project did not enter play mode");
         return 1;
     }
     // Joining happens after Play starts, because that is the rule the session
@@ -430,9 +430,9 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
             // gets when a join fails was a pointer at an empty log.
             ed.drain_script_logs();
             for e in &ed.console.entries {
-                eprintln!("  {}", e.msg);
+                floptle_say::say_err!("  {}", e.msg);
             }
-            eprintln!("could not join {addr} — is a `floptle serve` listening there?");
+            floptle_say::say_err!("could not join {addr} — is a `floptle serve` listening there?");
             return 1;
         }
     }
@@ -461,7 +461,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // `ScriptHost::gc_stop`).
     let window = alloc.then(|| AllocWindow::plan(asked)).flatten();
     if alloc && window.is_none() {
-        eprintln!(
+        floptle_say::say_err!(
             "--alloc needs at least {} steps to measure a settled frame; this run is {asked}, \
              so no allocation figure is reported",
             AllocWindow::MIN_SPAN
@@ -839,7 +839,7 @@ fn report(
         if let Some(seed) = seed {
             doc["seed"] = serde_json::json!(seed);
         }
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
 
@@ -860,31 +860,31 @@ fn report(
         let repeat = if *count > 1 { format!(" (x{count})") } else { String::new() };
         match &e.source {
             Some((file, line)) => {
-                println!("{}: {phase}: {file}:{line}: {}{repeat}", level_str(e.level), e.msg)
+                floptle_say::say!("{}: {phase}: {file}:{line}: {}{repeat}", level_str(e.level), e.msg)
             }
-            None => println!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
+            None => floptle_say::say!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
         }
     }
-    println!("{}", summary_line(steps, asked, simulated, errors, warnings));
+    floptle_say::say!("{}", summary_line(steps, asked, simulated, errors, warnings));
     if !ghosts.is_empty() {
-        println!("{}", ghosts_line(ghosts));
+        floptle_say::say!("{}", ghosts_line(ghosts));
     }
     if let Some(c) = clock {
-        println!("{}", timing_line(c));
+        floptle_say::say!("{}", timing_line(c));
     }
     if let Some(a) = allocated {
-        println!(
+        floptle_say::say!(
             "scripts allocate {:.1} KB per frame of Lua heap — measured with the collector \
              stopped, which is the only way it CAN be measured (with it running, a collection \
              inside the window eats part of what the window allocated)",
             a / 1024.0
         );
         for line in alloc_lines(a, by_script) {
-            println!("{line}");
+            floptle_say::say!("{line}");
         }
     }
     if let Some(seed) = seed {
-        println!("seeded with {seed}: math.random and rng() are pinned, so this run repeats");
+        floptle_say::say!("seeded with {seed}: math.random and rng() are pinned, so this run repeats");
     }
     i32::from(errors > 0)
 }

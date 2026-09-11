@@ -208,7 +208,7 @@ fn normalise_modes(dir: &Path) -> Result<(), String> {
 /// file logging on the box, because the journal is what gets shipped to the
 /// control plane and a second copy would be a second thing to rotate.
 pub fn log_line(msg: &str) {
-    println!("{msg}");
+    floptle_say::say!("{msg}");
 }
 
 /// The bundle's own manifest, as much of it as the agent needs.

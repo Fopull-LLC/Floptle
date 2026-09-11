@@ -289,7 +289,7 @@ impl Editor {
                     // there, on a stderr nobody sees.
                     let file = crate::project::resolve_asset_path(&self.project_root, &path);
                     let Ok(model) = floptle_assets::gltf_import::import(&file) else {
-                        eprintln!("collidable mesh: failed to load {path}");
+                        floptle_say::say_err!("collidable mesh: failed to load {path}");
                         continue;
                     };
                     // Scale + rotate locally (f32 is exact here — model-sized numbers);
@@ -1560,7 +1560,7 @@ impl Editor {
             return;
         }
         if !floptle_vfs::exists(Path::new(path)) {
-            eprintln!("  script not found: {path}");
+            floptle_say::say_err!("  script not found: {path}");
             return;
         }
         let kind = script_kind_of(path, &self.scripts_dir());

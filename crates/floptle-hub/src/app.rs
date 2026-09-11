@@ -1077,7 +1077,7 @@ impl HubApp {
         let Some(project) = self.config.projects.get(idx).cloned() else { return };
         let install = self.install_for(project.engine_version.as_deref()).cloned();
         match install {
-            Some(install) => match launch::launch(&install, &project) {
+            Some(install) => match launch::launch(&install, &project, &self.paths.logs_dir()) {
                 Ok(()) => self.toast = Some((format!("launched {}", project.name), false)),
                 Err(e) => self.toast = Some((e, true)),
             },

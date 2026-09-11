@@ -138,7 +138,7 @@ fn rel(root: &Path, path: &Path) -> String {
 /// draw, so a caller must not have to read the prose to tell them apart.
 pub(crate) fn run(root: &Path, json: bool) -> i32 {
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
     let report = examine(root);
@@ -496,8 +496,8 @@ fn print_text(r: &Report, root: &Path) {
             n => format!(" (and {} more like it)", n - 1),
         };
         match file {
-            Some(file) => println!("{}: {file}: {first}{more}", level.as_str()),
-            None => println!("{}: {first}{more}", level.as_str()),
+            Some(file) => floptle_say::say!("{}: {file}: {first}{more}", level.as_str()),
+            None => floptle_say::say!("{}: {first}{more}", level.as_str()),
         }
     }
     let counted = format!(
@@ -508,14 +508,14 @@ fn print_text(r: &Report, root: &Path) {
         // Said plainly: a checker that looked at nothing and printed nothing is
         // indistinguishable from a clean project, and that is the one way this
         // verb can lie.
-        println!("checked nothing in {} — no scenes, prefabs, effects or materials", root.display());
+        floptle_say::say!("checked nothing in {} — no scenes, prefabs, effects or materials", root.display());
         return;
     }
     match (r.errors(), r.warnings()) {
-        (0, 0) => println!("{counted} — all good"),
-        (0, w) => println!("{counted} — {w} warning(s)"),
-        (e, 0) => println!("{counted} — {e} error(s)"),
-        (e, w) => println!("{counted} — {e} error(s), {w} warning(s)"),
+        (0, 0) => floptle_say::say!("{counted} — all good"),
+        (0, w) => floptle_say::say!("{counted} — {w} warning(s)"),
+        (e, 0) => floptle_say::say!("{counted} — {e} error(s)"),
+        (e, w) => floptle_say::say!("{counted} — {e} error(s), {w} warning(s)"),
     }
 }
 
@@ -543,7 +543,7 @@ fn print_json(r: &Report) {
         "warnings": r.warnings(),
         "findings": findings,
     });
-    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
 }
 
 #[cfg(test)]

@@ -304,7 +304,7 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
     let scripts = root.join("scripts");
     let dir = if scripts.is_dir() { scripts } else { root.to_path_buf() };
     if !dir.is_dir() {
-        eprintln!("{} is not a directory", dir.display());
+        floptle_say::say_err!("{} is not a directory", dir.display());
         return 2;
     }
 
@@ -314,7 +314,7 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
         match std::fs::read_to_string(f) {
             Ok(src) => findings.extend(scan(f, &src)),
             Err(e) => {
-                eprintln!("could not read {}: {e}", f.display());
+                floptle_say::say_err!("could not read {}: {e}", f.display());
                 return 2;
             }
         }
@@ -350,22 +350,22 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
             "findings": items,
             "complete": false,
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     } else {
         for f in &findings {
-            println!("{}:{}: {} — {}", rel(&f.file), f.line, f.kind.what(), f.kind.fix());
-            println!("    {}", f.text);
+            floptle_say::say!("{}:{}: {} — {}", rel(&f.file), f.line, f.kind.what(), f.kind.fix());
+            floptle_say::say!("    {}", f.text);
         }
-        println!();
+        floptle_say::say!();
         if findings.is_empty() {
-            println!(
+            floptle_say::say!(
                 "nothing to change in {} script{} — this project looks ready for \
                  `script_vec3: Fast`.",
                 files.len(),
                 if files.len() == 1 { "" } else { "s" }
             );
         } else {
-            println!(
+            floptle_say::say!(
                 "{} thing{} to change across {} script{}.",
                 findings.len(),
                 if findings.len() == 1 { "" } else { "s" },
@@ -376,7 +376,7 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
         // Said on BOTH paths, and last, because the sentence people act on is
         // the clean one: a textual scan cannot see a vector that arrived
         // through a table, a function's return, or a name it could not follow.
-        println!(
+        floptle_say::say!(
             "This is a textual scan, not a type checker — it finds the common shapes and \
              cannot promise it found them all. In `fast`, a mutation it missed RAISES rather \
              than passing silently."

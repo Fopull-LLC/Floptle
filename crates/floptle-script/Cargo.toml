@@ -32,6 +32,7 @@ vm-luau = ["mlua/luau"]
 vm-luau-codegen = ["vm-luau", "mlua/luau-jit"]
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 # Files go through the engine's filesystem: std::fs on the desktop, the game's bundle in a browser.
 floptle-vfs = { path = "../floptle-vfs" }
 # Types only (PlayParams + enums for the audio command queue); no OS audio stack.
@@ -57,6 +58,8 @@ ron = { workspace = true }
 serde = { workspace = true }
 # `json.*` (proposal §4).
 serde_json = { workspace = true }
+# `openUrl` parses what it is handed before anything opens it.
+url = "2"
 
 # **`http.*`, on the platforms that have sockets.** Blocking requests on worker
 # threads, never on the frame thread; ureq is already what the Hub and the dist
@@ -65,6 +68,12 @@ serde_json = { workspace = true }
 # ureq's TLS stack alone is a large slice of a wasm module nothing could call.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { workspace = true }
+
+# **`openUrl` on Windows** goes through `ShellExecuteW` rather than `cmd /C
+# start`: `cmd.exe` reads `&`, `%VAR%` and a closing quote out of the URL as
+# its own syntax, and the browser was never the only thing a link could open.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # **`openUrl`, in the browser.** The one place the page itself is the platform's
 # browser, so this is a real implementation rather than another refusal — see

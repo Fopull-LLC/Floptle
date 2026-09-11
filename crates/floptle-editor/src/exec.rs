@@ -40,11 +40,11 @@ use crate::console::ConsoleState;
 /// Run `script` against `root`. Returns the process exit code.
 pub(crate) fn run(root: &Path, script: &Path, json: bool) -> i32 {
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
     if !script.is_file() {
-        eprintln!("no script at {}", script.display());
+        floptle_say::say_err!("no script at {}", script.display());
         return 2;
     }
 
@@ -156,7 +156,7 @@ fn report(
             "raised": script_error,
             "log": log,
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
 
@@ -172,19 +172,19 @@ fn report(
         let repeat = if *count > 1 { format!(" (x{count})") } else { String::new() };
         match &e.source {
             Some((file, line)) => {
-                println!("{}: {phase}: {file}:{line}: {}{repeat}", level_str(e.level), e.msg)
+                floptle_say::say!("{}: {phase}: {file}:{line}: {}{repeat}", level_str(e.level), e.msg)
             }
-            None => println!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
+            None => floptle_say::say!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
         }
     }
     if let Some(e) = script_error {
-        println!("error: script: {e}");
+        floptle_say::say!("error: script: {e}");
     }
     match (errors, warnings) {
-        (0, 0) => println!("ran — nothing raised"),
-        (0, w) => println!("ran — {w} warning(s)"),
-        (e, 0) => println!("ran — {e} error(s)"),
-        (e, w) => println!("ran — {e} error(s), {w} warning(s)"),
+        (0, 0) => floptle_say::say!("ran — nothing raised"),
+        (0, w) => floptle_say::say!("ran — {w} warning(s)"),
+        (e, 0) => floptle_say::say!("ran — {e} error(s)"),
+        (e, w) => floptle_say::say!("ran — {e} error(s), {w} warning(s)"),
     }
     i32::from(errors > 0)
 }

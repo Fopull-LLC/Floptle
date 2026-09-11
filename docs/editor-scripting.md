@@ -197,7 +197,7 @@ Everything a package registers goes away on ⟲ Reload, timers included.
 | `ed.play()` / `ed.stop()` | |
 | `ed.message(title, body)` | a modal with an OK button |
 | `ed.lookAt(point [, distance])` | glide the Scene camera to a place — see below |
-| `ed.openUrl(url)` | `Browser` permission. `http://` and `https://` only |
+| `ed.openUrl(url)` | `Browser` permission. `http://` and `https://` only; the address is parsed first, and one with a username, whitespace, or a quote, angle bracket, backtick, caret, pipe or backslash in it is refused with the reason |
 | `ed.repaint()` | draw again promptly (for an animating panel) |
 | `ed.log(…)` / `ed.warn(…)` / `ed.error(…)` | to the Console, tagged with your package's name. `print` does the same |
 | `ed.randomBytes(n)` | `n` bytes of real randomness, as a string (1–1024) |

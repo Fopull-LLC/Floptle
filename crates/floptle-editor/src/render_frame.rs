@@ -3134,9 +3134,9 @@ impl Editor {
             && std::env::var("FLOPTLE_GPU_TIMING").is_ok()
             && self.gpu_timing_frames.is_multiple_of(120)
         {
-            println!("--- GPU frame {gpu_total:.2} ms");
+            floptle_say::say!("--- GPU frame {gpu_total:.2} ms");
             for sp in &gpu_spans {
-                println!("  {:>7.3} ms  {}", sp.ms, sp.label);
+                floptle_say::say!("  {:>7.3} ms  {}", sp.ms, sp.label);
             }
         }
         let show_terrain_collider = &mut self.show_terrain_collider;
@@ -6529,7 +6529,7 @@ impl Editor {
         }
         if (want_save_project || cmd.save_project)
             && let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
-                eprintln!("  save project failed: {e}");
+                floptle_say::say_err!("  save project failed: {e}");
             }
         // Edit ⏵ Project Settings opens (or focuses) the ⚙ Settings TAB — it
         // docks like anything else, so there is no modal to dismiss.
@@ -8184,18 +8184,24 @@ impl Editor {
     /// server's whole log IS the Console, drained to stderr every tick, and
     /// echoing here as well would print every line a script writes twice.
     pub(crate) fn adopt_script_logs(&mut self, echo: bool) {
+        // On **stderr**: stdout belongs to whatever the caller asked for, and
+        // a verb's `--json` document is on it. Locked ONCE for the drain
+        // rather than per line, and a failed write is dropped: this is the
+        // hottest print in the process — a thousand lines a frame at the
+        // cap — and the descriptor it writes to is whatever launched the
+        // editor, which may have gone away.
+        use std::io::Write as _;
+        let mut err = echo.then(|| std::io::stderr().lock());
         // An asset reference that tried to leave the project, said once.
         for msg in crate::project::take_refused_refs() {
-            if echo {
-                eprintln!("[assets] {msg}");
+            if let Some(err) = err.as_mut() {
+                let _ = writeln!(err, "[assets] {msg}");
             }
             self.console.push(floptle_script::LogLevel::Warn, msg, None);
         }
         for l in self.script_host.drain_logs() {
-            // On **stderr**: stdout belongs to whatever the caller asked for,
-            // and a verb's `--json` document is on it.
-            if echo {
-                eprintln!("[lua] {}", l.msg);
+            if let Some(err) = err.as_mut() {
+                let _ = writeln!(err, "[lua] {}", l.msg);
             }
             self.console.push(l.level, l.msg, l.source);
         }
@@ -8214,7 +8220,7 @@ impl Editor {
                     if floptle_vfs::is_dir(&path) {
                         self.open_project(path);
                     } else {
-                        eprintln!("  open project: not a folder: {}", path.display());
+                        floptle_say::say_err!("  open project: not a folder: {}", path.display());
                     }
                 }
                 ProjectAction::Close => self.close_project(),
@@ -8902,7 +8908,7 @@ impl Editor {
             };
             let doc = crate::vfx::starter_effect_doc(key.rsplit('/').next().unwrap_or(&key));
             if let Err(err) = floptle_scene::save_vfx_effect(&doc, &path) {
-                eprintln!("  new effect {key} failed: {err}");
+                floptle_say::say_err!("  new effect {key} failed: {err}");
             } else {
                 self.vfx.rescan(&self.project_root);
                 self.asset_tree = build_assets(&self.project_root);

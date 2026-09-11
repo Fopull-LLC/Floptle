@@ -68,7 +68,7 @@ pub(crate) fn load_game_manifest() -> Option<(GameManifest, PathBuf)> {
     match ron::from_str::<GameManifest>(&text) {
         Ok(m) => Some((m, dir)),
         Err(e) => {
-            eprintln!("floptle-game.ron next to the binary is invalid ({e}); starting as editor");
+            floptle_say::say_err!("floptle-game.ron next to the binary is invalid ({e}); starting as editor");
             None
         }
     }
@@ -1463,11 +1463,11 @@ pub(crate) fn headless_export(
     if platform == SERVER_PLATFORM {
         return match export_server(project, out, title, scene) {
             Ok((msg, _)) => {
-                println!("{msg}");
+                floptle_say::say!("{msg}");
                 0
             }
             Err(e) => {
-                eprintln!("export failed: {e}");
+                floptle_say::say_err!("export failed: {e}");
                 1
             }
         };
@@ -1479,7 +1479,7 @@ pub(crate) fn headless_export(
         match EXPORT_TARGETS.iter().find(|t| t.template_key() == Some(platform)) {
             Some(t) => t,
             None => {
-                eprintln!(
+                floptle_say::say_err!(
                     "unknown platform {platform:?} — expected `host`, {}, or one of: {}",
                     floptle_dist::WEB_PLATFORM,
                     floptle_dist::PLATFORMS.join(", ")
@@ -1492,21 +1492,21 @@ pub(crate) fn headless_export(
         None => match player_beside_editor() {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("export failed: {e}");
+                floptle_say::say_err!("export failed: {e}");
                 return 1;
             }
         },
         Some(_) if cfg!(debug_assertions) && matches!(target.kind, ExportKind::Web) && web_template_from_checkout().is_some() => {
             // See `begin_export`: a debug editor ships the checkout's own build.
-            println!("using the web template tools/web/build.sh built in this checkout");
+            floptle_say::say!("using the web template tools/web/build.sh built in this checkout");
             web_template_from_checkout().expect("checked")
         }
         Some(platform) => {
             let Some(data) = floptle_dist::data_dir() else {
-                eprintln!("export failed: no data directory for the template cache");
+                floptle_say::say_err!("export failed: no data directory for the template cache");
                 return 1;
             };
-            println!("resolving the {} engine template for {version}…", target.label);
+            floptle_say::say!("resolving the {} engine template for {version}…", target.label);
             let (tx, rx) = std::sync::mpsc::channel();
             resolve_template(&version, platform, floptle_dist::DEFAULT_MANIFEST_URL, &data, &tx);
             drop(tx);
@@ -1517,23 +1517,23 @@ pub(crate) fn headless_export(
                     TemplateProgress::Downloading { done, total } => {
                         let pct = (done * 100).checked_div(total).unwrap_or(0);
                         if pct != last_pct && pct % 10 == 0 {
-                            println!("  downloading… {pct}%");
+                            floptle_say::say!("  downloading… {pct}%");
                             last_pct = pct;
                         }
                     }
-                    TemplateProgress::Verifying => println!("  verifying checksum…"),
-                    TemplateProgress::Unpacking => println!("  unpacking…"),
+                    TemplateProgress::Verifying => floptle_say::say!("  verifying checksum…"),
+                    TemplateProgress::Unpacking => floptle_say::say!("  unpacking…"),
                     TemplateProgress::Ready(p) => bin = Some(p),
                     // An unpublished web template has a second source: this
                     // checkout's own build of it.
                     TemplateProgress::Unpublished(e)
                         if matches!(target.kind, ExportKind::Web) && web_template_from_checkout().is_some() =>
                     {
-                        println!("  {e} — using the one tools/web/build.sh built in this checkout");
+                        floptle_say::say!("  {e} — using the one tools/web/build.sh built in this checkout");
                         bin = web_template_from_checkout();
                     }
                     TemplateProgress::Unpublished(e) | TemplateProgress::Failed(e) => {
-                        eprintln!("export failed: {e}");
+                        floptle_say::say_err!("export failed: {e}");
                         return 1;
                     }
                 }
@@ -1541,7 +1541,7 @@ pub(crate) fn headless_export(
             match bin {
                 Some(b) => b,
                 None => {
-                    eprintln!("export failed: the template produced no binary");
+                    floptle_say::say_err!("export failed: the template produced no binary");
                     return 1;
                 }
             }
@@ -1549,11 +1549,11 @@ pub(crate) fn headless_export(
     };
     match target.stamp(project, out, title, &binary) {
         Ok((msg, _)) => {
-            println!("{msg}");
+            floptle_say::say!("{msg}");
             0
         }
         Err(e) => {
-            eprintln!("export failed: {e}");
+            floptle_say::say_err!("export failed: {e}");
             1
         }
     }

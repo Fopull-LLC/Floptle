@@ -199,7 +199,7 @@ impl VfxSystem {
     pub fn save(&mut self, project_root: &Path, key: &str, doc: &VfxEffectDoc) {
         let path = project_root.join(format!("{key}{VFX_EXT}"));
         if let Err(e) = floptle_scene::save_vfx_effect(doc, &path) {
-            eprintln!("  save effect {key} failed: {e}");
+            floptle_say::say_err!("  save effect {key} failed: {e}");
             return;
         }
         match self.effects.iter_mut().find(|(k, _)| k == key) {

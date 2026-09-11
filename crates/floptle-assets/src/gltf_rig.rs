@@ -164,7 +164,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                 .map(|j| match gltf_to_skel.get(&j.index()) {
                     Some(&idx) => idx,
                     None => {
-                        eprintln!(
+                        floptle_say::say_err!(
                             "  [rig] skin joint node {} is outside the default scene — \
                              binding it to the root (deform may look wrong)",
                             j.index()

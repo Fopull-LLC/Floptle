@@ -1129,15 +1129,15 @@ pub(crate) enum Outcome {
 /// from what the binary accepts.
 pub(crate) fn print_help_and_flags() {
     let _ = command().print_long_help();
-    println!("\n\nThe flags this tool has always taken still work:\n");
+    floptle_say::say!("\n\nThe flags this tool has always taken still work:\n");
     let width = VERBS.iter().map(|v| v.legacy.join(", ").len()).max().unwrap_or(0);
     for v in VERBS {
         if v.legacy.is_empty() {
             continue;
         }
-        println!("  {:<width$}  now `floptle {}`", v.legacy.join(", "), v.name);
+        floptle_say::say!("  {:<width$}  now `floptle {}`", v.legacy.join(", "), v.name);
     }
-    println!(
+    floptle_say::say!(
         "\nA `floptle-game.ron` manifest next to the binary implies `play` — that is how an\n\
          exported game runs."
     );
@@ -1314,7 +1314,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let template =
                 text(a, "template").unwrap_or_else(|| crate::templates::EMPTY.to_string());
             if !crate::templates::known(&template) {
-                eprintln!(
+                floptle_say::say_err!(
                     "unknown template \"{template}\" — try one of: {}",
                     crate::templates::names().join(", ")
                 );
@@ -1381,7 +1381,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let scene = text(a, "scene");
             let size = match text(a, "size").as_deref().map(crate::shot::parse_size) {
                 Some(Err(e)) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(s)) => s,
@@ -1395,7 +1395,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             // error naming the flag — the same reason `run` parses its own span.
             let after = match text(a, "after").as_deref().map(crate::shot::parse_after) {
                 Some(Err(e)) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(t)) => Some(t),
@@ -1403,14 +1403,14 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             };
             let seed = match text(a, "seed").as_deref().map(str::parse::<u32>) {
                 Some(Err(_)) => {
-                    eprintln!("--seed wants a whole number");
+                    floptle_say::say_err!("--seed wants a whole number");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(n)) => Some(n),
                 None => None,
             };
             if seed.is_some() && after.is_none() {
-                eprintln!(
+                floptle_say::say_err!(
                     "--seed pins the randomness of a session that is played, and this shot \
                      is of the unplayed scene — add --after, or drop --seed"
                 );
@@ -1433,7 +1433,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let effect = text(a, "effect").expect("required");
             let at = match text(a, "at").as_deref().map(crate::vfx_shot::parse_times) {
                 Some(Err(e)) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(t)) => Some(t),
@@ -1441,12 +1441,12 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             };
             let frames = match text(a, "frames").as_deref().map(str::parse::<usize>) {
                 Some(Ok(0)) => {
-                    eprintln!("--frames 0 asks for no pictures");
+                    floptle_say::say_err!("--frames 0 asks for no pictures");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(n)) => n,
                 Some(Err(_)) => {
-                    eprintln!("--frames wants a whole number of moments");
+                    floptle_say::say_err!("--frames wants a whole number of moments");
                     return Outcome::Exit(2);
                 }
                 // Five: enough to tell a start from a middle from an end with
@@ -1455,7 +1455,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             };
             let size = match text(a, "size").as_deref().map(crate::shot::parse_size) {
                 Some(Err(e)) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(s)) => s,
@@ -1467,7 +1467,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             let background = match text(a, "background").as_deref().map(crate::vfx_shot::parse_color)
             {
                 Some(Err(e)) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(c)) => Some(c),
@@ -1500,12 +1500,12 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 None => None,
                 Some(v) => match v.parse::<u32>() {
                     Ok(0) => {
-                        eprintln!("--frames wants at least one frame");
+                        floptle_say::say_err!("--frames wants at least one frame");
                         return Outcome::Exit(2);
                     }
                     Ok(n) => Some(n),
                     Err(_) => {
-                        eprintln!("--frames wants a whole number of frames, not {v:?}");
+                        floptle_say::say_err!("--frames wants a whole number of frames, not {v:?}");
                         return Outcome::Exit(2);
                     }
                 },
@@ -1517,17 +1517,17 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 Some(v) => match v.parse::<f32>() {
                     Ok(s) if s.is_finite() && s > 0.0 => Some(s),
                     Ok(_) => {
-                        eprintln!("--seconds wants a positive length of time, not {v:?}");
+                        floptle_say::say_err!("--seconds wants a positive length of time, not {v:?}");
                         return Outcome::Exit(2);
                     }
                     Err(_) => {
-                        eprintln!("--seconds wants a number, not {v:?}");
+                        floptle_say::say_err!("--seconds wants a number, not {v:?}");
                         return Outcome::Exit(2);
                     }
                 },
             };
             if frames.is_some() && seconds.is_some() {
-                eprintln!("--frames and --seconds both say how long to run; pick one");
+                floptle_say::say_err!("--frames and --seconds both say how long to run; pick one");
                 return Outcome::Exit(2);
             }
             let span = match (frames, seconds) {
@@ -1543,7 +1543,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 Some(v) => match v.trim().parse::<u32>() {
                     Ok(n) => Some(n),
                     Err(_) => {
-                        eprintln!("--seed wants a whole number from 0 to 4294967295, not {v:?}");
+                        floptle_say::say_err!("--seed wants a whole number from 0 to 4294967295, not {v:?}");
                         return Outcome::Exit(2);
                     }
                 },
@@ -1552,7 +1552,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 && text(a, "ghosts").is_some()
                 && text(a, "join").is_some()
             {
-                eprintln!(
+                floptle_say::say_err!(
                     "--ghosts hosts a session and --join joins somebody else's; a run can do \
                      one or the other"
                 );
@@ -1560,12 +1560,12 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             let ghosts = match text(a, "ghosts").as_deref().map(str::parse::<u32>) {
                 Some(Ok(0)) => {
-                    eprintln!("--ghosts 0 asks for no clients, which is what run does anyway");
+                    floptle_say::say_err!("--ghosts 0 asks for no clients, which is what run does anyway");
                     return Outcome::Exit(2);
                 }
                 Some(Ok(n)) => n,
                 Some(Err(_)) => {
-                    eprintln!("--ghosts wants a whole number of clients");
+                    floptle_say::say_err!("--ghosts wants a whole number of clients");
                     return Outcome::Exit(2);
                 }
                 None => 0,
@@ -1608,7 +1608,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             // "your project is wrong". Asking first is what makes every 2 the
             // server returns afterwards unambiguous.
             if text(a, "port").is_none() && text(a, "relay").is_none() {
-                eprintln!(
+                floptle_say::say_err!(
                     "a dedicated server needs somewhere to listen: --port <n> or --relay <addr>"
                 );
                 return Outcome::Exit(2);
@@ -1623,7 +1623,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                     other => other,
                 }),
                 Err(e) => {
-                    eprintln!("{e}");
+                    floptle_say::say_err!("{e}");
                     Outcome::Exit(2)
                 }
             }
@@ -1657,7 +1657,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
         }
         Some(("version", a)) => {
             if a.get_flag("json") {
-                println!(
+                floptle_say::say!(
                     "{}",
                     serde_json::json!({
                         "engine": floptle_core::ENGINE_NAME,
@@ -1665,7 +1665,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                     })
                 );
             } else {
-                println!("{} {}", floptle_core::ENGINE_NAME, crate::distribution_version());
+                floptle_say::say!("{} {}", floptle_core::ENGINE_NAME, crate::distribution_version());
             }
             Outcome::Exit(0)
         }
@@ -1693,7 +1693,7 @@ fn help_text(verb: Option<&str>) -> Outcome {
     let mut cmd = command();
     let Some(name) = verb else {
         let _ = cmd.print_long_help();
-        println!();
+        floptle_say::say!();
         return Outcome::Exit(0);
     };
     // A nested verb can be asked for either way: `help bake` or `help "bake gi"`.
@@ -1702,22 +1702,22 @@ fn help_text(verb: Option<&str>) -> Outcome {
     // saying nothing at all, which is the one thing a help command must never
     // do.
     let Some(head) = parts.next() else {
-        eprintln!("`{name}` is not a verb name — try `floptle help`");
+        floptle_say::say_err!("`{name}` is not a verb name — try `floptle help`");
         return Outcome::Exit(1);
     };
     let Some(mut sub) = cmd.find_subcommand_mut(head).cloned() else {
-        eprintln!("no such verb: {name} — try `floptle help`");
+        floptle_say::say_err!("no such verb: {name} — try `floptle help`");
         return Outcome::Exit(1);
     };
     for p in parts {
         let Some(next) = sub.find_subcommand_mut(p).cloned() else {
-            eprintln!("no such verb: {name} — try `floptle help`");
+            floptle_say::say_err!("no such verb: {name} — try `floptle help`");
             return Outcome::Exit(1);
         };
         sub = next;
     }
     let _ = sub.print_long_help();
-    println!();
+    floptle_say::say!();
     Outcome::Exit(0)
 }
 
@@ -1762,10 +1762,10 @@ fn verb_json(v: &Verb) -> serde_json::Value {
 fn help_json(verb: Option<&str>) -> Outcome {
     if let Some(name) = verb {
         let Some(v) = VERBS.iter().find(|v| v.name == name) else {
-            eprintln!("no such verb: {name} — try `floptle help --json`");
+            floptle_say::say_err!("no such verb: {name} — try `floptle help --json`");
             return Outcome::Exit(1);
         };
-        println!("{}", serde_json::to_string_pretty(&verb_json(v)).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&verb_json(v)).unwrap_or_default());
         return Outcome::Exit(0);
     }
     let doc = serde_json::json!({
@@ -1773,7 +1773,7 @@ fn help_json(verb: Option<&str>) -> Outcome {
         "version": crate::distribution_version(),
         "verbs": VERBS.iter().map(verb_json).collect::<Vec<_>>(),
     });
-    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     Outcome::Exit(0)
 }
 

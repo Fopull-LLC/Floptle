@@ -470,12 +470,12 @@ impl AnimSystem {
             // key and the rescan picking whichever it read last. Refused here
             // as well as in the UI: a save path that can invent a second source
             // of truth should not depend on a screen being right.
-            eprintln!("  {key} is a sprite animation — edit the .spriteanim.ron file");
+            floptle_say::say_err!("  {key} is a sprite animation — edit the .spriteanim.ron file");
             return;
         }
         let path = project_root.join(format!("{key}{ANIM_CLIP_EXT}"));
         if let Err(e) = floptle_scene::save_anim_clip(doc, &path) {
-            eprintln!("  save clip {key} failed: {e}");
+            floptle_say::say_err!("  save clip {key} failed: {e}");
             return;
         }
         self.register_clip(key, doc);
@@ -507,7 +507,7 @@ impl AnimSystem {
     pub fn save_controller(&mut self, project_root: &Path, key: &str, doc: &AnimControllerDoc) {
         let path = project_root.join(format!("{key}{ANIM_CTL_EXT}"));
         if let Err(e) = floptle_scene::save_anim_controller(doc, &path) {
-            eprintln!("  save controller {key} failed: {e}");
+            floptle_say::say_err!("  save controller {key} failed: {e}");
             return;
         }
         match self.controllers.iter_mut().find(|(k, _)| k == key) {
@@ -1196,7 +1196,7 @@ fn diagnose_anim(
             );
             // Also to stdout so it's visible when launched from a terminal, not
             // only in the in-editor Console panel.
-            eprintln!("[anim-diag] {msg}");
+            floptle_say::say_err!("[anim-diag] {msg}");
             system.warnings.push(msg);
         }
     }
