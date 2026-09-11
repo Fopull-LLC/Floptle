@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.90.0 — "Say Who You Are".** A relay can be handed a real certificate and
+picks up its renewal without ending a lobby: `floptle-relay --tls-cert
+--tls-key`, the files watched, new connections on the new chain within ten
+seconds and every live connection untouched; `floptle-relay-bench --verify`
+checks it from outside. A dedicated server that restarts onto a new build keeps
+its lobby code — the relay no longer ends the reclaimed lobby, in the same
+second, for having sat empty. The fleet agent and the managed relay report the
+version compiled into them, the agent forwards which key a running server was
+started with, and the game key leaves the world-readable unit file for a
+root-only one. `floptle export … server --label` names a bundle, and the
+manifest says when it was exported rather than when it was uploaded. Nothing
+changes how you write a game.
+
 **v0.89.0 — "Stay In Your Lane".** A script's paths stay inside its project: an
 absolute path or a `..` that would leave it resolves to nothing, and the Console
 says which rule refused it. A loop without an exit stops the script rather than
