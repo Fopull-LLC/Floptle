@@ -665,8 +665,10 @@ self-signed one, and **watches them** — a renewal written to the same paths
 (which is what certbot does) is presented to new connections within ten seconds,
 and no connection already up is touched, so a certificate rolling over ends no
 lobby. A renewal that will not load is said once on the relay's log and the
-previous certificate stays. `floptle-relay-bench --verify` checks the result
-from outside (see [Measuring a relay](relay-bench.md)).
+previous certificate stays. `floptle-relay-bench --relay <name:port> --verify`
+checks the result from outside, with the same handshake a player's build runs:
+it prints the fingerprint of the certificate the relay actually presents and
+whether it verifies for the name.
 
 ### What it costs you if it is down
 
