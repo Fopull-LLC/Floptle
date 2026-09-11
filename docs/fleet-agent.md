@@ -29,8 +29,13 @@ One box runs one agent. The agent runs one `floptle-server` per deployment.
    not, and leaves alone anything already correct.
 4. **Says what happened.** `POST /status` with each deployment's state, player
    count, uptime, restarts, p95 tick time, the lobby code, **where it is
-   reachable** (the port it bound, or the relay it registered with) and its last
-   200 journal lines.
+   reachable** (the port it bound, or the relay it registered with), which key
+   it was started with (the first twelve characters, never the key) and its
+   last 200 journal lines — and, on the box object, **the agent's own version**,
+   compiled into the binary rather than read from anywhere it could be stale.
+   The relay reports its version the same way on its usage report; the two are
+   different binaries on different machines, and the control plane keeps them
+   apart.
 
    Everything but the state and the journal lines comes from the server's own
    `--status-file`, and that matters: the port a control plane *allocated* and
@@ -147,6 +152,18 @@ status file and the portal would show zeros with nothing in the journal to say
 why. The directory is the server's alone (`0750`, and the process runs with a
 `0077` umask): a box hosts more than one developer's servers, and one server's
 status — its lobby code, the prefix of its key — is not another's to read.
+
+**The game key is not in the unit.** A unit under `/etc/systemd/system` is
+world-readable, as units are, so the key lives in a file of its own under
+`--keys` (default `/etc/floptle/keys`, one `0600 root` file per deployment,
+the directory `0700`) that the unit names with `EnvironmentFile=`. systemd
+reads that file as the manager before the server's own user exists, so the
+server never opens it and no other user can. A rotated key changes that file
+and not the unit, and the agent restarts the server for it all the same; a
+deployment that leaves `/desired` takes its key file with it. Check it on the
+box the way it was found: `sudo -u nobody cat /etc/floptle/keys/d_1.env`
+should be refused, and `systemctl show floptle-d-d_1 -p Environment` should
+not print the key.
 
 **The unit denies the process link-local addresses** (`IPAddressDeny=`), which
 is where a cloud box's instance-metadata service answers. A game server has no

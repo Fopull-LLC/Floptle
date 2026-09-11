@@ -95,23 +95,12 @@ impl Agent {
                     // developer is looking at a page that says "starting".
                     bundle::log_line(&format!("deployment {}: {e}", d.deployment_id));
                     self.seen.insert(d.deployment_id.clone(), State::Failed);
-                    statuses.push(DeploymentStatus {
-                        deployment_id: d.deployment_id.clone(),
-                        state: State::Failed.as_str(),
-                        peers: 0,
-                        uptime_s: 0,
-                        restarts: *self.restarts.get(&d.deployment_id).unwrap_or(&0),
-                        tick_p95_ms: None,
-                        max_players: None,
-                        // A deployment that failed to start has no cgroup to
-                        // ask, which is not the same as having used no memory.
-                        mem_mb: None,
-                        mem_peak_mb: None,
-                        last_lines: vec![e],
-                        lobby_code: None,
-                        port: None,
-                        relay: None,
-                    });
+                    statuses.push(DeploymentStatus::unmeasured(
+                        d.deployment_id.clone(),
+                        State::Failed,
+                        *self.restarts.get(&d.deployment_id).unwrap_or(&0),
+                        vec![e],
+                    ));
                 }
             }
         }
@@ -132,27 +121,21 @@ impl Agent {
             if !args.dry_run {
                 let _ = host.run("systemctl", &["disable", "--now", &name]);
                 let _ = std::fs::remove_file(args.units.join(&name));
+                // The key goes with the unit: a credential for a deployment
+                // that no longer exists has no reason to stay on the box.
+                let _ = std::fs::remove_file(args.key_file(&id));
             }
             // Reported terminal exactly once, then forgotten. This is the
             // report that releases the port.
             if self.seen.remove(&id).is_some_and(|s| !s.is_terminal()) || !id.is_empty() {
-                statuses.push(DeploymentStatus {
-                    deployment_id: id,
-                    state: State::Stopped.as_str(),
-                    peers: 0,
-                    uptime_s: 0,
-                    restarts: 0,
-                    tick_p95_ms: None,
-                    max_players: None,
-                    // Its cgroup went away with the unit; what it peaked at is
-                    // gone rather than zero.
-                    mem_mb: None,
-                    mem_peak_mb: None,
-                    last_lines: vec!["stopped by the control plane".into()],
-                    lobby_code: None,
-                    port: None,
-                    relay: None,
-                });
+                // Its cgroup went away with the unit; what it peaked at is
+                // gone rather than zero.
+                statuses.push(DeploymentStatus::unmeasured(
+                    id,
+                    State::Stopped,
+                    0,
+                    vec!["stopped by the control plane".into()],
+                ));
             }
             if !args.dry_run {
                 let _ = host.run("systemctl", &["daemon-reload"]);
@@ -234,6 +217,7 @@ impl Agent {
                 d.deployment_id
             ));
         }
+        let key_file = d.game_key.as_ref().map(|_| args.key_file(&d.deployment_id));
         let plan = unit::UnitPlan {
             dep: &d,
             server_bin,
@@ -242,6 +226,7 @@ impl Agent {
             scene,
             relay: args.relay.clone(),
             runtime_dir,
+            key_file: key_file.clone(),
         };
         let text = unit::render(&plan);
         let name = unit::unit_name(&d.deployment_id);
@@ -249,7 +234,19 @@ impl Agent {
 
         // Rewrite only on a real change: `daemon-reload` and a restart on every
         // ten-second poll would bounce every server on the box, forever.
-        let changed = std::fs::read_to_string(&path).map(|old| old != text).unwrap_or(true);
+        //
+        // ⚠ The key file counts as part of the unit (`floptle/0229`): it is
+        // read at start, so a rotated key that changed nothing in the unit
+        // text would otherwise leave the old key running until something else
+        // restarted the server — and the rotation's grace window would run
+        // out on a server that looked deployed.
+        let key_text = d.game_key.as_ref().map(|k| format!("FLOPTLE_GAME_KEY={}\n", unit::systemd_escape(k)));
+        let key_changed = match (&key_file, &key_text) {
+            (Some(f), Some(t)) => std::fs::read_to_string(f).map(|old| old != *t).unwrap_or(true),
+            _ => false,
+        };
+        let changed = key_changed
+            || std::fs::read_to_string(&path).map(|old| old != text).unwrap_or(true);
         if args.dry_run {
             bundle::log_line(&format!(
                 "would {} {name}",
@@ -258,6 +255,11 @@ impl Agent {
             return Ok(self.status_of(args, host, &d, State::Starting));
         }
         if changed {
+            // The key first, so a unit that names the file never starts
+            // before the file exists.
+            if let (Some(f), Some(t)) = (&key_file, &key_text) {
+                write_secret(f, t)?;
+            }
             std::fs::create_dir_all(&args.units).map_err(|e| format!("create unit dir: {e}"))?;
             std::fs::write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
             host.run("systemctl", &["daemon-reload"])?;
@@ -312,22 +314,34 @@ impl Agent {
             State::Running | State::Starting => unit_memory(host, &unit::unit_name(&id)),
             State::Stopped | State::Failed => (None, None),
         };
-        DeploymentStatus {
-            deployment_id: id.clone(),
-            state: state.as_str(),
-            peers: s.peers,
-            uptime_s: s.uptime_s,
-            restarts: *self.restarts.get(&id).unwrap_or(&0),
-            tick_p95_ms: s.tick_p95_ms,
-            max_players: s.max_players,
-            mem_mb,
-            mem_peak_mb,
-            last_lines: journal_tail(host, &unit::unit_name(&id)),
-            lobby_code: s.lobby_code,
-            port: s.port,
-            relay: s.relay,
-        }
+        let restarts = *self.restarts.get(&id).unwrap_or(&0);
+        let last_lines = journal_tail(host, &unit::unit_name(&id));
+        DeploymentStatus::from_server(id, state, s, restarts, (mem_mb, mem_peak_mb), last_lines)
     }
+}
+
+/// Write a file only its owner can read (`0600`), whatever the umask and
+/// whatever mode it had before — a key file that was ever wider than this is
+/// narrowed, not left. The directory is created `0700` for the same reason.
+fn write_secret(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    // `mode` applies only at creation; an existing file keeps what it had.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
 }
 
 /// What systemd says one unit is doing, in the control plane's words.
@@ -422,7 +436,14 @@ pub fn box_stats(_host: &mut dyn Host) -> BoxStats {
                 .ok()
         })
         .map(|kb| kb / 1024);
-    BoxStats { host, load1, mem_free_mb, disk_free_mb: disk_free_mb("/var") }
+    BoxStats {
+        host,
+        // Compiled in: the one number this binary cannot be wrong about.
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        load1,
+        mem_free_mb,
+        disk_free_mb: disk_free_mb("/var"),
+    }
 }
 
 /// Free megabytes on the filesystem holding `path`, via `statvfs`, or `None`
@@ -522,6 +543,7 @@ mod tests {
         Args {
             root: dir.join("lib"),
             units: dir.join("units"),
+            keys: dir.join("keys"),
             run: dir.join("run"),
             ..Args::default()
         }
@@ -692,6 +714,61 @@ mod tests {
             "the unit was rewritten and the old process was left running: {:?}",
             h.calls
         );
+    }
+
+    /// ⚠ **The game key is on disk for root alone, and a rotated key restarts
+    /// the server** (`floptle/0229`).
+    ///
+    /// Found on `us-east-1`: the unit file carried `Environment=FLOPTLE_GAME_KEY=`
+    /// at `0644`, so `sudo -u nobody cat` read another developer's credential
+    /// — the very thing 0229 tightened the runtime directory against. The key
+    /// now lives in a `0600` file the unit names with `EnvironmentFile=`. And
+    /// because that file is read at start, a rotation that changes only the
+    /// key must still restart the unit, or the old key runs until something
+    /// else bounces it.
+    #[test]
+    fn the_game_key_is_a_root_only_file_and_a_rotated_key_restarts_the_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("keyfile");
+        let a = args_in(&dir);
+        seed(&a, "aa", "0.85.0-rc6", "scenes/lobby.ron");
+        let mut h = FakeHost { active: "active".into(), ..Default::default() };
+        let mut agent = Agent::default();
+        let keyed = Deployment { game_key: Some("fk_live_SECRETSECRET".into()), ..dep("d_1") };
+
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![keyed.clone()] }).expect("first cycle");
+        let unit = std::fs::read_to_string(a.units.join(unit::unit_name("d_1"))).expect("a unit");
+        assert!(!unit.contains("fk_live_SECRETSECRET"), "the key is in the world-readable unit:\n{unit}");
+        let key_path = a.key_file("d_1");
+        assert!(unit.contains(&format!("EnvironmentFile={}", key_path.display())), "{unit}");
+        let key = std::fs::read_to_string(&key_path).expect("the key file was written");
+        assert_eq!(key, "FLOPTLE_GAME_KEY=fk_live_SECRETSECRET\n");
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the key file is readable by others: {mode:o}");
+        let dir_mode = std::fs::metadata(&a.keys).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "the keys directory is listable by others: {dir_mode:o}");
+
+        // Unchanged: nothing bounces.
+        h.calls.clear();
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![keyed] }).expect("second cycle");
+        assert!(!h.calls.iter().any(|c| c.contains("restart")), "bounced for nothing: {:?}", h.calls);
+
+        // Rotated: the unit text is identical, the key is not — restart.
+        h.calls.clear();
+        let rotated = Deployment { game_key: Some("fk_live_ROTATEDROTATED".into()), ..dep("d_1") };
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![rotated] }).expect("third cycle");
+        assert_eq!(std::fs::read_to_string(&key_path).unwrap(), "FLOPTLE_GAME_KEY=fk_live_ROTATEDROTATED\n");
+        assert!(
+            h.calls.iter().any(|c| c == "systemctl restart floptle-d-d_1.service"),
+            "the key changed on disk and the old one kept running: {:?}",
+            h.calls
+        );
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the rewrite widened the file: {mode:o}");
+
+        // Gone from /desired: the key goes with the unit.
+        agent.cycle(&a, &mut h, &Desired { deployments: vec![] }).expect("fourth cycle");
+        assert!(!key_path.exists(), "a credential for a deployment that no longer exists stayed on the box");
     }
 
     /// A deployment that is already correct is left alone.

@@ -232,6 +232,13 @@ impl Report {
 #[derive(Debug, Default, Serialize)]
 pub struct BoxStats {
     pub host: String,
+    /// **This agent's own version** (`floptle/0232`), the string compiled into
+    /// the binary — never read from a file, a unit or a row, so an upgrade
+    /// cannot leave it saying the old number. The control plane had one
+    /// version field, hand-maintained, and it read `0.86.3` for a box running
+    /// `0.89.0`; a new box in the region would have been provisioned to
+    /// match it.
+    pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load1: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +328,57 @@ pub struct DeploymentStatus {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// **Which key the running server was started with** — the first twelve
+    /// characters, never the key (`floptle/0229`). Shown beside the rotate
+    /// control, so a developer mid-rotation can see what the process that
+    /// is running presented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_key_prefix: Option<String>,
+}
+
+impl DeploymentStatus {
+    /// **The one place the status file becomes the wire** (`floptle/0229`).
+    ///
+    /// The server writes a field; the agent parses it; the control plane
+    /// stores null — four times in one direction (`lobby_code` 0200,
+    /// `port`/`relay` 0212, `max_players` 0221, `game_key_prefix` 0229),
+    /// each time because the copy from [`ServerStatus`] to this struct was
+    /// hand-written at the call site and the new field was not in it. Every
+    /// field the file carries is carried here, in one function the report
+    /// and the tests both go through; `every_status_file_field_reaches_the_wire`
+    /// holds it to that.
+    pub fn from_server(
+        deployment_id: String,
+        state: State,
+        s: ServerStatus,
+        restarts: u32,
+        (mem_mb, mem_peak_mb): (Option<u64>, Option<u64>),
+        last_lines: Vec<String>,
+    ) -> Self {
+        Self {
+            deployment_id,
+            state: state.as_str(),
+            peers: s.peers,
+            uptime_s: s.uptime_s,
+            restarts,
+            tick_p95_ms: s.tick_p95_ms,
+            max_players: s.max_players,
+            mem_mb,
+            mem_peak_mb,
+            last_lines,
+            lobby_code: s.lobby_code,
+            port: s.port,
+            relay: s.relay,
+            game_key_prefix: s.game_key_prefix,
+        }
+    }
+
+    /// A deployment the agent could not start, or has stopped: nothing
+    /// measured — no cgroup to ask is not the same as no memory used — and
+    /// the reason, if any, in `last_lines`.
+    pub fn unmeasured(deployment_id: String, state: State, restarts: u32, last_lines: Vec<String>) -> Self {
+        Self::from_server(deployment_id, state, ServerStatus::default(), restarts, (None, None), last_lines)
+    }
 }
 
 /// What `floptle-server --status-file` writes, as much of it as the agent uses.
@@ -350,6 +408,10 @@ pub struct ServerStatus {
     /// The relay it registered with, or `None` when it listens directly.
     #[serde(default)]
     pub relay: Option<String>,
+    /// The first twelve characters of the key the server was started with
+    /// (`floptle/0229`). The whole key is never in the file.
+    #[serde(default)]
+    pub game_key_prefix: Option<String>,
 }
 
 #[cfg(test)]
@@ -443,6 +505,7 @@ mod tests {
         let r = Report {
             box_: BoxStats {
                 host: "us-east-1".into(),
+                version: "0.89.1".into(),
                 load1: Some(0.4),
                 mem_free_mb: Some(9000),
                 disk_free_mb: Some(40000),
@@ -461,10 +524,13 @@ mod tests {
                 lobby_code: Some("UQK7RM".into()),
                 port: None,
                 relay: Some("us-east.relay.fopull.com:7788".into()),
+                game_key_prefix: Some("fk_live_432N".into()),
             }],
         };
         let v = r.to_json();
         assert_eq!(v["box"]["host"], "us-east-1");
+        assert_eq!(v["box"]["version"], "0.89.1", "the box names its own version (0232)");
+        assert_eq!(v["deployments"][0]["game_key_prefix"], "fk_live_432N");
         assert_eq!(v["deployments"][0]["state"], "running");
         assert_eq!(v["deployments"][0]["peers"], 3);
         assert_eq!(v["deployments"][0]["lobby_code"], "UQK7RM");
@@ -504,9 +570,75 @@ mod tests {
                 lobby_code: s.lobby_code.clone(),
                 port: None,
                 relay: None,
+                game_key_prefix: None,
             }],
         };
         assert_eq!(r.to_json()["deployments"][0]["max_players"], 8);
+    }
+
+    /// ⚠ **Every field the server writes reaches the wire, or is named here as
+    /// deliberately left behind** (`floptle/0229`, the fourth time). The file
+    /// below is what `dedicated.rs::status_document` writes on `us-east-1`;
+    /// the test runs it through the SAME function the agent's report does, so
+    /// a field the agent parses and then forgets to copy fails here — which
+    /// the hand-built `DeploymentStatus` literals above cannot catch, because
+    /// they copy by hand too.
+    #[test]
+    fn every_status_file_field_reaches_the_wire() {
+        // Values chosen so none is a default.
+        let file = r#"{
+            "peers": 3, "max_players": 8, "uptime_s": 8812, "ticks": 528720, "tick_hz": 60,
+            "scene": "scenes/lobby.ron", "project": "assets",
+            "game_key_prefix": "fk_live_432N", "lobby_code": "UCELXG",
+            "port": 30017, "relay": "us-east.relay.fopull.com:7788", "tick_p95_ms": 4.1
+        }"#;
+        let keys: Vec<String> = serde_json::from_str::<serde_json::Value>(file)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert!(keys.len() >= 12, "the fixture stopped looking like the file: {keys:?}");
+        // What the wire does not carry, and why — a field lands here only with
+        // a reason the control plane would agree with.
+        let left_behind = [
+            ("ticks", "a counter with no reader; uptime_s and tick_hz say the same"),
+            ("tick_hz", "the deployment's own args set it"),
+            ("scene", "the deployment's own args set it"),
+            ("project", "always the bundle's `assets`"),
+        ];
+        let s: ServerStatus = serde_json::from_str(file).expect("the live status file");
+        let v = Report {
+            box_: BoxStats::default(),
+            deployments: vec![DeploymentStatus::from_server(
+                "d_1".into(),
+                State::Running,
+                s,
+                0,
+                (None, None),
+                vec![],
+            )],
+        }
+        .to_json();
+        let d = v["deployments"][0].as_object().unwrap();
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|k| !left_behind.iter().any(|(f, _)| f == k))
+            .filter(|k| !d.contains_key(k.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the server writes {missing:?} and the agent does not forward it — the fifth time \
+             in one direction. Add it to ServerStatus AND DeploymentStatus::from_server, or to \
+             left_behind with a reason: {v}"
+        );
+        assert_eq!(d["game_key_prefix"], "fk_live_432N");
+        assert_eq!(d["max_players"], 8);
+        assert_eq!(d["lobby_code"], "UCELXG");
+        assert_eq!(d["port"], 30017);
+        assert_eq!(d["relay"], "us-east.relay.fopull.com:7788");
+        assert!((d["tick_p95_ms"].as_f64().unwrap() - 4.1).abs() < 1e-3, "{v}"); // f32 on the wire
     }
 
     /// ⚠ **A server that reports no ceiling sends NO field, not `0`.**
@@ -534,6 +666,7 @@ mod tests {
                 lobby_code: None,
                 port: None,
                 relay: None,
+                game_key_prefix: None,
             }],
         };
         let v = r.to_json();
@@ -588,6 +721,7 @@ mod tests {
                 lobby_code: None,
                 port: None,
                 relay: None,
+                game_key_prefix: None,
             }],
         };
         let v = r.to_json();

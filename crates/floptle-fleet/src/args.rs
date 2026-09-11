@@ -22,6 +22,10 @@ pub struct Args {
     pub root: PathBuf,
     /// Where unit files are written.
     pub units: PathBuf,
+    /// Where each deployment's game key is written, `0600 root`, for the
+    /// unit's `EnvironmentFile=` (`floptle/0229`). The unit itself is
+    /// world-readable, as units are, and carries no secret.
+    pub keys: PathBuf,
     /// The directory under `/run` that holds one runtime directory per
     /// deployment, each created by systemd and owned by that server's own
     /// dynamic user — see [`Args::status_file`].
@@ -45,6 +49,7 @@ impl Default for Args {
             token: None,
             root: PathBuf::from("/var/lib/floptle-fleet"),
             units: PathBuf::from("/etc/systemd/system"),
+            keys: PathBuf::from("/etc/floptle/keys"),
             run: PathBuf::from("/run/floptle-d"),
             interval: 10,
             relay: None,
@@ -75,6 +80,10 @@ FLAGS
                         /var/lib/floptle-fleet.
   --units <dir>         where unit files are written. Default
                         /etc/systemd/system.
+  --keys <dir>          where each server's game key is written, one 0600
+                        root-only file per deployment that its unit reads with
+                        EnvironmentFile=. The unit carries no secret. Default
+                        /etc/floptle/keys.
   --run <dir>           parent of each server's runtime directory, which
                         systemd creates for that server's own user; the status
                         file is <dir>/<deployment>/status.json. Must be under
@@ -133,6 +142,10 @@ an endpoint that will refuse it every ten seconds forever.
                     a.units = PathBuf::from(val()?);
                     i += 1;
                 }
+                "--keys" => {
+                    a.keys = PathBuf::from(val()?);
+                    i += 1;
+                }
                 "--run" => {
                     a.run = PathBuf::from(val()?);
                     i += 1;
@@ -171,6 +184,11 @@ an endpoint that will refuse it every ten seconds forever.
     /// server's user.
     pub fn status_file(&self, deployment_id: &str) -> PathBuf {
         self.run.join(crate::unit::sanitize(deployment_id)).join("status.json")
+    }
+
+    /// The `EnvironmentFile=` holding one deployment's game key.
+    pub fn key_file(&self, deployment_id: &str) -> PathBuf {
+        self.keys.join(format!("{}.env", crate::unit::sanitize(deployment_id)))
     }
 
     /// The `RuntimeDirectory=` a deployment's unit declares, relative to
