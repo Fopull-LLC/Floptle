@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use floptle_net::{HostAdmission, JoinAdmission, RelayPolicy};
 
 use crate::boxstats::{self, RelayBox};
-use crate::control::{ControlError, ControlPlane, KeyRow, KeyState, KeyTable, UsageSample,
+use crate::control::{ControlError, ControlPlane, HostAddress, KeyRow, KeyState, KeyTable, UsageSample,
                      FREE_TIER_CCU};
 
 /// How often the key snapshot refreshes. Revocation propagates within this,
@@ -167,6 +167,13 @@ pub struct CloudPolicy {
     /// and reporting them here would tell a developer they are outgrowing a
     /// plan when somebody mistyped six characters.
     refused: HashMap<String, u32>,
+    /// **Where each live lobby's host is**, by code (`floptle/0228`). Reported
+    /// per key as `hosts`, which partitions the sample's `lobbies` by
+    /// address — so "is my key being used by someone who is not me" has an
+    /// answer, and "three lobbies from one address" is a number the control
+    /// plane can alert on before anyone decides whether to refuse it.
+    /// Updated when a host comes back from a different address.
+    host_of: HashMap<String, std::net::IpAddr>,
     /// The key a lobby was opened with, kept from when it CLOSES until the
     /// next usage flush.
     ///
@@ -243,6 +250,7 @@ impl CloudPolicy {
             traffic: HashMap::new(),
             closed_keys: HashMap::new(),
             refused: HashMap::new(),
+            host_of: HashMap::new(),
             bytes_total: (0, 0),
             at_cap: HashSet::new(),
             host_notices: Vec::new(),
@@ -715,8 +723,11 @@ impl RelayPolicy for CloudPolicy {
         self.say(format!("lobby {code}: host connection lost — holding the lobby for its return"));
     }
 
-    fn lobby_host_returned(&mut self, code: &str) {
+    fn lobby_host_returned(&mut self, code: &str, from: Option<std::net::IpAddr>) {
         self.say(format!("lobby {code}: host is back, players kept"));
+        if let Some(a) = from {
+            self.host_of.insert(code.to_string(), a);
+        }
     }
 
     fn lobby_ended(&mut self, code: &str, why: floptle_net::LobbyEnd) {
@@ -733,13 +744,21 @@ impl RelayPolicy for CloudPolicy {
         *self.orphaned.entry(code.to_string()).or_insert(0) += bytes;
     }
 
-    fn lobby_opened(&mut self, code: &str, key: Option<&str>) {
+    fn lobby_opened(&mut self, code: &str, key: Option<&str>, from: Option<std::net::IpAddr>) {
         self.say(format!("lobby {code}: open"));
         // It woke up. The next joiner asks the relay, not the control plane.
         self.waking.remove(code);
         self.live.insert(code.to_string(), 0);
         if let Some(k) = key {
             self.of_lobby.insert(code.to_string(), k.to_string());
+        }
+        match from {
+            Some(a) => {
+                self.host_of.insert(code.to_string(), a);
+            }
+            None => {
+                self.host_of.remove(code);
+            }
         }
     }
 
@@ -750,6 +769,7 @@ impl RelayPolicy for CloudPolicy {
     fn lobby_closed(&mut self, code: &str) {
         self.live.remove(code);
         self.dedicated.remove(code);
+        self.host_of.remove(code);
         // Remembered until the next flush so this lobby's bytes still find
         // their key — see `closed_keys`.
         if let Some(key) = self.of_lobby.remove(code) {
@@ -813,7 +833,13 @@ impl RelayPolicy for CloudPolicy {
             // One POST for the whole region, built from the running counts —
             // never one per lobby event.
             let mut by_key: HashMap<String, (u32, u32)> = HashMap::new();
+            // The same live lobbies, by the address their host is at — so
+            // `hosts` always sums to `lobbies` and the two cannot disagree.
+            let mut hosts_by_key: HashMap<String, HashMap<std::net::IpAddr, u32>> = HashMap::new();
             for (code, key) in &self.of_lobby {
+                if let Some(a) = self.host_of.get(code) {
+                    *hosts_by_key.entry(key.clone()).or_default().entry(*a).or_insert(0) += 1;
+                }
                 let e = by_key.entry(key.clone()).or_insert((0, 0));
                 // **Clients, plus the host only when the host is a person.**
                 // A listen host is playing and counts; a dedicated server is a
@@ -880,6 +906,15 @@ impl RelayPolicy for CloudPolicy {
                     let (bytes_in, bytes_out) = bytes.get(&key).copied().unwrap_or((0, 0));
                     let refused_joins = refused.remove(&key).unwrap_or(0);
                     let orphan_bytes = orphan_by_key.remove(&key).unwrap_or(0);
+                    let mut hosts: Vec<HostAddress> = hosts_by_key
+                        .remove(&key)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(address, lobbies)| HostAddress { address, lobbies })
+                        .collect();
+                    // Busiest first, then by address: a stable order for a
+                    // page and for a test.
+                    hosts.sort_by(|a, b| b.lobbies.cmp(&a.lobbies).then(a.address.cmp(&b.address)));
                     UsageSample {
                         key,
                         ccu,
@@ -888,6 +923,7 @@ impl RelayPolicy for CloudPolicy {
                         bytes_out,
                         refused_joins,
                         orphan_bytes,
+                        hosts,
                     }
                 })
                 .collect();
@@ -1133,7 +1169,7 @@ mod tests {
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.get(KEY).is_some()), "the snapshot never landed");
         assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
-        p.lobby_opened("UABCDE", Some(KEY));
+        p.lobby_opened("UABCDE", Some(KEY), Some("203.0.113.5".parse().unwrap()));
         for _ in 0..already {
             assert_eq!(p.admit_join("UABCDE"), JoinAdmission::Allow);
             p.peer_joined("UABCDE");
@@ -1168,9 +1204,9 @@ mod tests {
         }
         assert_eq!(p.admit_host(Some(KEY), Some("b_good")), HostAdmission::Allow { prefix: Some('U') });
         // Two lobbies open; the third is refused with the count.
-        p.lobby_opened("UAAAAA", Some(KEY));
+        p.lobby_opened("UAAAAA", Some(KEY), None);
         assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
-        p.lobby_opened("UBBBBB", Some(KEY));
+        p.lobby_opened("UBBBBB", Some(KEY), None);
         match p.admit_host(Some(KEY), None) {
             HostAdmission::Refuse { reason } => assert!(reason.contains("2 lobbies open"), "{reason}"),
             other => panic!("a third lobby was allowed past the ceiling: {other:?}"),
@@ -1371,7 +1407,7 @@ mod tests {
     fn the_relay_reports_its_own_saturation_alongside_the_usage() {
         let fake = Arc::new(Fake::default());
         let mut p = policy(fake.clone());
-        p.lobby_opened("UABCDE", Some(KEY));
+        p.lobby_opened("UABCDE", Some(KEY), None);
         p.peer_joined("UABCDE");
         p.peer_joined("UABCDE");
         // 1 MB out, 100 KB in — a relay multiplies traffic, so egress is the
@@ -1405,7 +1441,7 @@ mod tests {
     fn a_quiet_window_after_a_busy_one_reports_quiet() {
         let fake = Arc::new(Fake::default());
         let mut p = policy(fake.clone());
-        p.lobby_opened("UABCDE", Some(KEY));
+        p.lobby_opened("UABCDE", Some(KEY), None);
         p.forwarded("UABCDE", 100_000, 1_000_000);
         let busy = flush_box(&mut p, &fake).egress_bps.expect("egress");
         assert!(busy > 0);
@@ -1528,6 +1564,48 @@ mod tests {
         assert_eq!(row.bytes_out, 1500, "…and only what left");
         assert_ne!(row.bytes_in, row.bytes_out, "the two are not the same number");
         assert_eq!(row.ccu, 1, "the occupancy is still there");
+    }
+
+    /// ⚠ **A sample says which addresses a key's lobbies are hosted from, and
+    /// the breakdown sums to the lobby count** (`floptle/0228`). This is the
+    /// field 0228's first step — count and show, refuse nothing — cannot
+    /// start without. A host that comes back from a different address after
+    /// a blip is counted where it is now.
+    #[test]
+    fn a_usage_sample_partitions_a_keys_lobbies_by_host_address() {
+        let fake = Arc::new(Fake::default());
+        let a: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+        let b: std::net::IpAddr = "198.51.100.9".parse().unwrap();
+        let mut p = lobby_with(&fake, 20, 0); // UABCDE from 203.0.113.5
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
+        p.lobby_opened("UBBBBB", Some(KEY), Some(a));
+        assert_eq!(p.admit_host(Some(KEY), None), HostAdmission::Allow { prefix: Some('U') });
+        p.lobby_opened("UCCCCC", Some(KEY), Some(b));
+
+        let s = flush_usage(&mut p, &fake);
+        let row = s.iter().find(|s| s.key == KEY).expect("a row for the key");
+        assert_eq!(row.lobbies, 3);
+        assert_eq!(
+            row.hosts,
+            vec![HostAddress { address: a, lobbies: 2 }, HostAddress { address: b, lobbies: 1 }],
+            "two from one address, one from another, busiest first"
+        );
+
+        // The host of UCCCCC blips and comes back from somewhere else; one
+        // lobby closes. The next sample says where things are NOW.
+        p.lobby_host_lost("UCCCCC");
+        p.lobby_host_returned("UCCCCC", Some(a));
+        p.lobby_closed("UBBBBB");
+        let s = flush_usage(&mut p, &fake);
+        let row = s.iter().find(|s| s.key == KEY).expect("a row for the key");
+        assert_eq!(row.lobbies, 2);
+        assert_eq!(row.hosts, vec![HostAddress { address: a, lobbies: 2 }]);
+        let total: u32 = row.hosts.iter().map(|h| h.lobbies).sum();
+        assert_eq!(total, row.lobbies, "hosts must partition lobbies");
+        // A closed lobby's address is forgotten — a relay that runs for a
+        // month opens a great many lobbies, and a map that only grows is a
+        // leak with a six-character key.
+        assert_eq!(p.host_of.len(), 2, "a closed lobby's address is still held: {:?}", p.host_of);
     }
 
     /// A lobby that filled up and emptied again inside one interval is the
@@ -2057,7 +2135,7 @@ mod tests {
         });
         let mut p = policy(fake.clone());
         assert!(settle(&mut p, |p| p.keys.len() == 1));
-        p.lobby_opened("UABCDE", Some(KEY));
+        p.lobby_opened("UABCDE", Some(KEY), None);
 
         // A hundred lobby events, and the clock has not moved on.
         for _ in 0..100 {
