@@ -1456,6 +1456,7 @@ fn web_template_from_checkout() -> Option<PathBuf> {
 /// Now, as `2026-09-11T14:03:27Z` — RFC 3339, UTC, whole seconds. Hand-rolled
 /// (Howard Hinnant's civil-from-days) because nothing in the workspace formats
 /// a date and a calendar dependency for one line is not worth its build.
+#[cfg(feature = "editor-ui")]
 pub(crate) fn rfc3339_utc_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1464,6 +1465,7 @@ pub(crate) fn rfc3339_utc_now() -> String {
     rfc3339_utc(secs)
 }
 
+#[cfg(feature = "editor-ui")]
 pub(crate) fn rfc3339_utc(unix_secs: u64) -> String {
     let days = (unix_secs / 86_400) as i64;
     let rem = unix_secs % 86_400;
