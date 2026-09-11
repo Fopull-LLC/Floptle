@@ -36,5 +36,8 @@ floptle-audio = { path = "../floptle-audio" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# The public roots a MANAGED relay's certificate is checked against — see
+# `quic::ClientTrust`. A self-hosted relay keeps the dev-trust model.
+webpki-roots = "0.26"
 rcgen = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }

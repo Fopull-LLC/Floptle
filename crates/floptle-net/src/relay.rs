@@ -230,6 +230,9 @@ pub enum LobbyEnd {
     HostGone,
     /// The host closed it deliberately, or the process ended cleanly.
     HostLeft,
+    /// Nobody was in it for [`RelayLimits::idle_lobby`], and the host is not
+    /// a dedicated server.
+    Idle,
 }
 
 impl LobbyEnd {
@@ -237,6 +240,7 @@ impl LobbyEnd {
         match self {
             LobbyEnd::HostGone => "the host's connection dropped and did not return",
             LobbyEnd::HostLeft => "the host closed it",
+            LobbyEnd::Idle => "nobody joined it for half an hour",
         }
     }
 }
@@ -265,6 +269,70 @@ pub const NOT_READY_YET: &str =
 /// relay gives up and refuses. Comfortably longer than the cold-path lookup it
 /// exists for, and short enough that a player is not left staring at nothing.
 pub const HOST_DECISION_DEADLINE: Duration = Duration::from_secs(5);
+
+/// **What one connection, one address and one lobby may do**, on any relay —
+/// the open one included. A relay MULTIPLIES traffic (one datagram into an
+/// eight-player lobby leaves seven times), so it is the cheapest thing on the
+/// box to take down, and a leaked game key makes it the cheapest way to fill
+/// a developer's player cap with phantom lobbies. None of these is a plan
+/// limit; they are the shape of a relay that is being used as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayLimits {
+    /// Lobbies open at once, across every key.
+    pub max_lobbies: usize,
+    /// Clients in one lobby. A managed policy's player cap applies as well
+    /// and is the smaller number; this is the ceiling the open relay has.
+    pub max_clients_per_lobby: usize,
+    /// Payload bytes one connection may send in one [`Self::window`].
+    pub bytes_per_window: u64,
+    /// Messages one connection may send in one [`Self::window`].
+    pub msgs_per_window: u32,
+    /// The accounting window for the two above.
+    pub window: Duration,
+    /// Over budget this many windows in a row and the connection is closed.
+    pub strikes: u32,
+    /// Lobbies one address may open per [`Self::rate_window`].
+    pub opens_per_address: u32,
+    /// Joins one address may make per [`Self::rate_window`].
+    pub joins_per_address: u32,
+    pub rate_window: Duration,
+    /// A lobby whose host is not a dedicated server and that has had nobody
+    /// in it for this long is ended.
+    pub idle_lobby: Duration,
+}
+
+impl Default for RelayLimits {
+    fn default() -> Self {
+        Self {
+            max_lobbies: 4096,
+            max_clients_per_lobby: 64,
+            bytes_per_window: 512 * 1024,
+            msgs_per_window: 4000,
+            window: Duration::from_secs(1),
+            strikes: 3,
+            opens_per_address: 10,
+            joins_per_address: 30,
+            rate_window: Duration::from_secs(60),
+            idle_lobby: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+/// The largest reliable payload a HOST may push through the relay to one peer.
+///
+/// Measured before it was set: the largest reliable message a host sends is a
+/// `Spawn` carrying a prefab's RON, and the largest prefab in any shipped game
+/// is Solar's `FacHangar` at 28 248 bytes (Forgery's `Survivor` is 18 400).
+/// Four times that, rounded to a power of two.
+pub const MAX_HOST_RELIABLE: usize = 128 * 1024;
+/// The largest reliable payload a CLIENT may push through the relay to a host.
+///
+/// A client's reliable messages are `Hello`, `Input` and `Rpc`, and an RPC's
+/// value is capped at 1 KB by the wire's own rule; a voice packet is 400
+/// bytes. Sixty-four times the largest of those, which is still a quarter of
+/// what the transport's frame decoder would otherwise let a modified client
+/// hand a host to decode.
+pub const MAX_CLIENT_RELIABLE: usize = 64 * 1024;
 
 /// What a relay decides about a request to join an existing lobby.
 #[derive(Clone, Debug, PartialEq)]
@@ -326,6 +394,11 @@ pub trait RelayPolicy: Send {
     fn code_is_reserved(&self, _code: &str) -> bool {
         false
     }
+
+    /// The relay's own limits refused or dropped a message — see
+    /// [`RelayLimits`]. Counted, so a box being leaned on is visible on the
+    /// usage report rather than only in a quieter graph.
+    fn dropped_by_limit(&mut self) {}
 
     /// **May the relay invent a code at all yet?**
     ///
@@ -463,6 +536,8 @@ struct Lobby {
     /// its players are held, so a host whose connection blipped can come back
     /// to the match it was already in.
     host_lost_at: Option<Instant>,
+    /// Since when the lobby has had no clients — for [`RelayLimits::idle_lobby`].
+    empty_since: Instant,
 }
 
 /// The relay: step it forever (the `floptle-relay` binary) or from a test
@@ -492,6 +567,30 @@ pub struct RelayServer {
     /// How long a lobby outlives its host's connection. [`HOST_GRACE`] in
     /// production; shortened by tests that would otherwise sleep for it.
     grace: Duration,
+    /// See [`RelayLimits`].
+    limits: RelayLimits,
+    /// Per-connection ingress accounting for the byte and message budgets.
+    ingress: HashMap<PeerId, Ingress>,
+    /// Per-address lobby-open and join timestamps inside the rate window.
+    address_rates: HashMap<std::net::IpAddr, AddressRate>,
+    /// Messages the limits refused, cumulative. Not a proxy for anything: each
+    /// one is a message a connection sent that the relay chose not to carry.
+    limit_drops: u64,
+}
+
+/// One connection's spend inside the current window.
+struct Ingress {
+    window_start: Instant,
+    bytes: u64,
+    msgs: u32,
+    /// Windows in a row that went over budget.
+    strikes: u32,
+}
+
+#[derive(Default)]
+struct AddressRate {
+    opens: Vec<Instant>,
+    joins: Vec<Instant>,
 }
 
 /// A host waiting on a policy that has not decided yet.
@@ -523,7 +622,26 @@ impl RelayServer {
             dedicated: HashSet::new(),
             wanted: HashMap::new(),
             grace: HOST_GRACE,
+            limits: RelayLimits::default(),
+            ingress: HashMap::new(),
+            address_rates: HashMap::new(),
+            limit_drops: 0,
         })
+    }
+
+    /// Replace the limits — for an operator flag, or a test that trips one
+    /// without a thousand connections.
+    pub fn set_limits(&mut self, limits: RelayLimits) {
+        self.limits = limits;
+    }
+
+    pub fn limits(&self) -> RelayLimits {
+        self.limits
+    }
+
+    /// How many messages the limits have refused since the relay started.
+    pub fn limit_drops(&self) -> u64 {
+        self.limit_drops
     }
 
     /// Run under an admission policy — Floptle Cloud's managed mode.
@@ -564,6 +682,7 @@ impl RelayServer {
             p.tick();
         }
         self.sweep_lost_hosts();
+        self.sweep_idle_lobbies();
         // **The policy has words for a developer and no way to reach one.** It
         // knows lobby codes; only the relay knows which connection a code
         // belongs to, so the routing is here.
@@ -583,6 +702,13 @@ impl RelayServer {
                 }
                 Incoming::Disconnected(c, _) => self.drop_conn(c),
                 Incoming::Message(c, ch, bytes) => {
+                    // **Budgeted before it is decoded.** A connection over its
+                    // byte or message budget for the window has this message
+                    // dropped and counted; over it for [`RelayLimits::strikes`]
+                    // windows in a row, the connection is closed.
+                    if !self.charge_ingress(c, bytes.len() as u64) {
+                        continue;
+                    }
                     let Some(msg) = RelayMsg::decode(&bytes) else { continue };
                     self.dispatch(c, ch, msg);
                 }
@@ -622,6 +748,22 @@ impl RelayServer {
                 self.open_lobby(from, Some(&key), build.as_deref())
             }
             RelayMsg::Join { code } => {
+                // A connection already in a lobby, in either role, does not
+                // join another: the relay would otherwise hold two roles for
+                // one socket, and the first lobby would keep a client who is
+                // never coming back.
+                if !matches!(self.conns.get(&from), Some(Role::Fresh)) {
+                    self.refuse_limit(from, "this connection is already in a lobby");
+                    return;
+                }
+                if !self.address_may(from, |r| &mut r.joins, self.limits.joins_per_address) {
+                    self.refuse_limit(from, "too many joins from this address in a minute — wait a moment");
+                    return;
+                }
+                if self.lobbies.get(&code).is_some_and(|l| l.clients.len() >= self.limits.max_clients_per_lobby) {
+                    self.refuse_limit(from, "this lobby is full");
+                    return;
+                }
                 // The cap is enforced here and nowhere else: a live session is
                 // never broken for a limit, so the only thing a limit can do is
                 // turn away the next arrival — with words that name the plan
@@ -655,6 +797,7 @@ impl RelayServer {
                 let peer = lobby.next_peer;
                 lobby.next_peer += 1;
                 lobby.clients.insert(peer, from);
+                lobby.empty_since = Instant::now();
                 let host = lobby.host;
                 self.conns.insert(from, Role::Client { code: code.clone(), game_peer: peer });
                 if let Some(p) = self.policy.as_mut() {
@@ -665,6 +808,11 @@ impl RelayServer {
             }
             RelayMsg::ToPeer { peer, channel, seq, bytes } => {
                 let Some(Role::Host { code }) = self.conns.get(&from) else { return };
+                if leg_channel == Channel::Reliable && bytes.len() > MAX_HOST_RELIABLE {
+                    self.limit_drops += 1;
+                    self.note_limit_drop();
+                    return;
+                }
                 let code = code.clone();
                 let n = bytes.len() as u64;
                 let target = self.lobbies.get(&code).and_then(|l| l.clients.get(&peer)).copied();
@@ -686,6 +834,13 @@ impl RelayServer {
                 let Some(Role::Client { code, game_peer }) = self.conns.get(&from) else {
                     return;
                 };
+                // A host has to DECODE what a client sends; a modified client
+                // pushing a megabyte at it is the cheapest way to hurt one.
+                if leg_channel == Channel::Reliable && bytes.len() > MAX_CLIENT_RELIABLE {
+                    self.limit_drops += 1;
+                    self.note_limit_drop();
+                    return;
+                }
                 let (peer, code) = (*game_peer, code.clone());
                 let n = bytes.len() as u64;
                 let host = self.lobbies.get(&code).map(|l| l.host);
@@ -746,6 +901,30 @@ impl RelayServer {
     /// wire and reaches the player verbatim — the whole value of "connect your
     /// project at fopull.com/cloud" is that somebody reads it.
     fn open_lobby(&mut self, from: PeerId, key: Option<&str>, build: Option<&str>) {
+        // **One live lobby per connection.** A second `Host` on a connection
+        // that already hosts used to open a second lobby and forget the first
+        // — its players attached to a code nobody was serving.
+        if let Some(Role::Host { code }) = self.conns.get(&from) {
+            let code = code.clone();
+            self.refuse_limit(from, &format!("this connection already hosts lobby {code}"));
+            return;
+        }
+        if matches!(self.conns.get(&from), Some(Role::Client { .. })) {
+            self.refuse_limit(from, "this connection is a client in a lobby and cannot host");
+            return;
+        }
+        // Parked hosts have already paid the address rate when they first
+        // asked; they are re-asked from `retry_parked_hosts`.
+        if self.parked_since(from).is_none()
+            && !self.address_may(from, |r| &mut r.opens, self.limits.opens_per_address)
+        {
+            self.refuse_limit(from, "too many lobbies opened from this address in a minute — wait a moment");
+            return;
+        }
+        if self.lobbies.len() >= self.limits.max_lobbies {
+            self.refuse_limit(from, "this relay is at its lobby limit — try again in a moment");
+            return;
+        }
         let prefix = match self.policy.as_mut() {
             Some(p) => match p.admit_host(key, build) {
                 HostAdmission::Allow { prefix } => prefix,
@@ -840,8 +1019,16 @@ impl RelayServer {
                 }
             }
         };
-        self.lobbies
-            .insert(code.clone(), Lobby { host: from, clients: HashMap::new(), next_peer: 1, host_lost_at: None });
+        self.lobbies.insert(
+            code.clone(),
+            Lobby {
+                host: from,
+                clients: HashMap::new(),
+                next_peer: 1,
+                host_lost_at: None,
+                empty_since: Instant::now(),
+            },
+        );
         self.conns.insert(from, Role::Host { code: code.clone() });
         if let Some(p) = self.policy.as_mut() {
             p.lobby_opened(&code, key);
@@ -921,11 +1108,114 @@ impl RelayServer {
                 }
                 if let Some(lobby) = self.lobbies.get_mut(&code) {
                     lobby.clients.remove(&game_peer);
+                    if lobby.clients.is_empty() {
+                        lobby.empty_since = Instant::now();
+                    }
                     let host = lobby.host;
                     self.send(host, Channel::Reliable, &RelayMsg::PeerLeft { peer: game_peer });
                 }
             }
             _ => {}
+        }
+        self.ingress.remove(&c);
+    }
+
+    /// Account one message against its connection's window; `false` means it
+    /// is dropped. The strikes are consecutive: a window under budget resets.
+    fn charge_ingress(&mut self, c: PeerId, bytes: u64) -> bool {
+        let limits = self.limits;
+        let now = Instant::now();
+        let e = self.ingress.entry(c).or_insert(Ingress { window_start: now, bytes: 0, msgs: 0, strikes: 0 });
+        if now.duration_since(e.window_start) >= limits.window {
+            // The window that just closed: over budget counts a strike, under
+            // budget clears them.
+            if e.bytes > limits.bytes_per_window || e.msgs > limits.msgs_per_window {
+                e.strikes += 1;
+            } else {
+                e.strikes = 0;
+            }
+            e.window_start = now;
+            e.bytes = 0;
+            e.msgs = 0;
+        }
+        e.bytes += bytes;
+        e.msgs += 1;
+        let over = e.bytes > limits.bytes_per_window || e.msgs > limits.msgs_per_window;
+        if !over {
+            return true;
+        }
+        let strikes = e.strikes;
+        self.limit_drops += 1;
+        self.note_limit_drop();
+        // A repeat offender is closed — the strikes it already has plus the
+        // window it is over right now.
+        if strikes + 1 >= limits.strikes {
+            self.transport.disconnect(c);
+            self.drop_conn(c);
+        }
+        false
+    }
+
+    /// May this connection's address do one more of `which` inside the rate
+    /// window? Records it if so. A connection with no known address is never
+    /// rate-limited by address: the transport did not say, and refusing a
+    /// player for what the relay could not measure is the wrong default.
+    fn address_may(
+        &mut self,
+        c: PeerId,
+        which: impl FnOnce(&mut AddressRate) -> &mut Vec<Instant>,
+        per_window: u32,
+    ) -> bool {
+        let Some(addr) = self.transport.remote_addr(c) else { return true };
+        let now = Instant::now();
+        let window = self.limits.rate_window;
+        let rate = self.address_rates.entry(addr.ip()).or_default();
+        let stamps = which(rate);
+        stamps.retain(|t| now.duration_since(*t) < window);
+        if stamps.len() as u32 >= per_window {
+            return false;
+        }
+        stamps.push(now);
+        true
+    }
+
+    /// A refusal the limits made, on the wire like any other.
+    fn refuse_limit(&mut self, to: PeerId, reason: &str) {
+        self.limit_drops += 1;
+        self.note_limit_drop();
+        self.send(to, Channel::Reliable, &RelayMsg::Refused { reason: reason.into() });
+    }
+
+    fn note_limit_drop(&mut self) {
+        if let Some(p) = self.policy.as_mut() {
+            p.dropped_by_limit();
+        }
+    }
+
+    /// **End the lobbies nobody is in** — a host that opened one and never
+    /// had a player is not a session, and a leaked key opening thousands of
+    /// them is not a developer. Dedicated servers are exempt: an empty server
+    /// waiting for players is what a server is for.
+    fn sweep_idle_lobbies(&mut self) {
+        let idle = self.limits.idle_lobby;
+        let dead: Vec<String> = self
+            .lobbies
+            .iter()
+            .filter(|(_, l)| {
+                l.clients.is_empty()
+                    && l.host_lost_at.is_none()
+                    && !self.dedicated.contains(&l.host)
+                    && l.empty_since.elapsed() >= idle
+            })
+            .map(|(c, _)| c.clone())
+            .collect();
+        for code in dead {
+            let host = self.lobbies.get(&code).map(|l| l.host);
+            self.end_lobby(&code, LobbyEnd::Idle);
+            if let Some(h) = host {
+                self.conns.insert(h, Role::Fresh);
+                self.send(h, Channel::Reliable, &RelayMsg::Refused { reason: LobbyEnd::Idle.as_str().into() });
+            }
         }
     }
 
@@ -1225,7 +1515,11 @@ impl Transport for RelayHost {
     }
 
     fn take_notices(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.notices)
+        // The transport's own (a certificate that did not verify) and the
+        // relay's, in the order they happened.
+        let mut out = self.inner.take_warnings();
+        out.append(&mut self.notices);
+        out
     }
 
     fn lobby_code(&self) -> Option<String> {
@@ -1371,6 +1665,10 @@ impl RelayClient {
 }
 
 impl Transport for RelayClient {
+    fn take_notices(&mut self) -> Vec<String> {
+        self.inner.take_warnings()
+    }
+
     fn take_join_progress(&mut self) -> Option<String> {
         self.starting.take()
     }
@@ -1508,6 +1806,10 @@ mod tests {
         pub(super) port: u16,
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
+        /// `RelayServer::limit_drops`, mirrored out of the relay thread every
+        /// step so a test can read the count without owning the relay.
+        pub(super) drops: Arc<std::sync::atomic::AtomicU64>,
+        pub(super) lobbies: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     /// A policy that answers from a table instead of a control plane — the
@@ -1662,16 +1964,34 @@ mod tests {
         /// another at the same address — which is what a relay upgrade looks
         /// like from a host's point of view (`floptle/0210`).
         pub(super) fn restart_on(port: u16) -> Self {
-            let mut relay = RelayServer::bind(port).expect("the old relay's port is free again");
+            let relay = RelayServer::bind(port).expect("the old relay's port is free again");
+            Self::run(relay)
+        }
+
+        /// An open relay with its limits replaced, so a test can trip one
+        /// with a handful of connections rather than a thousand.
+        pub(super) fn limited(limits: RelayLimits) -> Self {
+            let mut relay = RelayServer::bind(0).expect("relay bind");
+            relay.set_grace(Duration::from_millis(150));
+            relay.set_limits(limits);
+            Self::run(relay)
+        }
+
+        fn run(mut relay: RelayServer) -> Self {
+            let port = relay.port();
             let stop = Arc::new(AtomicBool::new(false));
-            let s = stop.clone();
+            let drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let lobbies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (s, d, l) = (stop.clone(), drops.clone(), lobbies.clone());
             let thread = std::thread::spawn(move || {
                 while !s.load(Ordering::Relaxed) {
                     relay.step();
+                    d.store(relay.limit_drops(), Ordering::Relaxed);
+                    l.store(relay.lobby_count(), Ordering::Relaxed);
                     std::thread::sleep(Duration::from_millis(1));
                 }
             });
-            Self { port, stop, thread: Some(thread) }
+            Self { port, stop, thread: Some(thread), drops, lobbies }
         }
 
         /// `127.0.0.1:<port>`, which is what every endpoint call wants.
@@ -1693,16 +2013,7 @@ mod tests {
             }
             // Tests must not sleep for the production grace window.
             relay.set_grace(grace);
-            let port = relay.port();
-            let stop = Arc::new(AtomicBool::new(false));
-            let s = stop.clone();
-            let thread = std::thread::spawn(move || {
-                while !s.load(Ordering::Relaxed) {
-                    relay.step();
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            });
-            Self { port, stop, thread: Some(thread) }
+            Self::run(relay)
         }
     }
 
@@ -2434,5 +2745,193 @@ mod managed_tests {
         // a cap that evicted a player mid-game would be a worse product than
         // no cap at all.
         assert_eq!(settle(&mut first, &mut host), None, "the seated player was disturbed");
+    }
+}
+
+/// **The relay's own limits** — what one connection, one address and one
+/// lobby may do on any relay, the open one included. Each cap is tripped by
+/// exactly one and the refusal or drop asserted; the byte budget asserts the
+/// COUNT moved, not merely that nothing arrived.
+#[cfg(test)]
+mod limit_tests {
+    use super::tests::TestRelay;
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn drain(host: &mut RelayHost) -> Vec<Incoming> {
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            out.extend(host.poll());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        out
+    }
+
+    /// The refusal a joiner is given, if any.
+    fn join_refusal(addr: &str, code: &str) -> Option<String> {
+        let mut c = match RelayClient::join(addr, code) {
+            Ok(c) => c,
+            Err(e) => return Some(e),
+        };
+        for _ in 0..80 {
+            for inc in c.poll() {
+                if let Incoming::Disconnected(_, Some(reason)) = inc {
+                    return Some(reason);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    #[test]
+    fn a_relay_stops_at_its_lobby_limit_and_says_so() {
+        let relay = TestRelay::limited(RelayLimits { max_lobbies: 2, ..RelayLimits::default() });
+        let _a = RelayHost::host(&relay.addr()).expect("first");
+        let _b = RelayHost::host(&relay.addr()).expect("second");
+        let e = RelayHost::host(&relay.addr()).err().expect("the third opened a lobby past the limit");
+        assert!(e.contains("lobby limit"), "{e}");
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 2);
+        assert!(relay.drops.load(Ordering::Relaxed) >= 1, "the refusal was not counted");
+    }
+
+    #[test]
+    fn one_connection_hosts_one_lobby() {
+        let relay = TestRelay::start();
+        let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
+        // A second host request on the SAME connection.
+        host.inner.send(SERVER, Channel::Reliable, &RelayMsg::Host.encode());
+        let refused = drain(&mut host).into_iter().find_map(|i| match i {
+            Incoming::Disconnected(_, Some(r)) => Some(r),
+            _ => None,
+        });
+        // The refusal lands as a `Refused` the host reports; either way the
+        // relay still holds exactly ONE lobby, under the first code.
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "a second lobby was opened: {refused:?}");
+        assert_eq!(host.lobby_code().as_deref(), Some(code.as_str()));
+        assert!(relay.drops.load(Ordering::Relaxed) >= 1, "the second host was not counted as refused");
+    }
+
+    #[test]
+    fn a_lobby_stops_at_its_client_limit_and_the_next_joiner_is_told() {
+        let relay = TestRelay::limited(RelayLimits { max_clients_per_lobby: 2, ..RelayLimits::default() });
+        let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
+        let mut a = RelayClient::join(&relay.addr(), &code).expect("a");
+        let mut b = RelayClient::join(&relay.addr(), &code).expect("b");
+        // Let both seat before the third asks.
+        for _ in 0..40 {
+            let _ = host.poll();
+            let _ = a.poll();
+            let _ = b.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let why = join_refusal(&relay.addr(), &code).expect("the third joiner was seated past the limit");
+        assert!(why.contains("full"), "{why}");
+    }
+
+    #[test]
+    fn an_address_may_open_only_so_many_lobbies_a_minute() {
+        let relay = TestRelay::limited(RelayLimits { opens_per_address: 2, ..RelayLimits::default() });
+        let _a = RelayHost::host(&relay.addr()).expect("first");
+        let _b = RelayHost::host(&relay.addr()).expect("second");
+        let e = RelayHost::host(&relay.addr()).err().expect("a third lobby from one address inside the window");
+        assert!(e.contains("this address"), "{e}");
+    }
+
+    #[test]
+    fn an_address_may_join_only_so_many_times_a_minute() {
+        let relay = TestRelay::limited(RelayLimits { joins_per_address: 1, ..RelayLimits::default() });
+        let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
+        let mut a = RelayClient::join(&relay.addr(), &code).expect("a");
+        for _ in 0..40 {
+            let _ = host.poll();
+            let _ = a.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let why = join_refusal(&relay.addr(), &code).expect("a second join from one address inside the window");
+        assert!(why.contains("this address"), "{why}");
+    }
+
+    /// The byte budget: a connection over it has its messages dropped and
+    /// the count moves; over it for three windows running, it is closed.
+    #[test]
+    fn a_connection_over_its_byte_budget_is_dropped_counted_and_then_closed() {
+        let relay = TestRelay::limited(RelayLimits {
+            bytes_per_window: 4096,
+            window: Duration::from_millis(60),
+            strikes: 3,
+            ..RelayLimits::default()
+        });
+        let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
+        let mut c = RelayClient::join(&relay.addr(), &code).expect("joins");
+        for _ in 0..40 {
+            let _ = host.poll();
+            let _ = c.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let before = relay.drops.load(Ordering::Relaxed);
+        // Six kilobytes in one window: the second message is over.
+        c.send(SERVER, Channel::Reliable, &[7u8; 3000]);
+        c.send(SERVER, Channel::Reliable, &[7u8; 3000]);
+        std::thread::sleep(Duration::from_millis(30));
+        let got = drain(&mut host).iter().filter(|i| matches!(i, Incoming::Message(..))).count();
+        assert_eq!(got, 1, "the over-budget message was forwarded");
+        assert!(relay.drops.load(Ordering::Relaxed) > before, "the drop was not counted");
+        // Keep it up for three windows: closed.
+        let mut closed = false;
+        for _ in 0..12 {
+            c.send(SERVER, Channel::Reliable, &[7u8; 3000]);
+            c.send(SERVER, Channel::Reliable, &[7u8; 3000]);
+            if c.poll().iter().any(|i| matches!(i, Incoming::Disconnected(SERVER, _))) {
+                closed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        assert!(closed, "a repeat offender was never closed");
+    }
+
+    /// A client cannot push a frame at a host that is bigger than anything a
+    /// client legitimately sends; a host's ceiling is the larger one, sized
+    /// from the largest prefab a game ships.
+    #[test]
+    fn oversized_reliable_frames_are_dropped_on_the_relay_leg() {
+        let relay = TestRelay::start();
+        let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
+        let mut c = RelayClient::join(&relay.addr(), &code).expect("joins");
+        for _ in 0..40 {
+            let _ = host.poll();
+            let _ = c.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let before = relay.drops.load(Ordering::Relaxed);
+        c.send(SERVER, Channel::Reliable, &vec![1u8; MAX_CLIENT_RELIABLE + 1]);
+        c.send(SERVER, Channel::Reliable, &[2u8; 64]);
+        let got: Vec<usize> = drain(&mut host)
+            .iter()
+            .filter_map(|i| match i {
+                Incoming::Message(_, _, b) => Some(b.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec![64], "the oversized frame reached the host: {got:?}");
+        assert!(relay.drops.load(Ordering::Relaxed) > before, "the drop was not counted");
+        // The host's ceiling is above a client's and above a real prefab.
+        const { assert!(MAX_HOST_RELIABLE > MAX_CLIENT_RELIABLE && MAX_HOST_RELIABLE >= 4 * 28_248) };
+    }
+
+    /// An empty lobby ends after the idle window; a dedicated server's does
+    /// not, however long it waits.
+    #[test]
+    fn an_idle_lobby_ends_unless_its_host_is_a_dedicated_server() {
+        let relay = TestRelay::limited(RelayLimits { idle_lobby: Duration::from_millis(120), ..RelayLimits::default() });
+        let (mut idle, _) = RelayHost::host(&relay.addr()).expect("hosts");
+        let (mut server, _) = RelayHost::host(&relay.addr()).expect("hosts");
+        server.declare_dedicated();
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = drain(&mut idle);
+        let _ = drain(&mut server);
+        assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the idle lobby survived, or the server's did not");
+        assert!(server.lobby_code().is_some());
     }
 }

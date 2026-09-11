@@ -71,6 +71,12 @@ pub struct RelayBox {
     /// The 95th-percentile period of the forwarding loop over the interval.
     /// The reference binary aims for about a millisecond.
     pub step_p95_ms: Option<f32>,
+    /// Messages the relay's own limits refused or dropped — a connection over
+    /// its budget, an address opening lobbies too fast, a frame too large for
+    /// its leg (`floptle_net::relay::RelayLimits`). **Cumulative** like
+    /// `rx_drops`, and like it what matters is that it moves: a relay being
+    /// leaned on shows here before it shows anywhere else.
+    pub limit_drops: Option<u64>,
 }
 
 /// Read everything this module can measure about the machine.

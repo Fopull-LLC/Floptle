@@ -644,6 +644,21 @@ you is that you can rotate it, revoke it, and watch its usage graph, all in the
 portal. A managed relay refuses a host that presents no key, and says where to
 get one.
 
+The honest sentence about that: **a stranger with your key can use up your
+plan's players.** Anyone who unzips a build has the key, and lobbies they open
+count against your ceiling until the real players are told the game is full. It
+cannot cost you money — the cap is hard — but it can cost you an evening. The
+relay limits how fast one address can open lobbies and how many lobbies one key
+may hold, and the portal can switch off hosting from a single build's copy of
+the key; if it happens anyway, rotate the key. That is what rotation is for.
+
+**The connection to a managed relay is verified.** A relay reached by its
+region name under `fopull.com` has to present a certificate for that name; a
+self-hosted relay or a direct `host:port` keeps the dev-trust model, where the
+lobby code is the secret and the transport is not. Until the managed relay's
+certificate is live, a connection that cannot verify it goes ahead on the older
+model and says so once in the Console; a later release refuses instead.
+
 ### What it costs you if it is down
 
 Nothing that is already running, and nothing about joining. The relay decides
@@ -657,6 +672,19 @@ limits it knew rather than either refusing everyone or opening the doors.
 of the above applies: no keys, no control plane, no accounting, five-character
 lobby codes, exactly as it has always worked. Floptle Cloud sells not having to
 run a box (ADR-0022).
+
+### What any relay refuses, managed or not
+
+A relay multiplies traffic — one packet into an eight-player lobby leaves seven
+times — so it is the cheapest thing on a box to lean on. Every relay, the one you
+self-host included, keeps a few shapes out: one lobby per connection, at most
+4 096 lobbies and 64 clients in each, ten lobby-opens and thirty joins a minute
+from one address, half a megabyte a second from one connection (three seconds
+over it in a row closes the connection), and a lobby nobody has joined for half
+an hour ends unless its host is a dedicated server. A reliable message a client
+pushes at a host is capped at 64 KB and a host's at 128 KB — four times the
+largest prefab any shipped game spawns. A refusal is a sentence on the wire, and
+each one is counted in the relay's report.
 
 ---
 

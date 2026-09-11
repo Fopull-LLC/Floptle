@@ -52,6 +52,17 @@ pub struct KeyRow {
     /// is billed on it.
     #[serde(default)]
     pub account_over_limit: bool,
+    /// How many lobbies this key may hold open on this relay at once, when the
+    /// control plane sets one (`floptle/0228`). Absent means the player cap is
+    /// the only ceiling. A leaked key can fill a plan's players with empty
+    /// lobbies from a handful of addresses; this is the number that stops it.
+    #[serde(default)]
+    pub max_lobbies: Option<u32>,
+    /// Build ids the control plane has marked as not allowed to host on this
+    /// key — one shipped build whose copy of the key is being abused, revoked
+    /// without rotating the key for every other build.
+    #[serde(default)]
+    pub blocked_builds: Vec<String>,
 }
 
 fn active() -> KeyState {
@@ -95,6 +106,10 @@ pub struct AuthorizeReply {
     pub regions: Vec<String>,
     #[serde(default)]
     pub over_limit: bool,
+    #[serde(default)]
+    pub max_lobbies: Option<u32>,
+    #[serde(default)]
+    pub blocked_builds: Vec<String>,
 }
 
 impl AuthorizeReply {
@@ -109,6 +124,8 @@ impl AuthorizeReply {
             ccu_limit: self.ccu_limit,
             regions: self.regions,
             account_over_limit: self.over_limit,
+            max_lobbies: self.max_lobbies,
+            blocked_builds: self.blocked_builds,
         }
     }
 }
@@ -319,6 +336,7 @@ fn box_json(b: &RelayBox) -> serde_json::Value {
     num("rx_drops", b.rx_drops.map(Into::into));
     num("rx_queue_bytes", b.rx_queue_bytes.map(Into::into));
     num("step_p95_ms", b.step_p95_ms.map(hundredths));
+    num("limit_drops", b.limit_drops.map(Into::into));
     serde_json::Value::Object(o)
 }
 
@@ -362,7 +380,7 @@ mod box_tests {
         assert_eq!(o["peers"], 0);
         for f in [
             "load1", "cores", "mem_free_mb", "disk_free_mb", "egress_bps",
-            "ingress_bps", "rx_drops", "rx_queue_bytes", "step_p95_ms",
+            "ingress_bps", "rx_drops", "rx_queue_bytes", "step_p95_ms", "limit_drops",
         ] {
             assert!(!o.contains_key(f), "{f} was sent as zero rather than omitted: {v}");
         }
@@ -384,8 +402,10 @@ mod box_tests {
             rx_drops: Some(318),
             rx_queue_bytes: Some(65_536),
             step_p95_ms: Some(7.4),
+            limit_drops: Some(9),
         });
         assert_eq!(v["host"], "us-east-relay-1");
+        assert_eq!(v["limit_drops"], 9);
         assert_eq!(v["cores"], 1, "one OCPU is what makes load1 0.91 alarming");
         assert_eq!(v["egress_bps"], 41_000_000u64);
         assert_eq!(v["rx_drops"], 318);

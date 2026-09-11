@@ -29,6 +29,9 @@ struct Args {
     region: String,
     letter: char,
     token: Option<String>,
+    /// `--no-address-limits`: lift the per-address rates for a load test run
+    /// from one machine. Every other limit stays.
+    no_address_limits: bool,
 }
 
 impl Args {
@@ -64,6 +67,10 @@ FLAGS
   --token <t>           this box's token. Prefer --token-file.
   --token-file <path>   read the token from a file, so it is not in a command
                         line every `ps` on the box can read.
+  --no-address-limits   lift the per-address rates (lobby opens and joins a
+                        minute from one address) — for a load test run from one
+                        machine, which is the only case that looks like an
+                        attacker to a relay. Every other limit stays.
   --help, -h            this table.
 
 Without --control and --token this is the open relay and nothing else: no keys,
@@ -78,6 +85,7 @@ was missing is the untracked path that refuses to start instead.
             control: None,
             region: "us-east".into(),
             letter: 'U',
+            no_address_limits: false,
             token: None,
         };
         let mut i = 0;
@@ -118,6 +126,10 @@ was missing is the untracked path that refuses to start instead.
                         .map_err(|e| format!("--token-file {p}: {e}"))?;
                     out.token = Some(t.trim().to_string());
                     i += 2;
+                }
+                "--no-address-limits" => {
+                    out.no_address_limits = true;
+                    i += 1;
                 }
                 // Printed and exit 0, rather than refused as an unknown flag
                 // or — as the July binary did — parsed as a PORT NUMBER, which
@@ -165,6 +177,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if args.no_address_limits {
+        let limits = floptle_net::RelayLimits {
+            opens_per_address: u32::MAX,
+            joins_per_address: u32::MAX,
+            ..relay.limits()
+        };
+        relay.set_limits(limits);
+        println!("per-address limits OFF (--no-address-limits) — a load test, not a deployment");
+    }
 
     let mut managed: Option<policy::StatusHandle> = None;
     if let Some((base, token)) = args.managed() {
