@@ -282,7 +282,7 @@ pub(crate) fn open_external_editor(cmd: &str, project_root: &Path, file: &str, l
             command.arg(file);
         }
         if let Err(e) = command.spawn() {
-            eprintln!("  Open in IDE ({prog}) failed: {e}");
+            floptle_say::say_err!("  Open in IDE ({prog}) failed: {e}");
         }
     }
 }

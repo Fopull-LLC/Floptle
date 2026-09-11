@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 # The control plane. One GET and one POST every ten seconds, on the agent's own
 # thread with nobody waiting behind it — the same blocking client the relay, the
 # Hub and `account.*` already use.

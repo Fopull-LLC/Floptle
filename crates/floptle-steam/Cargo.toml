@@ -24,5 +24,6 @@ default = []
 steam = ["dep:floptle-services", "dep:steamworks"]
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 floptle-services = { path = "../floptle-services", optional = true }
 steamworks = { version = "0.13.1", optional = true }

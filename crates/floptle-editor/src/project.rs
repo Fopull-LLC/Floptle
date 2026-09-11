@@ -27,11 +27,11 @@ impl Editor {
     /// from the retro map). Refreshes the asset tree.
     pub(crate) fn extract_textures(&mut self, model_path: &str) {
         let Ok(model) = floptle_assets::import(Path::new(model_path)) else {
-            eprintln!("  extract: failed to read {model_path}");
+            floptle_say::say_err!("  extract: failed to read {model_path}");
             return;
         };
         if model.textures.is_empty() {
-            eprintln!("  extract: {model_path} has no embedded textures");
+            floptle_say::say_err!("  extract: {model_path} has no embedded textures");
             return;
         }
         let stem = Path::new(model_path)
@@ -46,7 +46,7 @@ impl Editor {
                 wrote += 1;
             }
         }
-        println!("  extracted {wrote} texture(s) from {stem} to textures/");
+        floptle_say::say!("  extracted {wrote} texture(s) from {stem} to textures/");
         self.asset_tree = build_assets(&self.project_root);
     }
 
@@ -328,11 +328,11 @@ impl Editor {
                     ),
                     None,
                 );
-                eprintln!("  imported {path} (rigged, {} clip(s))", model.clips.len());
+                floptle_say::say_err!("  imported {path} (rigged, {} clip(s))", model.clips.len());
                 return true;
             }
             Ok(None) => {} // no animations — fall through to the static bake
-            Err(e) => eprintln!("  rig import {path} failed ({e}); trying static"),
+            Err(e) => floptle_say::say_err!("  rig import {path} failed ({e}); trying static"),
         }
         match floptle_assets::gltf_import::import(&file) {
             Ok(model) => {
@@ -367,7 +367,7 @@ impl Editor {
                         rig: None,
                     },
                 );
-                eprintln!("  imported {path}");
+                floptle_say::say_err!("  imported {path}");
                 // A model imported after Play started — a script spawning a
                 // prefab, a scatter prototype baking — has to reach
                 // `node:materials()` too, or a runtime-spawned character has no
@@ -376,7 +376,7 @@ impl Editor {
                 true
             }
             Err(e) => {
-                eprintln!("  import {path} failed: {e}");
+                floptle_say::say_err!("  import {path} failed: {e}");
                 false
             }
         }
@@ -416,7 +416,7 @@ impl Editor {
             nodes: vec![default_camera_node(), gravity],
         };
         if let Err(e) = floptle_scene::save(&doc, &path) {
-            eprintln!("  new scene failed: {e}");
+            floptle_say::say_err!("  new scene failed: {e}");
             return;
         }
         self.world = World::new();
@@ -440,7 +440,7 @@ impl Editor {
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         self.scene_dirty = false;
         self.asset_tree = build_assets(&self.project_root);
-        eprintln!("  new scene: {}", path.display()); // progress, so: stderr
+        floptle_say::say_err!("  new scene: {}", path.display()); // progress, so: stderr
     }
 
     /// Open an existing scene `.ron` (double-clicked in Assets). Resets the world to
@@ -467,7 +467,7 @@ impl Editor {
                     None,
                 );
                 self.toast = Some((format!("⚠  {} did not load — see the Console", p.display()), 6.0));
-                eprintln!("  open scene failed: {e}");
+                floptle_say::say_err!("  open scene failed: {e}");
                 return;
             }
         };
@@ -520,7 +520,7 @@ impl Editor {
             );
         }
         self.check_autosave(); // offer crash recovery if an autosave is newer
-        eprintln!("  opened scene: {}", p.display()); // progress, so: stderr
+        floptle_say::say_err!("  opened scene: {}", p.display()); // progress, so: stderr
     }
 
     /// Register the GPU meshes named by a set of paths, importing each once.
@@ -742,7 +742,7 @@ impl Editor {
     pub(crate) fn new_folder(&mut self, dir: &str) {
         let target = unique_path(Path::new(dir), "new_folder", None);
         if let Err(e) = floptle_vfs::create_dir_all(&target) {
-            eprintln!("  new folder failed: {e}");
+            floptle_say::say_err!("  new folder failed: {e}");
             return;
         }
         self.asset_tree = build_assets(&self.project_root);
@@ -761,13 +761,13 @@ impl Editor {
             self.scripts_dir()
         };
         if let Err(e) = floptle_vfs::create_dir_all(&target_dir) {
-            eprintln!("  new script failed: {e}");
+            floptle_say::say_err!("  new script failed: {e}");
             return;
         }
         let path = unique_path(&target_dir, "script", Some("lua"));
         let name = script_name_of(&path.to_string_lossy());
         if let Err(e) = floptle_vfs::write(&path, script_template(&name)) {
-            eprintln!("  new script failed: {e}");
+            floptle_say::say_err!("  new script failed: {e}");
             return;
         }
         self.asset_tree = build_assets(&self.project_root);
@@ -795,12 +795,12 @@ impl Editor {
             self.project_root.join("shaders")
         };
         if let Err(e) = floptle_vfs::create_dir_all(&target_dir) {
-            eprintln!("  new shader failed: {e}");
+            floptle_say::say_err!("  new shader failed: {e}");
             return;
         }
         let path = unique_path(&target_dir, "shader", Some("flsl"));
         if let Err(e) = floptle_vfs::write(&path, floptle_shader::NEW_SHADER_TEMPLATE) {
-            eprintln!("  new shader failed: {e}");
+            floptle_say::say_err!("  new shader failed: {e}");
             return;
         }
         self.asset_tree = build_assets(&self.project_root);
@@ -873,7 +873,7 @@ impl Editor {
             return;
         }
         if floptle_vfs::exists(&dst) {
-            eprintln!("  rename: {} already exists", dst.display());
+            floptle_say::say_err!("  rename: {} already exists", dst.display());
             return;
         }
         // A SCENE carries files that are keyed by its stem — terrain fields, the
@@ -904,13 +904,13 @@ impl Editor {
                 "rename refused: {} already exists — rename or move it first",
                 taken.display()
             );
-            eprintln!("  {msg}");
+            floptle_say::say_err!("  {msg}");
             self.console.push(floptle_script::LogLevel::Error, msg.clone(), None);
             self.toast = Some((format!("⚠  {msg}"), 8.0));
             return;
         }
         if let Err(e) = std::fs::rename(&src, &dst) {
-            eprintln!("  rename failed: {e}");
+            floptle_say::say_err!("  rename failed: {e}");
             return;
         }
         // The scene file has moved; bring its data with it. A sidecar that fails
@@ -980,11 +980,11 @@ impl Editor {
                 continue;
             }
             if floptle_vfs::exists(&dst) {
-                eprintln!("  move: {} already exists", dst.display());
+                floptle_say::say_err!("  move: {} already exists", dst.display());
                 continue;
             }
             if let Err(e) = std::fs::rename(&sp, &dst) {
-                eprintln!("  move failed: {e}");
+                floptle_say::say_err!("  move failed: {e}");
                 continue;
             }
             moved.push((src.clone(), dst.to_string_lossy().to_string()));
@@ -1259,11 +1259,11 @@ impl Editor {
             return;
         }
         if let Err(e) = floptle_input::save_map(&map, &self.project_root) {
-            eprintln!("  could not seed input.ron: {e}");
+            floptle_say::say_err!("  could not seed input.ron: {e}");
             return;
         }
         // Never silent: this rewrites input.ron, comments and all.
-        println!("  input.ron: added {}", added.join(", "));
+        floptle_say::say!("  input.ron: added {}", added.join(", "));
     }
 
     pub(crate) fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
@@ -1287,9 +1287,9 @@ impl Editor {
             match crate::export::resolve_entry_scene(&self.project_root, entry) {
                 Some(p) => match floptle_scene::load(&p) {
                     Ok(doc) => return (p, doc),
-                    Err(e) => eprintln!("  entry scene {entry} failed to load ({e}); falling back"),
+                    Err(e) => floptle_say::say_err!("  entry scene {entry} failed to load ({e}); falling back"),
                 },
-                None => eprintln!("  entry scene {entry} doesn't exist; falling back"),
+                None => floptle_say::say_err!("  entry scene {entry} doesn't exist; falling back"),
             }
         }
         let first = self.project_root.join("scenes/first.ron");
@@ -1536,7 +1536,7 @@ impl Editor {
         // document is on it, and one stray line of prose makes that document
         // unparseable. Nothing reads this line; the Hub parses `--list-templates`
         // and nothing else.
-        eprintln!("  opened project {}", self.project_root.display());
+        floptle_say::say_err!("  opened project {}", self.project_root.display());
     }
 
     /// Create a fresh project at `root` (folders + a starter scene + example

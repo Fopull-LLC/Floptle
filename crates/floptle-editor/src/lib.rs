@@ -1386,13 +1386,13 @@ fn build_event_loop(steam_active: bool) -> EventLoop<()> {
         let opt_out = std::env::var("FLOPTLE_NO_FORCE_X11").is_ok_and(|v| !v.is_empty());
         if on_wayland && have_x11 && !opt_out {
             use winit::platform::x11::EventLoopBuilderExtX11;
-            println!(
+            floptle_say::say!(
                 "steam: forcing X11 (XWayland) so the overlay can hook this window — it can't \
                  attach to a native Wayland surface. FLOPTLE_NO_FORCE_X11=1 to keep Wayland."
             );
             match EventLoop::builder().with_x11().build() {
                 Ok(el) => return el,
-                Err(e) => eprintln!(
+                Err(e) => floptle_say::say_err!(
                     "steam: could not force X11 ({e}) — using the default backend; the overlay \
                      may not draw on Wayland"
                 ),
@@ -1470,7 +1470,7 @@ pub fn run() {
         .cloned()
         .unwrap_or_else(|| templates::EMPTY.to_string());
     if !templates::known(&template) {
-        eprintln!(
+        floptle_say::say_err!(
             "unknown template \"{template}\" — try one of: {}",
             templates::names().join(", ")
         );
@@ -1484,7 +1484,7 @@ pub fn run() {
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
-                println!("{} {}", floptle_core::ENGINE_NAME, distribution_version());
+                floptle_say::say!("{} {}", floptle_core::ENGINE_NAME, distribution_version());
                 return;
             }
             "--help" | "-h" => {
@@ -1498,7 +1498,7 @@ pub fn run() {
             }
             "--new" => {
                 let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
-                    eprintln!("--new needs a <dir>");
+                    floptle_say::say_err!("--new needs a <dir>");
                     std::process::exit(2);
                 };
                 std::process::exit(new_project(Path::new(p), &stamp, &template));
@@ -1514,7 +1514,7 @@ pub fn run() {
             }
             "--migrate" => {
                 let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
-                    eprintln!("--migrate needs a <dir>");
+                    floptle_say::say_err!("--migrate needs a <dir>");
                     std::process::exit(2);
                 };
                 std::process::exit(migrate_project(Path::new(p), &stamp));
@@ -1527,7 +1527,7 @@ pub fn run() {
                 let proj = args.get(i + 1).filter(|p| !p.starts_with('-'));
                 let model = args.get(i + 2).filter(|p| !p.starts_with('-'));
                 let (Some(proj), Some(model)) = (proj, model) else {
-                    eprintln!("--extract-clips needs <project_dir> <model_path>");
+                    floptle_say::say_err!("--extract-clips needs <project_dir> <model_path>");
                     std::process::exit(2);
                 };
                 std::process::exit(extract_clips_cmd(Path::new(proj), model));
@@ -1539,7 +1539,7 @@ pub fn run() {
                 let out = args.get(i + 2).filter(|p| !p.starts_with('-'));
                 let plat = args.get(i + 3).filter(|p| !p.starts_with('-'));
                 let (Some(proj), Some(out), Some(plat)) = (proj, out, plat) else {
-                    eprintln!("--export needs <project_dir> <out_dir> <platform>");
+                    floptle_say::say_err!("--export needs <project_dir> <out_dir> <platform>");
                     std::process::exit(2);
                 };
                 let title = args
@@ -1566,7 +1566,7 @@ pub fn run() {
             "--bake-gi" => {}
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
-                eprintln!("unknown argument: {other} (try --help)");
+                floptle_say::say_err!("unknown argument: {other} (try --help)");
                 std::process::exit(2);
             }
         }
@@ -1620,7 +1620,7 @@ pub fn run() {
                 // Said out loud, because a session that quietly never talked
                 // to Steam is indistinguishable from one where Steam's own
                 // hook failed — and the second is what people are testing for.
-                println!(
+                floptle_say::say!(
                     "steam: off — no Steam App ID in ⚙ Settings ▸ Game (pass --steam to \
                      use Spacewar 480 for testing)"
                 );
@@ -1633,9 +1633,9 @@ pub fn run() {
 
     if player_mode {
         let name = if game_title.is_empty() { "game".to_string() } else { game_title.clone() };
-        println!("{name} — {} v{}", floptle_core::ENGINE_NAME, distribution_version());
+        floptle_say::say!("{name} — {} v{}", floptle_core::ENGINE_NAME, distribution_version());
     } else {
-        println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
+        floptle_say::say!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
     }
     let event_loop = build_event_loop(steam_platform.is_some());
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -1670,10 +1670,10 @@ pub fn run() {
 /// about what is on offer.
 #[cfg(feature = "editor-ui")]
 fn print_templates() {
-    println!("Starter projects for `floptle new <dir> --template <name>`:\n");
-    println!("  {:<12}  a blank project (the default)", templates::EMPTY);
+    floptle_say::say!("Starter projects for `floptle new <dir> --template <name>`:\n");
+    floptle_say::say!("  {:<12}  a blank project (the default)", templates::EMPTY);
     for t in templates::TEMPLATES {
-        println!("  {:<12}  {}", t.name, t.blurb);
+        floptle_say::say!("  {:<12}  {}", t.name, t.blurb);
     }
 }
 
@@ -1688,13 +1688,13 @@ fn extract_clips_cmd(project: &Path, model: &str) -> i32 {
     match anim::extract_clips(&mut system, project, model) {
         Ok(keys) => {
             for k in &keys {
-                println!("extracted {k}");
+                floptle_say::say!("extracted {k}");
             }
-            println!("{} clip(s) written", keys.len());
+            floptle_say::say!("{} clip(s) written", keys.len());
             0
         }
         Err(e) => {
-            eprintln!("extract-clips failed: {e}");
+            floptle_say::say_err!("extract-clips failed: {e}");
             1
         }
     }
@@ -1708,11 +1708,11 @@ fn extract_clips_cmd(project: &Path, model: &str) -> i32 {
 fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     // Refuse to scaffold over an existing project — that would clobber its project.ron.
     if path.join("project.ron").exists() {
-        eprintln!("{} already contains a project (project.ron); refusing to overwrite", path.display());
+        floptle_say::say_err!("{} already contains a project (project.ron); refusing to overwrite", path.display());
         return 1;
     }
     if let Err(e) = floptle_vfs::create_dir_all(path) {
-        eprintln!("could not create {}: {e}", path.display());
+        floptle_say::say_err!("could not create {}: {e}", path.display());
         return 1;
     }
     // seed_project_dirs / project_cfg_path only touch the filesystem via project_root, so a
@@ -1727,14 +1727,14 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     if let Some(t) = chosen
         && let Err(e) = templates::apply(t, path)
     {
-        eprintln!("could not write the {} template: {e}", t.name);
+        floptle_say::say_err!("could not write the {} template: {e}", t.name);
         return 1;
     }
     let scene = path.join("scenes/first.ron");
     if !scene.exists()
         && let Err(e) = floptle_scene::save(&crate::project::default_scene(), &scene)
     {
-        eprintln!("could not write starter scene: {e}");
+        floptle_say::say_err!("could not write starter scene: {e}");
         return 1;
     }
     let cfg = floptle_scene::ProjectConfigDoc {
@@ -1745,19 +1745,19 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
         ..floptle_scene::ProjectConfigDoc::for_new_project()
     };
     if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
-        eprintln!("could not write project.ron: {e}");
+        floptle_say::say_err!("could not write project.ron: {e}");
         return 1;
     }
     // A note for whoever — or whatever — opens this folder next. Scaffold-time
     // only: it belongs to the project from here on.
     agents_guide::write(path);
     match chosen {
-        Some(t) => println!("created the {} project at {}", t.name, path.display()),
-        None => println!("created project at {}", path.display()),
+        Some(t) => floptle_say::say!("created the {} project at {}", t.name, path.display()),
+        None => floptle_say::say!("created project at {}", path.display()),
     }
-    println!("  {} says how to drive the engine from a terminal", agents_guide::FILE);
+    floptle_say::say!("  {} says how to drive the engine from a terminal", agents_guide::FILE);
     if let Some(id) = chosen.and_then(|t| t.tutorial) {
-        println!("  the 🎓 Learn tab builds this one step at a time — tutorial \"{id}\"");
+        floptle_say::say!("  the 🎓 Learn tab builds this one step at a time — tutorial \"{id}\"");
     }
     0
 }
@@ -1768,7 +1768,7 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
 /// left as-is. Returns the process exit code.
 fn migrate_project(path: &Path, stamp: &str) -> i32 {
     if !floptle_vfs::is_dir(path) {
-        eprintln!("{} is not a directory", path.display());
+        floptle_say::say_err!("{} is not a directory", path.display());
         return 1;
     }
     // Recursively re-serialize effects (load runs migrate_clips), skipping hidden/target.
@@ -1805,12 +1805,12 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
             // shipped game — which is the one thing the setting exists to
             // prevent. An explicit choice is never overwritten.
             if cfg.pin_script_vec3() {
-                println!("pinned script_vec3 to exact — the vector this project has always had");
+                floptle_say::say!("pinned script_vec3 to exact — the vector this project has always had");
             }
             let _ = floptle_scene::save_project(&cfg, &cfg_path);
         }
         Ok(None) => {} // no project.ron — leave it that way.
-        Err(e) => eprintln!("leaving project.ron untouched (won't parse: {e})"),
+        Err(e) => floptle_say::say_err!("leaving project.ron untouched (won't parse: {e})"),
     }
     // Top up `input.ron` with any starter binding it lacks. A project made
     // before the action layer has none at all, and its shipped default scripts
@@ -1819,7 +1819,7 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
     // Gap-filling only: existing bindings and custom actions are untouched.
     let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
     ed.seed_input_map();
-    println!("migrated {migrated} effect(s) in {}", path.display());
+    floptle_say::say!("migrated {migrated} effect(s) in {}", path.display());
     0
 }
 

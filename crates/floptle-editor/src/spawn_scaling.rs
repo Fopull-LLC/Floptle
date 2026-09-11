@@ -161,14 +161,14 @@ fn temp(tag: &str) -> std::path::PathBuf {
 #[test]
 fn the_cost_of_building_a_chunk_against_the_size_of_the_scene() {
     let dir = temp("table");
-    println!("\n{CHUNK}-node chunk, into a scene that already holds:\n");
-    println!("    scene     build      tear");
+    floptle_say::say!("\n{CHUNK}-node chunk, into a scene that already holds:\n");
+    floptle_say::say!("    scene     build      tear");
     for n in [1_000usize, 4_000, 8_000] {
         let (build, tear) = build_and_tear(&dir, n, true);
-        println!("  {n:>7}  {build:8.1}m {tear:8.1}m");
+        floptle_say::say!("  {n:>7}  {build:8.1}m {tear:8.1}m");
     }
     let _ = std::fs::remove_dir_all(&dir);
-    println!(
+    floptle_say::say!(
         "\nThe finding is the SHAPE of the build column. A chunk is the same\n\
          thousand nodes every time, so a path that walks the scene per node\n\
          costs eight times as much in the last row as in the first, and one\n\
@@ -204,7 +204,7 @@ fn building_a_chunk_does_not_cost_more_in_a_bigger_scene() {
 
     let build = large.0 / small.0;
     let tear = large.1 / small.1;
-    println!("  build {:.2}x   tear {:.2}x  (4x the scene)", build, tear);
+    floptle_say::say!("  build {:.2}x   tear {:.2}x  (4x the scene)", build, tear);
     assert!(
         build < 2.5,
         "building a {CHUNK}-node chunk cost {build:.1}x as much in a scene 4x the size \
@@ -317,8 +317,8 @@ fn streamed_ring(ed: &mut crate::Editor, chunks: usize) {
 fn rebake_a_chunk_against_rebaking_the_level() {
     use floptle_core::Transform;
     let dir = temp("rebake");
-    println!("\n  one 32 m chunk re-measured, in a ring of:\n");
-    println!("    ring        nodes    whole level     one chunk");
+    floptle_say::say!("\n  one 32 m chunk re-measured, in a ring of:\n");
+    floptle_say::say!("    ring        nodes    whole level     one chunk");
     for chunks in [2usize, 3, 4] {
         let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
         // The navmesh node, sized to hold the whole ring.
@@ -352,10 +352,10 @@ fn rebake_a_chunk_against_rebaking_the_level() {
         .expect("the chunk re-measures");
         let one = t1.elapsed().as_secs_f64() * 1000.0;
 
-        println!("  {chunks}x{chunks}  {nodes:>9}  {whole:>10.1}m  {one:>10.1}m");
+        floptle_say::say!("  {chunks}x{chunks}  {nodes:>9}  {whole:>10.1}m  {one:>10.1}m");
     }
     let _ = std::fs::remove_dir_all(&dir);
-    println!(
+    floptle_say::say!(
         "\n  The whole-level column grows with the ring, because it is measuring\n  \
          the ring. The chunk column should not, because a chunk is a chunk\n  \
          whatever is around it.\n"
@@ -402,7 +402,7 @@ fn re_measuring_a_chunk_does_not_cost_more_in_a_bigger_level() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     let ratio = large / small;
-    println!("  chunk rebake {ratio:.2}x for 4x the level ({large:.1} ms vs {small:.1} ms)");
+    floptle_say::say!("  chunk rebake {ratio:.2}x for 4x the level ({large:.1} ms vs {small:.1} ms)");
     assert!(
         ratio < 3.0,
         "re-measuring one 32 m chunk cost {ratio:.1}x as much in a level four times the size \

@@ -809,11 +809,9 @@ pub(crate) fn install_http_api(
             if !st.borrow().playing {
                 return Err(mlua::Error::RuntimeError("openUrl is Play-only".into()));
             }
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(mlua::Error::RuntimeError(
-                    "openUrl takes an http:// or https:// address".into(),
-                ));
-            }
+            // Refused at the call, with the reason, before the platform's
+            // opener is asked: a link a shell could read is not a link.
+            browser_url(&url).map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             match open_in_browser(&url) {
                 Ok(()) => Ok(()),
                 Err(e) => {
@@ -829,22 +827,93 @@ pub(crate) fn install_http_api(
     }
 }
 
-/// Hand a URL to the platform's browser. The Hub does the same for its own
-/// hyperlinks; this is the one call, kept here so a script can use it.
+/// What `openUrl` will hand to a browser: an `http`/`https` URL with a host,
+/// no credentials, and nothing in it a shell or a command line could read as
+/// its own syntax. Refused otherwise, with the reason.
+///
+/// **Parsed, not pattern-matched.** `https://a.example/?q="&calc.exe` starts
+/// with `https://` and is not a link; on the one platform where the opener
+/// used to be a shell, the `&` ran a program. The parse is the same on every
+/// platform so the rule is one rule, and a link that fails it here fails it
+/// on a developer's machine before it ever reaches a player's.
+pub fn browser_url(url: &str) -> std::io::Result<url::Url> {
+    use std::io::{Error, ErrorKind};
+    let refuse = |why: &str| Error::new(ErrorKind::InvalidInput, format!("openUrl: {why}"));
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(refuse("the address contains whitespace or a control character"));
+    }
+    if url.chars().any(|c| matches!(c, '"' | '\'' | '<' | '>' | '`' | '^' | '|' | '\\')) {
+        return Err(refuse("the address contains a character a shell would read: \" ' < > ` ^ | \\"));
+    }
+    let parsed = url::Url::parse(url).map_err(|e| refuse(&format!("not a URL — {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(refuse("only http:// and https:// addresses open"));
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(refuse("the address has no host"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(refuse("an address with a username or password in it does not open"));
+    }
+    Ok(parsed)
+}
+
+/// Hand a URL to the platform's browser. The editor's packages and the
+/// device-code sign-in go through the same call, so a script can use it.
+///
+/// The URL is [`browser_url`]-checked first and the CHECKED spelling is what
+/// is opened — never the string as written.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    let cmd = ("xdg-open", vec![url]);
+    let checked = browser_url(url)?;
+    open_checked(checked.as_str())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
+fn open_checked(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    let cmd = ("open", vec![url]);
-    #[cfg(target_os = "windows")]
-    let cmd = ("cmd", vec!["/C", "start", "", url]);
-    std::process::Command::new(cmd.0)
-        .args(cmd.1)
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+    // One argv element: neither opener runs a shell over it.
+    std::process::Command::new(program)
+        .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
+}
+
+/// `ShellExecuteW`, the way Explorer opens a link. Not `cmd /C start`: the
+/// URL would pass through `cmd.exe`, which reads `&`, `%VAR%` and a closing
+/// quote as its own syntax, and Rust's argument quoting is not the quoting
+/// `cmd` understands.
+#[cfg(target_os = "windows")]
+fn open_checked(url: &str) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| -> Vec<u16> { std::ffi::OsStr::new(s).encode_wide().chain([0]).collect() };
+    let verb = wide("open");
+    let target = wide(url);
+    // SAFETY: both strings are NUL-terminated for the duration of the call;
+    // the window, parameters and directory arguments are allowed to be null.
+    let r = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Per the documentation, a value above 32 is success.
+    if r as usize > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("ShellExecuteW returned {}", r as usize)))
+    }
 }
 
 /// The same, in a browser — where the platform's browser is the one already
@@ -859,6 +928,8 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
 #[cfg(target_arch = "wasm32")]
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
+    let url = browser_url(url)?;
+    let url = url.as_str();
     let win = web_sys::window()
         .ok_or_else(|| Error::new(ErrorKind::Unsupported, "no window: not a browser page"))?;
     match win.open_with_url(url) {
@@ -1301,6 +1372,43 @@ mod policy_tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("byte limit"), "{e}");
+    }
+
+    /// **A link is parsed before anything opens it, on every platform.** The
+    /// quote-and-ampersand spelling is the one that ran a program through
+    /// `cmd /C start`; the rest are the other ways an opener's command line
+    /// could be made to say something else.
+    #[test]
+    fn open_url_refuses_what_a_shell_could_read_and_opens_only_web_links() {
+        for bad in [
+            "https://a.example/?q=\"&calc.exe",
+            "https://a.example/?q=a\\b",
+            "https://a.example/ --flag",
+            "https://a.example/\r\nSecond: line",
+            "https://a.example/?q=`id`",
+            "https://a.example/?q=a|b",
+            "ftp://a.example/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://user:pw@a.example/",
+            "https://",
+            "not a url",
+        ] {
+            let e = browser_url(bad).unwrap_err().to_string();
+            assert!(e.starts_with("openUrl: "), "{bad}: {e}");
+        }
+        for ok in ["https://fopull.com/", "http://a.example:8080/path?x=1&y=2#frag", "https://a.example/%20"] {
+            browser_url(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        // …and the Lua binding refuses at the call, naming the rule.
+        let (lua, state, _) = super::tests::lua_with_http();
+        state.borrow_mut().set_playing(true);
+        let e = lua
+            .load("openUrl('https://a.example/?q=\"&calc.exe')")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("openUrl:") && e.contains("shell would read"), "{e}");
     }
 
     #[test]

@@ -155,7 +155,7 @@ pub(crate) fn write(project_root: &Path) {
     // guide is a courtesy, not a component, so a failure to write it is a line
     // on stderr rather than a failed `new`.
     if let Err(e) = std::fs::write(&path, GUIDE) {
-        eprintln!("could not write {}: {e}", path.display());
+        floptle_say::say_err!("could not write {}: {e}", path.display());
     }
 }
 

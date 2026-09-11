@@ -446,11 +446,11 @@ impl SteamPlatform {
     fn report_overlay_hook(&self) {
         match self.overlay_reported.get() {
             OverlayReport::Nothing if self.is_enabled() => {
-                println!("steam: overlay hooked this process — Shift+Tab should open it");
+                floptle_say::say!("steam: overlay hooked this process — Shift+Tab should open it");
                 self.overlay_reported.set(OverlayReport::Hooked);
             }
             OverlayReport::Nothing if self.booted_at.elapsed() > OVERLAY_HOOK_GRACE => {
-                println!(
+                floptle_say::say!(
                     "steam: overlay has NOT hooked this process after {}s. The overlay is \
                      injected by the Steam client into games it launches, not by the SDK — the \
                      supported way is to launch this build FROM Steam (Add a Non-Steam Game), \
@@ -465,7 +465,7 @@ impl SteamPlatform {
             // Hooked late, after the warning: say so, so the log doesn't end
             // on a false alarm.
             OverlayReport::NotHooked if self.is_enabled() => {
-                println!("steam: overlay hooked this process after all");
+                floptle_say::say!("steam: overlay hooked this process after all");
                 self.overlay_reported.set(OverlayReport::Hooked);
             }
             _ => {}

@@ -247,7 +247,7 @@ mod audio_api;
 mod env;
 mod host;
 mod http_api;
-pub use http_api::open_in_browser;
+pub use http_api::{browser_url, open_in_browser};
 pub mod http_policy;
 pub use http_policy::HttpPolicy;
 mod input_api;

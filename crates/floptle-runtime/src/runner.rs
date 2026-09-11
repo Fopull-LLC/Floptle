@@ -157,7 +157,7 @@ impl ApplicationHandler for Runner {
         for path in &paths {
             match floptle_assets::gltf_import::import(path) {
                 Ok(model) => {
-                    println!(
+                    floptle_say::say!(
                         "  imported '{}' — {} parts, {} textures, size {:.2}",
                         model.name,
                         model.parts.len(),
@@ -191,7 +191,7 @@ impl ApplicationHandler for Runner {
                         prop_models.push((part_ids, model.size));
                     }
                 }
-                Err(e) => eprintln!("  could not import {}: {e}", path.display()),
+                Err(e) => floptle_say::say_err!("  could not import {}: {e}", path.display()),
             }
         }
 

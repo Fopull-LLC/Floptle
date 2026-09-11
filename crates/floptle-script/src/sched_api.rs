@@ -236,6 +236,6 @@ pub(crate) fn install_sched_api(lua: &Lua, state: Rc<RefCell<SchedState>>) {
             let _ = g.set("every", e);
             let _ = g.set("tween", t);
         }
-        _ => eprintln!("[lua] failed to install the scheduler API"),
+        _ => floptle_say::say_err!("[lua] failed to install the scheduler API"),
     }
 }

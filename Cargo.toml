@@ -34,6 +34,7 @@ members = [
     "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
     "crates/floptle-package",  # packages: package.ron manifests, install/link/remove, the registry index
     "crates/floptle-account",  # Foverse account: device-flow sign-in + Floptle Cloud client
+    "crates/floptle-say",      # say!/say_err!: println!/eprintln! that never panic on a dead terminal
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-relay-bench", # load-generator for the relay: Mbps per CCU, where drops start (bin)
     "crates/floptle-fleet",    # fleet agent: desired deployments -> running dedicated servers (bin)

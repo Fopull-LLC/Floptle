@@ -42,36 +42,36 @@ pub(crate) fn run(json: bool) -> i32 {
             "canRender": f.renders.is_ok(),
             "whyNot": f.renders.as_ref().err(),
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(f.renders.is_err());
     }
 
-    println!("floptle {}", f.engine);
+    floptle_say::say!("floptle {}", f.engine);
     match &f.adapter {
         Some(a) => {
-            println!("  graphics    {} ({})", a.name, a.kind);
-            println!("  backend     {}", a.backend);
+            floptle_say::say!("  graphics    {} ({})", a.name, a.kind);
+            floptle_say::say!("  backend     {}", a.backend);
             if !a.driver.is_empty() {
-                println!("  driver      {}", a.driver);
+                floptle_say::say!("  driver      {}", a.driver);
             }
         }
         // No facts means the probe never got far enough to ask for them, and
         // the reason is on the line below. Saying "none" here would contradict
         // it when the adapter exists and the device is what failed.
-        None => println!("  graphics    could not be inspected"),
+        None => floptle_say::say!("  graphics    could not be inspected"),
     }
     match &f.renders {
-        Ok(()) => println!("  rendering   yes — shot, bake gi, open and play will run here"),
+        Ok(()) => floptle_say::say!("  rendering   yes — shot, bake gi, open and play will run here"),
         Err(why) => {
-            println!("  rendering   NO — {why}");
-            println!();
+            floptle_say::say!("  rendering   NO — {why}");
+            floptle_say::say!();
             // Read out of the verb table rather than typed here, so this list
             // cannot come to name a command that does not exist or miss one
             // that does — the same reason `--help` is generated from it.
             let fine: Vec<&str> =
                 crate::cli::VERBS.iter().filter(|v| !v.needs_gpu).map(|v| v.name).collect();
-            println!("Everything that needs no display still works: {}.", fine.join(", "));
-            println!("`floptle help --json` marks which is which with `needsGpu`.");
+            floptle_say::say!("Everything that needs no display still works: {}.", fine.join(", "));
+            floptle_say::say!("`floptle help --json` marks which is which with `needsGpu`.");
         }
     }
     i32::from(f.renders.is_err())

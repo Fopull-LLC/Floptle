@@ -173,7 +173,7 @@ pub(crate) struct Args<'a> {
 pub(crate) fn run(args: Args) -> i32 {
     let Args { root, scene, camera, size, out, json, timing, after, seed } = args;
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
     let (w, h) = (size.0.max(1), size.1.max(1));
@@ -201,14 +201,14 @@ pub(crate) fn run(args: Args) -> i32 {
     // installs no handler at all for the same reason in reverse — a probe must
     // never swallow one.
     gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        eprintln!("this machine's graphics driver could not build the renderer, so there is no \
+        floptle_say::say_err!("this machine's graphics driver could not build the renderer, so there is no \
                    picture to write:\n  {e}");
         // A guess, offered as one. It is the cause on every machine this has
         // been seen on — the raster pipeline binds one palette texture to a
         // filtering sampler and a nearest one, which OpenGL forbids — but the
         // handler cannot know that from here, and a confident wrong cause is
         // worse than a hint.
-        eprintln!(
+        floptle_say::say_err!(
             "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
              shaders need Vulkan, Metal or DirectX 12."
         );
@@ -229,7 +229,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // `--timing` on a device with no timestamp queries is a request that
     // cannot be met, and saying so beats a PNG with no numbers beside it.
     if timing && ed.gpu_timer.is_none() {
-        eprintln!(
+        floptle_say::say_err!(
             "this device has no GPU timestamp queries, so --timing has nothing to measure; \
              the picture is still rendered"
         );
@@ -238,7 +238,7 @@ pub(crate) fn run(args: Args) -> i32 {
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
-            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
         ed.open_scene_file(&path.to_string_lossy());
@@ -277,13 +277,13 @@ pub(crate) fn run(args: Args) -> i32 {
             .map(|(e, ..)| floptle_core::world_transform(&ed.world, e).translation)
             .unwrap_or(DVec3::ZERO);
         let Some(played) = play_for(&mut ed, seconds, anchor) else {
-            eprintln!("the project did not enter play mode, so there is nothing to photograph");
+            floptle_say::say_err!("the project did not enter play mode, so there is nothing to photograph");
             return 1;
         };
         // The clock the scripts themselves read, so the line cannot disagree
         // with them about how much of the span actually ran.
         if !json {
-            eprintln!("played {played:.2}s before drawing");
+            floptle_say::say_err!("played {played:.2}s before drawing");
         }
     }
 
@@ -294,8 +294,8 @@ pub(crate) fn run(args: Args) -> i32 {
     // `--camera` still names one and still wins.
     let Some((e, fov_y, cull_mask, ortho, ortho_height)) = find_camera(&ed, camera) else {
         match camera {
-            Some(name) => eprintln!("this scene has no camera called {name}"),
-            None => eprintln!(
+            Some(name) => floptle_say::say_err!("this scene has no camera called {name}"),
+            None => floptle_say::say_err!(
                 "this scene has no camera, so there is no view to render — add one, or name \
                  another scene with --scene"
             ),
@@ -318,7 +318,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // like a picture. Anchored on the camera being photographed, since that is
     // the presence in the world here.
     if !ed.settle_world_streaming(wt.translation, std::time::Duration::from_secs(45)) {
-        eprintln!(
+        floptle_say::say_err!(
             "warning: the world was still streaming after 45s — some terrain in this \
              shot is drawn as its impostor sphere rather than its surface"
         );
@@ -335,21 +335,21 @@ pub(crate) fn run(args: Args) -> i32 {
     ed.sync_map_meshes();
     ed.sync_map_paint();
     let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask) else {
-        eprintln!("no GPU: this machine has no adapter floptle can render on");
+        floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        eprintln!("could not create {}: {e}", parent.display());
+        floptle_say::say_err!("could not create {}: {e}", parent.display());
         return 1;
     }
     let Some(buf) = image::RgbaImage::from_raw(w, h, pixels) else {
-        eprintln!("the render came back the wrong size");
+        floptle_say::say_err!("the render came back the wrong size");
         return 1;
     };
     if let Err(e) = buf.save(out) {
-        eprintln!("could not write {}: {e}", out.display());
+        floptle_say::say_err!("could not write {}: {e}", out.display());
         return 1;
     }
 
@@ -365,7 +365,7 @@ pub(crate) fn run(args: Args) -> i32 {
         None
     };
     if json {
-        println!(
+        floptle_say::say!(
             "{}",
             serde_json::json!({
                 "ok": true,
@@ -383,11 +383,11 @@ pub(crate) fn run(args: Args) -> i32 {
             })
         );
     } else {
-        println!("wrote {} ({w}x{h})", out.display());
+        floptle_say::say!("wrote {} ({w}x{h})", out.display());
         if let Some((total, passes)) = &gpu_timing {
-            println!("gpu {total:.2} ms across {} passes at {w}x{h}:", passes.len());
+            floptle_say::say!("gpu {total:.2} ms across {} passes at {w}x{h}:", passes.len());
             for (label, ms) in passes {
-                println!("  {label:<20} {ms:7.3} ms");
+                floptle_say::say!("  {label:<20} {ms:7.3} ms");
             }
         }
     }

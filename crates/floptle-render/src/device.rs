@@ -53,7 +53,7 @@ pub fn backends_from_env() -> wgpu::Backends {
         Ok(v) if !v.trim().is_empty() => {
             let want = wgpu::Backends::from_comma_list(&v);
             if want.is_empty() {
-                eprintln!("WGPU_BACKEND={v:?} names no backend floptle knows — using all of them");
+                floptle_say::say_err!("WGPU_BACKEND={v:?} names no backend floptle knows — using all of them");
                 wgpu::Backends::all()
             } else {
                 want
@@ -72,7 +72,7 @@ fn gpu_error(e: &wgpu::Error) {
         }
         // Always to the terminal too: somebody running from a shell should see
         // it whether or not a host ever drains the queue.
-        eprintln!("GPU error: {message}");
+        floptle_say::say_err!("GPU error: {message}");
         seen.push(message.clone());
         queue.push(message);
     }

@@ -31,6 +31,7 @@ vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen", "floptle-editor/
 
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render", default-features = false }
 floptle-field = { path = "../floptle-field" }

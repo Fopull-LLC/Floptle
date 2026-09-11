@@ -1819,17 +1819,17 @@ impl ScriptHost {
             logs: logs.clone(),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
-            eprintln!("[lua] failed to install the node/script reference API: {e}");
+            floptle_say::say_err!("[lua] failed to install the node/script reference API: {e}");
         }
         // Vector math: `vec3`/`vec2` value types + the `distance` global.
         if let Err(e) = crate::math_api::install(&lua) {
-            eprintln!("[lua] failed to install the vector math API: {e}");
+            floptle_say::say_err!("[lua] failed to install the vector math API: {e}");
         }
         // `perf.*` — a game reading its own frame cost (`floptle/0077`). Off by
         // default and free while off, so this costs nothing but the table.
         let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
         if let Err(e) = crate::perf_api::install(&lua, &profile) {
-            eprintln!("[lua] failed to install the perf API: {e}");
+            floptle_say::say_err!("[lua] failed to install the perf API: {e}");
         }
         // `access.*` + `caption(...)` — the accessibility surface a game offers
         // its players (`floptle/0079`).
@@ -1837,7 +1837,7 @@ impl ScriptHost {
             Rc::new(RefCell::new(floptle_core::access::Accessibility::default()));
         let caption_queue: crate::access_api::CaptionQueue = Rc::new(RefCell::new(Vec::new()));
         if let Err(e) = crate::access_api::install(&lua, &access, &caption_queue) {
-            eprintln!("[lua] failed to install the access API: {e}");
+            floptle_say::say_err!("[lua] failed to install the access API: {e}");
         }
         // `app.*` — the settings a game offers a player, and the one thing every
         // main menu needs: quit (`floptle/0175`).
@@ -1845,7 +1845,7 @@ impl ScriptHost {
         let app_requests: crate::app_api::SharedAppRequests =
             Rc::new(RefCell::new(Default::default()));
         if let Err(e) = crate::app_api::install(&lua, &app_info, &app_requests) {
-            eprintln!("[lua] failed to install the app API: {e}");
+            floptle_say::say_err!("[lua] failed to install the app API: {e}");
         }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
@@ -1855,7 +1855,7 @@ impl ScriptHost {
             next_handle: Rc::new(RefCell::new(0)),
         };
         if let Err(e) = crate::audio_api::install_audio_api(&lua, &audio_bridges) {
-            eprintln!("[lua] failed to install the audio API: {e}");
+            floptle_say::say_err!("[lua] failed to install the audio API: {e}");
         }
         // The `net.*` API (docs/multiplayer.md §8): command queue out,
         // session state in, `net.on` handler registry, `net.rewind` (§7).
@@ -1892,7 +1892,7 @@ impl ScriptHost {
         if let Err(e) =
             crate::steam_api::install_steam_api(&lua, platform.clone(), steam_state.clone())
         {
-            eprintln!("[lua] failed to install the steam API: {e}");
+            floptle_say::say_err!("[lua] failed to install the steam API: {e}");
         }
 
         // The rollback `replaying` flag (§4) — shared so `net.replaying()` can
@@ -1903,7 +1903,7 @@ impl ScriptHost {
         // queue-drain shape as `net.*`.
         let voice = crate::voice_api::SharedVoice::new(logs.clone());
         if let Err(e) = crate::voice_api::install_voice_api(&lua, &voice) {
-            eprintln!("[lua] failed to install the voice API: {e}");
+            floptle_say::say_err!("[lua] failed to install the voice API: {e}");
         }
         if let Err(e) = crate::net_api::install_net_api(
             &lua,
@@ -1913,7 +1913,7 @@ impl ScriptHost {
             &synced_stores,
             &replaying,
         ) {
-            eprintln!("[lua] failed to install the net API: {e}");
+            floptle_say::say_err!("[lua] failed to install the net API: {e}");
         }
         // The `terrain.*` API (Terrain 2.0 P6): writes queue TerrainOps the editor
         // drains after the script pass; reads run against the lent colliders.
@@ -2032,7 +2032,7 @@ impl ScriptHost {
             assembly_impacts.clone(),
             assembly_cmds.clone(),
         ) {
-            eprintln!("[lua] failed to install the assembly API: {e}");
+            floptle_say::say_err!("[lua] failed to install the assembly API: {e}");
         }
         // The `camera.*` world→screen API (map click-on-line picking).
         let view_info: Rc<RefCell<crate::view_api::ViewInfo>> =

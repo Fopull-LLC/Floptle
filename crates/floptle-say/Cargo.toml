@@ -1,0 +1,9 @@
+[package]
+name = "floptle-say"
+description = "Two macros that write to the terminal and never panic when it is gone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

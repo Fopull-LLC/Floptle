@@ -906,11 +906,9 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
                         "ed.openUrl needs the `Browser` permission — add it to package.ron",
                     ));
                 }
-                if !(url.starts_with("http://") || url.starts_with("https://")) {
-                    return Err(mlua::Error::runtime(
-                        "ed.openUrl only opens http:// and https:// addresses",
-                    ));
-                }
+                // Parsed, the same rule a game's `openUrl` applies: a link a
+                // shell could read is not a link.
+                floptle_script::browser_url(&url).map_err(|e| mlua::Error::runtime(format!("ed.{e}")))?;
                 shared.cmds.borrow_mut().push(ExtCmd::OpenUrl(url));
                 Ok(())
             })?,
@@ -1986,11 +1984,7 @@ fn sys_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
         t.set(
             "openUrl",
             lua.create_function(move |_, url: String| {
-                if !(url.starts_with("http://") || url.starts_with("https://")) {
-                    return Err(mlua::Error::runtime(
-                        "sys.openUrl only opens http:// and https:// addresses",
-                    ));
-                }
+                floptle_script::browser_url(&url).map_err(|e| mlua::Error::runtime(format!("sys.{e}")))?;
                 shared.cmds.borrow_mut().push(ExtCmd::OpenUrl(url));
                 Ok(())
             })?,

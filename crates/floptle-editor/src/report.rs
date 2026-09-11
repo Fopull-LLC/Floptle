@@ -68,8 +68,8 @@ pub(crate) fn install_panic_hook() {
         if let Some(path) = crash_file() {
             let _ = floptle_vfs::create_dir_all(path.parent().unwrap_or(&path));
             let _ = floptle_vfs::write(&path, &note);
-            eprintln!("\nFloptle wrote a crash report to {}", path.display());
-            eprintln!("Please report it: {ISSUES_URL}");
+            floptle_say::say_err!("\nFloptle wrote a crash report to {}", path.display());
+            floptle_say::say_err!("Please report it: {ISSUES_URL}");
         }
     }));
 }
@@ -123,7 +123,7 @@ pub(crate) fn open_issue_tracker(details: Option<&str>) {
         }
     };
     if let Err(e) = floptle_script::open_in_browser(&url) {
-        eprintln!("could not open the browser ({e}) — the tracker is at {ISSUES_URL}");
+        floptle_say::say_err!("could not open the browser ({e}) — the tracker is at {ISSUES_URL}");
     }
 }
 

@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+floptle-say = { path = "../floptle-say" }
 floptle-anim = { path = "../floptle-anim" }
 floptle-core = { path = "../floptle-core" }
 # `default-features = false`: floptle-render's default is a script VM, for its

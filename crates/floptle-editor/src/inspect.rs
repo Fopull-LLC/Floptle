@@ -161,7 +161,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, select: Option<&str>, json: 
     // as though it were an answer and exit 0 — so a caller pointed at the wrong
     // directory was told the run had succeeded.
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
 
@@ -170,7 +170,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, select: Option<&str>, json: 
         Some(s) => match resolve_scene(root, s) {
             Some(p) => vec![p],
             None => {
-                eprintln!("no scene called {s} under {}", root.join("scenes").display());
+                floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
                 return 1;
             }
         },
@@ -234,33 +234,33 @@ fn report_project(root: &Path, files: &[PathBuf], json: bool) -> i32 {
             })).collect::<Vec<_>>(),
             "unreadable": failed,
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return 0;
     }
 
     match &cfg {
         Ok(Some(c)) => {
-            println!(
+            floptle_say::say!(
                 "{} — \"{}\", stamped {}",
                 root.display(),
                 c.title.as_deref().unwrap_or("(untitled)"),
                 c.engine_version.as_deref().unwrap_or("(no version)")
             );
             if let Some(e) = &c.entry_scene {
-                println!("  entry scene   {e}");
+                floptle_say::say!("  entry scene   {e}");
             }
             if !c.layers.is_empty() {
-                println!("  layers        {}", c.layers.join(", "));
+                floptle_say::say!("  layers        {}", c.layers.join(", "));
             }
         }
-        _ => println!("{} — no readable project.ron", root.display()),
+        _ => floptle_say::say!("{} — no readable project.ron", root.display()),
     }
-    println!("  {} scene(s)", loaded.len());
+    floptle_say::say!("  {} scene(s)", loaded.len());
     for l in &loaded {
-        println!("    {:<28}  \"{}\", {} node(s)", l.file, l.doc.name, l.doc.nodes.len());
+        floptle_say::say!("    {:<28}  \"{}\", {} node(s)", l.file, l.doc.name, l.doc.nodes.len());
     }
     for f in &failed {
-        println!("  unreadable: {f}");
+        floptle_say::say!("  unreadable: {f}");
     }
     0
 }
@@ -282,17 +282,17 @@ fn report_scenes(root: &Path, files: &[PathBuf], json: bool) -> i32 {
             })
             .collect();
         let doc = serde_json::json!({ "scenes": scenes, "unreadable": failed });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(!failed.is_empty());
     }
     for l in &loaded {
-        println!("{} — \"{}\", {} node(s)", l.file, l.doc.name, l.doc.nodes.len());
+        floptle_say::say!("{} — \"{}\", {} node(s)", l.file, l.doc.name, l.doc.nodes.len());
         for i in tree_order(l) {
-            println!("{}", node_line(l, i, &l.doc.nodes[i]));
+            floptle_say::say!("{}", node_line(l, i, &l.doc.nodes[i]));
         }
     }
     for f in &failed {
-        eprintln!("unreadable: {f}");
+        floptle_say::say_err!("unreadable: {f}");
     }
     i32::from(!failed.is_empty())
 }
@@ -329,7 +329,7 @@ fn report_selection(
             })
             .collect();
         let doc = serde_json::json!({ "query": typed, "matched": nodes.len(), "nodes": nodes });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         // Nothing found exits 1, the way `grep` answers — "is there a node
         // called X" is worth being able to ask from a script, and `matched`
         // still says so for a caller reading the document.
@@ -337,13 +337,13 @@ fn report_selection(
     }
 
     if hits.is_empty() {
-        println!("nothing matched {typed}");
+        floptle_say::say!("nothing matched {typed}");
         return 1;
     }
     for (l, i, n) in &hits {
-        println!("{}:{}", l.file, node_line(l, *i, n).trim_start());
+        floptle_say::say!("{}:{}", l.file, node_line(l, *i, n).trim_start());
     }
-    println!("{} node(s) matched {typed}", hits.len());
+    floptle_say::say!("{} node(s) matched {typed}", hits.len());
     0
 }
 

@@ -339,7 +339,7 @@ impl EditorTabViewer<'_> {
 /// console — Rust's stderr is a no-op on `wasm32-unknown-unknown`.
 fn mirror_line(line: &str) {
     #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("{line}");
+    floptle_say::say_err!("{line}");
     // The page's transcript first (`window.floptleLog`, which also echoes to
     // the browser console): that is what `tools/web/shot.py` collects, and a
     // spawn that failed or a shader a browser refused has to be READABLE from

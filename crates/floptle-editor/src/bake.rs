@@ -30,7 +30,7 @@ use floptle_render::Gpu;
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
 
@@ -43,7 +43,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     // from the Light Probes node's quality setting.
     let gpu = Gpu::headless_hdr(64, 64);
     gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        eprintln!("this machine's graphics driver could not build the renderer, so there is \
+        floptle_say::say_err!("this machine's graphics driver could not build the renderer, so there is \
                    nothing to bake with:\n  {e}");
         std::process::exit(1);
     }));
@@ -60,7 +60,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
-            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
         ed.open_scene_file(&path.to_string_lossy());
@@ -68,7 +68,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     let opened: Vec<crate::console::ConsoleEntry> = std::mem::take(&mut ed.console.entries);
 
     if !ed.start_gi_bake() {
-        eprintln!(
+        floptle_say::say_err!(
             "{} has no enabled Light Probes node, so there is nothing to bake — add one, or \
              name another scene with --scene",
             ed.scene_rel_or_default()
@@ -91,7 +91,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
         // future change rather than a case anybody has seen — and a loop that
         // cannot end is worse than a wrong answer.
         if slices > 1_000_000 {
-            eprintln!("the bake stopped making progress after {slices} passes");
+            floptle_say::say_err!("the bake stopped making progress after {slices} passes");
             return 1;
         }
     }
@@ -124,13 +124,13 @@ fn report(
                 }))
                 .collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
     // The bake's own summary line is the answer, so it goes to stdout — it says
     // how many probes, how many bounces, how long, and what it wrote.
     for e in all().filter(|e| e.level == LogLevel::Debug && e.msg.starts_with("baked GI")) {
-        println!("{}", e.msg);
+        floptle_say::say!("{}", e.msg);
     }
     i32::from(errors > 0)
 }
@@ -145,7 +145,7 @@ fn report(
 /// it over frames nobody is drawing.
 pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     if !root.join("project.ron").is_file() {
-        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
     }
     let mut ed = crate::Editor {
@@ -156,7 +156,7 @@ pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
-            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            floptle_say::say_err!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
         ed.open_scene_file(&path.to_string_lossy());
@@ -166,7 +166,7 @@ pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     let opened: Vec<crate::console::ConsoleEntry> = std::mem::take(&mut ed.console.entries);
 
     if crate::nav_bake::nav_node(&ed.world).is_none() {
-        eprintln!(
+        floptle_say::say_err!(
             "{} has no Nav Mesh node, so there is nothing to bake — add one, or name \
              another scene with --scene",
             ed.scene_rel_or_default()
@@ -183,7 +183,7 @@ pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     while ed.nav_job.is_some() {
         ed.poll_nav_bake();
         if started.elapsed() > std::time::Duration::from_secs(60 * 30) {
-            eprintln!("the bake was still running after half an hour — giving up");
+            floptle_say::say_err!("the bake was still running after half an hour — giving up");
             return 1;
         }
         std::thread::yield_now();
@@ -215,11 +215,11 @@ fn report_nav(
                 }))
                 .collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
     for e in all().filter(|e| e.level == LogLevel::Debug && e.msg.starts_with("navmesh:")) {
-        println!("{}", e.msg);
+        floptle_say::say!("{}", e.msg);
     }
     i32::from(errors > 0)
 }

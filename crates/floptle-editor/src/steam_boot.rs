@@ -59,11 +59,11 @@ pub(crate) fn boot(app_id: u32, shipped: bool) -> Option<Rc<dyn floptle_services
     }
     match floptle_steam::SteamPlatform::init(app_id) {
         Ok(p) => {
-            println!("steam: initialized (app {app_id})");
+            floptle_say::say!("steam: initialized (app {app_id})");
             Some(Rc::new(p))
         }
         Err(e) => {
-            eprintln!("steam: could not initialize ({e}) — continuing without it");
+            floptle_say::say_err!("steam: could not initialize ({e}) — continuing without it");
             None
         }
     }
@@ -73,7 +73,7 @@ pub(crate) fn boot(app_id: u32, shipped: bool) -> Option<Rc<dyn floptle_services
 /// [`boot`]'s signature so call sites never branch on the feature.
 #[cfg(not(feature = "steam"))]
 pub(crate) fn boot(app_id: u32, _shipped: bool) -> Option<Rc<dyn floptle_services::Platform>> {
-    eprintln!(
+    floptle_say::say_err!(
         "steam: this build has no `steam` feature compiled in — app {app_id} requested, \
          continuing without it"
     );
