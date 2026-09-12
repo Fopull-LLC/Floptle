@@ -1004,6 +1004,10 @@ empty list) and one Console line naming the rule. `getContents` walks at most
 |---|---|
 | `assets.getFile("models/armor.glb")` | the asset's path (a string you hand to `node.model` / `node.material`), or `nil` if it doesn't exist |
 | `assets.getContents("models")` | an array of **every file** under that directory (recursive) — great for building tables |
+| `assets.readText("data/intro.txt")` | the file's text, or `nil, why` |
+| `assets.readJson("charts/neon.json")` | the file decoded as JSON (`json.decode` rules), or `nil, why` |
+| `assets.writeText(path, text)` | write a text file under `Assets/` (folders created) — `ok, why` |
+| `assets.writeJson(path, value [, {pretty=true}])` | encode and write a JSON file — `ok, why` |
 
 ```lua
 -- Build a database of armor models once, then swap between them.
@@ -1015,6 +1019,28 @@ local armor = {
 -- …or grab a whole folder at once:
 local allTextures = assets.getContents("textures")
 ```
+
+**Your own data files.** A rhythm chart, a dialogue tree, a table of enemy
+stats — anything you would rather author as data than as a Lua table — is a
+JSON file under `Assets/`, and a script reads it in one call:
+
+```lua
+local chart, why = assets.readJson("charts/neon.json")
+if not chart then return log("no chart: " .. why) end
+for _, note in ipairs(chart.notes) do
+  spawnNote(note.t, note.lane)
+end
+```
+
+The reverse works too, so a chart editor can be a scene in your game rather
+than a tool outside it — record the hits, then
+`assets.writeJson("charts/neon.json", chart, { pretty = true })` writes a file
+the Asset Browser shows, git diffs and the export ships. Decoding follows
+`json.decode` (objects → tables, arrays → 1-based lists that stay lists on the
+way back, `null` → `nil`); a file that is missing, not text or not JSON answers
+`nil, why` plus one Console line, never an error that stops the script. Every
+path is relative to `Assets/` and stays inside it. The same calls work in an
+exported build and in a browser, where a write lands in the page's own storage.
 
 ### `node.model` — swap a mesh's model
 

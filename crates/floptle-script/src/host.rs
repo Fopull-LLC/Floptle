@@ -914,6 +914,104 @@ impl ScriptHost {
                 })
                 .ok(),
             );
+            // `assets.readText` / `writeText` / `readJson` / `writeJson`: a
+            // script's own data files. `getFile` answers a PATH, which is what
+            // a model or a material wants, and nothing a script can open — so
+            // a rhythm chart, a dialogue tree or a level table had to be
+            // written as a Lua table or pushed through `save.*` one 1 KB value
+            // at a time. These read and write the file itself, contained to
+            // the project the same way `getFile` is, so a chart editor built
+            // IN the game writes straight into `assets/` and the level it
+            // wrote is a file the Asset Browser shows.
+            //
+            // Every one answers `value, err` rather than raising: a data file
+            // is content, and a missing or mangled one is a message in the
+            // Console, not a script that stops loading. They go through
+            // `floptle_vfs`, so the same script reads from the bundle in a
+            // browser and its writes land in the page's overlay.
+            let pr = project_root.clone();
+            let sink = logs.clone();
+            let _ = t.set(
+                "readText",
+                lua.create_function(move |lua, path: String| {
+                    match read_project_text(&pr.borrow(), &path, "assets.readText") {
+                        Ok(text) => Ok((Value::String(lua.create_string(text.as_bytes())?), Value::Nil)),
+                        Err(why) => {
+                            refuse_read(&sink, &why);
+                            Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                        }
+                    }
+                })
+                .ok(),
+            );
+            let pr = project_root.clone();
+            let sink = logs.clone();
+            let _ = t.set(
+                "readJson",
+                lua.create_function(move |lua, path: String| {
+                    let text = match read_project_text(&pr.borrow(), &path, "assets.readJson") {
+                        Ok(text) => text,
+                        Err(why) => {
+                            refuse_read(&sink, &why);
+                            return Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)));
+                        }
+                    };
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(v) => Ok((crate::http_api::json_to_lua(lua, &v)?, Value::Nil)),
+                        Err(e) => {
+                            let why = format!("assets.readJson(\"{path}\"): not valid JSON — {e}");
+                            refuse_read(&sink, &why);
+                            Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                        }
+                    }
+                })
+                .ok(),
+            );
+            let pr = project_root.clone();
+            let sink = logs.clone();
+            let _ = t.set(
+                "writeText",
+                lua.create_function(move |lua, (path, text): (String, mlua::String)| {
+                    match write_project_bytes(&pr.borrow(), &path, &text.as_bytes(), "assets.writeText") {
+                        Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                        Err(why) => {
+                            refuse_read(&sink, &why);
+                            Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                        }
+                    }
+                })
+                .ok(),
+            );
+            let pr = project_root.clone();
+            let sink = logs.clone();
+            let _ = t.set(
+                "writeJson",
+                lua.create_function(move |lua, (path, value, opts): (String, Value, Option<Table>)| {
+                    // `{ pretty = true }` writes it indented — a chart a person
+                    // will open in a text editor, or diff in git, wants that.
+                    let pretty = match &opts {
+                        Some(o) => {
+                            crate::opts::check_keys(o, &["pretty"], "assets.writeJson")?;
+                            crate::opts::opt_bool(o, "assets.writeJson", "pretty")?.unwrap_or(false)
+                        }
+                        None => false,
+                    };
+                    // A table that cannot be JSON (nests forever, a mis-tagged
+                    // list) is a bug in the script and raises, exactly as
+                    // `json.encode` would.
+                    let j = crate::http_api::lua_to_json(&value)?;
+                    let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
+                        .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
+                    match write_project_bytes(&pr.borrow(), &path, text.as_bytes(), "assets.writeJson") {
+                        Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                        Err(why) => {
+                            refuse_read(&sink, &why);
+                            Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                        }
+                    }
+                })
+                .ok(),
+            );
             let _ = lua.globals().set("assets", t);
         }
 
@@ -6606,6 +6704,70 @@ fn list_files_under(base: &Path) -> (Vec<String>, bool) {
 /// One Console line for a path that tried to leave the project. Once per
 /// distinct `(call, path)` is what a script that asks every frame deserves,
 /// and `ScriptLog` de-duplicates identical lines downstream.
+/// The most a script may read as one string through `assets.readText` /
+/// `readJson`. A chart, a dialogue tree or a level table is kilobytes; the
+/// only thing past this is a model handed to the wrong call, and reading a
+/// 300 MB `.glb` into a Lua string before saying "not text" is a stall.
+const MAX_TEXT_READ_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a text file the script named, contained to the project. The error is
+/// the whole Console line: which call, which path, and which rule or failure.
+fn read_project_text(root: &Path, path: &str, call: &str) -> Result<String, String> {
+    let Some(full) = floptle_vfs::contain(root, path) else {
+        return Err(format!(
+            "{call}(\"{path}\"): a path is relative to the project and stays inside it — an \
+             absolute path or `..` is refused"
+        ));
+    };
+    if !floptle_vfs::is_file(&full) {
+        return Err(format!("{call}(\"{path}\"): no such file in the project"));
+    }
+    if let Some(n) = floptle_vfs::size(&full)
+        && n > MAX_TEXT_READ_BYTES
+    {
+        return Err(format!(
+            "{call}(\"{path}\"): {n} bytes is more than the {} MB a text read allows — is this \
+             a data file?",
+            MAX_TEXT_READ_BYTES / (1024 * 1024)
+        ));
+    }
+    floptle_vfs::read_to_string(&full).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            format!("{call}(\"{path}\"): not UTF-8 text")
+        } else {
+            format!("{call}(\"{path}\"): {e}")
+        }
+    })
+}
+
+/// Write a file the script named, contained to the project, creating the
+/// folders on the way. Same containment rule as the reads: a game runs on a
+/// machine that is not the developer's, and `../../.bashrc` is not its data.
+fn write_project_bytes(root: &Path, path: &str, bytes: &[u8], call: &str) -> Result<(), String> {
+    let Some(full) = floptle_vfs::contain(root, path) else {
+        return Err(format!(
+            "{call}(\"{path}\"): a path is relative to the project and stays inside it — an \
+             absolute path or `..` is refused"
+        ));
+    };
+    if path.is_empty() || full == root || floptle_vfs::is_dir(&full) {
+        return Err(format!("{call}(\"{path}\"): that is a folder, not a file"));
+    }
+    if let Some(parent) = full.parent()
+        && let Err(e) = floptle_vfs::create_dir_all(parent)
+    {
+        return Err(format!("{call}(\"{path}\"): could not create its folder — {e}"));
+    }
+    floptle_vfs::write(&full, bytes).map_err(|e| format!("{call}(\"{path}\"): {e}"))
+}
+
+/// One Console line for a read or write that answered `nil, err` — the
+/// script may handle it, but a data file that fails to load is worth seeing
+/// even when the script shrugs.
+fn refuse_read(sink: &Rc<RefCell<Vec<ScriptLog>>>, why: &str) {
+    sink.borrow_mut().push(ScriptLog { level: LogLevel::Warn, msg: why.to_owned(), source: None });
+}
+
 fn refuse_outside(sink: &Rc<RefCell<Vec<ScriptLog>>>, call: &str, path: &str) {
     sink.borrow_mut().push(ScriptLog {
         level: LogLevel::Warn,
@@ -6758,6 +6920,122 @@ mod host_tests {
         let rule = said.iter().filter(|m| m.contains("stays inside it")).count();
         assert_eq!(rule, 4, "one line per refused call, naming the rule:\n{joined}");
         assert!(joined.contains("assets.getFile(\"../secret.txt\")"), "{joined}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A data file round-trips through `assets.writeJson` / `readJson`.** A
+    /// chart written by one script — into a folder that did not exist — is
+    /// read back by another with its numbers, strings, nested tables and
+    /// LISTS intact (an empty list stays `[]`, and a decoded list is still
+    /// tagged as one). `readText` sees the same bytes, and `pretty` indents.
+    #[test]
+    fn a_json_file_written_by_a_script_reads_back_whole() {
+        let dir = std::env::temp_dir().join(format!("floptle-assets-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("proj");
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::write(
+            root.join("scripts/writer.lua"),
+            "function start()\n\
+             \x20 local chart = { bpm = 174.5, title = \"Neon\", notes = { {t = 0.5, lane = 2}, {t = 1, lane = 4} }, tags = json.array{} }\n\
+             \x20 local ok, err = assets.writeJson('charts/neon.json', chart)\n\
+             \x20 print('ok=' .. tostring(ok) .. ' err=' .. tostring(err))\n\
+             \x20 local ok2 = assets.writeJson('charts/pretty.json', chart, { pretty = true })\n\
+             \x20 print('ok2=' .. tostring(ok2))\n\
+             end\n",
+        )
+        .unwrap();
+        floptle_vfs::write(
+            root.join("scripts/reader.lua"),
+            "function start()\n\
+             \x20 local c, err = assets.readJson('charts/neon.json')\n\
+             \x20 print('err=' .. tostring(err))\n\
+             \x20 print('bpm=' .. c.bpm .. ' title=' .. c.title .. ' n=' .. #c.notes .. ' lane=' .. c.notes[2].lane)\n\
+             \x20 print('tags=' .. tostring(json.isArray(c.tags)) .. ' notes=' .. tostring(json.isArray(c.notes)))\n\
+             \x20 local raw = assets.readText('charts/neon.json')\n\
+             \x20 print('raw=' .. raw)\n\
+             \x20 local p = assets.readText('charts/pretty.json')\n\
+             \x20 print('indented=' .. tostring(p:find('\\n  ') ~= nil))\n\
+             end\n",
+        )
+        .unwrap();
+        let run = |kind: &str| -> Vec<String> {
+            let mut world = world_with_script(kind);
+            let mut host = ScriptHost::new();
+            host.set_project_root(root.clone());
+            host.set_playing(true);
+            host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+            assert!(host.errors().is_empty(), "{kind}: {:?}", host.errors());
+            host.drain_logs().into_iter().map(|l| l.msg).collect()
+        };
+        let said = run("writer");
+        assert_eq!(said, ["ok=true err=nil", "ok2=true"], "{said:?}");
+        assert!(root.join("charts/neon.json").is_file(), "the folder was created on the way");
+
+        let said = run("reader");
+        let joined = said.join("\n");
+        for want in [
+            "err=nil",
+            "bpm=174.5 title=Neon n=2 lane=4",
+            "tags=true notes=true",
+            "raw={\"bpm\":174.5,\"notes\":[{\"lane\":2,\"t\":0.5},{\"lane\":4,\"t\":1}],\"tags\":[],\"title\":\"Neon\"}",
+            "indented=true",
+        ] {
+            assert!(said.iter().any(|m| m == want), "missing {want} in:\n{joined}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A read or write that cannot be done answers `nil, why` and one
+    /// Console line** — never a raise, never a silent nil. Four ways: a path
+    /// out of the project (read AND write), a file that is not there, a file
+    /// that is not text, and a file that is not JSON. The writes that were
+    /// refused left nothing behind.
+    #[test]
+    fn a_data_file_that_cannot_be_read_or_written_says_why() {
+        let dir = std::env::temp_dir().join(format!("floptle-assets-json-no-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("proj");
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::create_dir_all(root.join("data")).unwrap();
+        floptle_vfs::write(root.join("data/blob.bin"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        floptle_vfs::write(root.join("data/broken.json"), "{ \"bpm\": ").unwrap();
+        floptle_vfs::write(
+            root.join("scripts/prober.lua"),
+            "function start()\n\
+             \x20 local v, e = assets.readText('../secret.txt')   print('up=' .. tostring(v) .. '|' .. e)\n\
+             \x20 local v, e = assets.readJson('data/nope.json')  print('missing=' .. tostring(v) .. '|' .. e)\n\
+             \x20 local v, e = assets.readText('data/blob.bin')   print('bin=' .. tostring(v) .. '|' .. e)\n\
+             \x20 local v, e = assets.readJson('data/broken.json') print('broken=' .. tostring(v) .. '|' .. e)\n\
+             \x20 local ok, e = assets.writeText('../escape.txt', 'x') print('wup=' .. tostring(ok) .. '|' .. e)\n\
+             \x20 local ok, e = assets.writeJson('/tmp/escape.json', {}) print('wabs=' .. tostring(ok) .. '|' .. e)\n\
+             \x20 local ok, e = assets.writeText('data', 'x') print('wdir=' .. tostring(ok) .. '|' .. e)\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("prober");
+        let mut host = ScriptHost::new();
+        host.set_project_root(root.clone());
+        host.set_playing(true);
+        host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let joined = said.join("\n");
+        let line = |tag: &str| -> String {
+            said.iter().find(|m| m.starts_with(tag)).unwrap_or_else(|| panic!("no {tag} in:\n{joined}")).clone()
+        };
+        assert!(line("up=").starts_with("up=nil|assets.readText(\"../secret.txt\"): a path is relative"), "{joined}");
+        assert!(line("missing=").starts_with("missing=nil|assets.readJson(\"data/nope.json\"): no such file"), "{joined}");
+        assert!(line("bin=").starts_with("bin=nil|assets.readText(\"data/blob.bin\"): not UTF-8"), "{joined}");
+        assert!(line("broken=").starts_with("broken=nil|assets.readJson(\"data/broken.json\"): not valid JSON"), "{joined}");
+        assert!(line("wup=").starts_with("wup=false|assets.writeText(\"../escape.txt\"): a path is relative"), "{joined}");
+        assert!(line("wabs=").starts_with("wabs=false|assets.writeJson(\"/tmp/escape.json\"): a path is relative"), "{joined}");
+        assert!(line("wdir=").starts_with("wdir=false|assets.writeText(\"data\"): that is a folder"), "{joined}");
+        // Each refusal was ALSO a Console line of its own (the script's print
+        // is the other seven), so a shrugged-off failure is still visible.
+        let warned = said.iter().filter(|m| m.starts_with("assets.")).count();
+        assert_eq!(warned, 7, "one Console line per refusal:\n{joined}");
+        assert!(!dir.join("escape.txt").exists() && !Path::new("/tmp/escape.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
