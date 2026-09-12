@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
-- [assets](#assets) — 3
+- [assets](#assets) — 7
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -3635,7 +3635,7 @@ Fader gain in dB (0 = unity, −60 = silent).
 
 ### `assets`
 
-Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir).
+Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir). Read and write your own data files: assets.readText / writeText, assets.readJson / writeJson.
 
 ### `assets.getContents`
 
@@ -3644,6 +3644,22 @@ assets.getContents("models") — an array of every file under that folder (recur
 ### `assets.getFile`
 
 assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line.
+
+### `assets.readJson`
+
+assets.readJson("charts/neon.json") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua.
+
+### `assets.readText`
+
+assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle).
+
+### `assets.writeJson`
+
+assets.writeJson("charts/neon.json", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships.
+
+### `assets.writeText`
+
+assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload.
 
 ## debug gizmos
 

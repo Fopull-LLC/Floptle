@@ -216,7 +216,7 @@ fn read_opts(
 /// become 1-based arrays, `null` becomes `nil` — which means a null FIELD
 /// simply isn't there, the same thing a missing field looks like, and that is
 /// the right answer in Lua.
-fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
+pub(crate) fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
     Ok(match v {
         serde_json::Value::Null => Value::Nil,
         serde_json::Value::Bool(b) => Value::Boolean(*b),
