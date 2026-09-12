@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.91.1 — "Your Own Data".** A script reads and writes its own data files:
+`assets.readJson(path)` hands a JSON file under `Assets/` to a script as a Lua
+value and `assets.writeJson(path, value)` writes one back (`{ pretty = true }`
+to indent it), with `assets.readText` / `writeText` for any other text
+format. A rhythm chart or a dialogue tree is a file the Asset Browser shows and
+the export ships, and a chart editor can be a scene in the game. A missing,
+malformed or out-of-project file answers `nil, why` and one Console line.
+
 **v0.91.0 — "In The Picture".** A relay asks the kernel for an 8 MiB socket
 buffer and prints what it was given, naming the sysctl to raise when it was
 clamped — the default-sized inbox was dropping packets at a hundred players on
