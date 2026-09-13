@@ -1340,11 +1340,17 @@ impl EditorTabViewer<'_> {
         // a page was removed.
         let mut open = self.ide.docs_guide.min(DOC_SECTIONS.len().saturating_sub(1));
 
-        ui.horizontal_top(|ui| {
+        // Two columns need room for BOTH of them. A dock panel is whatever width
+        // it was dragged to, and at 200 px a contents column at its own minimum
+        // leaves the page fifty pixels — which is the overflow this layout would
+        // otherwise introduce, in the tab whose whole job is reading. Narrow, the
+        // contents go ABOVE the page instead: shrink, then wrap, then stack.
+        let side = docs_contents_width(ui.available_width());
+        let render = |ui: &mut egui::Ui, this: &mut Self, open: &mut usize| {
             // ---- contents ----
-            let w = (ui.available_width() * 0.34).clamp(150.0, 260.0);
+            let w = side.unwrap_or_else(|| ui.available_width());
             ui.allocate_ui_with_layout(
-                egui::vec2(w, ui.available_height()),
+                egui::vec2(w, if side.is_some() { ui.available_height() } else { 150.0 }),
                 egui::Layout::top_down_justified(egui::Align::LEFT),
                 |ui| {
                     egui::ScrollArea::vertical().id_salt("docs-contents").show(ui, |ui| {
@@ -1366,11 +1372,11 @@ impl EditorTabViewer<'_> {
                                 // repeating it. Show the whole thing on hover.
                                 let short = crate::responsive::elide(ui, title, w - 18.0);
                                 if ui
-                                    .selectable_label(i == open, short)
+                                    .selectable_label(i == *open, short)
                                     .on_hover_text(title)
                                     .clicked()
                                 {
-                                    open = i;
+                                    *open = i;
                                 }
                             }
                         }
@@ -1384,39 +1390,65 @@ impl EditorTabViewer<'_> {
             ui.separator();
             // ---- the page ----
             egui::ScrollArea::vertical().id_salt("docs-page").show(ui, |ui| {
-                let (chapter, title, body) = DOC_SECTIONS[open];
+                let (chapter, title, body) = DOC_SECTIONS[*open];
                 ui.small(chapter);
                 ui.heading(title);
                 ui.add_space(2.0);
-                self.doc_body_ui(ui, body);
+                this.doc_body_ui(ui, body);
                 // Where to go next, so the guide reads as a sequence rather
                 // than as a pile. A page with nothing after it says so instead
                 // of showing a dead button.
                 ui.add_space(10.0);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    if open > 0
-                        && ui
-                            .button(format!("◀ {}", DOC_SECTIONS[open - 1].1))
-                            .on_hover_text(DOC_SECTIONS[open - 1].1)
-                            .clicked()
-                    {
-                        open -= 1;
+                    // Elided, because a chapter title is as long as it needs to
+                    // be and these two sit side by side on one line.
+                    let w = ui.available_width() * 0.45;
+                    if *open > 0 {
+                        let t = DOC_SECTIONS[*open - 1].1;
+                        let label = format!("◀ {}", crate::responsive::elide(ui, t, w));
+                        if ui.button(label).on_hover_text(t).clicked() {
+                            *open -= 1;
+                        }
                     }
-                    if open + 1 < DOC_SECTIONS.len()
-                        && ui
-                            .button(format!("{} ▶", DOC_SECTIONS[open + 1].1))
-                            .on_hover_text(DOC_SECTIONS[open + 1].1)
-                            .clicked()
-                    {
-                        open += 1;
+                    if *open + 1 < DOC_SECTIONS.len() {
+                        let t = DOC_SECTIONS[*open + 1].1;
+                        let label = format!("{} ▶", crate::responsive::elide(ui, t, w));
+                        if ui.button(label).on_hover_text(t).clicked() {
+                            *open += 1;
+                        }
                     }
                 });
             });
-        });
+        };
+        if side.is_some() {
+            ui.horizontal_top(|ui| render(ui, self, &mut open));
+        } else {
+            ui.vertical(|ui| render(ui, self, &mut open));
+        }
         self.ide.docs_guide = open;
         shown.len()
     }
+}
+
+/// How wide the Guides contents column should be, or `None` to stack it above
+/// the page instead of beside it.
+///
+/// A dock panel is whatever width somebody dragged it to. Two columns need room
+/// for both: a contents column at its own readable minimum inside a 200 px panel
+/// leaves the page fifty pixels, which is not a page. `MIN_TWO_COLUMN` is
+/// contents-minimum plus the narrowest a body of text is still worth setting.
+fn docs_contents_width(avail: f32) -> Option<f32> {
+    const MIN_CONTENTS: f32 = 150.0;
+    const MIN_PAGE: f32 = 240.0;
+    const MIN_TWO_COLUMN: f32 = MIN_CONTENTS + MIN_PAGE;
+    if avail < MIN_TWO_COLUMN {
+        return None;
+    }
+    Some((avail * 0.34).clamp(MIN_CONTENTS, 260.0))
+}
+
+impl EditorTabViewer<'_> {
 
     /// The Docs landing page: three pages behind one search box — the sectioned
     /// guide, the **API browser**, and the shader stdlib.
@@ -5952,6 +5984,38 @@ Prose with `inline code` in it.
         assert!(api_entry_for("myLocalVariable").is_none());
         assert!(api_entry_for("").is_none());
         assert!(api_entry_for("foo.").is_none());
+    }
+
+    /// **The Guides layout does not put two columns where one fits.**
+    ///
+    /// A dock panel is whatever width somebody dragged it to, and the § Docs
+    /// tab is the one people make narrow — it sits beside the code. A contents
+    /// column at its own readable minimum inside a 200 px panel leaves the page
+    /// fifty pixels, which is not a page; the rule in this codebase is shrink,
+    /// then wrap, then STACK, and this is the stack.
+    ///
+    /// The width decision is a free function precisely so it can be asserted on:
+    /// the layout it drives needs a whole `EditorTabViewer`, and a panel that
+    /// cannot be constructed cannot be checked.
+    #[test]
+    fn the_docs_contents_column_gives_way_before_it_squeezes_the_page() {
+        // Wide: two columns, and the contents never eat the page.
+        for w in [1400.0, 900.0, 600.0, 420.0] {
+            let side = docs_contents_width(w).unwrap_or_else(|| panic!("stacked at {w}px"));
+            assert!(side >= 150.0, "{w}px gave the contents {side}px — unreadable");
+            assert!(
+                w - side >= 240.0,
+                "{w}px left the page {}px after a {side}px contents column",
+                w - side
+            );
+        }
+        // Narrow: stacked, so the page gets the whole width.
+        for w in [380.0, 300.0, 200.0, 120.0] {
+            assert!(
+                docs_contents_width(w).is_none(),
+                "{w}px still tried to draw two columns"
+            );
+        }
     }
 
     /// **A call that promises an `err` must say what makes it fail.**
