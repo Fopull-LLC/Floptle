@@ -407,8 +407,23 @@ impl ChunkTerrain {
     /// (±1 cell) is guaranteed to cover everything within one cell of the
     /// point.
     #[inline]
-    fn cell(&self) -> f32 {
+    fn reach(&self) -> f32 {
         self.field.band().max(self.field.voxel()).max(1e-3)
+    }
+
+    /// Bucket size for the triangle grid — **one voxel**, which is about one
+    /// triangle.
+    ///
+    /// Deliberately NOT the reach. Sizing the buckets to how far a query may
+    /// look puts every triangle within the whole band into the bucket the point
+    /// is standing in, so the first and commonest lookup — a body resting on
+    /// flat ground — walks hundreds of triangles to find the one under its
+    /// feet. Buckets this size hold a handful each, and the expanding-ring
+    /// search below stops as soon as the answer cannot be beaten, so the reach
+    /// costs nothing until something actually makes it look that far.
+    #[inline]
+    fn bucket(&self) -> f32 {
+        self.field.voxel().max(1e-3)
     }
 
     /// **Forget every meshed chunk.** Called wherever the field is handed out
@@ -427,7 +442,7 @@ impl ChunkTerrain {
 
     /// Make sure every chunk within `cell()` of `local` has been meshed.
     fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
-        let r = Vec3::splat(self.cell());
+        let r = Vec3::splat(self.reach());
         for c in self.field.chunks_in_world_box(local - r, local + r) {
             if !s.meshed.insert(c) {
                 continue;
@@ -438,7 +453,7 @@ impl ChunkTerrain {
             // collision it would be an invisible wall around every chunk.
             let m = floptle_field::mesh_chunk(&self.field, c, 1, false);
             let origin = Vec3::from(m.origin);
-            let cell = self.cell();
+            let cell = self.bucket();
             for t in m.indices.as_chunks::<3>().0 {
                 let tri = [
                     origin + Vec3::from(m.positions[t[0] as usize]),
@@ -468,27 +483,62 @@ impl ChunkTerrain {
         }
         // Cheap reject before any meshing: outside the band the field saturates
         // and there is nothing for a triangle to correct.
-        if self.field.d(local).abs() > self.cell() {
+        if self.field.d(local).abs() > self.reach() {
             return None;
         }
         let mut s = self.surface.borrow_mut();
         self.ensure_meshed(local, &mut s);
-        let cell = self.cell();
+        let cell = self.bucket();
         let c = cell_coord(local, cell);
         let mut best = f32::INFINITY;
         let mut hit = None;
-        for cz in c.2 - 1..=c.2 + 1 {
-            for cy in c.1 - 1..=c.1 + 1 {
-                for cx in c.0 - 1..=c.0 + 1 {
-                    let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
-                    for tri in bucket {
-                        let q = closest_point_on_triangle(local, tri[0], tri[1], tri[2]);
-                        let d2 = (q - local).length_squared();
-                        if d2 < best {
-                            best = d2;
-                            hit = Some(q);
+        // **Expanding rings, stopping as soon as the answer is provably final.**
+        //
+        // A fixed 3×3×3 walk does twenty-seven buckets of work whatever the
+        // answer is, and a body resting on the ground asks this several times
+        // per substep — the honest hit is nearly always a triangle directly
+        // beneath it, in the first bucket. Measured on rough terrain, the fixed
+        // walk made this by far the most expensive thing in the step.
+        //
+        // The stopping rule is exact rather than a heuristic: after every shell
+        // out to `r`, everything still unscanned lies outside the box
+        // `[c-r, c+r+1] * cell`, so the shortest distance from the point to that
+        // box's faces is a floor on what any unscanned triangle could be. A hit
+        // nearer than that floor cannot be beaten.
+        //
+        // The ring is bounded by the reach the reject above already established
+        // — past it there is no triangle worth finding and the field answers.
+        let max_ring = (self.reach() / cell).ceil().max(1.0) as i32;
+        for r in 0..=max_ring {
+            for cz in c.2 - r..=c.2 + r {
+                for cy in c.1 - r..=c.1 + r {
+                    for cx in c.0 - r..=c.0 + r {
+                        // Only the SHELL: the inside was scanned at a smaller r.
+                        let on_shell = (cx - c.0).abs() == r
+                            || (cy - c.1).abs() == r
+                            || (cz - c.2).abs() == r;
+                        if !on_shell {
+                            continue;
+                        }
+                        let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
+                        for tri in bucket {
+                            let q = closest_point_on_triangle(local, tri[0], tri[1], tri[2]);
+                            let d2 = (q - local).length_squared();
+                            if d2 < best {
+                                best = d2;
+                                hit = Some(q);
+                            }
                         }
                     }
+                }
+            }
+            if hit.is_some() {
+                // The scanned box, and how far its nearest face is.
+                let lo = Vec3::new((c.0 - r) as f32, (c.1 - r) as f32, (c.2 - r) as f32) * cell;
+                let hi = lo + Vec3::splat(cell * (2 * r + 1) as f32);
+                let floor = (local - lo).min(hi - local).min_element();
+                if floor > 0.0 && best <= floor * floor {
+                    break;
                 }
             }
         }
@@ -1092,6 +1142,87 @@ mod drawn_surface_tests {
             f.sculpt(b, c, 1.0 + rnd() * 1.5, 1.0, BrushProfile::default());
         }
         f
+    }
+
+    /// **What agreeing with the picture costs a step**, as a RATIO against the
+    /// field collider it replaced — never as a duration, so runner speed
+    /// cancels (`floptle-field`'s mesher guard failed a release gate at 7.23 ms
+    /// on a shared machine for exactly that reason).
+    ///
+    /// Twenty bodies resting on rough ground, which is the state a game is in
+    /// almost all of the time and the one the query is asked hardest. Measured
+    /// at about **3.2×** — 39 µs against 123 µs a step here, which is under one
+    /// percent of a frame and the honest price of collision that matches what
+    /// is drawn.
+    ///
+    /// The ceiling is deliberately close to that. It exists to catch the
+    /// blow-up this went through on the way: sizing the triangle buckets to the
+    /// query REACH rather than to a voxel put every triangle in the band into
+    /// the bucket a resting body stands in, so finding the triangle under its
+    /// feet walked hundreds of them. A ceiling loose enough to be comfortable
+    /// would have let that through.
+    #[test]
+    fn colliding_with_the_drawn_surface_is_not_dear() {
+        let cost = |accurate: bool| {
+            let mut t = ChunkTerrain::new(rough());
+            t.mesh_accurate = accurate;
+            let mut w = crate::PhysicsWorld::new(Default::default());
+            w.add_collider(Box::new(t));
+            for i in 0..20 {
+                let a = i as f32 * 0.31;
+                w.add_body(crate::Body::sphere(
+                    Vec3::new(a.cos() * 4.0, 6.0, a.sin() * 4.0),
+                    0.4,
+                ));
+            }
+            for _ in 0..120 {
+                w.step(1.0 / 60.0); // let them land — settle is not the subject
+            }
+            let t0 = std::time::Instant::now();
+            for _ in 0..60 {
+                w.step(1.0 / 60.0);
+            }
+            t0.elapsed().as_secs_f64() / 60.0
+        };
+        // The field first, so a cold cache and a cold branch predictor are not
+        // charged to the feature.
+        let field = cost(false);
+        let mesh = cost(true);
+        let ratio = mesh / field.max(1e-9);
+        assert!(
+            ratio < 6.0,
+            "colliding against the drawn triangles costs {ratio:.1}x the field collider \
+             ({:.0} µs against {:.0} µs a step). Measured at 3.2x; past 6 something has \
+             stopped narrowing — check that the triangle buckets are still one VOXEL and \
+             not one reach, and that the expanding-ring search still stops early.",
+            mesh * 1e6,
+            field * 1e6
+        );
+    }
+
+    /// The cached surface must be a CACHE — meshed once per chunk, not per
+    /// query. A body resting on terrain asks `distance` several times a
+    /// substep, and surface-nets extraction is 1-2 ms a chunk; doing it per
+    /// query would be a frame budget gone on standing still.
+    #[test]
+    #[ignore = "timing, not a guard"]
+    fn the_surface_cache_is_asked_once_per_chunk() {
+        let t = ChunkTerrain::new(rough());
+        let probe = Vec3::new(0.0, 3.0, 0.0);
+        let t0 = std::time::Instant::now();
+        let first = t.distance(probe);
+        let cold = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(t.distance(probe));
+        }
+        let warm = t1.elapsed() / 1000;
+        println!("cold {cold:?}  warm {warm:?}  d={first}");
+        assert!(
+            warm * 50 < cold,
+            "a warm query costs {warm:?} against a cold {cold:?} — the mesh is being \
+             re-extracted per query, not cached"
+        );
     }
 
     /// Every face of the mesh the renderer draws is ON the collider's surface.
