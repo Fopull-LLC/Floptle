@@ -310,13 +310,54 @@ impl CollisionShape for SdfTerrain {
     }
 }
 
-/// The Terrain 2.0 collider: collides against the **same sparse chunk field the mesher
-/// extracts the drawn surface from** — the authority the brushes (and, at runtime, Lua)
-/// write. Distances saturate at the field's narrow band a few voxels out, which is all
-/// a penetration solver ever reads; ray queries step at most a band per iteration.
+/// The cached surface of a [`ChunkTerrain`]: the **same triangles the renderer
+/// draws**, bucketed for closest-point queries.
+///
+/// Chunks are meshed on demand — only where a body has actually asked about the
+/// terrain — and the answer is kept until the field is written. A whole planet
+/// is never meshed for physics; a level's worth of standing and walking touches
+/// a handful of chunks.
+#[derive(Default)]
+struct Surface {
+    /// Which chunks have been meshed, so an empty one is not re-meshed every
+    /// query. A chunk of pure air or pure rock extracts nothing and belongs in
+    /// here exactly as much as one that extracted a thousand triangles.
+    meshed: std::collections::HashSet<[i32; 3]>,
+    /// Triangles in FIELD-LOCAL space, bucketed by `cell`. One grid across every
+    /// meshed chunk rather than one per chunk: a query near a chunk boundary
+    /// then reads one bucket set instead of merging several.
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<[Vec3; 3]>>,
+}
+
+/// The Terrain 2.0 collider: collides against the **triangles the mesher
+/// extracts**, which is what you see, with the field deciding which side of them
+/// you are on.
+///
+/// It used to collide against the raw field, on the reasoning that the field is
+/// the authority and the mesh is derived from it. That is true and it is not the
+/// same surface. Surface nets puts one vertex per surface cell at the mean of
+/// that cell's edge crossings and joins them with flat triangles, so the drawn
+/// surface chords across every curve in the field: **inside a bulge and outside
+/// a hollow, by up to something like half a voxel.** Colliding against the field
+/// therefore let a player sink into a hillside that was drawn solid, and hover
+/// over ground that was drawn beneath their feet — the same mismatch in both
+/// directions, on the same hill, which is why it reads as the collision being
+/// vaguely wrong rather than as an offset.
+///
+/// So the MAGNITUDE comes from the triangles and the SIGN comes from the field.
+/// Neither half can do the other's job: unsigned triangle distance cannot tell
+/// the inside of a cave from the outside of a cliff (and an imported mesh is why
+/// [`TriMeshCollider`] settles for that), while the field's magnitude is the
+/// thing that disagrees with the picture. Together they answer exactly the
+/// surface the renderer drew.
+///
+/// Outside the field's narrow band there is nothing to reconcile — the field
+/// saturates there and no triangle is within reach — so those queries fall
+/// straight through to the field, at the cost of one hash lookup.
+///
 /// World placement rides the [`AnchoredCollider`] `f64` anchor exactly like
-/// [`SdfTerrain`] (ADR-0015), and unlike the dense grid there is **no size cap**: the
-/// field is unbounded, so physics finally agrees with the renderer everywhere.
+/// [`SdfTerrain`] (ADR-0015), and there is **no size cap**: the field is
+/// unbounded.
 pub struct ChunkTerrain {
     pub field: floptle_field::ChunkField,
     /// The terrain NODE's world rotation — queries rotate into the field's local
@@ -325,11 +366,30 @@ pub struct ChunkTerrain {
     /// The node's UNIFORM scale (x drives; an SDF can't stretch non-uniformly
     /// without breaking the distance metric). Distances scale back up by this.
     pub scale: f32,
+    /// Collide against the extracted triangles rather than the field itself.
+    ///
+    /// On by default, because agreeing with the picture is the whole point. Off
+    /// is the pre-0.92 behaviour, kept reachable for two reasons: a headless
+    /// server that never meshes anything can skip the work, and a bug in here
+    /// should be answerable with "turn it off" rather than with a release.
+    pub mesh_accurate: bool,
+    surface: std::cell::RefCell<Surface>,
 }
 
 impl ChunkTerrain {
     pub fn new(field: floptle_field::ChunkField) -> Self {
-        Self { field, rot: Quat::IDENTITY, scale: 1.0 }
+        Self {
+            field,
+            rot: Quat::IDENTITY,
+            scale: 1.0,
+            mesh_accurate: true,
+            surface: Default::default(),
+        }
+    }
+
+    /// The same collider, in the pose a terrain node gives it.
+    pub fn posed(field: floptle_field::ChunkField, rot: Quat, scale: f32) -> Self {
+        Self { rot, scale, ..Self::new(field) }
     }
 
     /// Anchor-relative world point → the field's local frame.
@@ -337,20 +397,137 @@ impl ChunkTerrain {
     fn to_local(&self, p: Vec3) -> Vec3 {
         (self.rot.inverse() * p) / self.scale.max(1e-6)
     }
+
+    /// Bucket size for the triangle grid, and the radius a query searches.
+    ///
+    /// Both are the field's own narrow band. That is not a coincidence to be
+    /// tidied away: the band is exactly how far the field carries a meaningful
+    /// distance, so a query that finds no triangle inside it is a query the
+    /// field could not have answered precisely either, and one bucket ring
+    /// (±1 cell) is guaranteed to cover everything within one cell of the
+    /// point.
+    #[inline]
+    fn cell(&self) -> f32 {
+        self.field.band().max(self.field.voxel()).max(1e-3)
+    }
+
+    /// **Forget every meshed chunk.** Called wherever the field is handed out
+    /// for writing — a sculpt, a dig, a streamed chunk arriving — because a
+    /// cached triangle is a claim about voxels that have just changed.
+    ///
+    /// Whole-cache rather than per-chunk: the caller gets `&mut ChunkField` and
+    /// may write anywhere in it, so there is no edited region to narrow to. The
+    /// cost is re-meshing the handful of chunks a body is standing in, on the
+    /// next query after an edit, which is precisely when the collision has to be
+    /// right.
+    pub fn invalidate_surface(&mut self) {
+        self.surface.get_mut().meshed.clear();
+        self.surface.get_mut().grid.clear();
+    }
+
+    /// Make sure every chunk within `cell()` of `local` has been meshed.
+    fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
+        let r = Vec3::splat(self.cell());
+        for c in self.field.chunks_in_world_box(local - r, local + r) {
+            if !s.meshed.insert(c) {
+                continue;
+            }
+            // stride 1, NO skirt — the LOD-0 extraction, which is what the
+            // renderer draws up close (`skirt: lod > 0` in the remesh queue).
+            // A skirt is a curtain hung over the crack between two LODs; as
+            // collision it would be an invisible wall around every chunk.
+            let m = floptle_field::mesh_chunk(&self.field, c, 1, false);
+            let origin = Vec3::from(m.origin);
+            let cell = self.cell();
+            for t in m.indices.as_chunks::<3>().0 {
+                let tri = [
+                    origin + Vec3::from(m.positions[t[0] as usize]),
+                    origin + Vec3::from(m.positions[t[1] as usize]),
+                    origin + Vec3::from(m.positions[t[2] as usize]),
+                ];
+                if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
+                    continue; // zero-area: no closest point worth having
+                }
+                let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
+                let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
+                for cz in lo.2..=hi.2 {
+                    for cy in lo.1..=hi.1 {
+                        for cx in lo.0..=hi.0 {
+                            s.grid.entry((cx, cy, cz)).or_default().push(tri);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The closest point on the drawn surface to `local`, if one is in reach.
+    fn closest_surface(&self, local: Vec3) -> Option<Vec3> {
+        if !self.mesh_accurate {
+            return None;
+        }
+        // Cheap reject before any meshing: outside the band the field saturates
+        // and there is nothing for a triangle to correct.
+        if self.field.d(local).abs() > self.cell() {
+            return None;
+        }
+        let mut s = self.surface.borrow_mut();
+        self.ensure_meshed(local, &mut s);
+        let cell = self.cell();
+        let c = cell_coord(local, cell);
+        let mut best = f32::INFINITY;
+        let mut hit = None;
+        for cz in c.2 - 1..=c.2 + 1 {
+            for cy in c.1 - 1..=c.1 + 1 {
+                for cx in c.0 - 1..=c.0 + 1 {
+                    let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
+                    for tri in bucket {
+                        let q = closest_point_on_triangle(local, tri[0], tri[1], tri[2]);
+                        let d2 = (q - local).length_squared();
+                        if d2 < best {
+                            best = d2;
+                            hit = Some(q);
+                        }
+                    }
+                }
+            }
+        }
+        hit
+    }
 }
 
 impl CollisionShape for ChunkTerrain {
     fn distance(&self, p: Vec3) -> f32 {
-        self.field.d(self.to_local(p)) * self.scale.max(1e-6)
+        let local = self.to_local(p);
+        let scale = self.scale.max(1e-6);
+        match self.closest_surface(local) {
+            // Magnitude from the triangles, sign from the field. `signum` on a
+            // field distance of exactly 0 would answer +1 and call a point ON
+            // the surface outside it, which is harmless here only because the
+            // magnitude is then 0 too.
+            Some(q) => (local - q).length() * scale * if self.field.d(local) < 0.0 { -1.0 } else { 1.0 },
+            None => self.field.d(local) * scale,
+        }
     }
     fn normal(&self, p: Vec3) -> Vec3 {
         self.normal_reliable(p).unwrap_or(Vec3::Y)
     }
     fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
+        let local = self.to_local(p);
+        // Away from the closest point on the DRAWN surface, so the direction a
+        // body is pushed out matches the face it is resting on. Degenerate when
+        // the point is exactly on a triangle, which is what the field fallback
+        // below is for.
+        if let Some(q) = self.closest_surface(local)
+            && self.field.d(local) >= 0.0
+            && let Some(n) = (self.rot * (local - q)).try_normalize()
+        {
+            return Some(n);
+        }
         // `try_normalize` yields None where the gradient is zero — i.e. deep in
         // a fully-solid (Uniform(-band)) interior, exactly where a fast ram
         // tunnels to. There the caller falls back to the body's travel axis.
-        (self.rot * self.field.grad(self.to_local(p))).try_normalize()
+        (self.rot * self.field.grad(local)).try_normalize()
     }
     fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
         Some(self)
@@ -880,3 +1057,189 @@ mod mesh_bound_tests {
     }
 }
 
+#[cfg(test)]
+mod drawn_surface_tests {
+    use super::*;
+    use floptle_field::{Brush, BrushProfile, ChunkField};
+
+    /// A rounded hill: curvature is what makes surface nets and the field
+    /// disagree, so a flat plane would prove nothing.
+    fn hill() -> ChunkField {
+        let mut f = ChunkField::new(0.5);
+        for _ in 0..30 {
+            f.sculpt(Brush::Raise, Vec3::new(0.0, 0.0, 0.0), 6.0, 1.0, BrushProfile::default());
+        }
+        f
+    }
+
+    /// ROUGH ground — many small overlapping stamps, which is what a generated
+    /// or hand-sculpted landscape actually is. Smooth curvature is the easy case
+    /// for surface nets; detail near the voxel size is where the extracted
+    /// triangles and the field part company.
+    fn rough() -> ChunkField {
+        let mut f = ChunkField::new(0.5);
+        for _ in 0..30 {
+            f.sculpt(Brush::Raise, Vec3::new(0.0, 0.0, 0.0), 6.0, 1.0, BrushProfile::default());
+        }
+        let mut seed = 12345u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16777216.0
+        };
+        for _ in 0..40 {
+            let c = Vec3::new(rnd() * 10.0 - 5.0, rnd() * 4.0 - 1.0, rnd() * 10.0 - 5.0);
+            let b = if rnd() > 0.5 { Brush::Raise } else { Brush::Lower };
+            f.sculpt(b, c, 1.0 + rnd() * 1.5, 1.0, BrushProfile::default());
+        }
+        f
+    }
+
+    /// Every face of the mesh the renderer draws is ON the collider's surface.
+    ///
+    /// This is the whole feature in one assertion, and it is stated against the
+    /// TRIANGLES rather than against a number, because the number is the thing
+    /// that was wrong. The field and the extracted mesh are two different
+    /// surfaces — surface nets puts its vertex at the mean of a cell's edge
+    /// crossings and joins them flat, which chords inside a bulge and outside a
+    /// hollow — and physics used to read the first while the player looked at
+    /// the second.
+    ///
+    /// The control is the same points measured against the raw field. If those
+    /// also came out at zero there would be no disagreement to fix and this test
+    /// would be asserting nothing, so the disagreement is asserted too.
+    ///
+    /// **Measured, so the size of the thing is on the record.** Over the face
+    /// centres of this fixture at a 0.5 voxel, the field is wrong about the
+    /// drawn surface by 0.015 on average and 0.107 at worst — a fifth of a
+    /// voxel, and it scales with the voxel, so a terrain authored at 1.0 is out
+    /// by a fifth of a metre where it is roughest. Smooth ground is an order of
+    /// magnitude better (0.008 mean / 0.014 worst), which is why the fixture is
+    /// deliberately the rough one: sculpting detail near the voxel size is
+    /// where surface nets chords hardest, and it is also what a landscape is.
+    #[test]
+    fn a_body_touches_the_terrain_exactly_where_it_is_drawn() {
+        let f = rough();
+        // Probe the INTERIOR of each drawn triangle, not its corners. A surface
+        // nets vertex sits at the mean of its cell's edge crossings and is
+        // therefore close to the isosurface almost by construction — the field
+        // and the mesh agree there to about three thousandths of a voxel, and a
+        // test that sampled corners would conclude there was nothing wrong. The
+        // error is the CHORD: the flat triangle spanning three such vertices
+        // cuts inside a bulge and outside a hollow, and the middle of the face
+        // is where it is worst. That is also exactly where a player stands.
+        let mut probes = Vec::new();
+        for c in f.all_chunk_coords() {
+            let m = floptle_field::mesh_chunk(&f, c, 1, false);
+            let o = Vec3::from(m.origin);
+            for t in m.indices.as_chunks::<3>().0 {
+                let v = |i: usize| o + Vec3::from(m.positions[t[i] as usize]);
+                probes.push((v(0) + v(1) + v(2)) / 3.0);
+            }
+        }
+        assert!(probes.len() > 200, "the hill did not mesh: {} faces", probes.len());
+
+        let t = ChunkTerrain::new(f.clone());
+        let mut worst_mesh = 0.0f32;
+        let mut worst_field = 0.0f32;
+        for p in &probes {
+            worst_mesh = worst_mesh.max(t.distance(*p).abs());
+            worst_field = worst_field.max(f.d(*p).abs());
+        }
+        // A vertex of the drawn mesh is on the drawn mesh. What is left is the
+        // closest-point solve's own rounding.
+        assert!(
+            worst_mesh < 1e-3,
+            "a point ON the drawn surface was {worst_mesh} from the collider's"
+        );
+        // …and the control: the field genuinely disagrees about those same
+        // points, by a meaningful fraction of a voxel. Without this the test
+        // passes just as well on a collider that never changed.
+        assert!(
+            worst_field > 0.05,
+            "the field agreed with the mesh to {worst_field} of a unit — nothing to reconcile, \
+             so this test cannot tell the two colliders apart"
+        );
+    }
+
+    /// The sign still comes from the field, so a cave is still hollow.
+    ///
+    /// Triangle distance alone is unsigned — that is why [`TriMeshCollider`]
+    /// cannot do this job — and a collider that lost the sign would report a
+    /// point in mid-air inside a tunnel as being in solid rock, which is a body
+    /// stuck in a wall rather than a body walking through it.
+    #[test]
+    fn the_drawn_surface_collider_still_knows_inside_from_outside() {
+        let mut f = hill();
+        // Bore a tunnel through the hill just under its crown.
+        for _ in 0..30 {
+            f.sculpt(Brush::Lower, Vec3::new(0.0, 1.0, 0.0), 2.0, 1.0, BrushProfile::default());
+        }
+        let t = ChunkTerrain::new(f.clone());
+        let air = Vec3::new(0.0, 1.0, 0.0); // in the bore
+        let rock = Vec3::new(0.0, -3.0, 0.0); // under it
+        assert!(t.distance(air) > 0.0, "the tunnel read as solid: {}", t.distance(air));
+        assert!(t.distance(rock) < 0.0, "the rock read as air: {}", t.distance(rock));
+    }
+
+    /// A dig drops the cached triangles — and the cache really was holding the
+    /// old ground up until it did.
+    ///
+    /// The cache is the only new state in this collider and it is the only thing
+    /// that could hold a dug tunnel shut. Written the obvious way round — warm
+    /// it, invalidate, dig, measure — this proves nothing at all, because the
+    /// invalidation happened *before* the edit and the "stale" reading was
+    /// freshly meshed. So the order here is deliberate: warm, dig with the cache
+    /// left alone, and assert the answer is WRONG; then invalidate and assert it
+    /// comes right. The first assertion is what makes the second one mean
+    /// something.
+    ///
+    /// `Sim::terrain_field_mut` is what calls this in earnest, and
+    /// `digging_under_a_body_updates_collision` is the same story told through a
+    /// falling body.
+    #[test]
+    fn writing_the_field_forgets_the_cached_surface() {
+        let mut t = ChunkTerrain::new(hill());
+        // Just above the crown, inside the narrow band — outside it the collider
+        // short-circuits to the field and never touches a triangle, so a probe
+        // in open air would test nothing. Found rather than assumed: the height
+        // a stack of Raise brushes settles at is not worth hard-coding.
+        let top = (0..400)
+            .map(|i| 8.0 - i as f32 * 0.05)
+            .find(|y| t.field.d(Vec3::new(0.0, *y, 0.0)) <= 0.0)
+            .expect("the hill has a surface");
+        let probe = Vec3::new(0.0, top + t.field.voxel(), 0.0);
+        let before = t.distance(probe); // warms the cache at the probe
+        assert!(
+            before.abs() < t.field.band(),
+            "the probe is outside the band at {before}; the collider never meshes there"
+        );
+        // Carve straight down from under the probe, hard enough that the drawn
+        // surface visibly drops away from it.
+        for _ in 0..40 {
+            t.field.sculpt(
+                Brush::Lower,
+                probe - Vec3::Y * 0.5,
+                3.0,
+                1.0,
+                BrushProfile::default(),
+            );
+        }
+        assert!(
+            t.field.d(probe) > before + 0.25,
+            "the fixture's dig did not move the field under the probe: {before} -> {}",
+            t.field.d(probe)
+        );
+        let stale = t.distance(probe);
+        assert!(
+            (stale - before).abs() < 1e-4,
+            "the cache was never consulted, so nothing here tests dropping it: \
+             {before} -> {stale}"
+        );
+        t.invalidate_surface();
+        let fresh = t.distance(probe);
+        assert!(
+            fresh > before + 0.1,
+            "digging under the probe did not open ground beneath it: {before} -> {fresh}"
+        );
+    }
+}

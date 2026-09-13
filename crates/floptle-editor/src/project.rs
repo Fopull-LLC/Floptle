@@ -1764,11 +1764,19 @@ impl Editor {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
+                    // `path` then a `|flag` per non-default setting, in a fixed
+                    // order. Written only when it differs from the default, so
+                    // an untouched palette is byte-identical to what every
+                    // previous version of the editor wrote.
+                    let mut line = p.clone();
                     if self.terrain_glow_mask & (1 << i.min(31)) != 0 {
-                        format!("{p}|glow")
-                    } else {
-                        p.clone()
+                        line.push_str("|glow");
                     }
+                    let scale = self.terrain_tex_scale.get(i).copied().unwrap_or(1.0);
+                    if (scale - 1.0).abs() > 1e-4 {
+                        line.push_str(&format!("|scale={scale}"));
+                    }
+                    line
                 })
                 .collect();
             if let Err(e) = floptle_vfs::write(self.terrain_palette_path(), palette.join("\n")) {

@@ -3556,6 +3556,25 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         None => Value::Nil,
                     });
                 }
+                // `node.scripts` — every script on this node, as handles, in
+                // the order they were attached. Possibly empty, never nil.
+                //
+                // This is the plural of `node:getScript(name)`, and it exists
+                // because the singular is unanswerable until you already know
+                // the answer: a script reaching across to a sibling or a parent
+                // has to spell the name exactly, a wrong spelling reads `nil`,
+                // and `nil` is also what "no such node" and "not running yet"
+                // look like. `for _, s in ipairs(n.scripts) do print(s.kind)
+                // end` settles which of those it is in one line, and reaching
+                // for the plural first is what people actually type.
+                "scripts" => {
+                    let kinds = scene.borrow().kinds_on(e).to_vec();
+                    let arr = lua.create_table()?;
+                    for (i, k) in kinds.iter().enumerate() {
+                        arr.set(i + 1, new_script_handle(lua, e, k)?)?;
+                    }
+                    return Ok(Value::Table(arr));
+                }
                 // The mesh node's current model path (nil on non-mesh nodes). Assigning it
                 // (see __newindex) swaps the model at runtime.
                 "model" => {

@@ -483,6 +483,22 @@ impl TerrainWorker {
     }
 }
 
+/// The per-slot triplanar scales, packed the way the field globals want them:
+/// [`floptle_render::TERRAIN_SLOTS`] multipliers, four to a `vec4`.
+///
+/// A missing or nonsensical entry becomes `1.0` rather than `0.0` — the list is
+/// grown lazily and an older project has no scales saved at all, and a zero
+/// there would collapse every terrain texture to a single texel instead of
+/// leaving it tiling as it was.
+pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {
+    let mut out = [[1.0f32; 4]; 8];
+    for i in 0..floptle_render::TERRAIN_SLOTS as usize {
+        let v = scales.get(i).copied().unwrap_or(1.0);
+        out[i / 4][i % 4] = if v.is_finite() && v > 0.0 { v.clamp(0.01, 100.0) } else { 1.0 };
+    }
+    out
+}
+
 impl Editor {
     /// Seconds since the editor started — a monotonic clock for anything that
     /// animates on wall time rather than on the play session's `play_t`, which
@@ -2666,25 +2682,40 @@ impl Editor {
             && let Ok(text) = floptle_vfs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut glow = 0u32;
+                let mut scales: Vec<f32> = Vec::new();
+                // One line per slot, `path` plus zero or more `|flag` suffixes.
+                // Unknown suffixes are IGNORED rather than folded into the path:
+                // this file is written by newer editors than the one reading it
+                // as often as the other way round, and a slot whose texture path
+                // had `|someflag` glued onto it would silently stop resolving.
                 let mut palette: Vec<String> = text
                     .lines()
                     .enumerate()
-                    .map(|(i, s)| match s.strip_suffix("|glow") {
-                        Some(path) => {
-                            glow |= 1 << i.min(31);
-                            path.to_string()
+                    .map(|(i, line)| {
+                        let mut parts = line.split('|');
+                        let path = parts.next().unwrap_or("").to_string();
+                        let mut scale = 1.0f32;
+                        for flag in parts {
+                            if flag == "glow" {
+                                glow |= 1 << i.min(31);
+                            } else if let Some(v) = flag.strip_prefix("scale=") {
+                                scale = v.parse().ok().filter(|f: &f32| f.is_finite() && *f > 0.0).unwrap_or(1.0);
+                            }
                         }
-                        None => s.to_string(),
+                        scales.push(scale);
+                        path
                     })
                     .collect();
                 palette.resize(slots, String::new());
+                scales.resize(slots, 1.0);
                 self.terrain_textures = palette;
+                self.terrain_tex_scale = scales;
                 self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
     }
 
-    /// The world translation of a terrain node (places its field in world space).
+/// The world translation of a terrain node (places its field in world space).
     /// A terrain node's world placement: translation + rotation + UNIFORM scale
     /// (x drives — an SDF can't stretch per-axis without breaking the distance
     /// metric). The one frame every terrain consumer (render, physics, brush,

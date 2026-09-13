@@ -1967,7 +1967,7 @@ impl Editor {
             cam.world_position,
             crate::shading::reflection_clamp(&light_node),
         );
-        let ((fog_color, fog_params), particle_fog) =
+        let ((fog_color, fog_params, fog_extra), particle_fog) =
             crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
@@ -2703,6 +2703,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                fog_extra,
+                terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
                 vol_fog_a,
                 vol_fog_b,
                 vol_fog_c,
@@ -3170,6 +3172,7 @@ impl Editor {
         let terrain_voxel = &mut self.terrain_voxel;
         let terrain_textures = &mut self.terrain_textures;
         let terrain_glow = &mut self.terrain_glow_mask;
+        let terrain_tex_scale = &mut self.terrain_tex_scale;
         let terrain_present = !self.terrains.is_empty();
         // Terrain 2.0 stats: volumes, resident data chunks, resident bytes — the
         // honest sparse numbers (the dense field's O(n³) voxel count is gone).
@@ -4594,6 +4597,7 @@ impl Editor {
                 terrain_voxel,
                 terrain_textures,
                 terrain_glow,
+                terrain_tex_scale,
                 terrain_present,
                 terrain_stats,
                 assets_grid,
@@ -9183,10 +9187,8 @@ impl Editor {
         }
         if let Some((mesh, idx)) = cmd.select_bone {
             // Select a model object/bone from the Inspector's Objects & Rig lists —
-            // mutually exclusive with node/asset selection (like the Hierarchy tree).
-            self.bone_selection = Some((mesh, idx));
-            self.selection.clear();
-            self.selected_asset = None;
+            // the same rule as the Hierarchy tree and the viewport rig.
+            self.select_bone(mesh, idx);
         }
         if let Some((mesh, name, p)) = cmd.set_object_pivot {
             self.apply_object_pivot(mesh, &name, Vec3::from(p));
@@ -10069,7 +10071,7 @@ impl Editor {
             .any(|s| (s[3] as u32) & 2 != 0);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let contact = crate::shading::contact_uniform(&light_node);
-        let ((fog_color, fog_params), particle_fog) =
+        let ((fog_color, fog_params, fog_extra), particle_fog) =
             crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
@@ -10628,6 +10630,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                fog_extra,
+                terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
                 vol_fog_a,
                 vol_fog_b,
                 vol_fog_c,

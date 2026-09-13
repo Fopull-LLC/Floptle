@@ -39,6 +39,10 @@ enum Edge {
     Vertical,
     /// A horizontal one — measured down a column.
     Horizontal,
+    /// A narrow bright strip hard against the LEFT border, for the frame-edge
+    /// check. The interesting geometry is outside the frame, which is the whole
+    /// point of it.
+    LeftStrip,
 }
 
 fn main() {
@@ -168,6 +172,43 @@ fn main() {
          raised. Equal ramps mean the cap is decorative."
     );
 
+    // ---- 7. the frame's own edge -------------------------------------------
+    //
+    // A gather has to decide what to do about taps that leave the picture, and
+    // the obvious answer — clamp them back to the border — is wrong in a way
+    // that only shows while the camera is moving. Every out-of-frame tap then
+    // returns the SAME border texel, so the outermost column is averaged mostly
+    // with itself and the columns beside it are dragged toward it: a band along
+    // the edge that stays sharp while everything inboard of it smears, and
+    // disappears the instant the camera stops. On a sky — at infinity, and so
+    // the fastest thing in any pan — it reads as the edge of the picture lagging
+    // behind the middle.
+    //
+    // The fixture is a narrow bright strip against the left border. Blurred
+    // honestly under a hard pan it smears inward and dims; clamped, it keeps
+    // feeding itself and stays bright.
+    let strip_sharp = rig.render(&gpu, Edge::LeftStrip, &off, Vec3::ZERO, Quat::IDENTITY);
+    let strip_blur =
+        rig.render(&gpu, Edge::LeftStrip, &base, Vec3::ZERO, Quat::from_rotation_y(0.12));
+    write_png(&format!("{dir}/motion_edge.png"), &strip_blur);
+    let col0 = |img: &[[u8; 3]]| -> f32 {
+        let n = S as usize;
+        (0..n).map(|y| luma(img[y * n])).sum::<f32>() / n as f32
+    };
+    let (before, after) = (col0(&strip_sharp), col0(&strip_blur));
+    println!("frame edge: border column {before:.0} sharp → {after:.0} blurred");
+    assert!(
+        before > 60.0,
+        "the fixture's bright strip is not on the border — it reads {before}, so this check \
+         is measuring empty frame and would pass on anything"
+    );
+    assert!(
+        after < before * 0.75,
+        "the border column barely blurred: {before:.0} → {after:.0}. Out-of-frame taps are \
+         being CLAMPED back onto it instead of dropped, so it is averaging with itself and \
+         the edge of the picture stays sharp while the middle smears."
+    );
+
     println!("motion probe OK");
 }
 
@@ -236,6 +277,13 @@ impl Rig {
         let panel = match edge {
             Edge::Vertical => Vec3::new(-shift, 0.0, 0.0),
             Edge::Horizontal => Vec3::new(0.0, -shift, 0.0),
+            // Push the same panel left until its edge is a few pixels inside the
+            // frame's left border. The frame's half-width at this depth is
+            // `Z * tan(fov/2)`, and the extra 0.2 leaves the strip a handful of
+            // pixels wide rather than exactly zero.
+            Edge::LeftStrip => {
+                Vec3::new(-(shift + Z * (FOV * 0.5).tan() - 0.2), 0.0, 0.0)
+            }
         };
         // Both plateaus below white on purpose. The chain's tonemap clips, so a
         // panel brighter than 1.0 would stay at 255 through most of the ramp and
@@ -295,6 +343,10 @@ fn ramp(img: &[[u8; 3]], edge: Edge) -> usize {
         let (x, y) = match edge {
             Edge::Vertical => (i, n / 2),
             Edge::Horizontal => (n / 2, i),
+            // Never measured this way: its step is at the border, where there is
+            // no plateau on the outside to measure against. Check 7 reads the
+            // border column directly instead.
+            Edge::LeftStrip => unreachable!("LeftStrip has no centre-of-frame ramp"),
         };
         luma(img[y * n + x])
     };

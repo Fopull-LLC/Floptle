@@ -242,11 +242,7 @@ impl Sim {
         for tv in terrains {
             world.add_collider_tagged(
                 tv.anchor,
-                Box::new(ChunkTerrain {
-                    field: tv.field.clone(),
-                    rot: tv.rot,
-                    scale: tv.scale,
-                }),
+                Box::new(ChunkTerrain::posed(tv.field.clone(), tv.rot, tv.scale)),
                 tv.layer,
                 tv.eid,
                 false,
@@ -1736,13 +1732,25 @@ impl Sim {
             .collect()
     }
 
+    /// The sim's own copy of a terrain field, for writing — `terrain.sculpt`,
+    /// `terrain.dig`, a streamed chunk landing.
+    ///
+    /// **Drops the collider's cached surface on the way out.** The caller gets
+    /// the whole field and may write anywhere in it, and every cached triangle
+    /// is a claim about voxels that are about to change; a stale one would hold
+    /// a dug tunnel shut, which is the exact bug the mesh-accurate collider was
+    /// added to avoid the mirror image of. Done here rather than at each call
+    /// site because this is the only way the field is handed out.
     pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
         self.world
             .colliders
             .iter_mut()
             .find(|c| c.eid == Some(eid))
             .and_then(|c| c.shape.chunk_terrain_mut())
-            .map(|t| &mut t.field)
+            .map(|t| {
+                t.invalidate_surface();
+                &mut t.field
+            })
     }
 
     pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {

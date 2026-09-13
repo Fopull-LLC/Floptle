@@ -236,6 +236,25 @@ pub struct RaymarchGlobals {
     /// `dot(spot_dir, -l)` and would otherwise pay an `acos` per lit pixel per
     /// light. The conversion is done once, where the light is packed.
     pub point_cone: [[f32; 4]; 16],
+    /// Depth fog, the lanes that did not fit in `fog_color`/`fog_params`:
+    /// **x = how much of the flat ramp the SKY also takes at the horizon**
+    /// (0..1), yzw spare. Appended at the END so this struct stays
+    /// byte-identical to the WGSL one.
+    ///
+    /// Zero is the behaviour fog had before this lane existed — surfaces
+    /// tinted, background untouched — and it is worth being able to get back
+    /// to, but it is not the default: see `fog_sky` in `field.wgsl` for why a
+    /// ramp that stops at the geometry makes a dark fog colour unusable.
+    pub fog_extra: [f32; 4],
+    /// **Per-slot terrain texture scale**, [`TERRAIN_SLOTS`] of them packed four
+    /// to a `vec4` — a multiplier on the palette's base triplanar scale.
+    ///
+    /// One scale for the whole palette meant matching a fine gravel to a broad
+    /// rock face was a job for an image editor. `0.0` reads as `1.0` in the
+    /// shader, so a globals block built from [`Default`] tiles exactly as it
+    /// always did. Appended at the END so this struct stays byte-identical to
+    /// the WGSL one.
+    pub terrain_scale: [[f32; 4]; 8],
 }
 
 impl Default for RaymarchGlobals {
@@ -325,6 +344,8 @@ impl Default for RaymarchGlobals {
             probe_meta: [0.0; 4],
             // -1 is "no cone": every direction is inside it.
             point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
+            fog_extra: [0.0; 4],
+            terrain_scale: [[1.0; 4]; 8],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

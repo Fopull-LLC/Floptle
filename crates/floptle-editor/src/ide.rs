@@ -78,6 +78,8 @@ pub(crate) struct IdeState {
     /// is a reference nobody browses — it was only ever reachable by searching
     /// for something you already knew the name of.
     pub(crate) docs_page: DocsPage,
+    /// Which guide page the Docs tab has open — an index into `DOC_SECTIONS`.
+    pub(crate) docs_guide: usize,
 }
 
 /// The three things the Docs tab is: a guide, a reference, a shader reference.
@@ -1307,6 +1309,115 @@ impl EditorTabViewer<'_> {
         }
     }
 
+    /// The Guides page: a **contents column** and one page at a time.
+    ///
+    /// It used to be twenty-four `CollapsingHeader`s in a single scroll, which
+    /// is a table of contents pretending to be a page. Nothing told you where
+    /// you were, pages were only near their relatives by luck, and the one way
+    /// to reach anything was to search for a word you already knew — so the
+    /// guide taught you nothing you did not already know to look for. That is
+    /// the same complaint the API browser was rebuilt for, one page over.
+    ///
+    /// So: chapters down the left, the page itself on the right, and the search
+    /// box narrows the CONTENTS rather than expanding every matching section in
+    /// place. Searching does not change what is on the right until you pick
+    /// something — a list that reflows under you as you type is not a list you
+    /// can click.
+    ///
+    /// Returns how many pages the query matched, for the tab's "no results"
+    /// line.
+    fn docs_guides_ui(&mut self, ui: &mut egui::Ui, q: &str) -> usize {
+        let searching = !q.is_empty();
+        let matches = |i: usize| -> bool {
+            let (_, title, body) = DOC_SECTIONS[i];
+            !searching
+                || title.to_ascii_lowercase().contains(q)
+                || body.to_ascii_lowercase().contains(q)
+        };
+        let shown: Vec<usize> = (0..DOC_SECTIONS.len()).filter(|&i| matches(i)).collect();
+        // The open page, clamped to something that exists: the list is a
+        // compile-time constant, but the stored index outlives a build in which
+        // a page was removed.
+        let mut open = self.ide.docs_guide.min(DOC_SECTIONS.len().saturating_sub(1));
+
+        ui.horizontal_top(|ui| {
+            // ---- contents ----
+            let w = (ui.available_width() * 0.34).clamp(150.0, 260.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(w, ui.available_height()),
+                egui::Layout::top_down_justified(egui::Align::LEFT),
+                |ui| {
+                    egui::ScrollArea::vertical().id_salt("docs-contents").show(ui, |ui| {
+                        for chapter in DOC_CHAPTERS {
+                            let pages: Vec<usize> = shown
+                                .iter()
+                                .copied()
+                                .filter(|&i| DOC_SECTIONS[i].0 == *chapter)
+                                .collect();
+                            if pages.is_empty() {
+                                continue;
+                            }
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(*chapter).strong().size(12.0));
+                            for i in pages {
+                                let title = DOC_SECTIONS[i].1;
+                                // The chapter already says the subject, so the
+                                // part of the title before the dash is usually
+                                // repeating it. Show the whole thing on hover.
+                                let short = crate::responsive::elide(ui, title, w - 18.0);
+                                if ui
+                                    .selectable_label(i == open, short)
+                                    .on_hover_text(title)
+                                    .clicked()
+                                {
+                                    open = i;
+                                }
+                            }
+                        }
+                        if shown.is_empty() {
+                            ui.add_space(6.0);
+                            ui.small("no page matches that");
+                        }
+                    });
+                },
+            );
+            ui.separator();
+            // ---- the page ----
+            egui::ScrollArea::vertical().id_salt("docs-page").show(ui, |ui| {
+                let (chapter, title, body) = DOC_SECTIONS[open];
+                ui.small(chapter);
+                ui.heading(title);
+                ui.add_space(2.0);
+                self.doc_body_ui(ui, body);
+                // Where to go next, so the guide reads as a sequence rather
+                // than as a pile. A page with nothing after it says so instead
+                // of showing a dead button.
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if open > 0
+                        && ui
+                            .button(format!("◀ {}", DOC_SECTIONS[open - 1].1))
+                            .on_hover_text(DOC_SECTIONS[open - 1].1)
+                            .clicked()
+                    {
+                        open -= 1;
+                    }
+                    if open + 1 < DOC_SECTIONS.len()
+                        && ui
+                            .button(format!("{} ▶", DOC_SECTIONS[open + 1].1))
+                            .on_hover_text(DOC_SECTIONS[open + 1].1)
+                            .clicked()
+                    {
+                        open += 1;
+                    }
+                });
+            });
+        });
+        self.ide.docs_guide = open;
+        shown.len()
+    }
+
     /// The Docs landing page: three pages behind one search box — the sectioned
     /// guide, the **API browser**, and the shader stdlib.
     ///
@@ -1349,19 +1460,7 @@ impl EditorTabViewer<'_> {
         let page = self.ide.docs_page;
         egui::ScrollArea::vertical().show(ui, |ui| {
           if page == DocsPage::Guides {
-            for (n, (title, body)) in DOC_SECTIONS.iter().enumerate() {
-                if searching
-                    && !title.to_ascii_lowercase().contains(&q)
-                    && !body.to_ascii_lowercase().contains(&q)
-                {
-                    continue;
-                }
-                hits += 1;
-                let hdr = egui::CollapsingHeader::new(*title).id_salt(("doc_sec", n));
-                // While searching, matching sections open themselves.
-                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(n == 0) };
-                hdr.show(ui, |ui| self.doc_body_ui(ui, body));
-            }
+            hits += self.docs_guides_ui(ui, &q);
           }
           if page == DocsPage::Api {
             ui.small(
@@ -3790,28 +3889,28 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "steam.onPersonaChanged", insert: "steam.onPersonaChanged(function()\n  \nend)", doc: "steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see the Steam integration plan)." },
     ApiEntry { label: "steam.statsReady", insert: "steam.statsReady()", doc: "steam.statsReady() — true once achievements/stats have finished loading from Steam. Every achievement/stat call below answers nil (reads) or false with a message (writes) before this, rather than guessing." },
     ApiEntry { label: "steam.achievementUnlocked", insert: "steam.achievementUnlocked(\"id\")", doc: "steam.achievementUnlocked(id) — true/false, or nil if stats aren't ready or id isn't a real achievement (check it against the Steamworks App Admin — a mistyped id is the single most common cause)." },
-    ApiEntry { label: "steam.unlockAchievement", insert: "steam.unlockAchievement(\"id\")", doc: "steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise." },
-    ApiEntry { label: "steam.clearAchievement", insert: "steam.clearAchievement(\"id\")", doc: "steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement." },
+    ApiEntry { label: "steam.unlockAchievement", insert: "steam.unlockAchievement(\"id\")", doc: "steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise. Refuses: the achievement id is not one this app declares on Steamworks; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.clearAchievement", insert: "steam.clearAchievement(\"id\")", doc: "steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement. Refuses: the achievement id is not one this app declares on Steamworks; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.achievementGlobalPercent", insert: "steam.achievementGlobalPercent(\"id\")", doc: "steam.achievementGlobalPercent(id) — the percentage of players globally who've unlocked id, once Steam has it cached; nil before then." },
     ApiEntry { label: "steam.achievementName", insert: "steam.achievementName(\"id\")", doc: "steam.achievementName(id) — id's display name, in Steam's own current language." },
     ApiEntry { label: "steam.achievementDescription", insert: "steam.achievementDescription(\"id\")", doc: "steam.achievementDescription(id) — id's display description, in Steam's own current language." },
     ApiEntry { label: "steam.statInt", insert: "steam.statInt(\"name\")", doc: "steam.statInt(name) — an integer stat's current value, or nil before stats are ready / if name isn't real." },
-    ApiEntry { label: "steam.setStatInt", insert: "steam.setStatInt(\"name\", 0)", doc: "steam.setStatInt(name, value) -> ok, err — writes an integer stat LOCALLY. Same batching as steam.unlockAchievement." },
+    ApiEntry { label: "steam.setStatInt", insert: "steam.setStatInt(\"name\", 0)", doc: "steam.setStatInt(name, value) -> ok, err — writes an integer stat LOCALLY. Same batching as steam.unlockAchievement. Refuses: the stat id is not one this app declares on Steamworks, or it is declared as a float; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.statFloat", insert: "steam.statFloat(\"name\")", doc: "steam.statFloat(name) — a float stat's current value, or nil." },
-    ApiEntry { label: "steam.setStatFloat", insert: "steam.setStatFloat(\"name\", 0.0)", doc: "steam.setStatFloat(name, value) -> ok, err — writes a float stat LOCALLY. Same batching as steam.unlockAchievement." },
+    ApiEntry { label: "steam.setStatFloat", insert: "steam.setStatFloat(\"name\", 0.0)", doc: "steam.setStatFloat(name, value) -> ok, err — writes a float stat LOCALLY. Same batching as steam.unlockAchievement. Refuses: the stat id is not one this app declares on Steamworks, or it is declared as an integer; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.flushStats", insert: "steam.flushStats()", doc: "steam.flushStats() — sends every pending achievement/stat write to Steam now, instead of waiting for the automatic batch (every 5s while something's pending). Safe to call with nothing pending." },
-    ApiEntry { label: "steam.resetAllStats", insert: "steam.resetAllStats(false)", doc: "steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic." },
+    ApiEntry { label: "steam.resetAllStats", insert: "steam.resetAllStats(false)", doc: "steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic. Refuses: Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.cloudEnabled", insert: "steam.cloudEnabled()", doc: "steam.cloudEnabled() — whether Cloud is enabled for THIS app specifically (independent of the account-wide setting). nil when steam.available() is false." },
-    ApiEntry { label: "steam.setCloudEnabled", insert: "steam.setCloudEnabled(true)", doc: "steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled()." },
+    ApiEntry { label: "steam.setCloudEnabled", insert: "steam.setCloudEnabled(true)", doc: "steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled(). Refuses: the player has turned Cloud off for this app in their own Steam settings, which no game may override; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.cloudEnabledForAccount", insert: "steam.cloudEnabledForAccount()", doc: "steam.cloudEnabledForAccount() — whether Cloud is enabled account-wide. Read-only: a player controls this from the Steam client itself, not from inside a game." },
     ApiEntry { label: "steam.cloudFiles", insert: "steam.cloudFiles()", doc: "steam.cloudFiles() — every file in Cloud storage for this app, as a list of { name, size } tables. nil when steam.available() is false." },
     ApiEntry { label: "steam.cloudFileExists", insert: "steam.cloudFileExists(\"save.dat\")", doc: "steam.cloudFileExists(name) — whether name exists in Cloud storage. It needn't exist to be named in any other steam.cloud* call — steam.cloudWrite creates it." },
     ApiEntry { label: "steam.cloudFileTimestamp", insert: "steam.cloudFileTimestamp(\"save.dat\")", doc: "steam.cloudFileTimestamp(name) — name's last-write time (Unix seconds), or nil if it doesn't exist. Compare against your own local save's modification time to build your own conflict policy — Steam Cloud has no built-in one to expose." },
-    ApiEntry { label: "steam.cloudDelete", insert: "steam.cloudDelete(\"save.dat\")", doc: "steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely." },
-    ApiEntry { label: "steam.cloudForget", insert: "steam.cloudForget(\"save.dat\")", doc: "steam.cloudForget(name) -> ok, err — deletes name from the Cloud while keeping the local copy, for a player who wants this one save to stop syncing without losing it." },
-    ApiEntry { label: "steam.cloudRead", insert: "steam.cloudRead(\"save.dat\")", doc: "steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe Lua string), or nil, message on failure (not in Cloud storage, most commonly)." },
-    ApiEntry { label: "steam.cloudWrite", insert: "steam.cloudWrite(\"save.dat\", data)", doc: "steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist." },
-    ApiEntry { label: "steam.setRichPresence", insert: "steam.setRichPresence(\"status\", \"In the lobby\")", doc: "steam.setRichPresence(key, value) -> ok, err — sets a rich-presence key for the local user, visible to friends in their friend list. Steam caps the number of keys and their length; err names the reason, not a bare failure." },
+    ApiEntry { label: "steam.cloudDelete", insert: "steam.cloudDelete(\"save.dat\")", doc: "steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely. Refuses: no file of that name in this app's Cloud; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.cloudForget", insert: "steam.cloudForget(\"save.dat\")", doc: "steam.cloudForget(name) -> ok, err — deletes name from the Cloud while keeping the local copy, for a player who wants this one save to stop syncing without losing it. Refuses: no file of that name in this app's Cloud; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.cloudRead", insert: "steam.cloudRead(\"save.dat\")", doc: "steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe Lua string), or nil, message on failure (not in Cloud storage, most commonly). Refuses: no file of that name in this app's Cloud; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.cloudWrite", insert: "steam.cloudWrite(\"save.dat\", data)", doc: "steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist. Refuses: the write would put this app over the player's Cloud quota; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.setRichPresence", insert: "steam.setRichPresence(\"status\", \"In the lobby\")", doc: "steam.setRichPresence(key, value) -> ok, err — sets a rich-presence key for the local user, visible to friends in their friend list. Steam caps the number of keys and their length; err names the reason, not a bare failure. Refuses: more than 20 keys set, or a key or value past Steam's length limit (the whole set must fit in 8 KB); Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.clearRichPresence", insert: "steam.clearRichPresence()", doc: "steam.clearRichPresence() — clears every rich-presence key set via steam.setRichPresence." },
     ApiEntry { label: "steam.friends", insert: "steam.friends()", doc: "steam.friends() — the local user's friend list, as a list of { id, name, state, playingThisGame } tables. id is a STRING (a SteamID64 exceeds what an f64 represents exactly). state is one of \"online\"/\"away\"/\"busy\"/\"snooze\"/\"looking to trade\"/\"looking to play\"/\"invisible\"/\"offline\". nil when steam.available() is false. Group/clan membership isn't exposed — Steam doesn't wrap that." },
     ApiEntry { label: "steam.friendRichPresence", insert: "steam.friendRichPresence(id, \"status\")", doc: "steam.friendRichPresence(id, key) — reads one of a FRIEND's own rich-presence values (id from steam.friends(), a string) — different from your own, which you set with steam.setRichPresence. nil if they haven't set it or aren't reachable." },
@@ -3825,22 +3924,22 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "steam.findLobbies", insert: "steam.findLobbies({ match = { mode = \"coop\" }, openSlots = 1 }, function(lobbies, err) end)", doc: "steam.findLobbies(opts, cb) — searches for lobbies. opts (optional, all additive): match = a table of lobby data that must be equal (a string compares as a string, a whole number as a number); compare = numeric comparisons, each an operator and a value as in { skill = { \">=\", 500 } } — takes ==, ~=, >, >=, <, <=; openSlots = only lobbies with at least this many free seats; distance = \"close\", \"default\", \"far\" or \"worldwide\"; maxResults. cb(lobbies, err) with a list of lobby tables — an empty list means nothing matched, which is not an error." },
     ApiEntry { label: "steam.leaveLobby", insert: "steam.leaveLobby(id)", doc: "steam.leaveLobby(id) — leaves a lobby. Safe to call when you aren't in it, and safe when there's no Steam; never raises." },
     ApiEntry { label: "steam.lobbyData", insert: "steam.lobbyData(id, \"mode\")", doc: "steam.lobbyData(id, key) — one of the lobby's own data values, or nil. Called with NO key, steam.lobbyData(id) answers the whole table at once, which is what a lobby browser wants. nil when there's no Steam." },
-    ApiEntry { label: "steam.setLobbyData", insert: "steam.setLobbyData(id, \"mode\", \"coop\")", doc: "steam.setLobbyData(id, key, value) -> ok, err — sets one of the lobby's own data values; this is what a lobby search matches against. Passing NO value deletes the key. ONLY THE OWNER may change lobby data, and err says so rather than failing quietly." },
+    ApiEntry { label: "steam.setLobbyData", insert: "steam.setLobbyData(id, \"mode\", \"coop\")", doc: "steam.setLobbyData(id, key, value) -> ok, err — sets one of the lobby's own data values; this is what a lobby search matches against. Passing NO value deletes the key. ONLY THE OWNER may change lobby data, and err says so rather than failing quietly. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not the lobby's OWNER (only the owner may write lobby data); Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.lobbyMemberData", insert: "steam.lobbyMemberData(id, memberId, \"ready\")", doc: "steam.lobbyMemberData(id, memberId, key) — one of THAT member's own values in this lobby (their character, their ready flag), or nil. Steam cannot tell a key set to \"\" from one never set, so both answer nil." },
-    ApiEntry { label: "steam.setLobbyMemberData", insert: "steam.setLobbyMemberData(id, \"ready\", \"yes\")", doc: "steam.setLobbyMemberData(id, key, value) -> ok, err — sets one of YOUR OWN values in this lobby. Any member may set their own, unlike steam.setLobbyData which is owner-only." },
+    ApiEntry { label: "steam.setLobbyMemberData", insert: "steam.setLobbyMemberData(id, \"ready\", \"yes\")", doc: "steam.setLobbyMemberData(id, key, value) -> ok, err — sets one of YOUR OWN values in this lobby. Any member may set their own, unlike steam.setLobbyData which is owner-only. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not IN that lobby; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.lobbyMembers", insert: "steam.lobbyMembers(id)", doc: "steam.lobbyMembers(id) — everyone currently in the lobby, as a list of id STRINGS (a Steam id exceeds what an f64 represents exactly). nil when there's no Steam." },
     ApiEntry { label: "steam.lobbyOwner", insert: "steam.lobbyOwner(id)", doc: "steam.lobbyOwner(id) — the lobby's owner (the host) as an id string, or nil. Only the owner may change lobby data or open and close the lobby." },
     ApiEntry { label: "steam.lobbyMemberLimit", insert: "steam.lobbyMemberLimit(id)", doc: "steam.lobbyMemberLimit(id) — the most members the lobby will hold, or nil." },
-    ApiEntry { label: "steam.setLobbyJoinable", insert: "steam.setLobbyJoinable(id, false)", doc: "steam.setLobbyJoinable(id, joinable) -> ok, err — opens or closes the lobby to new members; close it when the match starts. Owner only." },
+    ApiEntry { label: "steam.setLobbyJoinable", insert: "steam.setLobbyJoinable(id, false)", doc: "steam.setLobbyJoinable(id, joinable) -> ok, err — opens or closes the lobby to new members; close it when the match starts. Owner only. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not the lobby's OWNER; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.lobbiesInFlight", insert: "steam.lobbiesInFlight()", doc: "steam.lobbiesInFlight() — how many lobby requests have been made and not yet called back. Pressing Stop drops every pending callback, so this returns to 0." },
     ApiEntry { label: "steam.onLobbyEvent", insert: "steam.onLobbyEvent(function(e) end)", doc: "steam.onLobbyEvent(fn) — fires for each thing that happens in a lobby you're in. e.kind is \"member\" — with e.user and e.change of \"entered\", \"left\", \"disconnected\", \"kicked\" or \"banned\" — or \"data\", with e.whose telling you whether the LOBBY's data or a MEMBER's changed, so re-read the right one. Who did the kicking is deliberately not reported: Steam's binding fills that field from the wrong id. One handler; registering again replaces it, and Stop clears it." },
     ApiEntry { label: "steam.overlayEnabled", insert: "steam.overlayEnabled()", doc: "steam.overlayEnabled() — true once the Steam overlay has hooked this game and can open; false while it's still attaching at startup, when the player has it disabled in Steam's settings, or on a setup where it can't inject (some Linux/Proton configurations). nil when steam.available() is false. Every steam.openOverlay* call answers (false, why) in the same situations, so you rarely need to poll this yourself." },
     ApiEntry { label: "steam.overlayActive", insert: "steam.overlayActive()", doc: "steam.overlayActive() — true while the overlay is being shown over the game (Shift+Tab, or one of your own opens). nil when steam.available() is false — which is falsy, so `if steam.overlayActive() then` is safe in every session. The engine already feeds scripts neutral input while it's up; use this (or steam.onOverlayChanged) to pause a single-player game." },
-    ApiEntry { label: "steam.openOverlay", insert: "steam.openOverlay(\"friends\")", doc: "steam.openOverlay(page) -> ok, err — opens one of the overlay's own pages: \"friends\", \"community\", \"players\", \"settings\", \"officialgamegroup\", \"stats\" or \"achievements\". A misspelt page is refused with the list, in EVERY session — you don't need Steam running to find the typo. (false, why) when the overlay can't open, where Steam's own call would silently do nothing." },
-    ApiEntry { label: "steam.openOverlayUser", insert: "steam.openOverlayUser(\"steamid\", id)", doc: "steam.openOverlayUser(dialog, userId) -> ok, err — opens a page about one user (their id as a string, e.g. from steam.friends()): \"steamid\" is their profile; also \"chat\", \"jointrade\", \"stats\", \"achievements\", \"friendadd\", \"friendremove\", \"friendrequestaccept\", \"friendrequestignore\". Same refusals as steam.openOverlay." },
-    ApiEntry { label: "steam.openOverlayUrl", insert: "steam.openOverlayUrl(\"https://\")", doc: "steam.openOverlayUrl(url) -> ok, err — opens the overlay's web browser at a full http:// or https:// URL. When it can't (false, why): show the URL on screen instead, so the player can still get there." },
-    ApiEntry { label: "steam.openOverlayStore", insert: "steam.openOverlayStore()", doc: "steam.openOverlayStore([appId]) -> ok, err — opens a store page in the overlay: your own game's with no argument, another app's (a DLC's) with its id. When it can't (false, why): this is the purchase flow to degrade rather than break — tell the player where to look." },
-    ApiEntry { label: "steam.openInviteDialog", insert: "steam.openInviteDialog(lobby.id)", doc: "steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead." },
+    ApiEntry { label: "steam.openOverlay", insert: "steam.openOverlay(\"friends\")", doc: "steam.openOverlay(page) -> ok, err — opens one of the overlay's own pages: \"friends\", \"community\", \"players\", \"settings\", \"officialgamegroup\", \"stats\" or \"achievements\". A misspelt page is refused with the list, in EVERY session — you don't need Steam running to find the typo. (false, why) when the overlay can't open, where Steam's own call would silently do nothing. Refuses: the page name is not one of the seven listed — refused with the list in EVERY session, so a typo is found without Steam running; the overlay cannot open (it is switched off in Steam's settings, or this renderer is not hooked into it); Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.openOverlayUser", insert: "steam.openOverlayUser(\"steamid\", id)", doc: "steam.openOverlayUser(dialog, userId) -> ok, err — opens a page about one user (their id as a string, e.g. from steam.friends()): \"steamid\" is their profile; also \"chat\", \"jointrade\", \"stats\", \"achievements\", \"friendadd\", \"friendremove\", \"friendrequestaccept\", \"friendrequestignore\". Same refusals as steam.openOverlay. Refuses: the dialog name is not one Steam knows; the user id is not a number in a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.openOverlayUrl", insert: "steam.openOverlayUrl(\"https://\")", doc: "steam.openOverlayUrl(url) -> ok, err — opens the overlay's web browser at a full http:// or https:// URL. When it can't (false, why): show the URL on screen instead, so the player can still get there. Refuses: the URL is not http(s); the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.openOverlayStore", insert: "steam.openOverlayStore()", doc: "steam.openOverlayStore([appId]) -> ok, err — opens a store page in the overlay: your own game's with no argument, another app's (a DLC's) with its id. When it can't (false, why): this is the purchase flow to degrade rather than break — tell the player where to look. Refuses: the app id is not a positive number; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one)." },
+    ApiEntry { label: "steam.openInviteDialog", insert: "steam.openInviteDialog(lobby.id)", doc: "steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one)." },
     ApiEntry { label: "steam.onOverlayChanged", insert: "steam.onOverlayChanged(function(active) end)", doc: "steam.onOverlayChanged(fn) — fn(active) runs once per open (true) and close (false) of the overlay, in order, on the frame after it happened. Pause a single-player game on true and resume on false; a networked session keeps running regardless. One handler; registering again replaces it, and Stop clears it." },
     // ---- rollback netcode (a Networked node in mode "Rollback (all peers)") ----
     ApiEntry { label: "snapshot", insert: "function snapshot()\n  return { }\nend", doc: "function snapshot() — REQUIRED on a rollback node's scripts. Return a flat table of every gameplay value this script owns (state, frame counters, health, stun). The engine calls it each tick and restores it when a correction arrives. ANYTHING you leave out is a value that survives a rewind unchanged — which is exactly what a desync is made of. Transforms and physics bodies are saved for you; do NOT put them in here." },
@@ -3998,10 +4097,10 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir). Read and write your own data files: assets.readText / writeText, assets.readJson / writeJson." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line." },
     ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it. Relative to Assets/ and inside it; at most 20 000 files, and it says when it stopped." },
-    ApiEntry { label: "assets.readText", insert: "assets.readText(", doc: "assets.readText(\"data/intro.txt\") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle)." },
-    ApiEntry { label: "assets.readJson", insert: "assets.readJson(", doc: "assets.readJson(\"charts/neon.json\") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua." },
-    ApiEntry { label: "assets.writeText", insert: "assets.writeText(", doc: "assets.writeText(\"charts/neon.txt\", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload." },
-    ApiEntry { label: "assets.writeJson", insert: "assets.writeJson(", doc: "assets.writeJson(\"charts/neon.json\", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships." },
+    ApiEntry { label: "assets.readText", insert: "assets.readText(", doc: "assets.readText(\"data/intro.txt\") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle). Refuses: the path leaves the project (absolute, or containing `..`); no such file; the file is bigger than 64 MB; the bytes are not UTF-8 text. Each one names the call and the path." },
+    ApiEntry { label: "assets.readJson", insert: "assets.readJson(", doc: "assets.readJson(\"charts/neon.json\") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua. Refuses: everything `assets.readText` refuses, plus: the bytes are not valid JSON. Each one names the call and the path." },
+    ApiEntry { label: "assets.writeText", insert: "assets.writeText(", doc: "assets.writeText(\"charts/neon.txt\", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload. Refuses: the path leaves the project (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk)." },
+    ApiEntry { label: "assets.writeJson", insert: "assets.writeJson(", doc: "assets.writeJson(\"charts/neon.json\", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships. Refuses: everything `assets.writeText` refuses, plus: the value contains something JSON cannot hold (a function, a cycle)." },
     ApiEntry { label: "find", insert: "find(", doc: "find(\"Player\") — the first node in the scene with that name (a node handle), or nil." },
     ApiEntry { label: "findAll", insert: "findAll(", doc: "findAll(\"Coin\") — an array of every node with that name." },
     ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state. RESERVED KEYS: a handle answers `node` (its own node), `kind` (which script it is) and `valid` (still loaded?) ITSELF, so a script exporting one of those three can reach it and nobody else can — the editor lints the export and the Console says so at load. `name` is NOT reserved: a script's own `name` wins, and `kind` is the same string (floptle/0085)." },
@@ -4070,7 +4169,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "json.encode", insert: "json.encode(", doc: "json.encode(value) — a Lua value as a JSON string. A table with a [1] is an ARRAY, anything else is an object (that is the only rule Lua's single table type can support), and json.array(t) says list for the empty case the shape cannot answer. http.post takes a table body directly, so you rarely need this by hand." },
     ApiEntry { label: "json.array", insert: "json.array(", doc: "json.array(t) -> t \u{2014} mark a table as a JSON LIST, and return it. The encoder guesses from the shape (keys 1..n and nothing else is an array), which is right for every list with something in it and cannot be right for the empty one: {} is both an empty list and an empty object, and it stays an object. So json.encode{ ids = json.array{} } sends \"ids\":[] where a plain {} would send \"ids\":{} and the server would read the wrong type. json.array() with no argument builds a new empty list, and json.array(t) returns the SAME table it was given, so `local ids = json.array{}` then `ids[#ids+1] = x` reads normally. json.decode marks every array it builds, so read -> edit -> send back keeps its lists as lists; note that body.ids = {} throws the mark away with the table, and body.ids = json.array{} is the replacement that keeps it. A marked table that also carries a name, or that has a hole in it, is REFUSED by json.encode with a message saying which." },
     ApiEntry { label: "json.isArray", insert: "json.isArray(", doc: "json.isArray(v) -> bool \u{2014} would json.encode write this as a JSON array? True for a table marked by json.array, and for any table whose keys are exactly 1..n with n at least 1. FALSE for an empty unmarked table, which is the whole point: this is how json.decode('[]') and json.decode('{}') are told apart, and before it they were the same empty table." },
-    ApiEntry { label: "json.decode", insert: "json.decode(", doc: "json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else\'s server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one." },
+    ApiEntry { label: "json.decode", insert: "json.decode(", doc: "json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else\'s server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one. Refuses: the string is not valid JSON. It returns the message rather than raising, on purpose — a reply from someone else's server is data, not a bug in your script." },
     ApiEntry { label: "account.signIn", insert: "account.signIn()", doc: "account.signIn() — begin signing the player in to their Foverse account (fopull.com). Returns IMMEDIATELY; watch account.state() and draw account.code(). The engine drives the OAuth device flow in Rust — the player approves in their browser, so the game never sees a password and never holds a token. Play only. IN A BROWSER BUILD this is a redirect instead: the page leaves for fopull.com and the game RESTARTS when it comes back already signed in, so call it from a menu and never mid-play, and expect account.code() to stay nil (there is no code to show). The game's address has to be registered as a redirect URI first, or the sign-in is refused." },
     ApiEntry { label: "account.state", insert: "account.state()", doc: "account.state() — \"signedOut\" | \"starting\" | \"waiting\" | \"signedIn\" | \"failed\". Polled rather than called back, because signing in takes as long as a person takes to pick up their phone and a sign-in screen is redrawing anyway." },
     ApiEntry { label: "account.code", insert: "account.code()", doc: "account.code() — while state() is \"waiting\": { code = \"WXYZ-9999\", url = \"...\", expiresIn = 900 }. Show the code and send them to the url (openUrl does it) — that pairing is what the player approves. nil at any other time, and ALWAYS nil in a browser build, which redirects rather than pairing a code — so a sign-in screen that only draws the code shows an empty box there. Draw a button that calls signIn() as well." },
@@ -4094,6 +4193,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "node:getChild", insert: "node:getChild(", doc: "node:getChild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getScript", insert: "node:getScript(", doc: "node:getScript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
+    ApiEntry { label: "node.scripts", insert: "node.scripts", doc: "Every script on this node as an array of handles, in the order they were attached — possibly empty, never nil. The plural of node:getScript, for when you do not know the name yet: `for _, s in ipairs(n.scripts) do print(s.kind) end` says what a node actually carries, which is exactly the question a getScript that answered nil leaves you holding." },
     ApiEntry { label: "node:getComponent", insert: "node:getComponent(", doc: "node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
@@ -4609,8 +4709,34 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
 
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable
 /// collapsible sections: (title, monospace body).
-const DOC_SECTIONS: &[(&str, &str)] = &[
+/// The guide's chapters, in reading order — roughly the order somebody meets
+/// these things while building their first game, not alphabetical and not the
+/// order the pages were written in.
+const DOC_CHAPTERS: &[&str] = &[
+    "Start here",
+    "Nodes & the scene",
+    "Physics",
+    "Input",
+    "Interface",
+    "Look & sound",
+    "Working in the editor",
+];
+
+/// The in-engine guide, as `(chapter, title, body)`.
+///
+/// The chapter is what turned this from a scroll into something you can
+/// navigate. Twenty-four collapsing headers in one column is a table of
+/// contents pretending to be a page: nothing tells you where you are, related
+/// pages are only adjacent by luck, and the only way to find anything is to
+/// search for a word you already knew. Grouping them lets the tab show a
+/// contents column and ONE page at a time, which is how a documentation site
+/// works and what people expect of one.
+///
+/// Chapter order comes from [`DOC_CHAPTERS`], not from this list, so a new page
+/// can be filed next to its relatives without moving anything.
+const DOC_SECTIONS: &[(&str, &str, &str)] = &[
     (
+        "Working in the editor",
         "Inspector tunables — headers, tooltips, dropdowns, sliders",
         "\
 Everything in `defaults` becomes a row in the Inspector. Describe those rows with
@@ -4677,6 +4803,7 @@ exactly the kind of detail you should never have to know — every number is tru
 in Lua, so a leaked 0 would have been permanently `true`.)",
     ),
     (
+        "Working in the editor",
         "The editor — formatting, warnings, completion, keys",
         "\
 ## Formatting
@@ -4725,6 +4852,7 @@ changes. The selected row shows its doc, and a usage example when there is one.
     Alt+Shift+F             format document             Ctrl+Space    suggest",
     ),
     (
+        "Start here",
         "Getting started — your first script",
         "\
 Game logic is written in Lua. A script is a `.lua` file in your project's
@@ -4754,6 +4882,7 @@ in update) and hot-reloads the moment you save the file. `+=  -=  *=  /=  ..=`
 and friends work too.",
     ),
     (
+        "Nodes & the scene",
         "node — the transform",
         "\
 `node` is synced from the node's transform before each call and read back after,
@@ -4764,6 +4893,7 @@ so setting a field moves the object:
   • node.scale_x / scale_y / scale_z    per-axis scale",
     ),
     (
+        "Physics",
         "node — the physics body",
         "\
 These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
@@ -4804,6 +4934,7 @@ turns into a takeoff. The shipped first_person.lua /
 third_person.lua do both, with `slope_limit` in the Inspector.",
     ),
     (
+        "Nodes & the scene",
         "Components — live tweaks: node:getcomponent",
         "\
 Every tunable the Inspector shows on a Rigidbody or Point Light is scriptable.
@@ -4834,6 +4965,7 @@ Handles work cross-node too:
     find(\"Crate\"):getcomponent(\"RigidBody\").restitution = 0.9",
     ),
     (
+        "Input",
         "input — keyboard & mouse",
         "\
   • input.key(\"w\")          true while held. Names: a-z, 0-9, space, enter,
@@ -4848,6 +4980,7 @@ Handles work cross-node too:
   • input.scroll()          wheel delta this frame",
     ),
     (
+        "Physics",
         "raycast — ground checks, line-of-sight, shooting",
         "\
   • raycast(ox,oy,oz, dx,dy,dz, max [, ignore])  cast a ray against the
@@ -4866,6 +4999,7 @@ Handles work cross-node too:
   Use it for ground checks, line-of-sight, shooting, placing things on a surface.",
     ),
     (
+        "Working in the editor",
         "Debug gizmos — gizmo.line / ray / sphere / point",
         "\
 Draw one-frame debug shapes over the viewport from code — Scene view only
@@ -4882,6 +5016,7 @@ frame you want the shape visible.
     gizmo.ray(node.x, node.y, node.z, 0, -1, 0, 1.5, 0.3, 1.0, 0.4)",
     ),
     (
+        "Nodes & the scene",
         "Reaching other nodes & scripts — find, handles, managers",
         "\
 Reach beyond your own node — traverse the hierarchy, find any node/script in
@@ -4917,6 +5052,7 @@ from elsewhere still acts on the right object. Handles stay valid across frames 
 cache a lookup in start() and reuse it.",
     ),
     (
+        "Nodes & the scene",
         "References — noderef / scriptref / componentref (skip find())",
         "\
 Declare a `defaults` entry as a REFERENCE and wire it in the Inspector (pick
@@ -4943,6 +5079,7 @@ Components you can reference: RigidBody, PointLight, Camera, ParticleSystem,
 UiElement, UiSlider, UiLayer.",
     ),
     (
+        "Nodes & the scene",
         "Layers & tags — group, filter, find",
         "\
 LAYERS group nodes for physics + queries. Define them in Project Settings →
@@ -4971,6 +5108,7 @@ tags answer \"what IS this thing\" (identity checks + lookups). Both save with
 the scene and replicate with spawned nodes in multiplayer.",
     ),
     (
+        "Physics",
         "Collision & trigger events — onCollisionEnter and friends",
         "\
 Define these hooks in any script and the engine calls them when the node's
@@ -5010,6 +5148,7 @@ Events fire where physics runs (offline, the server, the predicted owner) —
 never during prediction replays, so they can't double-fire on corrections.",
     ),
     (
+        "Nodes & the scene",
         "Prefabs — spawn & destroy",
         "\
 A PREFAB is a reusable node (with its whole child subtree) saved as an asset:
@@ -5042,6 +5181,7 @@ Scripts spawn and remove them at runtime:
     (a plain Collidable marker only bakes at Play start).",
     ),
     (
+        "Start here",
         "Vectors & math — vec3, vec2, distance",
         "\
 Real vector VALUES with operators, not just x/y/z triplets:
@@ -5104,6 +5244,7 @@ Real vector VALUES with operators, not just x/y/z triplets:
     local total = table.sum(ready, function(s) return s.fuel end)",
     ),
     (
+        "Interface",
         "Game UI from scripts — text, sliders, buttons",
         "\
 UI elements are nodes, so the same handles drive HUDs:
@@ -5130,6 +5271,7 @@ value by clicking/dragging the track — poll it with getcomponent(\"UiSlider\")
 The engine imposes no look: style hover/press states yourself, it's 3 lines.",
     ),
     (
+        "Interface",
         "One script for a whole screen — ui.on and ui.events",
         "\
 A `clicked` function answers for the node its script is on, so a menu of eight
@@ -5176,6 +5318,7 @@ never disagree about what happened. A listener on an element that takes no
 clicks warns in the Console rather than failing silently.",
     ),
     (
+        "Look & sound",
         "Assets, models & materials — swap things at runtime",
         "\
 Reference files under Assets/ in code, and swap a node's components at runtime.
@@ -5194,6 +5337,7 @@ Reference files under Assets/ in code, and swap a node's components at runtime.
 (Right-click an asset ⏵ Copy asset path to grab the string to type.)",
     ),
     (
+        "Look & sound",
         "Animation — node:animator()",
         "\
 node:animator() is the animation handle for a node's Animation Controller (or
@@ -5217,6 +5361,7 @@ a rigged model's embedded clips). Drive states from gameplay:
     if input.clicked(0) then anim:restart(\"Attack\") end",
     ),
     (
+        "Look & sound",
         "Particles — node:particles()",
         "\
 node:particles() controls the node's Particle System component from a script —
@@ -5244,6 +5389,7 @@ FIRE-AND-FORGET — spawn a one-shot at a world point with no node at all:
     if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end",
     ),
     (
+        "Look & sound",
         "Audio — sounds & the mixer",
         "\
 THE 5-SECOND VERSION — no prefabs, no source setup, just a clip path:
@@ -5279,6 +5425,7 @@ Master). Scripts get live control that reverts when Play stops:
     audio.stopAll()",
     ),
     (
+        "Start here",
         "Globals — params, time, dt, log",
         "\
   • params   this instance's tunables — a table SEEDED from `defaults`, so
@@ -5289,6 +5436,7 @@ Master). Scripts get live control that reverts when Play stops:
   • the full Lua standard library (math, string, table, …)",
     ),
     (
+        "Start here",
         "Recipe — a walkable character (first/third person)",
         "\
 Two ready-made controller setups ship in scripts/ — no glue code needed:
@@ -5317,6 +5465,7 @@ A minimal controller, to show the velocity loop:
     end",
     ),
     (
+        "Start here",
         "Attaching & running scripts",
         "\
 • Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
@@ -5805,11 +5954,64 @@ Prose with `inline code` in it.
         assert!(api_entry_for("foo.").is_none());
     }
 
+    /// **A call that promises an `err` must say what makes it fail.**
+    ///
+    /// The reference used to be inconsistent about this in exactly the way that
+    /// is worst: some entries listed their refusals, some said "or nil and why"
+    /// and left you to find out by causing each one, and some named a second
+    /// return value and then never mentioned it again. A reader cannot tell
+    /// which kind they are looking at, so the useful ones do not get trusted
+    /// either — and "handle the error" is not something you can write against a
+    /// doc that will not say what the errors are.
+    ///
+    /// So the convention is a literal one, and this is what makes it a rule
+    /// rather than a habit: **an entry whose signature returns an `err` carries
+    /// a `Refuses:` clause listing the conditions, separated by semicolons.**
+    /// Mechanical, unmissable, and it fails the build the day somebody adds the
+    /// twenty-fifth such binding without one.
+    ///
+    /// The check is deliberately about PRESENCE and not about wording — a test
+    /// cannot read English, and one that tried would be a test people route
+    /// around. What it can do is refuse to let the question go unanswered.
+    #[test]
+    fn a_call_that_returns_an_err_lists_what_it_refuses() {
+        let mut missing = Vec::new();
+        let mut thin = Vec::new();
+        for e in LUA_API {
+            // The signature is the part before the em dash; `err` anywhere in a
+            // prose description is not a promise of one.
+            let sig = e.doc.split('\u{2014}').next().unwrap_or("");
+            let promises_err = sig.contains("->")
+                && sig.rsplit("->").next().is_some_and(|r| {
+                    r.split(',').any(|part| part.trim() == "err")
+                });
+            if !promises_err {
+                continue;
+            }
+            match e.doc.split_once("Refuses:") {
+                None => missing.push(e.label),
+                // One condition is a list of one, which is fine — but an empty
+                // clause is the same silence wearing the convention's clothes.
+                Some((_, why)) if why.trim().len() < 12 => thin.push(e.label),
+                Some(_) => {}
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these bindings hand a script an `err` and never say what fills it. Add a \
+             `Refuses: <condition>; <condition>` clause to each — the conditions are in \
+             the implementation, and a reader has no other way to learn them:\n  {}",
+            missing.join("\n  ")
+        );
+        assert!(thin.is_empty(), "a `Refuses:` clause that lists nothing: {thin:?}");
+    }
+
     /// The two new guide sections must exist and stay findable by the words a
     /// developer would search for — they document features with no other home.
     #[test]
     fn the_new_guides_cover_the_new_features() {
-        let all: String = DOC_SECTIONS.iter().map(|(t, b)| format!("{t}\n{b}\n")).collect();
+        let all: String =
+            DOC_SECTIONS.iter().map(|(c, t, b)| format!("{c}\n{t}\n{b}\n")).collect();
         for needle in [
             "--@header", "--@desc", "--@range", "--@slider", "--@options", "--@color",
             "--@hidden", "--@units", "--@multiline", "--@editorButton",

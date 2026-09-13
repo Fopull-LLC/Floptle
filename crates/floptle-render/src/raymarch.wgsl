@@ -441,7 +441,7 @@ fn map(p: vec3<f32>) -> Matter {
 // Triplanar-sample a terrain palette layer at a box-relative position (world-stable,
 // since `rel` cancels the camera offset), blended by the surface normal.
 fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
-    let scale = 0.22; // ~4.5 world units per tile
+    let scale = 0.22 * terrain_slot_scale(slot); // 0.22 ≈ 4.5 world units per tile
     let an = abs(n) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
     // Bit `slot` of the mask = this slot's texture asked for Pixelated/Nearest filtering
@@ -746,9 +746,10 @@ fn fs(in: VOut) -> FsOut {
                     col = (col + G.blob_rim[bi].rgb * rim_f) * occ + emissive;
                 }
             }
-            // Fog by camera-relative distance (p is camera-relative). The sky branch
-            // below takes the VOLUMETRIC layer (a medium the ray really crosses) but
-            // never the depth ramp, so a textured skybox still reads crisp.
+            // Fog by camera-relative distance (p is camera-relative). The sky
+            // branch below takes both modes; how much of the flat ramp it takes
+            // is the scene's `fog_sky`, weighted to the horizon so a textured
+            // skybox still reads crisp overhead.
             let fogged = apply_fog(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), p, pix);
             out.color = vec4<f32>(fogged, 1.0);
             out.depth = ndc_z;
@@ -761,7 +762,9 @@ fn fs(in: VOut) -> FsOut {
         // component falls back to the sky void colour, and negatives are clamped.
         var sky = sky_color(rd);
         sky = select(G.bg.rgb, sky, sky == sky);
-        // Volumetric fog reaches the sky (see `fog_sky`); the depth ramp does not.
+        // Fog reaches the sky — the volumetric layer by marching it, the flat
+        // ramp by `fog_sky`'s horizon-weighted blend (see the note there on why
+        // stopping at the geometry made every dark fog colour look like no fog).
         let spix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
         out.color = vec4<f32>(fog_sky(max(sky, vec3<f32>(0.0)), rd, spix), 1.0);
         out.depth = 1.0;

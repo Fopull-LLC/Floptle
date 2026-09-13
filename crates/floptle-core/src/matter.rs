@@ -1221,6 +1221,16 @@ pub struct Light {
     /// March the sun shadow at every fog step. This is what turns lit fog into
     /// actual beams, and it is essentially the entire cost of lit fog.
     pub fog_shafts: bool,
+    /// FLAT RAMP only — how much of the fog the **sky** takes at the horizon
+    /// (0..1), weighted so the zenith keeps whatever is painted there.
+    ///
+    /// Fog that tints surfaces and stops reads as fog only while its colour is
+    /// near the sky's, which is why every colour darker than the background
+    /// used to look like no fog at all: the hills went to silhouette and the
+    /// air behind them never moved. 0 restores that surfaces-only look for a
+    /// scene that wants it. Volumetric fog ignores this — it is a real medium
+    /// and reaches the sky by marching it.
+    pub fog_sky: f32,
 }
 
 impl Light {
@@ -1280,6 +1290,7 @@ impl Default for Light {
             fog_anisotropy: 0.6,
             fog_steps: 16,
             fog_shafts: true,
+            fog_sky: 1.0,
         }
     }
 }

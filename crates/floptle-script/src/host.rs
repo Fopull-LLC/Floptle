@@ -2220,6 +2220,8 @@ impl ScriptHost {
             envs: shared.envs.clone(),
             broken: shared.broken.clone(),
             broken_read_warned: shared.broken_read_warned.clone(),
+            find_scope_warned: shared.find_scope_warned.clone(),
+            miss_warned: shared.miss_warned.clone(),
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
@@ -2785,6 +2787,66 @@ impl ScriptHost {
             })
         };
         found.unwrap_or_else(|| "UiElement".to_string())
+    }
+
+    /// Forget every diagnostic this host has already said once — a **fresh
+    /// PLAY**, not a scene switch.
+    ///
+    /// Nearly every warning in here is deliberately said once and then
+    /// suppressed, because the thing that provokes it is per-frame and sixty
+    /// identical lines a second is how a Console stops being read
+    /// (`fail_load`'s doc says exactly that). The suppression key is the file's
+    /// generation or the (node, name) pair — **not the play session** — and
+    /// pressing Play clears the Console (`toggle_play`). So the second run of
+    /// an unedited project cleared the panel and then re-suppressed every line
+    /// that would have refilled it: *the same broken script that explained
+    /// itself the first time ran silently for the rest of the session.*
+    ///
+    /// That is worse than the noise it was avoiding. A script that fails to
+    /// load is reported on the first frame of every run; within a run the
+    /// generation key still collapses it to one line.
+    ///
+    /// A script held back by the budget comes back for the same reason. It is
+    /// stopped "until its file changes" so the editor does not freeze for the
+    /// budget every frame — a rule about *frames*, not about runs. Pressing
+    /// Play is a person asking for this game to run; answering with a scene
+    /// whose scripts were disqualified by a previous session, and no line
+    /// saying so, is the silent failure the budget message exists to avoid. It
+    /// trips again on its first frame and says so again.
+    ///
+    /// What frees it is the cached error on the SOURCE, below — not
+    /// `self.stopped`, which `ensure_instance` empties itself the moment the
+    /// script rebuilds. Clearing `stopped` here as well was written first and
+    /// removed after breaking it changed nothing: every path that fills it
+    /// fills `Source::error` in the same breath, so the two can never disagree.
+    pub fn reset_diagnostics(&mut self) {
+        self.load_failure_reported.clear();
+        self.upvalue_warned.clear();
+        self.synced_warned.clear();
+        self.shader_warned.clear();
+        self.param_warned.clear();
+        self.handle_key_warned.clear();
+        self.broken.borrow_mut().clear();
+        // The cached compile/runtime failure on each SOURCE, which is what
+        // actually keeps a failed script from being rebuilt: `ensure_instance`
+        // sees a source carrying an error and refuses to recompile that
+        // generation, on purpose, so that one bad file does not cost a compile
+        // every frame. After `reset_instances` there is no instance left to
+        // stand in for it, so the same cache turns "do not recompile this
+        // frame" into "never run again this session" — a script that overran
+        // its budget once was gone for every later Play, without a line.
+        for src in self.sources.values_mut() {
+            src.error = None;
+        }
+        self.broken_read_warned.borrow_mut().clear();
+        self.find_scope_warned.borrow_mut().clear();
+        self.miss_warned.borrow_mut().clear();
+        // The `script_vec3 = fast` precision warning lives in Lua app data
+        // rather than on the host, and is keyed by script name — so it has
+        // exactly the same once-ever lifetime as the rest of these.
+        if let Some(watch) = self.lua.app_data_ref::<crate::math_api::PrecisionWatch>() {
+            watch.warned.borrow_mut().clear();
+        }
     }
 
     /// Drop every per-(node, script) environment plus its net handlers and
@@ -7087,6 +7149,78 @@ mod host_tests {
             said.iter().any(|m| m.contains("stopped at") && m.contains("narrow the folder")),
             "the cap was silent:\n{joined}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Every run explains itself, not just the first one.** Pressing Play
+    /// clears the Console, and every diagnostic in the host is suppressed after
+    /// its first appearance — keyed by the file's generation, or by the node
+    /// and the name asked for, never by the play session. Together those two
+    /// facts meant the SECOND run of an unedited project emptied the panel and
+    /// then refused to refill it: a script that failed to load said so once,
+    /// ever, and every run after that was silent.
+    ///
+    /// Three shapes at once, because they are suppressed by three different
+    /// keys and one of them working proves nothing about the others: a load
+    /// failure (`load_failure_reported`, keyed by generation), a `getscript`
+    /// that finds nothing (`miss_warned`, keyed by node + name), and a script
+    /// held back by the budget (`stopped`, which silences the script itself
+    /// rather than a line).
+    #[test]
+    fn a_second_play_session_says_everything_the_first_one_said() {
+        let dir = std::env::temp_dir().join(format!("floptle-replay-diag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        // (a) does not compile, (b) asks a node for a script it has not got,
+        // (c) never returns.
+        floptle_vfs::write(dir.join("scripts/wonky.lua"), "function update(  \n").unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/asker.lua"),
+            "function update(node, dt)\n  local _ = node:getscript(\"nosuch\")\nend\n",
+        )
+        .unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/spinner.lua"),
+            "function update(node, dt)\n  print('spun')\n  while true do end\nend\n",
+        )
+        .unwrap();
+        let mut world = floptle_core::World::default();
+        for k in ["wonky", "asker", "spinner"] {
+            let e = world.spawn();
+            world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(k.into()));
+            world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new(k)]));
+        }
+        let scripts = dir.join("scripts");
+
+        // What one run puts in the CONSOLE — `drain_logs`, which is exactly
+        // what `adopt_script_logs` moves into the panel. Deliberately NOT
+        // `errors()`: that feeds the Scripting tab, it is re-pushed every
+        // frame from the cached failure, and asserting on it passes while the
+        // Console stays empty — which is the bug.
+        let session = |host: &mut ScriptHost, world: &mut floptle_core::World| {
+            host.set_script_budget(std::time::Duration::from_millis(50));
+            host.set_playing(true);
+            host.run(world, &scripts, 1.0 / 60.0, 0.0);
+            host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n")
+        };
+
+        let mut host = ScriptHost::new();
+        let first = session(&mut host, &mut world);
+        assert!(first.contains("wonky"), "run 1 never reported the load failure:\n{first}");
+        assert!(first.contains("nosuch"), "run 1 never reported the miss:\n{first}");
+        assert!(first.contains("spun"), "run 1 never ran the spinner:\n{first}");
+        assert!(first.contains("50 ms"), "run 1 never reported the budget:\n{first}");
+
+        // Press Stop, then Play again, with NOTHING edited — exactly what
+        // `toggle_play` does, and what the Console is cleared for.
+        host.reset_instances();
+        host.reset_diagnostics();
+        let second = session(&mut host, &mut world);
+        assert!(second.contains("wonky"), "run 2 swallowed the load failure:\n{second}");
+        assert!(second.contains("nosuch"), "run 2 swallowed the miss:\n{second}");
+        assert!(second.contains("spun"), "run 2 never ran the spinner at all:\n{second}");
+        assert!(second.contains("50 ms"), "run 2 swallowed the budget:\n{second}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

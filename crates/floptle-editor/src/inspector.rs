@@ -1373,6 +1373,32 @@ impl EditorTabViewer<'_> {
             *self.bone_selection = None;
             return;
         };
+        // Under a held selection this panel has taken the place of the node
+        // inspector, which is where the lock's only switch lives — so it has to
+        // carry one, or holding a selection and then clicking a bone is a state
+        // with no way out of it.
+        if self.selection_locked {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{} release", crate::icons::LOCK))
+                    .on_hover_text(
+                        "the selection is held on this model, which is what keeps its rig \
+                         on screen while you pose it. Click to release.",
+                    )
+                    .clicked()
+                {
+                    self.cmd.toggle_selection_lock = true;
+                }
+                if ui
+                    .button("↩ back to the model")
+                    .on_hover_text("deselect the bone and inspect the model itself")
+                    .clicked()
+                {
+                    *self.bone_selection = None;
+                }
+            });
+            ui.separator();
+        }
         // Current local pose: the live preview pose if the mesh is animating, else rest.
         let cur = self
             .anim
@@ -1660,10 +1686,22 @@ impl EditorTabViewer<'_> {
             self.vfx_track_inspector_ui(ui);
             return;
         }
-        // A selected armature bone (clicked in the Hierarchy) takes over the Inspector:
-        // edit its local transform, auto-keyed into the open animator clip. It yields the
-        // moment a node or asset is also selected, so no stale-selection clearing needed.
-        if self.bone_selection.is_some() && self.selection.is_empty() && self.selected_asset.is_none() {
+        // A selected armature bone (clicked in the Hierarchy, the viewport rig,
+        // or the Objects & Rig lists) takes over the Inspector: edit its local
+        // transform, auto-keyed into the open animator clip. It yields the
+        // moment a node or asset is also selected, so no stale-selection
+        // clearing needed.
+        //
+        // …except under a HELD selection, where the model stays selected on
+        // purpose — the lock has to have something to hold, and the rig is only
+        // drawn for a mesh that is selected. So a bone of the held model still
+        // takes the panel; `bone_inspector_ui` draws the release for it.
+        let bone_of_held = self.selection_locked
+            && self.bone_selection.is_some_and(|(mesh, _)| self.selection.contains(&mesh));
+        if self.bone_selection.is_some()
+            && self.selected_asset.is_none()
+            && (self.selection.is_empty() || bone_of_held)
+        {
             self.bone_inspector_ui(ui);
             return;
         }
@@ -2141,6 +2179,15 @@ impl EditorTabViewer<'_> {
                                     .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
                                     .changed();
                             });
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_sky, 0.0..=1.0), "takes the sky")
+                                .on_hover_text(
+                                    "how much of the fog the SKY takes at the horizon. This is what makes a fog \
+                                     colour darker than the background read as fog at all: tint only the \
+                                     surfaces and distant hills turn to silhouette against air that never \
+                                     moved. Weighted toward the horizon, so straight up your skybox \
+                                     survives. 0 is the old surfaces-only look.",
+                                )
+                                .changed();
                         }
                         // Dither: hide 8-bit banding on long, slow fog ramps.
                         ui.horizontal_wrapped(|ui| {
