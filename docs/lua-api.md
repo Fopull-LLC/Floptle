@@ -15,7 +15,7 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 144
-- [node — transform & body fields](#node--transform--body-fields) — 36
+- [node — transform & body fields](#node--transform--body-fields) — 37
 - [node — methods & handles](#node--methods--handles) — 28
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
@@ -365,7 +365,7 @@ steam.buildId() — this build's Steam build id. nil when steam.available() is f
 
 ### `steam.clearAchievement`
 
-steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement.
+steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement. Refuses: the achievement id is not one this app declares on Steamworks; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.clearRichPresence`
 
@@ -373,7 +373,7 @@ steam.clearRichPresence() — clears every rich-presence key set via steam.setRi
 
 ### `steam.cloudDelete`
 
-steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely.
+steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely. Refuses: no file of that name in this app's Cloud; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.cloudEnabled`
 
@@ -397,15 +397,15 @@ steam.cloudFiles() — every file in Cloud storage for this app, as a list of { 
 
 ### `steam.cloudForget`
 
-steam.cloudForget(name) -> ok, err — deletes name from the Cloud while keeping the local copy, for a player who wants this one save to stop syncing without losing it.
+steam.cloudForget(name) -> ok, err — deletes name from the Cloud while keeping the local copy, for a player who wants this one save to stop syncing without losing it. Refuses: no file of that name in this app's Cloud; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.cloudRead`
 
-steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe Lua string), or nil, message on failure (not in Cloud storage, most commonly).
+steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe Lua string), or nil, message on failure (not in Cloud storage, most commonly). Refuses: no file of that name in this app's Cloud; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.cloudWrite`
 
-steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist.
+steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist. Refuses: the write would put this app over the player's Cloud quota; Cloud is off for the app or for the player; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.createLobby`
 
@@ -513,23 +513,23 @@ steam.onPersonaChanged(fn) — fires once when the local user's persona (name or
 
 ### `steam.openInviteDialog`
 
-steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead.
+steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.openOverlay`
 
-steam.openOverlay(page) -> ok, err — opens one of the overlay's own pages: "friends", "community", "players", "settings", "officialgamegroup", "stats" or "achievements". A misspelt page is refused with the list, in EVERY session — you don't need Steam running to find the typo. (false, why) when the overlay can't open, where Steam's own call would silently do nothing.
+steam.openOverlay(page) -> ok, err — opens one of the overlay's own pages: "friends", "community", "players", "settings", "officialgamegroup", "stats" or "achievements". A misspelt page is refused with the list, in EVERY session — you don't need Steam running to find the typo. (false, why) when the overlay can't open, where Steam's own call would silently do nothing. Refuses: the page name is not one of the seven listed — refused with the list in EVERY session, so a typo is found without Steam running; the overlay cannot open (it is switched off in Steam's settings, or this renderer is not hooked into it); Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.openOverlayStore`
 
-steam.openOverlayStore([appId]) -> ok, err — opens a store page in the overlay: your own game's with no argument, another app's (a DLC's) with its id. When it can't (false, why): this is the purchase flow to degrade rather than break — tell the player where to look.
+steam.openOverlayStore([appId]) -> ok, err — opens a store page in the overlay: your own game's with no argument, another app's (a DLC's) with its id. When it can't (false, why): this is the purchase flow to degrade rather than break — tell the player where to look. Refuses: the app id is not a positive number; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.openOverlayUrl`
 
-steam.openOverlayUrl(url) -> ok, err — opens the overlay's web browser at a full http:// or https:// URL. When it can't (false, why): show the URL on screen instead, so the player can still get there.
+steam.openOverlayUrl(url) -> ok, err — opens the overlay's web browser at a full http:// or https:// URL. When it can't (false, why): show the URL on screen instead, so the player can still get there. Refuses: the URL is not http(s); the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.openOverlayUser`
 
-steam.openOverlayUser(dialog, userId) -> ok, err — opens a page about one user (their id as a string, e.g. from steam.friends()): "steamid" is their profile; also "chat", "jointrade", "stats", "achievements", "friendadd", "friendremove", "friendrequestaccept", "friendrequestignore". Same refusals as steam.openOverlay.
+steam.openOverlayUser(dialog, userId) -> ok, err — opens a page about one user (their id as a string, e.g. from steam.friends()): "steamid" is their profile; also "chat", "jointrade", "stats", "achievements", "friendadd", "friendremove", "friendrequestaccept", "friendrequestignore". Same refusals as steam.openOverlay. Refuses: the dialog name is not one Steam knows; the user id is not a number in a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.overlayActive`
 
@@ -545,35 +545,35 @@ steam.personaName() — the local user's current display name. nil when steam.av
 
 ### `steam.resetAllStats`
 
-steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic.
+steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic. Refuses: Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setCloudEnabled`
 
-steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled().
+steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled(). Refuses: the player has turned Cloud off for this app in their own Steam settings, which no game may override; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setLobbyData`
 
-steam.setLobbyData(id, key, value) -> ok, err — sets one of the lobby's own data values; this is what a lobby search matches against. Passing NO value deletes the key. ONLY THE OWNER may change lobby data, and err says so rather than failing quietly.
+steam.setLobbyData(id, key, value) -> ok, err — sets one of the lobby's own data values; this is what a lobby search matches against. Passing NO value deletes the key. ONLY THE OWNER may change lobby data, and err says so rather than failing quietly. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not the lobby's OWNER (only the owner may write lobby data); Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setLobbyJoinable`
 
-steam.setLobbyJoinable(id, joinable) -> ok, err — opens or closes the lobby to new members; close it when the match starts. Owner only.
+steam.setLobbyJoinable(id, joinable) -> ok, err — opens or closes the lobby to new members; close it when the match starts. Owner only. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not the lobby's OWNER; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setLobbyMemberData`
 
-steam.setLobbyMemberData(id, key, value) -> ok, err — sets one of YOUR OWN values in this lobby. Any member may set their own, unlike steam.setLobbyData which is owner-only.
+steam.setLobbyMemberData(id, key, value) -> ok, err — sets one of YOUR OWN values in this lobby. Any member may set their own, unlike steam.setLobbyData which is owner-only. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; you are not IN that lobby; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setRichPresence`
 
-steam.setRichPresence(key, value) -> ok, err — sets a rich-presence key for the local user, visible to friends in their friend list. Steam caps the number of keys and their length; err names the reason, not a bare failure.
+steam.setRichPresence(key, value) -> ok, err — sets a rich-presence key for the local user, visible to friends in their friend list. Steam caps the number of keys and their length; err names the reason, not a bare failure. Refuses: more than 20 keys set, or a key or value past Steam's length limit (the whole set must fit in 8 KB); Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setStatFloat`
 
-steam.setStatFloat(name, value) -> ok, err — writes a float stat LOCALLY. Same batching as steam.unlockAchievement.
+steam.setStatFloat(name, value) -> ok, err — writes a float stat LOCALLY. Same batching as steam.unlockAchievement. Refuses: the stat id is not one this app declares on Steamworks, or it is declared as an integer; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.setStatInt`
 
-steam.setStatInt(name, value) -> ok, err — writes an integer stat LOCALLY. Same batching as steam.unlockAchievement.
+steam.setStatInt(name, value) -> ok, err — writes an integer stat LOCALLY. Same batching as steam.unlockAchievement. Refuses: the stat id is not one this app declares on Steamworks, or it is declared as a float; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.statFloat`
 
@@ -593,7 +593,7 @@ steam.uiLanguage() — Steam's own UI language right now (e.g. "english", "frenc
 
 ### `steam.unlockAchievement`
 
-steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise.
+steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise. Refuses: the achievement id is not one this app declares on Steamworks; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.uploadScore`
 
@@ -760,6 +760,10 @@ Scale along Y.
 ### `node.scale_z`
 
 Scale along Z.
+
+### `node.scripts`
+
+Every script on this node as an array of handles, in the order they were attached — possibly empty, never nil. The plural of node:getScript, for when you do not know the name yet: `for _, s in ipairs(n.scripts) do print(s.kind) end` says what a node actually carries, which is exactly the question a getScript that answered nil leaves you holding.
 
 ### `node.size`
 
@@ -1687,7 +1691,7 @@ json.array(t) -> t — mark a table as a JSON LIST, and return it. The encoder g
 
 ### `json.decode`
 
-json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else's server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one.
+json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else's server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one. Refuses: the string is not valid JSON. It returns the message rather than raising, on purpose — a reply from someone else's server is data, not a bug in your script.
 
 ```lua
 -- bad input is a VALUE, not an error
@@ -3647,19 +3651,19 @@ assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to nod
 
 ### `assets.readJson`
 
-assets.readJson("charts/neon.json") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua.
+assets.readJson("charts/neon.json") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua. Refuses: everything `assets.readText` refuses, plus: the bytes are not valid JSON. Each one names the call and the path.
 
 ### `assets.readText`
 
-assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle).
+assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle). Refuses: the path leaves the project (absolute, or containing `..`); no such file; the file is bigger than 64 MB; the bytes are not UTF-8 text. Each one names the call and the path.
 
 ### `assets.writeJson`
 
-assets.writeJson("charts/neon.json", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships.
+assets.writeJson("charts/neon.json", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships. Refuses: everything `assets.writeText` refuses, plus: the value contains something JSON cannot hold (a function, a cycle).
 
 ### `assets.writeText`
 
-assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload.
+assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload. Refuses: the path leaves the project (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
 
 ## debug gizmos
 

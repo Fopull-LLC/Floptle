@@ -208,7 +208,31 @@ pub enum Interp {
 pub struct Track<T> {
     pub times: Vec<f32>,
     pub values: Vec<T>,
+    /// The lane's interpolation, used by every key that does not override it.
     pub interp: Interp,
+    /// **Per-key overrides**, parallel to `times`: how key `i` reaches the key
+    /// after it. Shorter than `times` (usually empty) — a key with no entry uses
+    /// the lane's `interp`.
+    ///
+    /// Per key because a lane-wide switch is the wrong unit for the thing people
+    /// actually want. "Stepped animation" in hand-drawn work is not a clip that
+    /// never interpolates: it is a clip that holds each drawing and snaps on the
+    /// beats the animator chose, with the odd move eased through. A lane flag
+    /// forces all-or-nothing, and the only way to get a hold in the middle of a
+    /// smooth lane was to key the same value twice and hope nobody retimed it.
+    ///
+    /// Empty by default, and empty is exactly the old behaviour, so a clip that
+    /// never touches this samples bit-for-bit as it did — and writes a file with
+    /// no new fields in it.
+    pub key_interp: Vec<Interp>,
+}
+
+impl<T> Track<T> {
+    /// How key `i` reaches the next one.
+    #[inline]
+    pub fn interp_at(&self, i: usize) -> Interp {
+        self.key_interp.get(i).copied().unwrap_or(self.interp)
+    }
 }
 
 impl<T: Copy> Track<T> {
@@ -229,7 +253,11 @@ impl<T: Copy> Track<T> {
         let (a, b) = (hi - 1, hi);
         let (ta, tb) = (self.times[a], self.times[b]);
         let k = if tb > ta { ((t - ta) / (tb - ta)).clamp(0.0, 1.0) } else { 0.0 };
-        match self.interp {
+        // The mode belongs to the key the playhead is LEAVING — the segment
+        // after key `a` — which is the convention every keyframe editor uses and
+        // the only one that lets a single hold be authored without touching the
+        // key on the far side of it.
+        match self.interp_at(a) {
             Interp::Step => Some((a, a, 0.0)),
             Interp::Linear => Some((a, b, k)),
         }
@@ -311,10 +339,19 @@ pub struct PropertyTrack {
     /// Parallel to `values`, ascending.
     pub times: Vec<f32>,
     pub values: Vec<PropValue>,
+    /// The lane's interpolation, used by every key that does not override it.
     pub interp: Interp,
+    /// Per-key overrides, parallel to `times` — see [`Track::key_interp`].
+    pub key_interp: Vec<Interp>,
 }
 
 impl PropertyTrack {
+    /// How key `i` reaches the next one.
+    #[inline]
+    pub fn interp_at(&self, i: usize) -> Interp {
+        self.key_interp.get(i).copied().unwrap_or(self.interp)
+    }
+
     /// The value at `t` (holds the ends; step or lerp between keys). Text values
     /// — and any Step lane — hold the earlier key; numeric Linear lanes lerp.
     pub fn sample(&self, t: f32) -> Option<PropValue> {
@@ -324,7 +361,7 @@ impl PropertyTrack {
         let n = self.times.len();
         let hi = self.times.partition_point(|&k| k <= t);
         let a = hi.saturating_sub(1).min(n - 1);
-        if hi == 0 || hi >= n || self.interp == Interp::Step {
+        if hi == 0 || hi >= n || self.interp_at(a) == Interp::Step {
             return Some(self.values[a].clone());
         }
         let b = hi;
@@ -1224,6 +1261,79 @@ mod tests {
         assert_eq!(flat.matrix_about_rest(pivot, &TransformTRS::IDENTITY), flat.matrix_about(pivot));
     }
 
+    /// **One key holds and the next one moves, in the same lane.**
+    ///
+    /// A lane-wide `Interp` cannot express this at all, and it is what "stepped
+    /// animation" actually means: a clip that holds each pose and snaps on the
+    /// beats the animator chose, not a clip that never interpolates anywhere.
+    /// The only way to author a hold in a smooth lane used to be keying the same
+    /// value twice and hoping nobody retimed it.
+    ///
+    /// The mode belongs to the key the playhead is LEAVING — the segment after
+    /// it — which is the convention every keyframe editor uses and the only one
+    /// under which a single hold can be authored without touching the key on the
+    /// far side of it. Sampling INSIDE both segments is what pins that down: a
+    /// version that read the arriving key's mode instead would hold the second
+    /// segment and ease the first, and every assertion about the endpoints alone
+    /// would still pass.
+    #[test]
+    fn a_key_can_hold_while_the_next_one_interpolates() {
+        let tr = Track {
+            times: vec![0.0, 1.0, 2.0],
+            values: vec![0.0f32, 10.0, 20.0],
+            interp: Interp::Linear,
+            key_interp: vec![Interp::Step, Interp::Linear, Interp::Linear],
+        };
+        // Segment 0→1 HOLDS: anywhere inside it reads the key it left.
+        assert_eq!(tr.sample(0.25), Some(0.0));
+        assert_eq!(tr.sample(0.99), Some(0.0));
+        // …and arrives exactly on the next key.
+        assert_eq!(tr.sample(1.0), Some(10.0));
+        // Segment 1→2 EASES.
+        assert_eq!(tr.sample(1.5), Some(15.0));
+        assert_eq!(tr.sample(2.0), Some(20.0));
+    }
+
+    /// An empty `key_interp` is the lane's own mode, for every key — which is
+    /// what makes this feature free for every clip that does not use it, and
+    /// what keeps an untouched file byte-identical.
+    #[test]
+    fn a_lane_with_no_per_key_modes_behaves_exactly_as_it_did() {
+        let base = Track {
+            times: vec![0.0, 1.0],
+            values: vec![0.0f32, 10.0],
+            interp: Interp::Linear,
+            key_interp: Vec::new(),
+        };
+        assert_eq!(base.sample(0.5), Some(5.0));
+        assert_eq!(base.interp_at(0), Interp::Linear);
+        let stepped = Track { interp: Interp::Step, ..base.clone() };
+        assert_eq!(stepped.sample(0.5), Some(0.0));
+        assert_eq!(stepped.interp_at(0), Interp::Step);
+        // …and a per-key entry OVERRIDES the lane in both directions, so the
+        // lane flag is a default and not a ceiling.
+        let eased = Track { key_interp: vec![Interp::Linear, Interp::Linear], ..stepped.clone() };
+        assert_eq!(eased.sample(0.5), Some(5.0), "a per-key Linear must beat a Step lane");
+        let held = Track { key_interp: vec![Interp::Step, Interp::Step], ..base };
+        assert_eq!(held.sample(0.5), Some(0.0), "a per-key Step must beat a Linear lane");
+    }
+
+    /// Property lanes get the same treatment — a light that snaps on and then
+    /// fades out is one lane, not two.
+    #[test]
+    fn a_property_lane_holds_per_key_too() {
+        let pt = PropertyTrack {
+            component: "PointLight".into(),
+            field: "intensity".into(),
+            times: vec![0.0, 1.0, 2.0],
+            values: vec![PropValue::Float(0.0), PropValue::Float(4.0), PropValue::Float(0.0)],
+            interp: Interp::Linear,
+            key_interp: vec![Interp::Step, Interp::Linear, Interp::Linear],
+        };
+        assert_eq!(pt.sample(0.5), Some(PropValue::Float(0.0)), "the held segment eased");
+        assert_eq!(pt.sample(1.5), Some(PropValue::Float(2.0)), "the eased segment held");
+    }
+
     fn skel2() -> Skeleton {
         Skeleton::new(vec![
             SkelNode { name: "Root".into(), parent: None, rest: TransformTRS::IDENTITY, pivot: Vec3::ZERO },
@@ -1246,6 +1356,7 @@ mod tests {
                     times: vec![0.0, dur],
                     values: vec![Vec3::new(x0, 0.0, 0.0), Vec3::new(x1, 0.0, 0.0)],
                     interp: Interp::Linear,
+                    key_interp: Vec::new(),
                 }),
                 rotation: None,
                 scale: None,
@@ -1267,6 +1378,7 @@ mod tests {
             times: vec![0.0, 1.0],
             values: vec![Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)],
             interp: Interp::Linear,
+            key_interp: Vec::new(),
         };
         assert_eq!(tr.sample(-1.0), Some(Vec3::ZERO));
         assert_eq!(tr.sample(0.5), Some(Vec3::new(1.0, 0.0, 0.0)));
@@ -1288,6 +1400,7 @@ mod tests {
                 PropValue::Text("c.png".into()),
             ],
             interp: Interp::Step,
+            key_interp: Vec::new(),
         };
         assert_eq!(img.sample(0.0), Some(PropValue::Text("a.png".into())));
         assert_eq!(img.sample(0.49), Some(PropValue::Text("a.png".into())));
@@ -1301,6 +1414,7 @@ mod tests {
             times: vec![0.0, 1.0],
             values: vec![PropValue::Float(0.0), PropValue::Float(1.0)],
             interp: Interp::Linear,
+            key_interp: Vec::new(),
         };
         assert_eq!(op.sample(0.25), Some(PropValue::Float(0.25)));
     }
@@ -1324,6 +1438,7 @@ mod tests {
             times: vec![0.0, 1.0],
             values: vec![PropValue::Frame(f("a.png", 0)), PropValue::Frame(f("b.png", 3))],
             interp: Interp::Linear,
+            key_interp: Vec::new(),
         };
         assert_eq!(lane.sample(0.0), Some(PropValue::Frame(f("a.png", 0))));
         assert_eq!(lane.sample(0.999), Some(PropValue::Frame(f("a.png", 0))));
@@ -1350,6 +1465,7 @@ mod tests {
             times: vec![0.0, 0.5],
             values: vec![PropValue::Text("a.png".into()), PropValue::Text("b.png".into())],
             interp: Interp::Step,
+            key_interp: Vec::new(),
         });
         let mut c = one_layer_ctl(vec![State::new("Swap".into(), clip)], Some(0));
         c.advance(0.1);

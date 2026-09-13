@@ -2210,6 +2210,21 @@ pub struct LightDoc {
     pub fog_steps: u32,
     #[serde(default = "true_bool")]
     pub fog_shafts: bool,
+    /// How much of the flat depth ramp the **sky** takes at the horizon (0..1).
+    ///
+    /// Fog used to tint surfaces and stop there, which reads as fog only while
+    /// its colour is near the sky's — so a light fog under a light sky looked
+    /// right and every darker colour looked like nothing at all, because the
+    /// distant geometry darkened into a silhouette against a background that
+    /// had not moved. This is the amount of the ramp the background takes as
+    /// well; 0 is the old surfaces-only behaviour, kept because a stylised
+    /// scene may genuinely want it.
+    ///
+    /// Weighted toward the horizon, never flat: straight up the sky keeps what
+    /// is painted there, so a skybox survives. Volumetric fog ignores this — it
+    /// is a real medium and has always reached the sky on its own.
+    #[serde(default = "default_fog_sky")]
+    pub fog_sky: f32,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -2217,6 +2232,9 @@ fn default_shadow_softness() -> f32 {
 }
 fn default_shadow_distance() -> f32 {
     150.0
+}
+fn default_fog_sky() -> f32 {
+    1.0
 }
 fn default_fog_color() -> [f32; 3] {
     [0.6, 0.65, 0.72]
@@ -2327,6 +2345,7 @@ impl From<&Light> for LightDoc {
             fog_anisotropy: l.fog_anisotropy,
             fog_steps: l.fog_steps,
             fog_shafts: l.fog_shafts,
+            fog_sky: l.fog_sky,
         }
     }
 }
@@ -2380,6 +2399,7 @@ impl LightDoc {
             fog_anisotropy: self.fog_anisotropy,
             fog_steps: self.fog_steps.clamp(2, 64),
             fog_shafts: self.fog_shafts,
+            fog_sky: self.fog_sky.clamp(0.0, 1.0),
         }
     }
 }

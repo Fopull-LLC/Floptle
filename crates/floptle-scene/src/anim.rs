@@ -66,6 +66,9 @@ pub struct AnimPropTrackDoc {
     pub values: Vec<AnimPropValueDoc>,
     #[serde(default)]
     pub step: bool,
+    /// Which keys hold, by time — see [`AnimTrackDoc3::hold_times`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold_times: Vec<f32>,
 }
 
 /// One property keyframe value: a number, a string (path/text), or a whole
@@ -131,6 +134,24 @@ pub struct AnimTrackDoc3 {
     pub values: Vec<[f32; 3]>,
     #[serde(default)]
     pub step: bool,
+    /// **Which keys HOLD**, by their time: a key listed here keeps its value
+    /// until the next key instead of interpolating toward it. Keys not listed
+    /// use the lane's `step`.
+    ///
+    /// By TIME rather than by index, and that is the whole design. The obvious
+    /// spelling is a `Vec<bool>` parallel to `times`, and it is a trap: a dozen
+    /// places in the editor insert into or remove from `times`, and every one of
+    /// them that forgot the parallel array would shift every flag after it onto
+    /// the wrong key — silently, and only visibly as "the animation is wrong
+    /// somewhere". Keyed by time, a missed update leaves an entry that matches
+    /// nothing, which does nothing.
+    ///
+    /// Empty unless a lane actually uses it, and skipped on serialize, so a clip
+    /// that never touches this writes the same bytes every previous version of
+    /// the editor wrote — and those versions read this one by ignoring a field
+    /// they do not know.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold_times: Vec<f32>,
 }
 
 /// A keyed quaternion lane (xyzw), slerped.
@@ -140,6 +161,24 @@ pub struct AnimTrackDoc4 {
     pub values: Vec<[f32; 4]>,
     #[serde(default)]
     pub step: bool,
+    /// **Which keys HOLD**, by their time: a key listed here keeps its value
+    /// until the next key instead of interpolating toward it. Keys not listed
+    /// use the lane's `step`.
+    ///
+    /// By TIME rather than by index, and that is the whole design. The obvious
+    /// spelling is a `Vec<bool>` parallel to `times`, and it is a trap: a dozen
+    /// places in the editor insert into or remove from `times`, and every one of
+    /// them that forgot the parallel array would shift every flag after it onto
+    /// the wrong key — silently, and only visibly as "the animation is wrong
+    /// somewhere". Keyed by time, a missed update leaves an entry that matches
+    /// nothing, which does nothing.
+    ///
+    /// Empty unless a lane actually uses it, and skipped on serialize, so a clip
+    /// that never touches this writes the same bytes every previous version of
+    /// the editor wrote — and those versions read this one by ignoring a field
+    /// they do not know.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold_times: Vec<f32>,
 }
 
 /// A point on the clip's timeline that calls `func` on the node's scripts.
@@ -380,6 +419,7 @@ impl SpriteAnimDoc {
                     times,
                     values,
                     step: true,
+                    hold_times: Vec::new(),
                 }],
                 ..Default::default()
             }],
@@ -456,11 +496,13 @@ mod tests {
                     times: vec![0.0, 1.5],
                     values: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
                     step: false,
+                    hold_times: Vec::new(),
                 }),
                 rotation: Some(AnimTrackDoc4 {
                     times: vec![0.0],
                     values: vec![[0.0, 0.0, 0.0, 1.0]],
                     step: true,
+                    hold_times: Vec::new(),
                 }),
                 scale: None,
                 // A numeric lane + a stepped image-swap lane.
@@ -471,6 +513,7 @@ mod tests {
                         times: vec![0.0, 1.5],
                         values: vec![AnimPropValueDoc::Float(0.0), AnimPropValueDoc::Float(1.0)],
                         step: false,
+                        hold_times: Vec::new(),
                     },
                     AnimPropTrackDoc {
                         component: "UiElement".into(),
@@ -481,6 +524,7 @@ mod tests {
                             AnimPropValueDoc::Text("textures/b.png".into()),
                         ],
                         step: true,
+                        hold_times: Vec::new(),
                     },
                 ],
             }],

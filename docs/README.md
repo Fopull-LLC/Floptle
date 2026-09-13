@@ -53,9 +53,21 @@ The build-something guides. Each one is a path from nothing to a working result.
 
 - [getting-started.md](getting-started.md) — from empty project to a **walkable
   first-person scene**: sculpt terrain, add a player, gravity, mesh colliders, scripts.
-- [scripting.md](scripting.md) — the **Lua guide**, taught in order: the `node` transform
-  and physics body, `input`, `raycast`, lifecycle, UI, netcode, scenes, water, scatter.
-  Mirrored in-engine on the **Scripting ▸ § Docs** page.
+- [scripting.md](scripting.md) — the **Lua guide**, in chapters. Each one is a page
+  of its own, and the hub is the contents:
+  [Start here](scripting/start.md) ·
+  [Nodes & the scene](scripting/nodes.md) ·
+  [Physics](scripting/physics.md) ·
+  [Input](scripting/input.md) ·
+  [Assets & materials](scripting/assets.md) ·
+  [Animation, particles & sound](scripting/visuals.md) ·
+  [Maths & the world](scripting/world.md) ·
+  [Multiplayer](scripting/networking.md) ·
+  [Data, time & the outside world](scripting/data.md) ·
+  [Steam](scripting/steam.md) ·
+  [Working in the editor](scripting/workflow.md).
+  Mirrored in-engine on the **Scripting ▸ § Docs ▸ 📖 Guides** page, with the same
+  chapters down the left.
 - [lua-api.md](lua-api.md) — the **complete Lua reference**: every name a script can
   reach, grouped and searchable. Generated from the same table that drives the editor's
   Docs tab, its hover docs and its autocomplete, so all four always agree.

@@ -66,6 +66,7 @@
 ---@field getscript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
 ---@field getScript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
 ---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
+---@field scripts table[] Every script on this node as handles, in attach order — possibly empty, never nil. The plural of getScript, for when you do not yet know the name: `for _, s in ipairs(n.scripts) do print(s.kind) end` tells you what a node actually carries, which is the question a getScript that answered nil leaves you with.
 ---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
 ---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek, and :state / :time / :finished / :isPlaying.
 ---@field toWorld fun(self: Node, v: Vec3): Vec3 A point in this node's own frame converted to world space — position, rotation AND scale, composed up the whole parent chain. "Where is the muzzle?" is gun:toWorld(vec3(0, 0, -1.2)).

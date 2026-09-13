@@ -164,7 +164,33 @@ struct Globals {
     // is every light authored before spots existed. Appended at the END so this
     // struct stays byte-identical to the Rust `RaymarchGlobals`.
     point_cone: array<vec4<f32>, 16>,
+    // Depth fog, the lanes that did not fit in `fog_color`/`fog_params`:
+    // x = how much of the ramp the SKY also takes at the horizon (0..1), yzw
+    // spare. Appended at the END, like everything above it, so this struct
+    // stays byte-identical to the Rust `RaymarchGlobals`.
+    fog_extra: vec4<f32>,
+    // Per-slot terrain texture SCALE, 32 slots packed four to a vec4 — a
+    // multiplier on the palette's base triplanar scale, 1.0 = as before.
+    // Appended at the END, like everything above it.
+    terrain_scale: array<vec4<f32>, 8>,
 };
+
+// The triplanar scale multiplier for palette slot `slot`.
+//
+// Per slot, because the textures in a palette are not drawn at the same detail:
+// a fine gravel and a broad rock face tile correctly at very different world
+// sizes, and with one scale for the whole palette the only way to match them was
+// to re-author the images. Packed four to a vec4 so 32 slots cost 128 bytes
+// rather than 512; the two indexing steps are a shift and a mask.
+//
+// Zero reads as 1.0 so a globals block that never learned about this field —
+// a probe, an offscreen preview, anything built from `Default` — tiles exactly
+// as it did before rather than collapsing every terrain texture to a point.
+fn terrain_slot_scale(slot: i32) -> f32 {
+    let i = clamp(u32(slot), 0u, 31u);
+    let v = G.terrain_scale[i >> 2u][i & 3u];
+    return select(v, 1.0, v <= 0.0);
+}
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
 // are camera-relative on both sides), un-rotate by the stored INVERSE quat,
@@ -1150,14 +1176,55 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
     return out;
 }
 
-// Volumetric fog over a ray that hit NOTHING. The depth ramp deliberately leaves
-// the sky crisp — it is a stylistic distance ramp, not a medium — but a fog
-// LAYER is something the ray really does pass through on the way out of the
-// world, and leaving it out is what put a hard seam at the horizon and hid every
-// shaft that had sky behind it.
+// Fog over a ray that hit NOTHING — the sky, or the flat background.
+//
+// The volumetric layer is something the ray really does pass through on the way
+// out of the world, and leaving it out is what put a hard seam at the horizon
+// and hid every shaft that had sky behind it.
+//
+// The flat depth RAMP used to stop at the geometry, on the theory that it is a
+// stylistic distance ramp rather than a medium. That theory does not survive
+// contact with a dark fog colour. Tint only the surfaces and fog reads as fog
+// exactly when its colour is near the sky's — which in practice means light fog
+// under a light sky, and a scene author concluding that fog can only wash the
+// picture out and never deepen it. A dark fog turned distant hills into
+// silhouettes against an untouched bright sky: the geometry visibly changed and
+// the *fog* was nowhere. The ramp reaches the background now, by
+// `fog_extra.x`.
+//
+// Weighted toward the HORIZON rather than applied flat, because the two ends of
+// the sky are not the same question. A ray along the ground travels through the
+// whole depth of the air and should arrive at the fog colour; a ray straight up
+// leaves it almost at once, and taking the zenith with it would erase the
+// skybox — the one part of the picture fog has no business deleting. So the
+// blend falls off with the ray's up component and the top of the sky keeps
+// whatever is painted there.
 fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
-    if (G.fog_params.z < 0.5 || G.vol_fog_b.w < 0.5) {
+    if (G.fog_params.z < 0.5) {
         return color;
+    }
+    if (G.vol_fog_b.w < 0.5) {
+        // FLAT RAMP. The sky is at infinity, so the distance term is saturated
+        // by construction; what is left to decide is how much of it the sky
+        // takes, and where.
+        let amount = clamp(G.fog_extra.x, 0.0, 1.0);
+        if (amount <= 0.0) {
+            return color;
+        }
+        // 1 at and below the horizon, easing to 0 overhead. Squared so the
+        // band that actually meets the ground is tight and most of the dome is
+        // left alone.
+        let up = clamp(rd.y, 0.0, 1.0);
+        let horizon = (1.0 - up) * (1.0 - up);
+        var f = amount * horizon;
+        // The same dither the ramp uses on surfaces: a sky gradient is the
+        // slowest one in the frame and bands the hardest in 8 bits.
+        let amp = G.fog_color.w;
+        if (amp > 0.0) {
+            let dith = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
+            f = clamp(f + (dith - 0.5) * amp * 0.06, 0.0, 1.0);
+        }
+        return mix(color, G.fog_color.rgb, clamp(f, 0.0, 1.0));
     }
     var t_max = max(G.fog_params.y, 1.0); // the "max distance" fence
     if (rd.y > 1e-3) {

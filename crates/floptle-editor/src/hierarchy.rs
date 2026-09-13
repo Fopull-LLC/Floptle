@@ -806,11 +806,20 @@ impl EditorTabViewer<'_> {
                 if let Some(fill) = band {
                     ui.painter().set(band_slot, egui::Shape::rect_filled(resp.rect, 3.0, fill));
                 }
-                if resp.clicked() && !self.selection_locked {
-                    // Selecting a node clears the node/asset selection so the Inspector
-                    // switches to the object/bone editor (they're mutually exclusive).
-                    *self.bone_selection = Some((e, i));
-                    self.selection.clear();
+                // A bone row is clickable even under a held selection, as long
+                // as the bone belongs to a model the lock is holding — see
+                // `selection::select_bone_into`. Unlocked, picking a bone
+                // replaces the node selection (the two are mutually exclusive
+                // and the Inspector switches to the bone editor).
+                if resp.clicked()
+                    && crate::selection::select_bone_into(
+                        self.selection,
+                        self.bone_selection,
+                        self.selection_locked,
+                        e,
+                        i,
+                    )
+                {
                     *self.selected_asset = None;
                 }
             }

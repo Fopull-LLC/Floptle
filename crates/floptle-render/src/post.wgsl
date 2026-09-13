@@ -632,14 +632,33 @@ fn fs_motion(in: VsOut) -> @location(0) vec4<f32> {
     var wsum = 1.0;
     // Symmetric about the pixel: a one-sided smear drags every edge in the
     // direction of travel and reads as the picture sliding, not as exposure.
+    //
+    // A tap that lands OUTSIDE the frame is dropped from the average rather
+    // than clamped into it. Clamping is the obvious thing and it is what put a
+    // bright band around the picture whenever the camera swung: every tap on
+    // the far side of a border pixel collapses onto that one texel, so near the
+    // edge half the average became a single colour smeared inward — worst on
+    // the SKY, which is at infinity and therefore has the largest velocity in
+    // the frame, and gone the instant the camera stopped. It reads as the edge
+    // of the picture lagging behind the rest of it.
+    //
+    // Dropping them means a pixel at the border blurs with the samples that
+    // exist and no others, which is less blur and never a wrong colour. The
+    // weight is computed rather than branched on so every invocation still
+    // samples — `textureSampleLevel` at an out-of-range uv is just a clamped
+    // read, and its result is multiplied away.
     for (var i = 1.0; i <= taps; i = i + 1.0) {
         let t = (i / taps) * 0.5;
-        let a = clamp(in.uv + v * t, vec2<f32>(0.0), vec2<f32>(1.0));
-        let b = clamp(in.uv - v * t, vec2<f32>(0.0), vec2<f32>(1.0));
+        let a = in.uv + v * t;
+        let b = in.uv - v * t;
+        let wa = select(0.0, 1.0, all(a == clamp(a, vec2<f32>(0.0), vec2<f32>(1.0))));
+        let wb = select(0.0, 1.0, all(b == clamp(b, vec2<f32>(0.0), vec2<f32>(1.0))));
         // Explicit level 0 for the same reason as the depth-of-field loop: the
         // still-pixel return above makes this non-uniform control flow.
-        sum = sum + textureSampleLevel(tex, samp, a, 0.0).rgb + textureSampleLevel(tex, samp, b, 0.0).rgb;
-        wsum = wsum + 2.0;
+        sum = sum
+            + textureSampleLevel(tex, samp, clamp(a, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb * wa
+            + textureSampleLevel(tex, samp, clamp(b, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb * wb;
+        wsum = wsum + wa + wb;
     }
-    return vec4<f32>(sum / wsum, 1.0);
+    return vec4<f32>(sum / max(wsum, 1.0), 1.0);
 }

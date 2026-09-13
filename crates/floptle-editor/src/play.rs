@@ -925,6 +925,11 @@ impl Editor {
             // script state can't leak across sessions (Ty's ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.
             self.script_host.reset_instances();
+            // …and every diagnostic they already said once. Play clears the
+            // Console two dozen lines below, and a warning suppressed by the
+            // PREVIOUS run would never refill it — a project replayed without
+            // an edit ran silently. See `ScriptHost::reset_diagnostics`.
+            self.script_host.reset_diagnostics();
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
             // and no stale per-tick input edges from before Play.
             self.game_tick.reset();

@@ -1006,6 +1006,8 @@ struct EditorTabViewer<'a> {
     terrain_textures: &'a mut Vec<String>,
     /// Per-slot glow bitmask (bit i = slot i self-lit) — the Terrain tab's ✨ toggle.
     terrain_glow: &'a mut u32,
+    /// Per-slot triplanar scale multiplier — the Terrain tab's ▦ × control.
+    terrain_tex_scale: &'a mut Vec<f32>,
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
@@ -2377,6 +2379,15 @@ struct Editor {
     /// magma veins and cave crystals stay visible underground). Persisted in the
     /// `.palette` sidecar as a `|glow` suffix on the slot's line.
     terrain_glow_mask: u32,
+    /// Per-palette-slot triplanar SCALE multiplier (1.0 = the palette's base
+    /// tiling). One entry per slot, same length as `terrain_textures`.
+    ///
+    /// Per slot because a palette's textures are not authored at one detail
+    /// level: fine gravel and a broad rock face tile correctly at very different
+    /// world sizes, and with a single scale for the whole palette the only way
+    /// to match them was to go back to the image editor. Persisted beside the
+    /// palette (see `save_terrain_palette`).
+    terrain_tex_scale: Vec<f32>,
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so
@@ -3762,6 +3773,7 @@ impl ApplicationHandler for Editor {
         self.viewport_zoom = 0.9;
         self.terrain_voxel = 1.5;
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
+        self.terrain_tex_scale = vec![1.0; floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
         self.prefer_external_editor = load_prefer_external();
         let (tint_on, tint_rgb) = load_play_tint();
@@ -4642,19 +4654,19 @@ impl ApplicationHandler for Editor {
                             // is still a target. A rig is mostly bone and very
                             // little joint, so requiring the dot made posing a
                             // game of darts.
-                            if self.selection_locked {
-                                // Held selection: a viewport click changes
-                                // nothing at all — not the node, not the bone.
-                            } else if let Some((mesh, idx)) =
+                            if let Some((mesh, idx)) =
                                 crate::viz::pick_joint(&self.rig_gizmos, cursor)
                                     .or_else(|| crate::viz::pick_bone(&self.rig_gizmos, cursor))
+                                    .filter(|&(mesh, idx)| self.select_bone(mesh, idx))
                             {
-                                // Same swap the Hierarchy makes: a bone and a
-                                // node selection are mutually exclusive, so the
-                                // Inspector becomes the bone editor.
-                                self.bone_selection = Some((mesh, idx));
-                                self.selection.clear();
-                                self.selected_asset = None;
+                                // Taken — `select_bone` has already done the
+                                // swap (or kept the locked model selected and
+                                // just moved the bone). Nothing left to do but
+                                // stop the node pick below from also running.
+                                let _ = (mesh, idx);
+                            } else if self.selection_locked {
+                                // A held selection still refuses everything
+                                // else a viewport click could mean.
                             } else {
                                 // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
                                 // (Ctrl matches the Hierarchy's toggle-select).

@@ -1204,7 +1204,7 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
 // weight-blended splat below samples a variable number of slots per fragment. `slot` is
 // the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
 fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> vec3<f32> {
-    let scale = g.terrain_mask.y;
+    let scale = g.terrain_mask.y * terrain_slot_scale(slot);
     let an = abs(normalize(n)) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
     let nearest = (g.terrain_bits.x & (1u << u32(slot))) != 0u;

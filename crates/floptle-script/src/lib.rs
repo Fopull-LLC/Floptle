@@ -677,6 +677,11 @@ pub struct ScriptHost {
     /// `Shared` copy (`floptle/0086`).
     broken: Rc<RefCell<std::collections::HashSet<String>>>,
     broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
+    /// The two remaining once-ever diagnostic sets, held here only so that
+    /// [`ScriptHost::reset_diagnostics`] can empty them at the start of a run.
+    /// See the `Shared` copies for what each one suppresses.
+    find_scope_warned: Rc<RefCell<std::collections::HashSet<String>>>,
+    miss_warned: Rc<RefCell<std::collections::HashSet<String>>>,
     /// Mesh model paths scripts wrote this frame (entity index → new asset path), applied
     /// to the ECS `Matter::Mesh` in `run` and drained by the editor to re-import the GPU mesh.
     model_changes: Rc<RefCell<HashMap<u32, String>>>,

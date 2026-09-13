@@ -2828,6 +2828,11 @@ impl EditorTabViewer<'_> {
             };
             let mut prop_retime: Option<(usize, usize, f32, f32)> = None; // (ci, ti, old, new)
             let mut prop_delete: Option<(usize, usize, f32)> = None; // (ci, ti, t)
+            // Per-key interpolation: (channel, time, hold?) for a transform key,
+            // (channel, lane, time, hold?) for a property key. Deferred like
+            // every other edit here — the menu runs inside the painter's borrow.
+            let mut key_hold: Option<(usize, f32, bool)> = None;
+            let mut prop_key_hold: Option<(usize, usize, f32, bool)> = None;
             let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
             let mut pose_key_at: Option<(usize, f32)> = None; // key the LIVE pose on channel ci at t
             let mut prop_key_at: Option<(usize, usize, f32)> = None; // key the live/carried value
@@ -3093,6 +3098,26 @@ impl EditorTabViewer<'_> {
                             delete_key = Some((ci, t));
                             ui.close();
                         }
+                        // How THIS key reaches the next one. The lane-wide
+                        // toggle is still there and still means "the default for
+                        // keys that have not been told otherwise" — this is the
+                        // one people reach for, because stepped animation is not
+                        // a clip that never interpolates but a clip that holds
+                        // each pose and snaps on the beats the animator chose.
+                        ui.separator();
+                        let held = channel_key_holds(&doc.channels[ci], t);
+                        if ui
+                            .selectable_label(held, "⇥ Hold until next key")
+                            .on_hover_text(
+                                "this key keeps its pose and snaps to the next one instead of \
+                                 easing into it. Set per key, so a clip can hold on its beats \
+                                 and still move smoothly everywhere else.",
+                            )
+                            .clicked()
+                        {
+                            key_hold = Some((ci, t, !held));
+                            ui.close();
+                        }
                     });
                 }
                 // --- property lanes, indented under the node ---
@@ -3229,6 +3254,29 @@ impl EditorTabViewer<'_> {
                                 prop_delete = Some((ci, ti, t));
                                 ui.close();
                             }
+                            // Not offered on a text or frame lane: those cannot
+                            // blend at all, the conversion forces Step on load,
+                            // and a control that only persists a lie into the
+                            // file is worse than no control.
+                            if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
+                            {
+                                ui.separator();
+                                let held = doc.channels[ci].properties[ti]
+                                    .hold_times
+                                    .iter()
+                                    .any(|h| (h - t).abs() < 1e-4);
+                                if ui
+                                    .selectable_label(held, "⇥ Hold until next key")
+                                    .on_hover_text(
+                                        "this key keeps its value and snaps to the next one \
+                                         instead of easing into it",
+                                    )
+                                    .clicked()
+                                {
+                                    prop_key_hold = Some((ci, ti, t, !held));
+                                    ui.close();
+                                }
+                            }
                         });
                     }
                 }
@@ -3269,6 +3317,16 @@ impl EditorTabViewer<'_> {
             if let Some((ci, t)) = delete_key {
                 delete_channel_key(&mut doc.channels[ci], t);
                 drop_empty_channel(doc, ci);
+                st.clip_dirty = true;
+            }
+            if let Some((ci, t, hold)) = key_hold {
+                set_channel_key_hold(&mut doc.channels[ci], t, hold);
+                st.clip_dirty = true;
+            }
+            if let Some((ci, ti, t, hold)) = prop_key_hold
+                && let Some(pt) = doc.channels[ci].properties.get_mut(ti)
+            {
+                set_hold(&mut pt.hold_times, t, hold);
                 st.clip_dirty = true;
             }
             // Context-menu "Delete N keys" (works regardless of keyboard focus).
@@ -4090,6 +4148,7 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
         if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
             let v = l.values.remove(i);
             l.times.remove(i);
+            move_hold(&mut l.hold_times, old, new);
             if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
                 l.values[j] = v; // merge onto the existing key
                 return;
@@ -4103,6 +4162,7 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
         if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
             let v = l.values.remove(i);
             l.times.remove(i);
+            move_hold(&mut l.hold_times, old, new);
             if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
                 l.values[j] = v;
                 return;
@@ -4123,12 +4183,88 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
     }
 }
 
+/// Carry a key's hold with it when the key is retimed.
+///
+/// A time-keyed list survives a missed update — the entry simply matches nothing
+/// — but "survives" is not "is right": a hold left behind at the old time would
+/// reattach itself to whatever key is keyed there next, which looks like the
+/// editor inventing a hold nobody asked for. Cheap to do, so it is done.
+fn move_hold(hold_times: &mut Vec<f32>, old: f32, new: f32) {
+    if hold_times.iter().any(|&h| (h - old).abs() < 1e-4) {
+        set_hold(hold_times, old, false);
+        set_hold(hold_times, new, true);
+    }
+}
+
+/// Mark (or unmark) the key at `t` on one lane as holding until the next key.
+///
+/// The list is by TIME, so this is an insert or a remove and there is no index
+/// to keep in step with anything — see
+/// [`floptle_scene::AnimTrackDoc3::hold_times`] for why that matters.
+fn set_hold(hold_times: &mut Vec<f32>, t: f32, hold: bool) {
+    let at = hold_times.iter().position(|&h| (h - t).abs() < 1e-4);
+    match (hold, at) {
+        (true, None) => {
+            hold_times.push(t);
+            hold_times.sort_by(f32::total_cmp);
+        }
+        (false, Some(i)) => {
+            hold_times.remove(i);
+        }
+        _ => {}
+    }
+}
+
+/// Does the dope-sheet key at `t` hold?
+///
+/// A dope-sheet key is the union of the channel's three transform lanes at one
+/// time, so "held" means every lane that HAS a key there holds it. Any-of would
+/// show the tick for a key that is half-held, which is a state you cannot get to
+/// from this menu and would be a lie about the two lanes that are not.
+fn channel_key_holds(ch: &floptle_scene::AnimChannelDoc, t: f32) -> bool {
+    let mut any = false;
+    let mut all = true;
+    let mut lane = |times: &[f32], holds: &[f32]| {
+        if times.iter().any(|&x| (x - t).abs() < 1e-4) {
+            any = true;
+            all &= holds.iter().any(|&h| (h - t).abs() < 1e-4);
+        }
+    };
+    if let Some(l) = &ch.translation {
+        lane(&l.times, &l.hold_times);
+    }
+    if let Some(l) = &ch.rotation {
+        lane(&l.times, &l.hold_times);
+    }
+    if let Some(l) = &ch.scale {
+        lane(&l.times, &l.hold_times);
+    }
+    any && all
+}
+
+/// Hold (or release) every transform lane keyed at `t` on this channel.
+fn set_channel_key_hold(ch: &mut floptle_scene::AnimChannelDoc, t: f32, hold: bool) {
+    for (times, holds) in [
+        ch.translation.as_mut().map(|l| (&l.times, &mut l.hold_times)),
+        ch.rotation.as_mut().map(|l| (&l.times, &mut l.hold_times)),
+        ch.scale.as_mut().map(|l| (&l.times, &mut l.hold_times)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if times.iter().any(|&x| (x - t).abs() < 1e-4) {
+            set_hold(holds, t, hold);
+        }
+    }
+}
+
 /// Delete every lane key at `t`; drops emptied lanes.
 fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
     fn del3(l: &mut AnimTrackDoc3, t: f32) -> bool {
         if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
             l.times.remove(i);
             l.values.remove(i);
+            set_hold(&mut l.hold_times, t, false);
         }
         l.times.is_empty()
     }
@@ -4136,6 +4272,7 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
         if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
             l.times.remove(i);
             l.values.remove(i);
+            set_hold(&mut l.hold_times, t, false);
         }
         l.times.is_empty()
     }
@@ -4325,6 +4462,7 @@ fn write_copied_key(doc: &mut AnimClipDoc, key: &CopiedKey, t: f32) {
                     times: Vec::new(),
                     values: Vec::new(),
                     step: *step,
+                    hold_times: Vec::new(),
                 });
                 ch.properties.len() - 1
             }
@@ -4465,6 +4603,7 @@ fn write_property_value(
                 times: Vec::new(),
                 values: Vec::new(),
                 step: steps_by_nature(comp, field),
+                hold_times: Vec::new(),
             });
             props.len() - 1
         }
@@ -4504,6 +4643,7 @@ fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field:
         times: Vec::new(),
         values: Vec::new(),
         step: steps_by_nature(component, field),
+        hold_times: Vec::new(),
     });
 }
 

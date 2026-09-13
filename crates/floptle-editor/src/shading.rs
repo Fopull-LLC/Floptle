@@ -560,11 +560,21 @@ pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [
     )
 }
 
-pub(crate) fn fog_uniforms(l: &Light) -> ([f32; 4], [f32; 4]) {
+/// The third lane carries what did not fit: `x` = how much of the flat ramp the
+/// SKY takes at the horizon. Reported as 0 whenever the fog is volumetric — that
+/// mode reaches the sky by marching it, and applying the flat blend on top would
+/// fog the same air twice.
+/// The three uniform lanes depth fog occupies: `(fog_color, fog_params,
+/// fog_extra)`.
+pub(crate) type FogLanes = ([f32; 4], [f32; 4], [f32; 4]);
+
+pub(crate) fn fog_uniforms(l: &Light) -> FogLanes {
     let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
+    let sky = if l.fog_volumetric { 0.0 } else { l.fog_sky.clamp(0.0, 1.0) };
     (
         [l.fog_color[0], l.fog_color[1], l.fog_color[2], dither],
         [l.fog_start, l.fog_end.max(l.fog_start + 1e-3), if l.fog { 1.0 } else { 0.0 }, 0.0],
+        [sky, 0.0, 0.0, 0.0],
     )
 }
 
@@ -677,23 +687,26 @@ pub(crate) fn fog_uniforms_and_particles_at(
     l: &Light,
     world: &floptle_core::World,
     cam: floptle_core::math::DVec3,
-) -> (([f32; 4], [f32; 4]), [f32; 4]) {
+) -> (FogLanes, [f32; 4]) {
     if let Some((tint, vis)) = underwater_at(world, cam) {
         let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
         // Start close to the eye: water attenuates from the first centimetre,
         // and a start distance would give you a crisp bubble of clear water
         // around the camera that moves with you.
         let params = [vis * 0.05, vis, 1.0, 0.0];
-        return (([tint[0], tint[1], tint[2], dither], params), params);
+        // Under water the sky is water too — there is no horizon down here and
+        // nothing to preserve overhead, so the background takes the tint in
+        // full rather than by the scene's setting.
+        return (([tint[0], tint[1], tint[2], dither], params, [1.0, 0.0, 0.0, 0.0]), params);
     }
-    let (color, params) = fog_uniforms(l);
+    let (color, params, extra) = fog_uniforms(l);
     let particles = if l.fog && l.fog_volumetric {
         let full = 2.3 / l.fog_density.max(1e-4);
         [full * 0.15, full, 1.0, params[3]]
     } else {
         params
     };
-    ((color, params), particles)
+    ((color, params, extra), particles)
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —

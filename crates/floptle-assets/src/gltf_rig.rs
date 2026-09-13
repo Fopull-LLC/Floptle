@@ -332,7 +332,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                 Some(ReadOutputs::Translations(it)) => {
                     let values = detangent(it.map(Vec3::from).collect(), cubic);
                     duration = duration.max(*times.last().unwrap());
-                    entry!().translation = Some(Track { times: times.clone(), values, interp });
+                    entry!().translation = Some(Track { times: times.clone(), values, interp, key_interp: Vec::new() });
                 }
                 Some(ReadOutputs::Rotations(rot)) => {
                     let values = detangent(
@@ -340,12 +340,12 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                         cubic,
                     );
                     duration = duration.max(*times.last().unwrap());
-                    entry!().rotation = Some(Track { times: times.clone(), values, interp });
+                    entry!().rotation = Some(Track { times: times.clone(), values, interp, key_interp: Vec::new() });
                 }
                 Some(ReadOutputs::Scales(it)) => {
                     let values = detangent(it.map(Vec3::from).collect(), cubic);
                     duration = duration.max(*times.last().unwrap());
-                    entry!().scale = Some(Track { times: times.clone(), values, interp });
+                    entry!().scale = Some(Track { times: times.clone(), values, interp, key_interp: Vec::new() });
                 }
                 _ => {} // morph-target weights: deferred
             }

@@ -167,6 +167,7 @@ impl EditorTabViewer<'_> {
         let terrain_voxel = &mut *self.terrain_voxel;
         let terrain_textures = &mut *self.terrain_textures;
         let terrain_glow = &mut *self.terrain_glow;
+        let terrain_tex_scale = &mut *self.terrain_tex_scale;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let project_root = self.project_root;
@@ -265,8 +266,14 @@ impl EditorTabViewer<'_> {
             // cleared middle slot stays visible until the trailing empties.
             let last_used = terrain_textures.iter().rposition(|t| !t.is_empty());
             let visible = (last_used.map_or(0, |i| i + 1) + 1).min(terrain_textures.len());
+            // The scale list is grown to match rather than assumed to match: it
+            // arrives empty from a project saved before per-slot scales existed,
+            // and every read below indexes it.
+            if terrain_tex_scale.len() < terrain_textures.len() {
+                terrain_tex_scale.resize(terrain_textures.len(), 1.0);
+            }
             for (slot, tex) in terrain_textures.iter_mut().enumerate().take(visible) {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let sel = terrain_brush.tex_slot == slot as i32;
                     let label = if tex.is_empty() {
                         format!("slot {}", slot + 1)
@@ -279,29 +286,29 @@ impl EditorTabViewer<'_> {
                     if ui.selectable_label(sel, format!("🖊 {label}")).clicked() {
                         terrain_brush.tex_slot = slot as i32;
                     }
-                    egui::ComboBox::from_id_salt(("tslot", slot))
-                        .selected_text("set…")
-                        .width(70.0)
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(false, "(none)").clicked() {
-                                tex.clear();
-                                cmd.terrain_palette_changed = true;
-                            }
-                            for p in &tex_list {
-                                let n = Path::new(p)
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                // Store the PORTABLE project-relative form (tree paths
-                                // embed how the editor was launched); match either
-                                // spelling so legacy slots still show as selected.
-                                let rel = crate::assets::asset_rel_path(p, project_root);
-                                if ui.selectable_label(*tex == *p || *tex == rel, n).clicked() {
-                                    *tex = rel;
-                                    cmd.terrain_palette_changed = true;
-                                }
-                            }
-                        });
+                    // The SAME picker every other texture field in the editor
+                    // uses: search, folders, thumbnails, drag-and-drop from the
+                    // Assets tab. This row had a bare ComboBox listing every
+                    // image in the project in tree order with no way to filter,
+                    // which is usable at a dozen textures and not at two hundred
+                    // — and it was the only texture field in the editor that
+                    // behaved differently from the others.
+                    if let Some(pick) = crate::ui_widgets::asset_picker(
+                        ui,
+                        egui::Id::new(("tslot", slot)),
+                        project_root,
+                        "set…",
+                        Some("(none)"),
+                        asset_tree,
+                        crate::assets::is_texture,
+                        90.0,
+                    ) {
+                        // `asset_picker` already returns the PORTABLE
+                        // project-relative form (tree paths embed how the editor
+                        // was launched).
+                        *tex = pick.unwrap_or_default();
+                        cmd.terrain_palette_changed = true;
+                    }
                     // Self-lit slot: its texture stays visible with no light at all —
                     // glowing crystals, magma veins, anything meant to read in caves.
                     if !tex.is_empty() {
@@ -318,10 +325,42 @@ impl EditorTabViewer<'_> {
                             }
                             cmd.terrain_palette_changed = true;
                         }
+                        // How big this texture is drawn on the ground, as a
+                        // multiple of the palette's base tiling. Per slot,
+                        // because a palette's images are not authored at one
+                        // detail level: a fine gravel and a broad rock face
+                        // only look like the same ground if one of them tiles
+                        // several times as often, and until now the only way to
+                        // arrange that was to resample the image.
+                        //
+                        // Bigger number = SMALLER features, because it scales
+                        // the sampling coordinate — so the control says what it
+                        // does to the picture, not what it does to the maths.
+                        let mut tiles = terrain_tex_scale.get(slot).copied().unwrap_or(1.0);
+                        let mut detail = tiles;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut detail)
+                                    .speed(0.01)
+                                    .range(0.05..=20.0)
+                                    .prefix("▦ ×"),
+                            )
+                            .on_hover_text(
+                                "how often this texture repeats, relative to the rest of the \
+                                 palette. Above 1 makes its features smaller and denser, below \
+                                 1 makes them larger — the knob for matching a fine texture to \
+                                 a coarse one without re-authoring either.",
+                            )
+                            .changed()
+                        {
+                            tiles = detail.clamp(0.05, 20.0);
+                            terrain_tex_scale[slot] = tiles;
+                            cmd.terrain_palette_changed = true;
+                        }
                     }
                 });
             }
-            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
+            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette.");
         }
         ui.separator();
         // Fill-bounds tool. Sculpting near an edge now grows only the BOUNDS (the

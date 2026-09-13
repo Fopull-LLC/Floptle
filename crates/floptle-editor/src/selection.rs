@@ -95,6 +95,40 @@ impl Editor {
         }
     }
 
+    /// Select a bone (or model object) of `mesh` — the one rule, shared by the
+    /// three places a bone can be clicked: the viewport rig, the Hierarchy's
+    /// bone rows, and the Inspector's Objects & Rig lists.
+    ///
+    /// **A held selection does not hold the RIG.** Locking exists so you can
+    /// work on one model without a stray click taking you somewhere else, and
+    /// posing is exactly when you want that — but the lock also swallowed every
+    /// bone click, which made it useless for the one job it was most wanted for.
+    /// A bone is part of the model the lock is holding, not a way out of it, so
+    /// clicking one is not the gesture the lock exists to refuse. A bone
+    /// belonging to some OTHER model still is, and is still refused.
+    ///
+    /// Unlocked, a bone selection REPLACES the node selection — the two are
+    /// mutually exclusive and the Inspector switches to the bone editor. Locked,
+    /// the model stays selected, because it must: the lock has nothing to hold
+    /// otherwise (`enforce_selection_lock` would release it a frame later) and
+    /// the rig is only drawn for a mesh that IS selected, so clearing it would
+    /// take the bones off the screen the moment you picked one.
+    ///
+    /// Returns whether the bone was taken.
+    pub(crate) fn select_bone(&mut self, mesh: Entity, idx: usize) -> bool {
+        if !select_bone_into(
+            &mut self.selection,
+            &mut self.bone_selection,
+            self.selection_locked,
+            mesh,
+            idx,
+        ) {
+            return false;
+        }
+        self.selected_asset = None;
+        true
+    }
+
     /// Clear the selection as a GESTURE — clicking empty space in a viewport.
     /// Held by the lock, unlike a bare `selection.clear()`, which is what the
     /// paths that answer to the world (scene switch, delete) still use.
@@ -907,6 +941,30 @@ impl Editor {
 /// tool's face handles — mirrors [`Editor::pick`]'s primitive sizes. `None` =
 /// the Rect tool has no box for this matter (Empty, lights, UI elements — the
 /// Scene tab gives those their own 2D handles).
+/// [`Editor::select_bone`]'s rule, as a free function — the Hierarchy tree draws
+/// from borrowed field references rather than from `&mut Editor`, and the rule
+/// has to be the same one in both places or a bone would be clickable from one
+/// panel and not the other.
+pub(crate) fn select_bone_into(
+    selection: &mut Vec<Entity>,
+    bone_selection: &mut Option<(Entity, usize)>,
+    locked: bool,
+    mesh: Entity,
+    idx: usize,
+) -> bool {
+    if locked {
+        // Only a bone of a model the lock is already holding.
+        if !selection.contains(&mesh) {
+            return false;
+        }
+        *bone_selection = Some((mesh, idx));
+        return true;
+    }
+    *bone_selection = Some((mesh, idx));
+    selection.clear();
+    true
+}
+
 pub(crate) fn rect_base_half(
     world: &floptle_core::World,
     mesh_registry: &std::collections::HashMap<String, crate::MeshAsset>,
@@ -1036,6 +1094,58 @@ mod focus_tests {
         assert!(!ed.selection_locked);
         ed.select_single(b);
         assert_eq!(ed.selection, vec![b], "released, the same gesture works again");
+    }
+
+    /// **A held selection holds the SCENE, not the rig.**
+    ///
+    /// Locking is most wanted for exactly the job it used to make impossible:
+    /// posing one model without a stray click taking you off it. Every bone
+    /// click was swallowed with everything else, so the lock and the Animating
+    /// tab could not be used together at all.
+    ///
+    /// A bone of the held model is part of that model, not a way out of it. A
+    /// bone of some OTHER model still is, and is still refused — otherwise the
+    /// lock leaks through the one panel that lists every rig in the scene.
+    #[test]
+    fn a_held_selection_still_lets_you_pick_the_model_s_own_bones() {
+        let mut ed = Editor::default();
+        let mine = locked_node(&mut ed, "Knight");
+        let other = locked_node(&mut ed, "Horse");
+        ed.select_single(mine);
+        ed.toggle_selection_lock();
+        assert!(ed.selection_locked);
+
+        assert!(ed.select_bone(mine, 3), "a bone of the held model was refused");
+        assert_eq!(ed.bone_selection, Some((mine, 3)));
+        // The model STAYS selected. It has to: the lock has nothing to hold
+        // otherwise (`enforce_selection_lock` would release it next frame) and
+        // the rig is only drawn for a mesh that is selected, so clearing it
+        // would take the bones off the screen the instant one was picked.
+        assert_eq!(ed.selection, vec![mine], "picking a bone dropped the held model");
+        ed.enforce_selection_lock();
+        assert!(ed.selection_locked, "the lock released itself after a bone pick");
+
+        // Another bone of the same model: fine.
+        assert!(ed.select_bone(mine, 7));
+        assert_eq!(ed.bone_selection, Some((mine, 7)));
+        // Another MODEL's bone: refused, and nothing moves.
+        assert!(!ed.select_bone(other, 1), "the lock leaked through another model's rig");
+        assert_eq!(ed.bone_selection, Some((mine, 7)));
+        assert_eq!(ed.selection, vec![mine]);
+    }
+
+    /// Released, a bone pick behaves as it always did: the bone REPLACES the
+    /// node selection, because the two are mutually exclusive and the Inspector
+    /// switches to the bone editor.
+    #[test]
+    fn an_unheld_bone_pick_still_replaces_the_node_selection() {
+        let mut ed = Editor::default();
+        let a = locked_node(&mut ed, "A");
+        let b = locked_node(&mut ed, "B");
+        ed.select_single(a);
+        assert!(ed.select_bone(b, 2), "an unheld selection refuses nothing");
+        assert_eq!(ed.bone_selection, Some((b, 2)));
+        assert!(ed.selection.is_empty(), "a bone and a node selection are exclusive");
     }
 
     /// The trap this guards: the lock's only switch is the Inspector's name

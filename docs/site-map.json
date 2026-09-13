@@ -24,7 +24,22 @@
       "id": "scripting",
       "title": "Scripting",
       "blurb": "Lua, and every call the engine answers.",
-      "pages": ["scripting.md", "lua-api.md", "web-api.md"]
+      "pages": [
+        "scripting.md",
+        "scripting/start.md",
+        "scripting/nodes.md",
+        "scripting/physics.md",
+        "scripting/input.md",
+        "scripting/assets.md",
+        "scripting/visuals.md",
+        "scripting/world.md",
+        "scripting/networking.md",
+        "scripting/data.md",
+        "scripting/steam.md",
+        "scripting/workflow.md",
+        "lua-api.md",
+        "web-api.md"
+      ]
     },
     {
       "id": "building",
