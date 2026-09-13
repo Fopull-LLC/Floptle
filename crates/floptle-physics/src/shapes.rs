@@ -398,14 +398,16 @@ impl ChunkTerrain {
         (self.rot.inverse() * p) / self.scale.max(1e-6)
     }
 
-    /// Bucket size for the triangle grid, and the radius a query searches.
+    /// **How far a query looks** for a triangle — the field's own narrow band.
     ///
-    /// Both are the field's own narrow band. That is not a coincidence to be
-    /// tidied away: the band is exactly how far the field carries a meaningful
-    /// distance, so a query that finds no triangle inside it is a query the
-    /// field could not have answered precisely either, and one bucket ring
-    /// (±1 cell) is guaranteed to cover everything within one cell of the
-    /// point.
+    /// The band is exactly how far the field carries a meaningful distance, so
+    /// a query that finds no triangle inside it is a query the field could not
+    /// have answered precisely either: past this the two agree, and the reject
+    /// in `closest_surface` hands those straight back to the field.
+    ///
+    /// Separate from [`Self::bucket`], which is how the triangles are FILED.
+    /// They were one constant to begin with and that cost 11x — see the note
+    /// there.
     #[inline]
     fn reach(&self) -> f32 {
         self.field.band().max(self.field.voxel()).max(1e-3)
