@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.92.0 — "What You See".** Terrain collides against the triangles you are
+looking at rather than the field beneath them, so a hillside you can see solid
+stops letting you into it and ground you can see under your feet stops dropping
+you through. Fog reaches the sky now, weighted to the horizon — pick a colour
+darker than the background and it reads as weather instead of as nothing. The
+Console keeps explaining itself on the second and every later Play, and a
+script the time budget stopped gets another run instead of staying silently
+dead for the session. `node.scripts` lists every script on a node as handles.
+A held selection lets you click that model's own bones, so locking works with
+posing. Any keyframe can **⇥ Hold until next key** on its own. Terrain texture
+slots get the editor's real picker and a per-slot repeat scale. Motion blur no
+longer leaves a sharp band around the edge of a swinging frame. And the
+scripting guide is eleven chapters, in the editor and on the site, instead of
+one very long page.
+
 **v0.91.1 — "Your Own Data".** A script reads and writes its own data files:
 `assets.readJson(path)` hands a JSON file under `Assets/` to a script as a Lua
 value and `assets.writeJson(path, value)` writes one back (`{ pretty = true }`
