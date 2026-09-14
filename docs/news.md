@@ -1,5 +1,17 @@
 ## Just shipped
 
+**v0.93.0-rc1 — "Feet On The Ground"** (beta). The terrain collider matched
+the picture after v0.92.1, and a character still hovered over a rough hillside
+— because a capsule's round bottom touches a slope off to one side, bridges a
+crease and coasts off a crest, leaving the feet you drew hanging in the air.
+Capsule bodies now stand on the ground straight beneath their centre line:
+pushed up out of it, held down onto it while standing, following crests and
+stairs instead of hopping, with jumps, walls, cliffs and ledges untouched.
+Nothing to set. Measured walking around a real project, the feet went from
+floating more than five centimetres on one tick in five to within a few
+millimetres on nearly all of them. And `floptle shot` draws the terrain now,
+which it never had.
+
 **v0.92.1 — "On Solid Ground".** A patch for the terrain collision v0.92.0
 promised. It measured distance to the drawn triangles but still decided which
 side of them you were on from the underlying field, so a character settled on
