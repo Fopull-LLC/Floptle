@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.92.1 — "On Solid Ground".** A patch for the terrain collision v0.92.0
+promised. It measured distance to the drawn triangles but still decided which
+side of them you were on from the underlying field, so a character settled on
+the field as before — over a metre off the drawn ground on a large, scaled
+terrain. The side now comes from the drawn surface itself; measured on the
+same terrain, the gap went from 1.15 units to 0.005. Raycasts land on the
+drawn ground too.
+
 **v0.92.0 — "What You See".** Terrain collides against the triangles you are
 looking at rather than the field beneath them, so a hillside you can see solid
 stops letting you into it and ground you can see under your feet stops dropping
