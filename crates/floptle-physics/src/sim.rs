@@ -207,6 +207,44 @@ pub struct BodyReport {
 /// while keeping the normal component for square-on landing feel.
 pub type CompoundImpact = (u32, u32, f32, f32, f32, DVec3);
 
+/// The LOCAL translation that puts `e` at `world_pos`.
+///
+/// A body is built from its node's WORLD transform and its position comes
+/// back as a world point — but `Transform::translation` is the node's
+/// position in its PARENT's frame. Writing the world point straight into it
+/// was right only for a node at the scene root; a body under a group node
+/// was displaced by the group's whole transform every frame, so its model
+/// (a child, drawn where the node says) stood beside and above the capsule
+/// the collider was actually resolving — a character hovering over flat
+/// ground by exactly its group's height, and walking into slopes by its
+/// group's offset, while every collision measurement read zero.
+fn local_translation_for(ecs: &World, e: Entity, world_pos: DVec3) -> DVec3 {
+    match ecs.get::<floptle_core::Parent>(e) {
+        Some(floptle_core::Parent(p)) => {
+            let pw = world_transform(ecs, *p);
+            pw.inv_mul(&Transform { translation: world_pos, ..Transform::IDENTITY }).translation
+        }
+        None => world_pos,
+    }
+}
+
+/// The LOCAL translation and rotation that put `e` at `world_pos` facing
+/// `world_rot` — see [`local_translation_for`].
+fn local_pose_for(ecs: &World, e: Entity, world_pos: DVec3, world_rot: Quat) -> (DVec3, Quat) {
+    match ecs.get::<floptle_core::Parent>(e) {
+        Some(floptle_core::Parent(p)) => {
+            let pw = world_transform(ecs, *p);
+            let l = pw.inv_mul(&Transform {
+                translation: world_pos,
+                rotation: world_rot,
+                ..Transform::IDENTITY
+            });
+            (l.translation, l.rotation)
+        }
+        None => (world_pos, world_rot),
+    }
+}
+
 impl Sim {
     /// Build the sim from the ECS: every `RigidBody` entity becomes a dynamic sphere at
     /// its world position; each terrain volume in `terrains` — `(node world translation,
@@ -1309,10 +1347,11 @@ impl Sim {
             let rot = from_rot.slerp(c.orient, alpha).normalize();
             let com = from_pos.lerp(c.pos, alpha);
             let p = com + rot * c.local_origin;
+            let world_pos = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            let (local, local_rot) = local_pose_for(ecs, link.entity, world_pos, rot);
             if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
-                t.translation =
-                    self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
-                t.rotation = rot;
+                t.translation = local;
+                t.rotation = local_rot;
             }
         }
     }
@@ -1353,9 +1392,11 @@ impl Sim {
         };
         // Write the new root's transform at the detached origin (its CoM).
         let p = detached.origin();
+        let world_pos = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+        let (local, local_rot) = local_pose_for(ecs, new_root, world_pos, detached.orient);
         if let Some(t) = ecs.get_mut::<Transform>(new_root) {
-            t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
-            t.rotation = detached.orient;
+            t.translation = local;
+            t.rotation = local_rot;
         }
         let idx = self.world.add_compound(detached);
         self.cmap.push(CompoundLink { entity: new_root, compound: idx });
@@ -1926,8 +1967,10 @@ impl Sim {
     /// Write one body's (interpolated) sim-frame position to its entity's transform,
     /// honoring the rotation-axis locks.
     fn write_one_transform(&self, ecs: &mut World, link: &BodyLink, p: Vec3) {
+        let world_pos = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+        let local = local_translation_for(ecs, link.entity, world_pos);
         if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
-            t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            t.translation = local;
             // Align-to-gravity: tilt the node so local +Y tracks the body's up
             // (kept along −gravity by the step) — a planet-walker stands on the
             // planet visually, and its children (camera, held items) inherit the
@@ -2694,5 +2737,58 @@ mod runtime_body_tests {
             }
         }
         assert!(origins.len() >= 3, "the rebase must actually have fired: {origins:?}");
+    }
+}
+
+#[cfg(test)]
+mod parented_bodies {
+    use super::*;
+    use floptle_core::Parent;
+
+    /// A body under a group node lands where its WORLD position says, not
+    /// where that position would put it if it were the node's local one.
+    /// Broken (world written into the local translation) the node stands the
+    /// group's whole transform away from its own body: on KnightFight, a
+    /// PlayerGroup 0.61 up and two units aside made the knight hover exactly
+    /// 0.61 over ground the collider had it standing on.
+    #[test]
+    fn a_parented_body_is_written_back_in_its_parents_frame() {
+        let mut ecs = World::default();
+        let group = ecs.spawn();
+        let group_t = Transform {
+            translation: DVec3::new(-1.23, 0.61, 1.57),
+            rotation: Quat::from_rotation_y(0.7),
+            scale: Vec3::splat(2.0),
+        };
+        ecs.insert(group, group_t);
+        let player = ecs.spawn();
+        ecs.insert(player, Parent(group));
+        // Authored 4 units above the group, in the group's frame.
+        ecs.insert(player, Transform::from_translation(DVec3::new(0.0, 4.0, 0.0)));
+        ecs.insert(player, RigidBody { gravity: true, ..Default::default() });
+        let start_world = world_transform(&ecs, player).translation;
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+        // Nothing moves (no gravity): every writeback must leave the node
+        // exactly where it was, in world space.
+        for _ in 0..5 {
+            sim.step_tick(1.0 / 60.0, None);
+            sim.writeback_interpolated(&mut ecs, 1.0);
+        }
+        let after = world_transform(&ecs, player).translation;
+        assert!(
+            (after - start_world).length() < 1e-4,
+            "a still body must not move its node: {start_world:?} -> {after:?}"
+        );
+        // And a moved body lands at its world position, through the parent.
+        sim.set_body_velocity(player.index(), Vec3::new(0.0, -6.0, 0.0));
+        sim.step_tick(1.0 / 60.0, None);
+        sim.writeback_interpolated(&mut ecs, 1.0);
+        let body = sim.body_snapshot(player.index()).unwrap().pos;
+        let node = world_transform(&ecs, player).translation;
+        assert!(
+            (node - body).length() < 1e-4,
+            "the node's WORLD position is the body's: node {node:?}, body {body:?}"
+        );
     }
 }
