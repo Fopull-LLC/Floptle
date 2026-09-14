@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.93.0-rc2 — "Feet On The Ground"** (beta). Terrain collision you can see
+and choose. View ▸ Terrain collider wireframe now draws exactly the surface
+physics uses, through the node's transform, instead of a coarse field proxy
+nothing collided with; the Rigidbody outline draws the live body during Play.
+The terrain node gets a **collide with** picker — the drawn surface (default)
+or the field. And a capsule collides along its whole length, not just its two
+end spheres, so legs no longer sink into a steep face.
+
 **v0.93.0-rc1 — "Feet On The Ground"** (beta). The terrain collider matched
 the picture after v0.92.1, and a character still hovered over a rough hillside
 — because a capsule's round bottom touches a slope off to one side, bridges a
