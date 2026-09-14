@@ -1694,7 +1694,7 @@ impl Editor {
             .terrains
             .iter()
             .filter_map(|(&e, t)| match self.world.get::<Matter>(e) {
-                Some(Matter::Terrain { id }) => Some((*id, t.field.to_bytes())),
+                Some(Matter::Terrain { id, .. }) => Some((*id, t.field.to_bytes())),
                 _ => None,
             })
             .collect();
@@ -1717,7 +1717,7 @@ impl Editor {
         let world = &self.world;
         self.terrain_disk_dirty.retain(|e| {
             !matches!(world.get::<Matter>(*e),
-                Some(Matter::Terrain { id }) if saved_ids.contains(id))
+                Some(Matter::Terrain { id, .. }) if saved_ids.contains(id))
         });
         // Stamp each saved celestial field's residency sidecar: impostor color +
         // the genspec hash it was written under. The hash is what lets streaming
@@ -1729,7 +1729,7 @@ impl Editor {
             .iter()
             .filter_map(|(&e, t)| {
                 let id = match self.world.get::<Matter>(e) {
-                    Some(Matter::Terrain { id }) if saved_ids.contains(id) => *id,
+                    Some(Matter::Terrain { id, .. }) if saved_ids.contains(id) => *id,
                     _ => return None,
                 };
                 let cb = self.world.get::<floptle_core::CelestialBody>(e)?;

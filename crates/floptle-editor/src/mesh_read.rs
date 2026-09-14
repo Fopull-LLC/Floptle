@@ -258,7 +258,7 @@ mod tests {
         let mut w = World::new();
         let e = w.spawn();
         w.insert(e, floptle_core::Name("Ground".into()));
-        w.insert(e, Matter::Terrain { id: 0 });
+        w.insert(e, Matter::Terrain { id: 0, collision: Default::default() });
         let err = read_node(&w, e, std::path::Path::new("."), &Default::default()).unwrap_err();
         assert!(err.contains("per chunk"), "{err}");
         assert!(err.contains("raycast"), "it has to say what to do instead: {err}");

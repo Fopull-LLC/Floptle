@@ -30,7 +30,7 @@ Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body. Properties:
 
 | Property | Meaning |
 |---|---|
-| **shape** | Sphere or **Capsule** (capsules stand upright; best for characters) |
+| **shape** | Sphere or **Capsule** (capsules stand upright; best for characters). A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
 | **radius / height** | Collision size |
 | **bounce** | Restitution (0 = no bounce) |
 | **friction** | 0 = ice, 1 = no sliding |
@@ -83,8 +83,14 @@ Per-body, **affected by gravity** opts a single body out.
 
 The world you collide with is built from:
 
-- **Terrain** — collides against the *same* SDF field the renderer draws (sculpt it and
-  the collision updates). Toggle **View ▸ Terrain collider wireframe** to see it.
+- **Terrain** — collides against the **triangles you see**: the drawn surface, at any
+  voxel size or node scale, so ground you can see under your feet is under your feet.
+  Sculpt it and the collision updates. Toggle **View ▸ Terrain collider wireframe** to
+  draw exactly the surface physics uses over the picture — it lies on the terrain, or
+  something is wrong. The terrain node's **collide with** picker in the Inspector can
+  switch a terrain to the underlying **field** instead: smoother than the picture and
+  up to a fraction of a voxel away from it, but cheaper and never meshed — for a
+  server that draws nothing, or a project tuned against it.
 - **Mesh colliders** — check **▦ Mesh collider (walkable)** on an imported `Matter::Mesh`
   node. Its triangles (in world space) become static collision so you can walk on a map
   model. Toggle **View ▸ Mesh collider wireframes** to see them; the selected node's

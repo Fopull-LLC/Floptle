@@ -1865,6 +1865,11 @@ pub(crate) fn grab_cursor(window: &Window, want: bool) -> bool {
     true
 }
 
+/// One terrain's cached collider wireframe: the node, whether it was built
+/// for the drawn surface (else the field), and its segments in node-local
+/// coordinates.
+type TerrainWire = (Entity, bool, Vec<(Vec3, Vec3)>);
+
 // Field order is drop order: every GPU-resource holder (raster/raymarch/retro/egui)
 // must drop BEFORE `gpu` (the device + surface), so `gpu` is intentionally last.
 #[derive(Default)]
@@ -2469,7 +2474,8 @@ struct Editor {
     /// when the terrain changes (cleared on `terrain_gpu_dirty`), projected each frame.
     /// Per terrain entity, in the node's LOCAL frame (the f64 anchor is added at
     /// projection, so a moved terrain's wireframe follows for free).
-    terrain_wire_world: Vec<(Entity, Vec<(Vec3, Vec3)>)>,
+    /// (terrain, built for the drawn surface?, local segments)
+    terrain_wire_world: Vec<TerrainWire>,
     /// This frame's projected terrain-collider wireframe segments (screen space).
     terrain_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// The baked navmesh, projected to screen space — one coloured outline per

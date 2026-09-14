@@ -471,11 +471,7 @@ impl ChunkTerrain {
             if !s.meshed.insert(c) {
                 continue;
             }
-            // stride 1, NO skirt — the LOD-0 extraction, which is what the
-            // renderer draws up close (`skirt: lod > 0` in the remesh queue).
-            // A skirt is a curtain hung over the crack between two LODs; as
-            // collision it would be an invisible wall around every chunk.
-            let m = floptle_field::mesh_chunk(&self.field, c, 1, false);
+            let m = drawn_chunk(&self.field, c);
             let origin = Vec3::from(m.origin);
             let cell = self.bucket();
             for t in m.indices.as_chunks::<3>().0 {
@@ -575,6 +571,34 @@ impl ChunkTerrain {
         }
         hit
     }
+}
+
+/// The triangles of one chunk AS DRAWN: stride 1, no skirt — the LOD-0
+/// extraction, which is what the renderer draws up close (`skirt: lod > 0` in
+/// the remesh queue). A skirt is a curtain hung over the crack between two
+/// LODs; as collision it would be an invisible wall around every chunk.
+///
+/// One function, because two callers must not disagree about it: the
+/// collider meshes through this, and so does [`drawn_surface`], which is what
+/// the editor draws when asked to show the collision surface.
+pub fn drawn_chunk(field: &floptle_field::ChunkField, c: [i32; 3]) -> floptle_field::ChunkMesh {
+    floptle_field::mesh_chunk(field, c, 1, false)
+}
+
+/// Every triangle a [`ChunkTerrain`] over `field` collides with, in the
+/// field's local frame — for drawing the collision surface over the picture,
+/// so "does the collider match what I see" is a question answered by looking.
+pub fn drawn_surface(field: &floptle_field::ChunkField) -> Vec<[Vec3; 3]> {
+    let mut out = Vec::new();
+    for c in field.chunk_coords() {
+        let m = drawn_chunk(field, c);
+        let origin = Vec3::from(m.origin);
+        for t in m.indices.as_chunks::<3>().0 {
+            let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
+            out.push([at(t[0]), at(t[1]), at(t[2])]);
+        }
+    }
+    out
 }
 
 /// The surface normal at `q`, a point on triangle `tri`: the vertex normals
@@ -1418,6 +1442,40 @@ mod drawn_surface_tests {
     /// collider is not being asked to grade itself. The trace stops within 0.02
     /// of the surface from above, so that is the tolerance, plus a little for
     /// the tilt of a face over that last step.
+    /// The wireframe the editor draws for "the collision surface" is built
+    /// from `drawn_surface`; the collider meshes chunk by chunk. They share
+    /// one extraction, and this holds them to it: every drawn triangle's
+    /// centre reads as ON the collider, and the field disagrees with most of
+    /// them — so a wireframe that lies on the picture is proof the collider
+    /// does, and a collider quietly switched back to the field would light
+    /// this up.
+    #[test]
+    fn the_drawn_surface_is_the_collision_surface() {
+        let field = coarse();
+        let t = ChunkTerrain::new(field.clone());
+        let tris = drawn_surface(&field);
+        assert!(tris.len() > 100, "the fixture must have a real surface: {}", tris.len());
+        let mut off_field = 0;
+        for tri in &tris {
+            let c = (tri[0] + tri[1] + tri[2]) / 3.0;
+            let d = t.distance(c);
+            assert!(d.abs() < 1e-3, "a drawn triangle's centre is on the collider, got {d}");
+            if field.d(c).abs() > 0.01 {
+                off_field += 1;
+            }
+        }
+        assert!(
+            off_field * 2 > tris.len(),
+            "the field must disagree with most drawn triangles or this proves nothing: {off_field} of {}",
+            tris.len()
+        );
+        // And the switch: the same terrain set to the FIELD is the field.
+        let mut f = ChunkTerrain::new(field.clone());
+        f.mesh_accurate = false;
+        let c = (tris[0][0] + tris[0][1] + tris[0][2]) / 3.0;
+        assert!((f.distance(c) - field.d(c)).abs() < 1e-6, "mesh_accurate = false is the field");
+    }
+
     #[test]
     fn a_ray_lands_on_the_drawn_ground() {
         let f = coarse();

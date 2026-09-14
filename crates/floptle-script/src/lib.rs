@@ -2859,7 +2859,7 @@ end
         let cb = creates.remove(0).cb.expect("create carried its callback");
         host.call_create_callback(&mut world, cb, child);
         match world.get::<Matter>(child) {
-            Some(Matter::Terrain { id }) => assert_eq!(*id, 3),
+            Some(Matter::Terrain { id, .. }) => assert_eq!(*id, 3),
             other => panic!("createNode callback's setTerrain(3) did not land: {other:?}"),
         }
         // setTerrainGen: the genspec lands as a RON PlanetFill that parses back

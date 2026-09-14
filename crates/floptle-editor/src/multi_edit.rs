@@ -872,16 +872,16 @@ mod tests {
     fn a_terrain_id_never_travels() {
         let mut w = World::new();
         let a = w.spawn();
-        w.insert(a, Matter::Terrain { id: 1 });
+        w.insert(a, Matter::Terrain { id: 1, collision: Default::default() });
         let b = w.spawn();
-        w.insert(b, Matter::Terrain { id: 2 });
+        w.insert(b, Matter::Terrain { id: 2, collision: Default::default() });
         let sel = vec![a, b];
         let snap = Snapshot::take(&w, &sel).expect("two selected");
-        if let Some(Matter::Terrain { id }) = w.get_mut::<Matter>(b) {
+        if let Some(Matter::Terrain { id, .. }) = w.get_mut::<Matter>(b) {
             *id = 7;
         }
         assert_eq!(snap.apply(&mut w, &sel), 0);
-        assert!(matches!(w.get::<Matter>(a), Some(Matter::Terrain { id }) if *id == 1));
+        assert!(matches!(w.get::<Matter>(a), Some(Matter::Terrain { id, .. }) if *id == 1));
     }
 
     /// Tags travel as the change, so each node keeps the tags it already had.

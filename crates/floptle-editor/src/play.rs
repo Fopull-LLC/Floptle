@@ -533,6 +533,12 @@ impl Editor {
             .iter()
             .map(|(&e, t)| {
                 let (anchor, rot, scale) = self.terrain_world_frame_of(e);
+                let drawn = match self.world.get::<floptle_core::Matter>(e) {
+                    Some(floptle_core::Matter::Terrain { collision, .. }) => {
+                        *collision == floptle_core::TerrainCollision::Drawn
+                    }
+                    _ => true,
+                };
                 floptle_physics::TerrainVolume {
                     anchor,
                     field: &t.field,
@@ -540,6 +546,7 @@ impl Editor {
                     eid: Some(e.index()),
                     rot,
                     scale,
+                    drawn,
                 }
             })
             .collect()
@@ -564,7 +571,7 @@ impl Editor {
         self.world
             .query::<floptle_core::Matter>()
             .filter_map(|(e, m)| match m {
-                floptle_core::Matter::Terrain { id } => Some((e, *id)),
+                floptle_core::Matter::Terrain { id, .. } => Some((e, *id)),
                 _ => None,
             })
             .filter(|(e, _)| !self.terrains.contains_key(e))
@@ -627,7 +634,7 @@ impl Editor {
             if !self.terrain_disk_dirty.contains(&e) {
                 continue; // clean: keep it resident, normal residency owns it now
             }
-            let Some(floptle_core::Matter::Terrain { id }) =
+            let Some(floptle_core::Matter::Terrain { id, .. }) =
                 self.world.get::<floptle_core::Matter>(e).cloned()
             else {
                 continue;
@@ -897,7 +904,7 @@ impl Editor {
                 self.terrains
                     .iter()
                     .filter_map(|(&e, t)| match self.world.get::<floptle_core::Matter>(e) {
-                        Some(floptle_core::Matter::Terrain { id }) => {
+                        Some(floptle_core::Matter::Terrain { id, .. }) => {
                             Some((*id, t.field.clone()))
                         }
                         _ => None,

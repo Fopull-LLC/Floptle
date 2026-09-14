@@ -1384,6 +1384,26 @@ impl LightShape {
     }
 }
 
+/// Which surface a terrain's physics collides with.
+///
+/// The picture is the **drawn** surface: the triangles extracted from the
+/// voxel field, which chord across every curve in it by up to a fraction of a
+/// voxel — inside a bulge, outside a hollow — and on a large voxel that is a
+/// visible distance. Colliding with the drawn surface is what makes "I can
+/// see the ground under my feet" and "the ground is under my feet" the same
+/// statement, so it is the default. The **field** is the pre-0.92 behaviour:
+/// smoother than the picture, cheaper to query, and never meshes anything —
+/// a headless server that draws nothing may prefer it, and a project that
+/// tuned its physics against it can keep it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerrainCollision {
+    /// The triangles you see (the default).
+    #[default]
+    Drawn,
+    /// The voxel field itself.
+    Field,
+}
+
 /// What an entity is made of, interpreted by the renderer. Placed via the
 /// entity's `Transform`; deliberately free of GPU handles.
 #[derive(Clone, Debug, PartialEq)]
@@ -1409,7 +1429,9 @@ pub enum Matter {
     /// The transform places its volume; the field data lives alongside the scene.
     /// `id` is a stable per-terrain key (Entity indices aren't stable across load),
     /// so each terrain's field file + combine slot can be matched back on reload.
-    Terrain { id: u32 },
+    /// `collision` picks the surface bodies collide with — see
+    /// [`TerrainCollision`].
+    Terrain { id: u32, collision: TerrainCollision },
     /// A camera viewpoint — its transform is the camera pose; `fov_y` is the vertical
     /// field of view in radians. One camera holds play-mode authority at a time
     /// (`active`); the gameplay view renders from it, switchable for cutscenes.

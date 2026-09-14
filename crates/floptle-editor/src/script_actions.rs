@@ -128,7 +128,7 @@ impl Editor {
                 .world
                 .query::<floptle_core::Matter>()
                 .find_map(|(e, m)| match m {
-                    floptle_core::Matter::Terrain { id: tid } if *tid == id => Some(e),
+                    floptle_core::Matter::Terrain { id: tid, .. } if *tid == id => Some(e),
                     _ => None,
                 });
             let Some(e) = target else {

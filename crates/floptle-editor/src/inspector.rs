@@ -2892,12 +2892,46 @@ impl EditorTabViewer<'_> {
                                 ui.label("group / empty");
                                 ui.small("a folder — organizes child nodes; has a transform but no geometry");
                             }
-                            Matter::Terrain { .. } => {
+                            Matter::Terrain { collision, .. } => {
                                 ui.label("editable terrain");
                                 ui.small("a sculptable SDF field — move it with the transform below");
                                 if ui.button("Δ Open Terrain tools").clicked() {
                                     cmd.focus_terrain = true;
                                 }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("collide with");
+                                    use floptle_core::TerrainCollision as TC;
+                                    let name = |c: TC| match c {
+                                        TC::Drawn => "the drawn surface",
+                                        TC::Field => "the field",
+                                    };
+                                    egui::ComboBox::from_id_salt("terrain_collision")
+                                        .width(crate::responsive::fit_here(ui, 220.0))
+                                        .wrap_mode(egui::TextWrapMode::Truncate)
+                                        .selected_text(name(*collision))
+                                        .show_ui(ui, |ui| {
+                                            cmd.inspector_changed |= ui
+                                                .selectable_value(collision, TC::Drawn, name(TC::Drawn))
+                                                .on_hover_text(
+                                                    "Physics collides with the triangles you see — \
+                                                     what the terrain is drawn as. Ground you can \
+                                                     see under your feet is under your feet, at any \
+                                                     voxel size.",
+                                                )
+                                                .clicked();
+                                            cmd.inspector_changed |= ui
+                                                .selectable_value(collision, TC::Field, name(TC::Field))
+                                                .on_hover_text(
+                                                    "Physics collides with the voxel field itself: \
+                                                     smoother than the picture, and up to a fraction \
+                                                     of a voxel away from it — inside bulges, outside \
+                                                     hollows. Cheaper, and never meshes anything, so a \
+                                                     server that draws nothing may prefer it.",
+                                                )
+                                                .clicked();
+                                        });
+                                });
+                                ui.small("takes effect on the next Play");
                             }
                             Matter::Camera {
                                 fov_y,

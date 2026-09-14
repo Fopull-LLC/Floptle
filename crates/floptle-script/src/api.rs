@@ -2103,7 +2103,7 @@ pub(crate) fn apply_rich_sets(
                 }
             }
             RichSet::MatterTerrain(id) => {
-                world.insert(e, Matter::Terrain { id });
+                world.insert(e, Matter::Terrain { id, collision: Default::default() });
             }
             RichSet::TerrainGen(spec) => match spec {
                 Some(s) => {
