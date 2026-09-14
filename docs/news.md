@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.93.0 — "Feet On The Ground".** The hover that survived two terrain
+patches was never the terrain: a physics body under a group node was written
+back in world coordinates into a parent-relative position, so its model stood
+the group's whole offset away from its own capsule while every collision
+measurement read zero. Bodies are written back in their parent's frame now.
+With it, everything from the betas: the collider wireframe draws the exact
+surface physics uses and the Rigidbody outline the live body; a **collide
+with** picker on the terrain node; capsules that stand on their feet and
+collide along their whole length; and `floptle shot` draws terrain.
+
 **v0.93.0-rc2 — "Feet On The Ground"** (beta). Terrain collision you can see
 and choose. View ▸ Terrain collider wireframe now draws exactly the surface
 physics uses, through the node's transform, instead of a coarse field proxy
