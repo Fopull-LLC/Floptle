@@ -1109,6 +1109,60 @@ impl PhysicsWorld {
         }
     }
 
+    /// Where body `bi` is tested against collider `ci`: its sample centres,
+    /// how many, and the sphere radius at each.
+    ///
+    /// A sphere and a box are their [`Body::sample_centers`]. A capsule is a
+    /// sphere SWEPT along a segment, and testing only its two end spheres —
+    /// which is what this did — leaves the whole length between them
+    /// untested: a character on a face steep enough to reach its shins between
+    /// the feet and the head walked with its legs inside the hill, and a
+    /// crouching one could put its waist through a low wall. So the third
+    /// sample is the point of the segment CLOSEST to this collider, found by
+    /// sampling the axis and refining around the best, and only when it is
+    /// strictly between the ends (an end is already sample 0 or 1). Sample 0
+    /// stays the bottom sphere — the feet's, see [`Self::foot_probe`].
+    fn contact_samples(&self, bi: usize, ci: usize) -> ([Vec3; 9], usize, f32) {
+        let b = &self.bodies[bi];
+        let BodyShape::Capsule { half_height } = b.shape else { return b.sample_centers() };
+        let (mut centers, n_c, radius) = b.sample_centers();
+        if half_height <= 1e-4 {
+            return (centers, n_c, radius);
+        }
+        let (lo, hi) = (centers[0], centers[1]);
+        let c = &self.colliders[ci];
+        let d_at = |s: f32| c.distance(lo.lerp(hi, s));
+        // Coarse: the interior quarter points; refine by golden-section
+        // between the neighbours of the best. Five samples put the answer
+        // within a few percent of the axis, which is well under the radius.
+        let mut best = (0.25f32, d_at(0.25));
+        for s in [0.5f32, 0.75] {
+            let d = d_at(s);
+            if d < best.1 {
+                best = (s, d);
+            }
+        }
+        let (mut a, mut z) = (best.0 - 0.25, best.0 + 0.25);
+        for _ in 0..5 {
+            let m1 = a + (z - a) * 0.382;
+            let m2 = a + (z - a) * 0.618;
+            if d_at(m1) < d_at(m2) {
+                z = m2;
+            } else {
+                a = m1;
+            }
+        }
+        let s = 0.5 * (a + z);
+        let d = d_at(s);
+        // Only worth a contact when it beats BOTH ends — otherwise the end
+        // sphere already covers it and a duplicate push would double-count.
+        if d < c.distance(lo) && d < c.distance(hi) && s > 1e-3 && s < 1.0 - 1e-3 {
+            centers[2] = lo.lerp(hi, s);
+            return (centers, 3, radius);
+        }
+        (centers, n_c, radius)
+    }
+
     /// The walkable ground straight beneath a capsule's bottom sphere, if the
     /// body has [feet](Body::feet) and there is any within reach: how far
     /// below the sphere's centre it is, its normal there, and which collider
@@ -1508,7 +1562,7 @@ impl PhysicsWorld {
                     if self.colliders[ci].sensor {
                         continue;
                     }
-                    let (centers, n_c, radius) = self.bodies[bi].sample_centers();
+                    let (centers, n_c, radius) = self.contact_samples(bi, ci);
                     for (si, &c) in centers[..n_c].iter().enumerate() {
                         let pen = radius - self.colliders[ci].distance(c);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
@@ -2716,6 +2770,30 @@ mod feet {
         assert!(with.abs() < 0.02, "with feet the body walks onto the flat, feet at {with}");
         let without = run(false);
         assert!(without > 0.2, "without feet the ramp launches it, feet at {without}");
+    }
+
+    #[test]
+    fn the_capsules_length_collides_not_only_its_ends() {
+        // A thin wall whose height spans only the MIDDLE of a standing
+        // capsule: settled feet at −1.2 put the centre at 0, the bottom
+        // sphere's top at −0.5 and the top sphere's bottom at +0.5. The wall
+        // spans y −0.2..0.2 and starts at x = 0.2, so the capsule's middle
+        // (reaching x = 0.35) is 0.15 inside it while both end spheres clear
+        // it — two-sphere collision leaves the body exactly where it is.
+        let mut w = world();
+        w.add_collider(Box::new(Plane::ground(-1.2)));
+        w.add_collider(Box::new(BoxShape::new(
+            Vec3::new(5.2, 0.0, 0.0),
+            Vec3::new(5.0, 0.2, 5.0),
+            Quat::IDENTITY,
+        )));
+        w.add_body(capsule(Vec3::new(0.0, 0.0, 0.0), true));
+        settle(&mut w, 1.0);
+        let x = w.bodies[0].pos.x;
+        assert!(
+            (x + 0.15).abs() < 1e-2,
+            "the capsule's middle must be pushed out of the wall, centre x = {x}"
+        );
     }
 
     #[test]

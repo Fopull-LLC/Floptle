@@ -47,6 +47,7 @@ pub use ecs::{Entity, World};
 pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Retro, Shading, Tiling, Tint};
 pub use matter::{
+    TerrainCollision,
     active_camera, is_disabled, is_drawn, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
     CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, LightShape, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,

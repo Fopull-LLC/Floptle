@@ -205,6 +205,28 @@ pub(crate) fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::Impo
 /// vertex per straddling cell (averaged edge crossings), connected to its +X/+Y/+Z
 /// neighbors. `stride` sets coarseness (bigger = fewer lines). Cached by the caller and
 /// projected to screen each frame.
+/// The edges of the surface a terrain COLLIDES with, in the field's local
+/// frame: the drawn triangles (`floptle_physics::drawn_surface`), each edge
+/// once. Drawn over the terrain, this either lies exactly on the picture or
+/// it does not — which is the whole question the toggle exists to answer.
+pub(crate) fn terrain_collision_wire(field: &floptle_field::ChunkField) -> Vec<(Vec3, Vec3)> {
+    let key = |p: Vec3| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits());
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tri in floptle_physics::drawn_surface(field) {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let (ka, kb) = (key(a), key(b));
+            let e = if ka < kb { (ka, kb) } else { (kb, ka) };
+            if seen.insert(e) {
+                out.push((a, b));
+            }
+        }
+    }
+    out
+}
+
+/// The field's own zero crossing, coarsely, from the shadow proxy — what the
+/// collider sees when a terrain is set to collide with the FIELD.
 pub(crate) fn terrain_collider_wire(b: &floptle_field::BakedSdf, stride: u32) -> Vec<(Vec3, Vec3)> {
     let [w, h, d] = b.dims;
     let s = stride.max(1);

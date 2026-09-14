@@ -203,7 +203,7 @@ impl Editor {
     /// The terrain node carrying `id` (if any), for keyed undo/save.
     pub(crate) fn terrain_entity_of_id(&self, id: u32) -> Option<Entity> {
         self.terrains.keys().copied().find(|&e| {
-            matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { id: i }) if *i == id)
+            matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { id: i, .. }) if *i == id)
         })
     }
 

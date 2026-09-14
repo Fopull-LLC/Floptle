@@ -797,6 +797,32 @@ impl TransformDoc {
 /// `Empty` is the `Default` so a `NodeDoc` missing its `matter:` line still
 /// loads — a node with nothing in it, which is a thing you can see and fix,
 /// rather than a whole scene that refuses to open.
+/// [`floptle_core::TerrainCollision`] on the wire.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerrainCollisionDoc {
+    #[default]
+    Drawn,
+    Field,
+}
+
+impl TerrainCollisionDoc {
+    fn is_default(v: &Self) -> bool {
+        *v == Self::Drawn
+    }
+    pub fn to_core(self) -> floptle_core::TerrainCollision {
+        match self {
+            Self::Drawn => floptle_core::TerrainCollision::Drawn,
+            Self::Field => floptle_core::TerrainCollision::Field,
+        }
+    }
+    pub fn from_core(c: floptle_core::TerrainCollision) -> Self {
+        match c {
+            floptle_core::TerrainCollision::Drawn => Self::Drawn,
+            floptle_core::TerrainCollision::Field => Self::Field,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum MatterDoc {
     Primitive { shape: ShapeDoc, color: [f32; 3] },
@@ -808,6 +834,11 @@ pub enum MatterDoc {
         /// Stable per-terrain id (legacy single-terrain scenes default to 0).
         #[serde(default)]
         id: u32,
+        /// Which surface physics collides with. Omitted at its default — the
+        /// drawn triangles — so a scene written before the choice existed
+        /// loads meaning what it means now.
+        #[serde(default, skip_serializing_if = "TerrainCollisionDoc::is_default")]
+        collision: TerrainCollisionDoc,
     },
     /// An editable map-building polygon mesh. Geometry lives in the per-scene
     /// `maps/<scene>.map.ron` sidecar keyed by this stable id (the terrain
@@ -1546,7 +1577,7 @@ impl From<&Matter> for MatterDoc {
             Matter::Blob { scale } => MatterDoc::Blob { scale: *scale },
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
-            Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
+            Matter::Terrain { id, collision } => MatterDoc::Terrain { id: *id, collision: TerrainCollisionDoc::from_core(*collision) },
             Matter::MapMesh { id } => MatterDoc::MapMesh { id: *id, geo: None },
             Matter::Camera {
                 fov_y,
@@ -1812,7 +1843,7 @@ impl MatterDoc {
             MatterDoc::Blob { scale } => Matter::Blob { scale: *scale },
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
-            MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
+            MatterDoc::Terrain { id, collision } => Matter::Terrain { id: *id, collision: collision.to_core() },
             MatterDoc::MapMesh { id, .. } => Matter::MapMesh { id: *id },
             MatterDoc::Camera {
                 fov_y,
@@ -2974,12 +3005,44 @@ mod migrate_tests {
             "(name:\"s\",nodes:[(name:\"T\",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter: Terrain,)])",
         ] {
             let doc = from_ron(legacy).expect("legacy scene parses");
-            assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 0 }));
+            assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 0, .. }));
         }
         // a new-form scene with an id is untouched.
         let newform = r#"(name:"s",nodes:[(name:"T",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter:Terrain(id:5))])"#;
         let doc = from_ron(newform).expect("new scene parses");
-        assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 5 }));
+        assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 5, .. }));
+    }
+
+    /// The collision choice rides the terrain matter: absent means the drawn
+    /// surface (every older scene), `Field` round-trips, and the default is
+    /// not written.
+    #[test]
+    fn a_terrains_collision_choice_round_trips_and_defaults_to_drawn() {
+        let old = r#"(name:"s",nodes:[(name:"T",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter:Terrain(id: 2))])"#;
+        let doc: SceneDoc = ron::from_str(old).expect("older scene loads");
+        assert!(matches!(
+            doc.nodes[0].matter,
+            MatterDoc::Terrain { id: 2, collision: TerrainCollisionDoc::Drawn }
+        ));
+        let core = doc.nodes[0].matter.to_matter();
+        assert!(matches!(
+            core,
+            Matter::Terrain { id: 2, collision: floptle_core::TerrainCollision::Drawn }
+        ));
+        let written = ron::to_string(&doc.nodes[0].matter).unwrap();
+        assert!(!written.contains("collision"), "the default is not written: {written}");
+
+        let field = MatterDoc::from(&Matter::Terrain {
+            id: 2,
+            collision: floptle_core::TerrainCollision::Field,
+        });
+        let written = ron::to_string(&field).unwrap();
+        assert!(written.contains("collision:Field"), "{written}");
+        let back: MatterDoc = ron::from_str(&written).unwrap();
+        assert!(matches!(
+            back.to_matter(),
+            Matter::Terrain { id: 2, collision: floptle_core::TerrainCollision::Field }
+        ));
     }
 }
 

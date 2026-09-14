@@ -139,6 +139,13 @@ sphere:  pen = r - f(c);            if pen > 0: contact at c - r·n,  n = ∇f(c
 capsule: q   = argmin_{s∈[a,b]} f(s);   then sphere test at q
 ```
 
+**A capsule is swept, not two spheres.** Its end spheres are always tested, and
+so is the point of its axis closest to each collider (three coarse samples,
+five golden-section refinements), when that point is strictly between the ends
+and nearer than either — so a face steep enough to reach a character's shins
+pushes the body out instead of letting the legs walk through it, and a crouching
+body cannot put its waist through a low wall.
+
 **Feet (capsules only).** A sphere resting on a slope touches it off to one
 side, so the point straight under the centre — where a character's feet are
 drawn — hangs `r·(1 − cos θ)` above the ground; in a crease it bridges the two
@@ -155,6 +162,13 @@ cannot launch it. Anything the probe does not find — a wall, a slope past
 something — is left to the rounded bottom exactly as above, so walls push and a
 ledge still holds a body by its rim. Moving platforms are surfaces for the
 probe too. Not a knob: every capsule has feet, and only a capsule.
+
+**Which terrain surface.** `Matter::Terrain::collision` picks `Drawn` (the
+extracted triangles — `ChunkTerrain::mesh_accurate`, the default) or `Field`.
+The editor's *Terrain collider wireframe* draws whichever the node collides
+with, through the node's full transform, from the same extraction
+(`floptle_physics::drawn_surface`) — a guard holds every drawn triangle's
+centre to distance zero on the collider.
 
 **Morph is automatic.** Every query takes the current sim time `t` and passes it
 straight to `f(p, t)`. There is *no* per-frame rebuild, no dirty flag, no re-bake of

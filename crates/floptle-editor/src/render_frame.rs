@@ -1346,9 +1346,23 @@ impl Editor {
             } else {
                 Vec::new()
             };
+            // During Play the LIVE body, not the authored component: a script
+            // that set `node.height` (a controller's stand height, a crouch)
+            // changed the capsule and moved its centre to keep the feet
+            // planted, and an outline drawn from the component then sat a
+            // hand's width above where the body actually met the ground —
+            // an instrument that lied about the one thing it was for.
+            let live: std::collections::HashMap<Entity, (DVec3, f32)> = self
+                .sim
+                .as_ref()
+                .map(|sim| sim.body_states().map(|b| (b.entity, (b.pos, b.height))).collect())
+                .unwrap_or_default();
             for (e, rb) in bodies {
                 let wt = floptle_core::world_transform(&self.world, e);
-                let p = wt.translation;
+                let (p, height) = match live.get(&e) {
+                    Some(&(pos, h)) => (pos, h),
+                    None => (wt.translation, rb.height),
+                };
                 let lines = if rb.kind == floptle_core::BodyKind::Box {
                     let s = wt.scale;
                     let half = Vec3::new(
@@ -1362,7 +1376,7 @@ impl Editor {
                         p,
                         rb.kind == floptle_core::BodyKind::Capsule,
                         rb.radius,
-                        rb.height,
+                        height,
                         cam.world_position,
                         view_proj,
                         gw,
@@ -1390,26 +1404,50 @@ impl Editor {
                     }
                 }
             }
-            // Terrain collider wireframes (the SDF surfaces you walk on). Cached per
-            // terrain in NODE-LOCAL coords at native resolution + rebuilt only when
-            // that terrain's shape changes; here we add each node's f64 anchor and
-            // re-project — so a moved terrain's wireframe follows for free.
-            // Coarseness scales with each grid so the line count stays sane.
+            // Terrain collider wireframes: the surface physics ACTUALLY collides
+            // with. For a terrain set to collide with the drawn surface (the
+            // default) that is every drawn triangle, from the same extraction
+            // the collider runs — so this wireframe lies on the picture or the
+            // collider does not, and a screenshot settles it. For one set to
+            // the field it is the field's own zero crossing, coarsely. (It
+            // used to draw the shadow proxy for every terrain, unrotated and
+            // unscaled: a wireframe of a surface nothing collided with, in the
+            // wrong place — an instrument that lied about the thing it was
+            // for.) Cached per terrain in NODE-LOCAL coords, rebuilt when that
+            // terrain's shape changes; posed here through the node's full
+            // transform, so a moved, turned or scaled terrain's wireframe
+            // follows for free.
             if self.show_terrain_collider && filter.colliders {
                 for (&e, t) in &self.terrains {
-                    if !self.terrain_wire_world.iter().any(|(we, _)| *we == e) {
-                        let stride =
-                            (t.shadow.dims.into_iter().max().unwrap_or(64) / 48).max(2);
-                        self.terrain_wire_world
-                            .push((e, terrain_collider_wire(&t.shadow, stride)));
+                    let drawn = !matches!(
+                        self.world.get::<Matter>(e),
+                        Some(Matter::Terrain { collision: floptle_core::TerrainCollision::Field, .. })
+                    );
+                    // Rebuilt when the terrain's choice of surface changes too.
+                    self.terrain_wire_world.retain(|(we, d, _)| *we != e || *d == drawn);
+                    if !self.terrain_wire_world.iter().any(|(we, ..)| *we == e) {
+                        let segs = if drawn {
+                            crate::viz::terrain_collision_wire(&t.field)
+                        } else {
+                            let stride =
+                                (t.shadow.dims.into_iter().max().unwrap_or(64) / 48).max(2);
+                            terrain_collider_wire(&t.shadow, stride)
+                        };
+                        self.terrain_wire_world.push((e, drawn, segs));
                     }
                 }
-                self.terrain_wire_world.retain(|(we, _)| self.terrains.contains_key(we));
-                for (e, segs) in &self.terrain_wire_world {
-                    let anchor = floptle_core::world_transform(&self.world, *e).translation;
+                self.terrain_wire_world.retain(|(we, ..)| self.terrains.contains_key(we));
+                for (e, _, segs) in &self.terrain_wire_world {
+                    let wt = floptle_core::world_transform(&self.world, *e);
+                    let (anchor, rot, scale) =
+                        (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6));
+                    let place = |p: Vec3| {
+                        let q = rot * (p * scale);
+                        anchor + DVec3::new(q.x as f64, q.y as f64, q.z as f64)
+                    };
                     for &(a, b) in segs {
-                        let wa = anchor + DVec3::new(a.x as f64, a.y as f64, a.z as f64);
-                        let wb = anchor + DVec3::new(b.x as f64, b.y as f64, b.z as f64);
+                        let wa = place(a);
+                        let wb = place(b);
                         if let (Some(pa), Some(pb)) = (
                             project(wa, cam.world_position, view_proj, gw, gh),
                             project(wb, cam.world_position, view_proj, gw, gh),
@@ -6798,7 +6836,7 @@ impl Editor {
                     })
                     .map(|&e| {
                         let id = match self.world.get::<Matter>(e) {
-                            Some(Matter::Terrain { id }) => *id,
+                            Some(Matter::Terrain { id, .. }) => *id,
                             _ => 0,
                         };
                         (id, e)
@@ -6855,7 +6893,7 @@ impl Editor {
             }
             if geom {
                 // Sculpt moved this terrain's surface — rebuild just its wireframe.
-                self.terrain_wire_world.retain(|(we, _)| *we != e);
+                self.terrain_wire_world.retain(|(we, ..)| *we != e);
             }
         }
         // (see terrain_nearest_mask for the per-slot filter bits)
@@ -9541,7 +9579,7 @@ impl Editor {
                 // Snapshot for undo (one step), then fill the whole field. Fills only
                 // modify EXISTING chunks, so the stored set is the exact undo cover.
                 let id = match self.world.get::<Matter>(e) {
-                    Some(Matter::Terrain { id }) => *id,
+                    Some(Matter::Terrain { id, .. }) => *id,
                     _ => 0,
                 };
                 if let Some(t) = self.terrains.get(&e) {
@@ -9560,7 +9598,7 @@ impl Editor {
         if cmd.fill_bounds
             && let Some(e) = self.target_terrain() {
                 let id = match self.world.get::<Matter>(e) {
-                    Some(Matter::Terrain { id }) => *id,
+                    Some(Matter::Terrain { id, .. }) => *id,
                     _ => 0,
                 };
                 if let Some(t) = self.terrains.get(&e) {

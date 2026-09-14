@@ -1767,7 +1767,7 @@ mod tests {
     fn terrain_counts_without_being_marked_collidable() {
         let mut w = World::new();
         let e = w.spawn();
-        w.insert(e, Matter::Terrain { id: 1 });
+        w.insert(e, Matter::Terrain { id: 1, collision: Default::default() });
         assert!(counts(&w, e, &[]));
         w.insert(e, floptle_core::NavMeshExclude);
         assert!(!counts(&w, e, &[]), "and it can still be taken out by hand");

@@ -1329,7 +1329,7 @@ impl Editor {
             // Brush radius is WORLD units; the field works in LOCAL units.
             let r_local = brush.radius / tscale;
             let id = match self.world.get::<Matter>(active) {
-                Some(Matter::Terrain { id }) => *id,
+                Some(Matter::Terrain { id, .. }) => *id,
                 _ => 0,
             };
             let terrain = self.terrains.get_mut(&active).unwrap();
@@ -1615,7 +1615,7 @@ impl Editor {
         self.world.insert(e, Transform { translation: pos, ..Transform::IDENTITY });
         let n = self.terrains.len() + 1;
         self.world.insert(e, Name(format!("Terrain {n}")));
-        self.world.insert(e, Matter::Terrain { id });
+        self.world.insert(e, Matter::Terrain { id, collision: Default::default() });
         self.terrains.insert(e, EditorTerrain::new(field));
         self.active_terrain = Some(e);
         self.terrain_gpu_dirty = true;
@@ -1855,7 +1855,7 @@ impl Editor {
         }
         let Some(t) = self.terrains.get(&e) else { return };
         let Some(sd) = self.script_host.terrain_save_dir() else { return };
-        let Some(Matter::Terrain { id }) = self.world.get::<Matter>(e).cloned() else { return };
+        let Some(Matter::Terrain { id, .. }) = self.world.get::<Matter>(e).cloned() else { return };
         let name = self
             .world
             .get::<floptle_core::Name>(e)
@@ -1916,7 +1916,7 @@ impl Editor {
             .keys()
             .filter(|e| self.terrain_disk_dirty.contains(e))
             .filter_map(|&e| match self.world.get::<Matter>(e) {
-                Some(Matter::Terrain { id }) => Some((e, *id)),
+                Some(Matter::Terrain { id, .. }) => Some((e, *id)),
                 _ => None,
             })
             .collect();
@@ -2167,7 +2167,7 @@ impl Editor {
             .world
             .query::<Matter>()
             .filter_map(|(e, m)| match m {
-                Matter::Terrain { id } => Some((e, *id)),
+                Matter::Terrain { id, .. } => Some((e, *id)),
                 _ => None,
             })
             .filter(|(e, id)| {
@@ -2284,7 +2284,7 @@ impl Editor {
                 continue;
             }
             let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) else { continue };
-            let Some(Matter::Terrain { id }) = self.world.get::<Matter>(e) else { continue };
+            let Some(Matter::Terrain { id, .. }) = self.world.get::<Matter>(e) else { continue };
             let r = cb.body_radius.max(1.0);
             let p = floptle_core::world_transform(&self.world, e).translation;
             if !near(p, r * RESIDENT_EVICT_RADII) {
@@ -2595,7 +2595,7 @@ impl Editor {
             .world
             .query::<Matter>()
             .filter_map(|(e, m)| match m {
-                Matter::Terrain { id } => Some((e, *id)),
+                Matter::Terrain { id, .. } => Some((e, *id)),
                 _ => None,
             })
             .collect();

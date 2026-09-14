@@ -148,12 +148,16 @@ pub struct TerrainVolume<'a> {
     pub eid: Option<u32>,
     pub rot: Quat,
     pub scale: f32,
+    /// Collide with the DRAWN triangles (`ChunkTerrain::mesh_accurate`) rather
+    /// than the field — `Matter::Terrain::collision`.
+    pub drawn: bool,
 }
 
 impl<'a> TerrainVolume<'a> {
-    /// Placement-free volume (identity rotation, unit scale, Default layer).
+    /// Placement-free volume (identity rotation, unit scale, Default layer,
+    /// colliding with the drawn surface).
     pub fn new(anchor: DVec3, field: &'a ChunkField) -> Self {
-        Self { anchor, field, layer: 0, eid: None, rot: Quat::IDENTITY, scale: 1.0 }
+        Self { anchor, field, layer: 0, eid: None, rot: Quat::IDENTITY, scale: 1.0, drawn: true }
     }
 }
 
@@ -240,9 +244,11 @@ impl Sim {
         world.origin = origin.round();
         world.matrix = layers.matrix;
         for tv in terrains {
+            let mut terrain = ChunkTerrain::posed(tv.field.clone(), tv.rot, tv.scale);
+            terrain.mesh_accurate = tv.drawn;
             world.add_collider_tagged(
                 tv.anchor,
-                Box::new(ChunkTerrain::posed(tv.field.clone(), tv.rot, tv.scale)),
+                Box::new(terrain),
                 tv.layer,
                 tv.eid,
                 false,
