@@ -34,7 +34,7 @@ if [ -z "${WASI_SDK_PATH:-}" ]; then
         _fl_tar="wasi-sdk-${WASI_SDK_VERSION}.0-${_fl_sdk_os}.tar.gz"
         echo "fetching wasi-sdk ${WASI_SDK_VERSION} into $HOME/.cache/floptle-web …" >&2
         mkdir -p "$HOME/.cache/floptle-web" \
-            && curl -sSL -o "$HOME/.cache/floptle-web/$_fl_tar" \
+            && curl -sSL --fail --retry 5 --retry-delay 3 --retry-all-errors -o "$HOME/.cache/floptle-web/$_fl_tar" \
                 "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/$_fl_tar" \
             && tar -xzf "$HOME/.cache/floptle-web/$_fl_tar" -C "$HOME/.cache/floptle-web" \
             && rm -f "$HOME/.cache/floptle-web/$_fl_tar"
