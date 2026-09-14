@@ -329,6 +329,17 @@ pub(crate) fn run(args: Args) -> i32 {
         );
     }
     ed.sync_terrain_gpu();
+    // **The fields are resident; now the triangles.** Chunk meshes reach the
+    // GPU through the pump the frame loop runs before every draw, and this verb
+    // has no frame loop: the collider was live, the character stood on the
+    // ground, and the picture showed it standing on the sky — not one chunk had
+    // been meshed. Anchored on the camera like the streaming settle above.
+    if !ed.settle_terrain_meshes(wt.translation, std::time::Duration::from_secs(45)) {
+        floptle_say::say_err!(
+            "warning: the terrain was still meshing after 45s — some ground in this \
+             shot is missing"
+        );
+    }
     // **Map geometry is authored, not generated — but it still has to reach the
     // GPU somehow.** `sync_map_meshes` (self-heal + triangulate + upload) and
     // `sync_map_paint` (re-attach paint to whatever survived the last edit) are

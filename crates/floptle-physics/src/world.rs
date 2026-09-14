@@ -1109,6 +1109,103 @@ impl PhysicsWorld {
         }
     }
 
+    /// The walkable ground straight beneath a capsule's bottom sphere, if the
+    /// body has [feet](Body::feet) and there is any within reach: how far
+    /// below the sphere's centre it is, its normal there, and which collider
+    /// it belongs to.
+    ///
+    /// A sphere-trace down the body's `up` axis from the bottom sphere's
+    /// centre, against the same candidate colliders the contacts use, and
+    /// with their own signed distances — so on a terrain this lands on the
+    /// drawn triangles, exactly where the sphere contacts do. It looks twice
+    /// the radius down: far enough to pull a body onto the far side of a
+    /// crest or down a stair step, not far enough to find a floor a whole
+    /// body-height below a ledge and drag it off.
+    ///
+    /// Kinematic hulls — moving platforms — are surfaces too, or a lift
+    /// standing a little above the ground would have the feet pulling the
+    /// body down through it while the hull pushed it back out. A hull hit
+    /// answers with no collider index: the kinematic pass records its own
+    /// contact for it.
+    ///
+    /// `None` — leave everything to the rounded bottom — when the body has no
+    /// feet, the centre is already inside something (the sphere push-out is
+    /// the only thing that can recover that), nothing is within reach, or
+    /// what is there is too steep to stand on.
+    fn foot_probe(
+        &self,
+        bi: usize,
+        cand: &[u32],
+        row: u32,
+    ) -> Option<(f32, Vec3, Option<usize>)> {
+        let b = &self.bodies[bi];
+        let BodyShape::Capsule { half_height } = b.shape else { return None };
+        if !b.feet {
+            return None;
+        }
+        let up = b.up;
+        let centre = b.pos - up * half_height;
+        let reach = 2.0 * b.radius;
+        let cos_walk = b.slope_limit.clamp(0.0, std::f32::consts::FRAC_PI_2).cos();
+        // (distance, static collider index, kinematic hull index)
+        let nearest = |p: Vec3| -> (f32, Option<usize>, Option<usize>) {
+            let mut best = (f32::INFINITY, None, None);
+            for &ci in cand {
+                let ci = ci as usize;
+                let c = &self.colliders[ci];
+                if (row >> c.layer) & 1 == 0 || c.sensor {
+                    continue;
+                }
+                let d = c.distance(p);
+                if d < best.0 {
+                    best = (d, Some(ci), None);
+                }
+            }
+            for (hi, hull) in self.kin_hulls.iter().enumerate() {
+                if (row >> hull.layer) & 1 == 0 {
+                    continue;
+                }
+                let d = hull.distance(p);
+                if d < best.0 {
+                    best = (d, None, Some(hi));
+                }
+            }
+            best
+        };
+        // Inside something already: not the feet's problem.
+        let (d0, _, _) = nearest(centre);
+        let outside = d0 >= 0.0 && d0.is_finite();
+        if !outside {
+            return None;
+        }
+        let mut t = 0.0f32;
+        for _ in 0..24 {
+            let p = centre - up * t;
+            let (d, ci, hi) = nearest(p);
+            if !d.is_finite() {
+                return None;
+            }
+            if d <= 2e-3 {
+                let n = match (ci, hi) {
+                    (Some(ci), _) => self.colliders[ci].normal(p),
+                    (None, Some(hi)) => self.kin_hulls[hi].normal(p),
+                    (None, None) => return None,
+                };
+                // `!(a > b)` on purpose: a NaN normal is not walkable either.
+                let walkable = n.dot(up) > cos_walk;
+                if !walkable {
+                    return None;
+                }
+                return Some((t, n, ci));
+            }
+            t += d.max(2e-3);
+            if t > reach {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Record one resolved contact on a body: the telegraph normal, whether it
     /// counts as ground, and the step's two extremes — the most floor-like
     /// surface (`ground_normal`) and the steepest one (`wall_normal`).
@@ -1341,6 +1438,11 @@ impl PhysicsWorld {
             }
             let v = self.bodies[bi].vel;
             self.bodies[bi].pos += v * dt;
+            // Whether it stood on something LAST step, and on what — what
+            // lets the feet pull a body down onto ground it is walking over
+            // rather than only pushing it up out of ground it is walking into.
+            let was_grounded = self.bodies[bi].grounded;
+            let prev_ground = self.bodies[bi].ground_normal;
             self.bodies[bi].grounded = false;
             self.bodies[bi].contact = None;
             self.bodies[bi].ground_normal = None;
@@ -1383,6 +1485,19 @@ impl PhysicsWorld {
                     self.collider_index.sphere(pos, reach + radius + 0.01, &mut cand);
                     cand
                 };
+                // FEET: the walkable ground straight under a capsule's bottom
+                // sphere, when there is any. Found once per pass, before the
+                // sphere contacts, because it decides which of them to leave
+                // alone: a walkable surface the rounded bottom is touching is
+                // the feet's to resolve, or the two would fight — the sphere
+                // pushing out along the slope's normal, the feet pulling back
+                // down, and the body creeping sideways by the difference every
+                // substep.
+                let foot = self.foot_probe(bi, &cand, row);
+                let cos_walk = self.bodies[bi]
+                    .slope_limit
+                    .clamp(0.0, std::f32::consts::FRAC_PI_2)
+                    .cos();
                 for &ci in &cand {
                     let ci = ci as usize;
                     if (row >> self.colliders[ci].layer) & 1 == 0 {
@@ -1394,7 +1509,7 @@ impl PhysicsWorld {
                         continue;
                     }
                     let (centers, n_c, radius) = self.bodies[bi].sample_centers();
-                    for &c in &centers[..n_c] {
+                    for (si, &c) in centers[..n_c].iter().enumerate() {
                         let pen = radius - self.colliders[ci].distance(c);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
                         // so a bad distance can never push the body to a non-finite pos.
@@ -1403,6 +1518,14 @@ impl PhysicsWorld {
                             continue;
                         }
                         let n = self.colliders[ci].normal(c);
+                        // The bottom sphere's contact with WALKABLE ground
+                        // belongs to the feet (above). A wall, a cliff face,
+                        // a slope past the limit — anything the body cannot
+                        // stand on — still pushes the sphere exactly as it
+                        // always has.
+                        if si == 0 && foot.is_some() && n.dot(self.bodies[bi].up) > cos_walk {
+                            continue;
+                        }
                         self.bodies[bi].pos += n * pen; // push out to the surface
                         let vn = self.bodies[bi].vel.dot(n);
                         if vn < 0.0 {
@@ -1419,6 +1542,57 @@ impl PhysicsWorld {
                             body: bi,
                             collider: ci,
                             point: c - n * radius,
+                            normal: n,
+                        });
+                    }
+                }
+                // FEET, resolved: stand the centre line on the ground the
+                // probe found. Up out of it always; down onto it only when the
+                // body was standing last step and is not LEAVING that floor —
+                // moving away from it along its normal, which is what a jump
+                // is. Not "moving up": a character walking up a slope has an
+                // upward velocity by construction (its controller aims it
+                // along the ground), and gating on that switched the feet off
+                // at every uphill crest, where they matter most. Measured on a
+                // real hill: with the up-gate the hops stayed; with this one
+                // the body is followed down onto the far side instead.
+                if let Some((t, n, ci)) = foot {
+                    let (up, radius) = (self.bodies[bi].up, self.bodies[bi].radius);
+                    let pen = radius - t;
+                    let vel = self.bodies[bi].vel;
+                    // A jump is BOTH: away from the floor it stood on, along
+                    // that floor's normal, and upward. Either alone is
+                    // ordinary walking — up a slope the velocity rises but
+                    // stays in the floor; coasting over a crest it is level
+                    // but leaves the new, steeper floor beneath.
+                    let floor = prev_ground.unwrap_or(up);
+                    let leaving = vel.dot(floor) > 0.1 && vel.dot(up) > 0.1;
+                    let snap = was_grounded && !leaving;
+                    if pen > 0.0 || snap {
+                        self.bodies[bi].pos += up * pen;
+                    }
+                    let vn = vel.dot(n);
+                    if vn < 0.0 {
+                        let rest = self.bodies[bi].restitution;
+                        let vt = vel - n * vn;
+                        self.bodies[bi].vel = vt - n * vn * rest;
+                        impact_dv += -vn * (1.0 + rest);
+                    } else if snap {
+                        // Kept on the ground, so it moves ALONG the ground:
+                        // the component away from the new floor goes, or a
+                        // body carried up a ramp would leave the top of it at
+                        // the ramp's angle and land some way off.
+                        self.bodies[bi].vel = vel - n * vn;
+                    }
+                    self.note_body_contact(bi, n);
+                    if let Some(ci) = ci {
+                        let BodyShape::Capsule { half_height } = self.bodies[bi].shape else {
+                            unreachable!("the foot probe only answers for a capsule")
+                        };
+                        self.contacts.push(Contact {
+                            body: bi,
+                            collider: ci,
+                            point: self.bodies[bi].pos - up * (half_height + radius),
                             normal: n,
                         });
                     }
@@ -2311,3 +2485,276 @@ mod reindex_tests {
     }
 }
 
+
+/// The FEET of a capsule body (`Body::feet`): a character stands on the ground
+/// straight beneath its centre line, not wherever its rounded bottom first
+/// touches. Every guard here runs the same scene twice — feet on, feet off —
+/// because the point is the DIFFERENCE: a control that reads the same either
+/// way would be a guard that could not see the thing it guards.
+#[cfg(test)]
+mod feet {
+    use super::*;
+    use crate::shapes::{BoxShape, Plane};
+
+    const R: f32 = 0.35;
+    const H: f32 = 2.4;
+    const DT: f32 = 1.0 / 120.0;
+
+    fn world() -> PhysicsWorld {
+        PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)))
+    }
+
+    /// A capsule that will not slide off anything a test puts it on.
+    fn capsule(pos: Vec3, feet: bool) -> Body {
+        let mut b = Body::capsule(pos, R, H);
+        b.friction = 2.0;
+        b.feet = feet;
+        b
+    }
+
+    /// The lowest point of the capsule — where a character's feet are drawn.
+    fn feet_of(b: &Body) -> Vec3 {
+        let BodyShape::Capsule { half_height } = b.shape else { unreachable!() };
+        b.pos - b.up * (half_height + b.radius)
+    }
+
+    fn settle(w: &mut PhysicsWorld, seconds: f32) {
+        for _ in 0..(seconds / DT) as usize {
+            w.step(DT);
+        }
+    }
+
+    /// 30° up to the right: solid below `y = -x·tan30`.
+    fn slope() -> Plane {
+        Plane { point: Vec3::ZERO, normal: Vec3::new(0.5, 0.866_025_4, 0.0) }
+    }
+
+    #[test]
+    fn feet_stand_on_the_slope_beneath_the_centre() {
+        let rest = |feet: bool| {
+            let mut w = world();
+            w.add_collider(Box::new(slope()));
+            w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), feet));
+            settle(&mut w, 3.0);
+            let b = &w.bodies[0];
+            assert!(b.grounded, "feet={feet}: must be standing on the slope");
+            slope().distance(feet_of(b))
+        };
+        // Feet: the point under the centre is ON the drawn surface.
+        let with = rest(true);
+        assert!(with.abs() < 5e-3, "with feet the feet sit on the slope, got {with}");
+        // Rounded bottom: a sphere touches a 30° slope off to one side, so the
+        // point under the centre hangs r·(1 − cos 30°) = 0.047 above it.
+        let without = rest(false);
+        assert!(
+            (0.03..0.07).contains(&without),
+            "the rounded bottom hovers r(1-cos30) over a 30° slope, got {without}"
+        );
+    }
+
+    #[test]
+    fn feet_reach_the_bottom_of_a_crease() {
+        let rest = |feet: bool| {
+            let mut w = world();
+            w.add_collider(Box::new(slope()));
+            w.add_collider(Box::new(Plane {
+                point: Vec3::ZERO,
+                normal: Vec3::new(-0.5, 0.866_025_4, 0.0),
+            }));
+            w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), feet));
+            settle(&mut w, 3.0);
+            assert!(w.bodies[0].grounded, "feet={feet}: must be standing in the crease");
+            let f = feet_of(&w.bodies[0]);
+            // Signed distance to the V (solid where EITHER side is): the
+            // nearer face. Zero means the feet are on the drawn ground.
+            let on_ground = w.colliders.iter().map(|c| c.distance(f)).fold(f32::MAX, f32::min);
+            (f.y, on_ground)
+        };
+        // The crease's bottom is the line y = 0. The feet settle a hair to one
+        // side of it (the two faces' velocity projections trade the last
+        // millimetres), so: on a face, and within a couple of centimetres of
+        // the bottom.
+        let (with_y, with_d) = rest(true);
+        assert!(with_d.abs() < 5e-3, "with feet the feet are on the ground, got {with_d}");
+        assert!(with_y < 0.02, "with feet the feet reach the crease bottom, got {with_y}");
+        // The rounded bottom never gets there: grippy enough to hold a 30°
+        // face, it stops on whichever face it lands on, r(1 − cos 30°) = 0.047
+        // off it and well above the bottom.
+        let (without_y, without_d) = rest(false);
+        assert!(
+            without_y > 0.03 && (0.03..0.07).contains(&without_d),
+            "the rounded bottom hovers off a face, got {without_y} / {without_d}"
+        );
+    }
+
+    #[test]
+    fn flat_ground_reads_the_same_either_way() {
+        let rest = |feet: bool| {
+            let mut w = world();
+            w.add_collider(Box::new(Plane::ground(0.0)));
+            w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), feet));
+            settle(&mut w, 3.0);
+            feet_of(&w.bodies[0]).y
+        };
+        let (with, without) = (rest(true), rest(false));
+        assert!(with.abs() < 5e-3 && (with - without).abs() < 1e-3, "{with} vs {without}");
+    }
+
+    #[test]
+    fn a_jump_is_not_snapped_back_down() {
+        let mut w = world();
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), true));
+        settle(&mut w, 3.0);
+        assert!(w.bodies[0].grounded);
+        let start = w.bodies[0].pos.y;
+        w.bodies[0].vel = Vec3::new(0.0, 4.0, 0.0);
+        w.step(DT);
+        let rose = w.bodies[0].pos.y - start;
+        // One tick at 4 m/s (less the tick's gravity): the feet were within
+        // reach of the ground and must not have pulled it back.
+        assert!(rose > 0.025, "a jumping body must leave the ground, rose {rose}");
+    }
+
+    #[test]
+    fn a_ledge_is_left_to_the_rounded_bottom() {
+        // A block whose top is y = 0 for x ≤ 0; the capsule's centre is 0.2
+        // past the edge, hanging by its rim — a classic "toes over the drop"
+        // stance that a probe straight down from the centre must NOT turn into
+        // a fall (there is a floor 2 units below).
+        let rest = |feet: bool| {
+            let mut w = world();
+            w.add_collider(Box::new(BoxShape::new(
+                Vec3::new(-2.0, -1.0, 0.0),
+                Vec3::new(2.0, 1.0, 2.0),
+                Quat::IDENTITY,
+            )));
+            w.add_collider(Box::new(Plane::ground(-2.0)));
+            w.add_body(capsule(Vec3::new(0.2, 2.0, 0.0), feet));
+            settle(&mut w, 3.0);
+            let b = &w.bodies[0];
+            assert!(b.grounded, "feet={feet}: hanging on the rim counts as ground");
+            feet_of(b).y
+        };
+        let (with, without) = (rest(true), rest(false));
+        // Hanging on the rim: the bottom sphere's centre is √(r² − 0.2²)
+        // above the top, so the lowest point is that minus r: −0.063.
+        assert!((with - without).abs() < 1e-3, "feet must not change a rim hang: {with} vs {without}");
+        assert!((-0.1..-0.03).contains(&with), "still hanging by the rim, feet at {with}");
+    }
+
+    #[test]
+    fn a_capsule_follows_the_ground_over_a_crest() {
+        // Flat ground for x ≤ 0, then a 30° drop. A body crossing the edge at
+        // speed used to leave the ground ballistically and land some way down
+        // the far slope; with feet it is pulled onto the slope every tick.
+        let run = |feet: bool| {
+            let mut w = world();
+            w.add_collider(Box::new(BoxShape::new(
+                Vec3::new(-5.0, -0.5, 0.0),
+                Vec3::new(5.0, 0.5, 5.0),
+                Quat::IDENTITY,
+            )));
+            // A slab whose top face descends from (0, 0) at 30°.
+            let rot = Quat::from_rotation_z(-30f32.to_radians());
+            let along = rot * Vec3::X;
+            let normal = rot * Vec3::Y;
+            let centre = along * 5.0 - normal * 0.5;
+            let slab = BoxShape::new(centre, Vec3::new(5.0, 0.5, 5.0), rot);
+            w.add_collider(Box::new(slab));
+            let mut b = capsule(Vec3::new(-0.5, 3.0, 0.0), feet);
+            b.friction = 0.0; // keep its speed across the edge
+            w.add_body(b);
+            settle(&mut w, 2.0);
+            w.bodies[0].vel = Vec3::new(6.0, 0.0, 0.0);
+            settle(&mut w, 0.3);
+            let b = &w.bodies[0];
+            assert!(b.pos.x > 0.8, "feet={feet}: must have crossed the edge, x = {}", b.pos.x);
+            // Height of the feet above the far slope's face.
+            let f = feet_of(b);
+            (f - Vec3::ZERO).dot(normal)
+        };
+        let with = run(true);
+        assert!(with.abs() < 0.02, "with feet the body is on the far slope, gap {with}");
+        let without = run(false);
+        assert!(without > 0.3, "without feet the body hops off the crest, gap {without}");
+    }
+
+    #[test]
+    fn a_ramp_does_not_launch_a_walking_body() {
+        // A 30° ramp rising to a flat top at (0, 0). A body carried up it —
+        // velocity along the ramp, as every walking controller aims it — has
+        // an upward velocity when it reaches the top, and used to leave the
+        // ramp at the ramp's angle. That is ordinary walking, not a jump: the
+        // feet keep it on the flat and turn its velocity along the flat.
+        let run = |feet: bool| {
+            let mut w = world();
+            let rot = Quat::from_rotation_z(30f32.to_radians());
+            let along = rot * Vec3::X;
+            let normal = rot * Vec3::Y;
+            let ramp = BoxShape::new(-along * 5.0 - normal * 0.5, Vec3::new(5.0, 0.5, 5.0), rot);
+            w.add_collider(Box::new(ramp));
+            w.add_collider(Box::new(BoxShape::new(
+                Vec3::new(5.0, -0.5, 0.0),
+                Vec3::new(5.0, 0.5, 5.0),
+                Quat::IDENTITY,
+            )));
+            // Dropped straight down onto the ramp 2.5 along from its top;
+            // grippy while it settles, ice once it is sent up.
+            let start = -along * 2.5 + Vec3::Y * 3.0;
+            w.add_body(capsule(start, feet));
+            settle(&mut w, 2.0);
+            assert!(w.bodies[0].grounded, "feet={feet}: on the ramp first");
+            w.bodies[0].friction = 0.0;
+            w.bodies[0].vel = along * 8.0;
+            settle(&mut w, 0.6);
+            let b = &w.bodies[0];
+            assert!(b.pos.x > 0.8, "feet={feet}: must have reached the flat, x = {}", b.pos.x);
+            feet_of(b).y
+        };
+        let with = run(true);
+        assert!(with.abs() < 0.02, "with feet the body walks onto the flat, feet at {with}");
+        let without = run(false);
+        assert!(without > 0.2, "without feet the ramp launches it, feet at {without}");
+    }
+
+    #[test]
+    fn a_platform_above_low_ground_is_the_floor() {
+        // A moving platform standing 0.3 above a static floor. The probe must
+        // find the platform: were it blind to kinematic hulls it would find
+        // the floor beneath, pull the body down through the platform, and the
+        // platform would push it back out — every tick.
+        let mut w = world();
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        w.kin_hulls.push(BodyHull {
+            eid: 7,
+            pos: Vec3::new(0.0, -0.2, 0.0),
+            radius: 0.5,
+            shape: BodyShape::Box { half: Vec3::new(2.0, 0.5, 2.0) },
+            up: Vec3::Y,
+            layer: 0,
+        });
+        w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), true));
+        settle(&mut w, 3.0);
+        let a = feet_of(&w.bodies[0]).y;
+        w.step(DT);
+        let b = feet_of(&w.bodies[0]).y;
+        assert!((a - 0.3).abs() < 5e-3, "standing on the platform's top at 0.3, feet at {a}");
+        assert!((a - b).abs() < 1e-4, "and holding still there, not fighting: {a} -> {b}");
+    }
+}
+
+#[cfg(test)]
+mod feet_default {
+    use super::*;
+
+    /// The feet are not a knob: every capsule has them, and only a capsule —
+    /// a ball rolls on its curve. (`Sim` builds every RigidBody capsule
+    /// through `Body::capsule`.)
+    #[test]
+    fn a_capsule_has_feet_and_a_ball_does_not() {
+        assert!(Body::capsule(Vec3::ZERO, 0.35, 2.4).feet);
+        assert!(!Body::sphere(Vec3::ZERO, 0.35).feet);
+        assert!(!Body::boxx(Vec3::ZERO, Vec3::ONE).feet);
+    }
+}

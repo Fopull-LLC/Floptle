@@ -142,6 +142,29 @@ pub struct Body {
     /// consecutively — reset the instant either condition breaks. Reaching
     /// [`crate::world::SLEEP_SETTLE_TIME`] is what sets `asleep`.
     pub sleep_time: f32,
+    /// FEET (`RigidBody::feet`): a capsule stands on the ground straight
+    /// beneath its centre line, not wherever its rounded bottom first touches.
+    ///
+    /// A sphere resting on a slope touches it off to one side, so the point
+    /// directly under the centre — where a character's feet are drawn — hangs
+    /// `r·(1 − cos θ)` above the ground; in a crease it bridges the two sides
+    /// and the feet hang over the bottom; on a bump it perches. On a coarse
+    /// terrain those creases and bumps are everywhere, and the model reads as
+    /// hovering over ground it is standing on, or toeing into ground it is
+    /// not. Measured on a real project: up to 0.19 units of hover from a
+    /// 0.35 capsule at rest on 10–20° ground, with the collider itself within
+    /// a centimetre of the drawn triangles.
+    ///
+    /// With feet, walkable ground under the bottom sphere is resolved by a
+    /// probe straight down from the sphere's centre: the body is pushed up
+    /// until that point clears the surface, and pulled down onto it when it
+    /// was standing and is not moving upward (so a jump is never snapped
+    /// back, and a crest is followed rather than hopped). Anything the probe
+    /// does not find — a wall, a slope past `slope_limit`, a ledge the centre
+    /// has stepped past — is left to the rounded bottom exactly as before, so
+    /// walls still push and a character still hangs by its rim at an edge.
+    /// Only a capsule has feet; a ball rolls on its curve.
+    pub feet: bool,
 }
 
 impl Body {
@@ -172,6 +195,7 @@ impl Body {
             mass: 1.0,
             asleep: false,
             sleep_time: 0.0,
+            feet: false,
         }
     }
 
@@ -185,10 +209,15 @@ impl Body {
         }
     }
 
-    /// A capsule body of total standing `height` (clamped to ≥ 2·radius).
+    /// A capsule body of total standing `height` (clamped to ≥ 2·radius). It
+    /// stands on its [feet](Self::feet).
     pub fn capsule(pos: Vec3, radius: f32, height: f32) -> Self {
         let half = (height.max(2.0 * radius) * 0.5 - radius).max(0.0);
-        Self { shape: BodyShape::Capsule { half_height: half }, ..Self::sphere(pos, radius) }
+        Self {
+            shape: BodyShape::Capsule { half_height: half },
+            feet: true,
+            ..Self::sphere(pos, radius)
+        }
     }
 
     /// A box body with the given world-axis half-extents (a crate / falling platform).
