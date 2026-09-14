@@ -326,7 +326,20 @@ struct Surface {
     /// Triangles in FIELD-LOCAL space, bucketed by `cell`. One grid across every
     /// meshed chunk rather than one per chunk: a query near a chunk boundary
     /// then reads one bucket set instead of merging several.
-    grid: std::collections::HashMap<(i32, i32, i32), Vec<[Vec3; 3]>>,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<SurfaceTri>>,
+}
+
+/// One drawn triangle: its corners and the field-gradient normal at each.
+///
+/// The normals are what decide INSIDE from OUTSIDE. They are the same normals
+/// the renderer shades with — sampled from the field's gradient at each vertex
+/// (`mesher.rs`, "the one choice that matters") — interpolated across the
+/// face, so the side test is smooth across a curved surface and agrees with
+/// the lit picture rather than with a flat facet.
+#[derive(Clone, Copy)]
+struct SurfaceTri {
+    p: [Vec3; 3],
+    n: [Vec3; 3],
 }
 
 /// The Terrain 2.0 collider: collides against the **triangles the mesher
@@ -344,12 +357,21 @@ struct Surface {
 /// directions, on the same hill, which is why it reads as the collision being
 /// vaguely wrong rather than as an offset.
 ///
-/// So the MAGNITUDE comes from the triangles and the SIGN comes from the field.
-/// Neither half can do the other's job: unsigned triangle distance cannot tell
-/// the inside of a cave from the outside of a cliff (and an imported mesh is why
-/// [`TriMeshCollider`] settles for that), while the field's magnitude is the
-/// thing that disagrees with the picture. Together they answer exactly the
-/// surface the renderer drew.
+/// So both the MAGNITUDE and the SIGN come from the triangles. The magnitude is
+/// the distance to the closest drawn point; the side is decided by the mesh's
+/// own interpolated vertex normal there — the same field-gradient normal the
+/// picture is lit with. Surface nets extracts a closed surface, so that test is
+/// well posed everywhere a body can be.
+///
+/// **The sign cannot come from the field.** The first cut of this took the
+/// magnitude from the triangles and the side from the field's own sign, on the
+/// reasoning that unsigned triangle distance cannot tell a cave from a cliff.
+/// That is true and it is also a collider whose ZERO CROSSING is still the
+/// field's — the sign flips where the field flips, the mesh only reshapes the
+/// magnitude around that, and a body settles on exactly the surface it settled
+/// on before. Measured on a real project at a 1.5 voxel scaled ×5, physics
+/// matched the field to four decimals and missed the drawn ground by over a
+/// metre. The guard that let it through took `.abs()`.
 ///
 /// Outside the field's narrow band there is nothing to reconcile — the field
 /// saturates there and no triangle is within reach — so those queries fall
@@ -457,20 +479,26 @@ impl ChunkTerrain {
             let origin = Vec3::from(m.origin);
             let cell = self.bucket();
             for t in m.indices.as_chunks::<3>().0 {
-                let tri = [
-                    origin + Vec3::from(m.positions[t[0] as usize]),
-                    origin + Vec3::from(m.positions[t[1] as usize]),
-                    origin + Vec3::from(m.positions[t[2] as usize]),
-                ];
+                let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
+                let tri = [at(t[0]), at(t[1]), at(t[2])];
                 if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
                     continue; // zero-area: no closest point worth having
                 }
+                // The mesher's normals are unit gradients; a degenerate one
+                // (deep in uniform solid, which never meshes) falls back to
+                // the face so the side test always has SOMETHING to compare
+                // against rather than a zero.
+                let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+                let nrm = |i: u32| {
+                    Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face)
+                };
+                let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])] };
                 let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
                 let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
                 for cz in lo.2..=hi.2 {
                     for cy in lo.1..=hi.1 {
                         for cx in lo.0..=hi.0 {
-                            s.grid.entry((cx, cy, cz)).or_default().push(tri);
+                            s.grid.entry((cx, cy, cz)).or_default().push(entry);
                         }
                     }
                 }
@@ -478,8 +506,9 @@ impl ChunkTerrain {
         }
     }
 
-    /// The closest point on the drawn surface to `local`, if one is in reach.
-    fn closest_surface(&self, local: Vec3) -> Option<Vec3> {
+    /// The closest point on the drawn surface to `local`, and the surface's
+    /// outward normal there, if one is in reach.
+    fn closest_surface(&self, local: Vec3) -> Option<(Vec3, Vec3)> {
         if !self.mesh_accurate {
             return None;
         }
@@ -493,7 +522,7 @@ impl ChunkTerrain {
         let cell = self.bucket();
         let c = cell_coord(local, cell);
         let mut best = f32::INFINITY;
-        let mut hit = None;
+        let mut hit: Option<(Vec3, Vec3)> = None;
         // **Expanding rings, stopping as soon as the answer is provably final.**
         //
         // A fixed 3×3×3 walk does twenty-seven buckets of work whatever the
@@ -524,11 +553,11 @@ impl ChunkTerrain {
                         }
                         let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
                         for tri in bucket {
-                            let q = closest_point_on_triangle(local, tri[0], tri[1], tri[2]);
+                            let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
                             let d2 = (q - local).length_squared();
                             if d2 < best {
                                 best = d2;
-                                hit = Some(q);
+                                hit = Some((q, normal_at(tri, q)));
                             }
                         }
                     }
@@ -548,16 +577,38 @@ impl ChunkTerrain {
     }
 }
 
+/// The surface normal at `q`, a point on triangle `tri`: the vertex normals
+/// blended by `q`'s barycentric weights.
+fn normal_at(tri: &SurfaceTri, q: Vec3) -> Vec3 {
+    let [a, b, c] = tri.p;
+    let (v0, v1, v2) = (b - a, c - a, q - a);
+    let (d00, d01, d11, d20, d21) =
+        (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+    let den = d00 * d11 - d01 * d01;
+    let (wb, wc) = if den.abs() > 1e-12 {
+        ((d11 * d20 - d01 * d21) / den, (d00 * d21 - d01 * d20) / den)
+    } else {
+        (0.0, 0.0)
+    };
+    let wa = 1.0 - wb - wc;
+    let n = tri.n[0] * wa + tri.n[1] * wb + tri.n[2] * wc;
+    n.try_normalize().unwrap_or_else(|| v0.cross(v1).normalize_or_zero())
+}
+
 impl CollisionShape for ChunkTerrain {
     fn distance(&self, p: Vec3) -> f32 {
         let local = self.to_local(p);
         let scale = self.scale.max(1e-6);
         match self.closest_surface(local) {
-            // Magnitude from the triangles, sign from the field. `signum` on a
-            // field distance of exactly 0 would answer +1 and call a point ON
-            // the surface outside it, which is harmless here only because the
-            // magnitude is then 0 too.
-            Some(q) => (local - q).length() * scale * if self.field.d(local) < 0.0 { -1.0 } else { 1.0 },
+            // Magnitude AND side from the drawn surface: which way of the
+            // closest point the point lies, judged by the surface's own
+            // normal there. Exactly on the surface both are zero, and the
+            // sign of a zero does not matter.
+            Some((q, n)) => {
+                let off = local - q;
+                let side = if off.dot(n) < 0.0 { -1.0 } else { 1.0 };
+                off.length() * side * scale
+            }
             None => self.field.d(local) * scale,
         }
     }
@@ -566,15 +617,16 @@ impl CollisionShape for ChunkTerrain {
     }
     fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
         let local = self.to_local(p);
-        // Away from the closest point on the DRAWN surface, so the direction a
-        // body is pushed out matches the face it is resting on. Degenerate when
-        // the point is exactly on a triangle, which is what the field fallback
-        // below is for.
-        if let Some(q) = self.closest_surface(local)
-            && self.field.d(local) >= 0.0
-            && let Some(n) = (self.rot * (local - q)).try_normalize()
-        {
-            return Some(n);
+        // Away from the closest point on the DRAWN surface — flipped when the
+        // point is inside, so a body pushed out is pushed OUT — so the
+        // direction a body is pushed matches the face it is resting on. A
+        // point exactly on the surface has no direction of its own and takes
+        // the surface's.
+        if let Some((q, n)) = self.closest_surface(local) {
+            let off = local - q;
+            let side = if off.dot(n) < 0.0 { -1.0 } else { 1.0 };
+            let dir = (off * side).try_normalize().unwrap_or(n);
+            return (self.rot * dir).try_normalize();
         }
         // `try_normalize` yields None where the gradient is zero — i.e. deep in
         // a fully-solid (Uniform(-band)) interior, exactly where a fast ram
@@ -1191,6 +1243,7 @@ mod drawn_surface_tests {
         let field = cost(false);
         let mesh = cost(true);
         let ratio = mesh / field.max(1e-9);
+        eprintln!("step cost: field {:.0} us, mesh {:.0} us, ratio {ratio:.2}x", field * 1e6, mesh * 1e6);
         assert!(
             ratio < 6.0,
             "colliding against the drawn triangles costs {ratio:.1}x the field collider \
@@ -1249,9 +1302,32 @@ mod drawn_surface_tests {
     /// magnitude better (0.008 mean / 0.014 worst), which is why the fixture is
     /// deliberately the rough one: sculpting detail near the voxel size is
     /// where surface nets chords hardest, and it is also what a landscape is.
+    /// The SAME ground at a coarse voxel — 1.5, what a real project used, and
+    /// the case that made this matter. The mesh-vs-field gap scales with the
+    /// voxel, so a fixture at 0.5 has a gap the side test can step clean over
+    /// in either design and tells you nothing; at 1.5 the gap is a quarter of
+    /// a unit and the two designs come apart.
+    fn coarse() -> ChunkField {
+        let mut f = ChunkField::new(1.5);
+        for _ in 0..30 {
+            f.sculpt(Brush::Raise, Vec3::ZERO, 18.0, 1.0, BrushProfile::default());
+        }
+        let mut seed = 777u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16777216.0
+        };
+        for _ in 0..40 {
+            let c = Vec3::new(rnd() * 30.0 - 15.0, rnd() * 12.0 - 3.0, rnd() * 30.0 - 15.0);
+            let b = if rnd() > 0.5 { Brush::Raise } else { Brush::Lower };
+            f.sculpt(b, c, 3.0 + rnd() * 4.5, 1.0, BrushProfile::default());
+        }
+        f
+    }
+
     #[test]
     fn a_body_touches_the_terrain_exactly_where_it_is_drawn() {
-        let f = rough();
+        let f = coarse();
         // Probe the INTERIOR of each drawn triangle, not its corners. A surface
         // nets vertex sits at the mean of its cell's edge crossings and is
         // therefore close to the isosurface almost by construction — the field
@@ -1260,13 +1336,17 @@ mod drawn_surface_tests {
         // error is the CHORD: the flat triangle spanning three such vertices
         // cuts inside a bulge and outside a hollow, and the middle of the face
         // is where it is worst. That is also exactly where a player stands.
+        // Each probe carries the face's outward normal, for the side test.
         let mut probes = Vec::new();
         for c in f.all_chunk_coords() {
             let m = floptle_field::mesh_chunk(&f, c, 1, false);
             let o = Vec3::from(m.origin);
             for t in m.indices.as_chunks::<3>().0 {
                 let v = |i: usize| o + Vec3::from(m.positions[t[i] as usize]);
-                probes.push((v(0) + v(1) + v(2)) / 3.0);
+                let n = |i: usize| Vec3::from(m.normals[t[i] as usize]);
+                let centre = (v(0) + v(1) + v(2)) / 3.0;
+                let normal = ((n(0) + n(1) + n(2)) / 3.0).normalize_or_zero();
+                probes.push((centre, normal));
             }
         }
         assert!(probes.len() > 200, "the hill did not mesh: {} faces", probes.len());
@@ -1274,23 +1354,150 @@ mod drawn_surface_tests {
         let t = ChunkTerrain::new(f.clone());
         let mut worst_mesh = 0.0f32;
         let mut worst_field = 0.0f32;
-        for p in &probes {
+        let mut wrong_side = 0usize;
+        for (p, n) in &probes {
             worst_mesh = worst_mesh.max(t.distance(*p).abs());
             worst_field = worst_field.max(f.d(*p).abs());
+            // **The side, not just the size.** A step off the face along its
+            // normal must read as outside, and a step against it as inside —
+            // this is what the field-vs-mesh disagreement actually IS, and the
+            // half a `.abs()` cannot see. The first cut of this collider took
+            // its magnitude from the triangles and its SIGN from the field,
+            // and this assertion written with `.abs()` alone passed on it
+            // while physics still settled on the field: the zero crossing is
+            // wherever the sign flips, and the sign was still the field's.
+            // A tenth of a voxel: well inside the gap between the two surfaces
+            // on this ground, and well outside the closest-point solve's noise.
+            let step = 0.1 * f.voxel();
+            let (out, inn) = (t.distance(*p + *n * step), t.distance(*p - *n * step));
+            if out <= 0.0 || inn >= 0.0 {
+                wrong_side += 1;
+            }
         }
-        // A vertex of the drawn mesh is on the drawn mesh. What is left is the
+        // A point on the drawn mesh is on the drawn mesh. What is left is the
         // closest-point solve's own rounding.
         assert!(
             worst_mesh < 1e-3,
             "a point ON the drawn surface was {worst_mesh} from the collider's"
         );
+        // Not zero: sculpted ground has the odd sliver where a step this size
+        // crosses a thin feature and both sides honestly read as inside.
+        // Measured: **0.2%** of faces here. The design this replaced — sign
+        // from the field — scores **7.2%** on the same ground, and the
+        // collider with the mesh switched off fails the magnitude assertion
+        // above at 0.31 of a unit. Both were watched red; 2% sits between
+        // with room on each side.
+        let frac = wrong_side as f32 / probes.len() as f32;
+        assert!(
+            frac < 0.02,
+            "{wrong_side} of {} faces ({:.1}%) have their inside and outside decided by \
+             something other than the drawn surface",
+            probes.len(),
+            frac * 100.0
+        );
         // …and the control: the field genuinely disagrees about those same
         // points, by a meaningful fraction of a voxel. Without this the test
         // passes just as well on a collider that never changed.
         assert!(
-            worst_field > 0.05,
+            worst_field > 0.1,
             "the field agreed with the mesh to {worst_field} of a unit — nothing to reconcile, \
              so this test cannot tell the two colliders apart"
+        );
+    }
+
+    /// **A ray lands on the drawn ground too.** A character controller finds
+    /// its floor with a raycast far more often than with a contact, and a ray
+    /// that stopped on the field while the body stood on the mesh would put the
+    /// feet and the ground-check a voxel apart — which reads as "grounded" being
+    /// wrong at random, and is the other half of the same report.
+    ///
+    /// Cast straight down from well above the ground, in the sim's own world
+    /// frame (rotated, scaled ×5 like the project this came from), and compare
+    /// the hit against the FIRST drawn triangle on that line — found by an
+    /// independent ray/triangle intersection over the extracted mesh, so the
+    /// collider is not being asked to grade itself. The trace stops within 0.02
+    /// of the surface from above, so that is the tolerance, plus a little for
+    /// the tilt of a face over that last step.
+    #[test]
+    fn a_ray_lands_on_the_drawn_ground() {
+        let f = coarse();
+        let scale = 5.0f32;
+        let rot = Quat::from_rotation_y(0.3);
+        let anchor = Vec3::new(3.0, -7.0, 11.0);
+        let t = ChunkTerrain::posed(f.clone(), rot, scale);
+        let mut colliders = vec![crate::AnchoredCollider::world(Box::new(t))];
+        // `re_anchor`, not a write to `.anchor`: the query offset is cached
+        // from it, and a bare field write leaves the collider at the origin.
+        colliders[0].re_anchor(anchor.as_dvec3(), floptle_core::math::DVec3::ZERO);
+
+        // Every drawn triangle, field space.
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        for c in f.all_chunk_coords() {
+            let m = floptle_field::mesh_chunk(&f, c, 1, false);
+            let o = Vec3::from(m.origin);
+            for tri in m.indices.as_chunks::<3>().0 {
+                let v = |i: usize| o + Vec3::from(m.positions[tri[i] as usize]);
+                tris.push([v(0), v(1), v(2)]);
+            }
+        }
+        // The topmost drawn surface on the vertical through (x, z), field space.
+        let drawn_top = |x: f32, z: f32| -> Option<f32> {
+            let (ro, rd) = (Vec3::new(x, 1e3, z), Vec3::NEG_Y);
+            let mut best: Option<f32> = None;
+            for [a, b, c] in &tris {
+                let (e1, e2) = (*b - *a, *c - *a);
+                let pv = rd.cross(e2);
+                let det = e1.dot(pv);
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let inv = 1.0 / det;
+                let sv = ro - *a;
+                let u = sv.dot(pv) * inv;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let qv = sv.cross(e1);
+                let v = rd.dot(qv) * inv;
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let tt = e2.dot(qv) * inv;
+                if tt <= 0.0 {
+                    continue;
+                }
+                let y = ro.y - tt;
+                best = Some(best.map_or(y, |b: f32| b.max(y)));
+            }
+            best
+        };
+
+        let mut worst = 0.0f32;
+        let (mut cast, mut missed) = (0usize, 0usize);
+        for ix in -14..=14 {
+            for iz in -14..=14 {
+                let (x, z) = (ix as f32 * 1.1, iz as f32 * 1.1);
+                let Some(top) = drawn_top(x, z) else { continue };
+                cast += 1;
+                // Start 30 field units up — above every stamp in the fixture
+                // — and cast straight down the field's own vertical, which is
+                // a tilted line in the sim frame because the terrain is rotated.
+                let from = anchor + rot * (Vec3::new(x, top + 30.0, z) * scale);
+                let dir = rot * Vec3::NEG_Y;
+                match crate::raycast_colliders(&colliders, from, dir, 400.0, !0) {
+                    Some(hit) => {
+                        let local = rot.inverse() * (Vec3::from(hit.point) - anchor) / scale;
+                        worst = worst.max((local.y - top).abs() * scale);
+                    }
+                    None => missed += 1,
+                }
+            }
+        }
+        assert!(cast > 400, "{cast} rays cast");
+        assert_eq!(missed, 0, "{missed} of {cast} rays fell through the ground");
+        assert!(
+            worst < 0.08,
+            "a ray cast at the drawn ground stopped {worst} world units off it"
         );
     }
 
