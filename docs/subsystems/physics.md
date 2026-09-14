@@ -139,6 +139,23 @@ sphere:  pen = r - f(c);            if pen > 0: contact at c - r·n,  n = ∇f(c
 capsule: q   = argmin_{s∈[a,b]} f(s);   then sphere test at q
 ```
 
+**Feet (capsules only).** A sphere resting on a slope touches it off to one
+side, so the point straight under the centre — where a character's feet are
+drawn — hangs `r·(1 − cos θ)` above the ground; in a crease it bridges the two
+sides, on a bump it perches, and over a crest it coasts off. On a coarse
+terrain that is visible hover. So a capsule's bottom sphere resolves
+*walkable* ground by a probe straight down its `up` axis from the sphere's
+centre (a sphere-trace over the same signed distances, reaching `2r`): the body
+is pushed up until that point clears the surface, and pulled down onto it while
+it was standing last step and is not leaving its floor — a jump being velocity
+away from the floor along its normal *and* upward; either alone is walking. A
+snapped body also has its velocity projected onto the new floor, so a ramp
+cannot launch it. Anything the probe does not find — a wall, a slope past
+`slope_limit`, a ledge the centre has stepped past, a centre already inside
+something — is left to the rounded bottom exactly as above, so walls push and a
+ledge still holds a body by its rim. Moving platforms are surfaces for the
+probe too. Not a knob: every capsule has feet, and only a capsule.
+
 **Morph is automatic.** Every query takes the current sim time `t` and passes it
 straight to `f(p, t)`. There is *no* per-frame rebuild, no dirty flag, no re-bake of
 analytic colliders — the collision surface *is* the rendered surface, at the same

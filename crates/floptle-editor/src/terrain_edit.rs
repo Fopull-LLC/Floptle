@@ -2007,6 +2007,56 @@ impl Editor {
             || !self.terrain_load_jobs.is_empty()
     }
 
+    /// Mesh every resident terrain chunk the view can see and WAIT for it, for
+    /// the one-shot verbs that have no frame loop to do it over time. Returns
+    /// whether it settled inside `budget`.
+    ///
+    /// [`Self::settle_world_streaming`] brings the FIELDS in; this is the other
+    /// half — the triangles. The frame loop runs [`Self::sync_terrain_meshes`]
+    /// before every draw, so in the windowed editor the ground is meshed as a
+    /// matter of course. A verb that draws one frame with no loop in front of
+    /// it has to run the pump itself, or the field is resident, the collider
+    /// is live, the character stands on the ground — and the picture shows it
+    /// standing on nothing, because not one chunk mesh ever reached the GPU.
+    /// The same silent shape as the map meshes and the map paint that `shot`
+    /// already syncs by hand.
+    ///
+    /// The first pass is a full re-plan (every chunk queued at once); the near
+    /// ring meshes synchronously inside it and the rest goes through the
+    /// worker, which is capped in flight and topped up by later passes — and
+    /// the coverage scan itself runs every fourth pass per terrain. So this
+    /// pumps until several consecutive passes find nothing pending, not until
+    /// the first one does.
+    pub(crate) fn settle_terrain_meshes(
+        &mut self,
+        cam_world: DVec3,
+        budget: std::time::Duration,
+    ) -> bool {
+        let deadline = floptle_core::time::Instant::now() + budget;
+        let mut quiet = 0u32;
+        let mut first = true;
+        loop {
+            self.sync_terrain_meshes(first, cam_world);
+            first = false;
+            let pending = self.terrain_render.values().any(|r| !r.pending.is_empty());
+            if pending {
+                quiet = 0;
+            } else {
+                quiet += 1;
+                // Past the scan throttle with nothing queued: settled.
+                if quiet > 4 {
+                    return true;
+                }
+                continue;
+            }
+            if floptle_core::time::Instant::now() >= deadline {
+                return false;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+    }
+
     /// Stream the world in and WAIT for it, for the one-shot verbs that have no
     /// frame loop to do it over time. Returns whether it settled inside `budget`.
     ///
