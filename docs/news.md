@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.93.1 — "Clear Skies".** The sky-flicker bug: a straight-edged wedge
+of the sky flashing a flat colour for one frame while you looked around. The
+renderer built each pixel's ray out to a far plane hundreds of thousands of
+units away, at the very edge of 32-bit precision, and for some camera poses
+the rounding tipped over along a line across the screen and left the sky
+shader without a direction. The ray now stops halfway down the depth range —
+the same line, without the cliff. Also: `floptle shot` draws the Sky shader
+it always skipped, and gains `--frames`/`--turn` for camera sweeps.
+
 **v0.93.0 — "Feet On The Ground".** The hover that survived two terrain
 patches was never the terrain: a physics body under a group node was written
 back in world coordinates into a parent-relative position, so its model stood
