@@ -534,12 +534,35 @@ struct FsOut {
     @builtin(frag_depth) depth: f32,
 };
 
+// ---- the camera ray for a screen position ----------------------------------
+//
+// The origin is the near-plane point; the direction is the line from it to a
+// point HALFWAY down the depth range, not the far-plane point. Mathematically
+// the two directions are the same line. Numerically they are not: unprojecting
+// depth 1.0 lands on the far plane, whose homogeneous `w` is 1/far — with a
+// 300000-unit far plane that is 3e-6, formed as the difference of two ~20-sized
+// terms at the very edge of f32 precision. The f32 inverse of the view
+// projection carries stray x/y coefficients in that row of a similar size, so
+// for a fraction of camera poses the sign of `w` flips along a straight line
+// across the screen; beyond that line the far point overflows, the direction
+// becomes NaN, and a sky shader's `saturate(NaN)` collapses to 0 — a wedge of
+// the horizon colour with a dead-straight edge, one frame long, wherever the
+// camera happened to stop. The mid-depth point's `w` is ~10, and the stray
+// terms are noise on the tenth digit of it.
+fn camera_ray_origin(ndc: vec2<f32>) -> vec3<f32> {
+    let near = G.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
+    return near.xyz / near.w;
+}
+
+fn camera_ray_dir(ndc: vec2<f32>, ro: vec3<f32>) -> vec3<f32> {
+    let mid = G.inv_view_proj * vec4<f32>(ndc, 0.5, 1.0);
+    return normalize(mid.xyz / mid.w - ro);
+}
+
 @fragment
 fn fs(in: VOut) -> FsOut {
-    let near = G.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
-    let far = G.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
-    let ro = near.xyz / near.w;
-    let rd = normalize(far.xyz / far.w - ro);
+    let ro = camera_ray_origin(in.ndc);
+    let rd = camera_ray_dir(in.ndc, ro);
 
     let max_t = march_bound();
     // Everything drawable lives inside the volume boxes + blob spheres: march
@@ -777,10 +800,8 @@ fn fs(in: VOut) -> FsOut {
 // hugs the true SDF silhouette (not a bounding circle).
 @fragment
 fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
-    let near = G.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
-    let far = G.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
-    let ro = near.xyz / near.w;
-    let rd = normalize(far.xyz / far.w - ro);
+    let ro = camera_ray_origin(in.ndc);
+    let rd = camera_ray_dir(in.ndc, ro);
 
     let max_t = march_bound();
     let span = field_span(ro, rd, max_t);
