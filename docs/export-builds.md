@@ -233,7 +233,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle open [PROJECT]                     # the bare invocation, said out loud
 [x] floptle play [PROJECT]
 [x] floptle run [PROJECT] [--scene S] [--frames N | --seconds T] [--seed N] [--timing] [--alloc] [--json]
-[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--after T] [--no-ui] [--out FILE] [--timing]
+[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--after T] [--frames N --turn DEG] [--no-ui] [--out FILE] [--timing]
 [x] floptle vfx [PROJECT] --effect KEY [--at SECS] [--frames N] [--scene S] [--out DIR]
 [x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
 [x] floptle check [PROJECT] [--json]
@@ -262,6 +262,21 @@ after it — and tiles the moments into one contact sheet, through a camera fixe
 across all of them so they can be compared. Which moments are worth
 photographing is decided by rendering the effect at thumbnail size first and
 keeping the part where something actually lands in the picture.
+
+`shot --frames N --turn DEG` writes a sequence instead of one picture: the
+world keeps playing a fixed step between frames and the camera turns by `DEG`
+over the run, nodding up and down as it goes. A thing that flickers cannot be
+shown by one frame; a folder of them can be scanned for it.
+
+Two diagnostics reach the windowed editor the same way, for a glitch that only
+happens on screen. `FLOPTLE_FRAME_DUMP=<dir>` photographs every presented frame
+into `<dir>` out of the swapchain image itself, exactly as `--shot` does for
+one, and `floptle <project> --auto-play` presses Play as soon as the scene is
+up (`FLOPTLE_AUTO_LOOK=scene` or `=game` then keeps that tab in front and
+flicks the camera about by itself, for an unattended run). Together they turn "it flashes sometimes while I look around" into a folder
+of the frames that were actually on the screen, one of which has the flash in
+it. The dump costs a readback per frame and writes about two megabytes per
+frame, so it is for a minute of reproducing something, not for playing.
 
 ## Multi-device LAN testing
 

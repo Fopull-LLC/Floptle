@@ -547,6 +547,21 @@ pub(crate) const VERBS: &[Verb] = &[
                        produces the same picture twice (only meaningful with --after)",
             },
             Arg {
+                name: "--frames",
+                value: Value::Text,
+                required: false,
+                help: "draw this many consecutive frames, one fixed step apart, as \
+                       `<out>-0001.png` and on — the world keeps playing between them \
+                       (with --after). A single picture cannot show a thing that flickers",
+            },
+            Arg {
+                name: "--turn",
+                value: Value::Text,
+                required: false,
+                help: "with --frames: yaw the camera by this many degrees over the \
+                       sequence, with a small pitch nod — looking around",
+            },
+            Arg {
                 name: "--out",
                 value: Value::Path,
                 required: false,
@@ -1452,6 +1467,8 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 after,
                 seed,
                 no_ui: a.get_flag("no-ui"),
+                frames: text(a, "frames").and_then(|t| t.parse().ok()).unwrap_or(1),
+                turn: text(a, "turn").and_then(|t| t.parse().ok()).unwrap_or(0.0),
             }))
         }
         Some(("vfx", a)) => {

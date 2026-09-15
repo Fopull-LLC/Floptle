@@ -379,7 +379,31 @@ impl Player {
         // A browser cannot block on a GPU readback, so the page's capture is
         // its own path (`capture_web`) and the frame itself is never asked to.
         let capture = !cfg!(target_arch = "wasm32") && self.shot.is_some() && self.frames >= self.shot_at;
-        let shot = self.ed.player_frame(capture);
+        // `FLOPTLE_FRAME_DUMP=<dir>`: photograph EVERY presented frame into
+        // that directory, out of the swapchain image, exactly as `--shot` does
+        // for one. A glitch that lasts a frame while the camera moves cannot be
+        // caught by a screenshot key or a headless render; a stream of the
+        // frames the player actually saw can be scanned for it afterwards.
+        // A diagnostic, not a feature: it costs a GPU readback per frame.
+        // A browser has neither threads nor a filesystem to dump into.
+        #[cfg(not(target_arch = "wasm32"))]
+        let dump_dir = std::env::var_os("FLOPTLE_FRAME_DUMP").map(std::path::PathBuf::from);
+        #[cfg(target_arch = "wasm32")]
+        let dump_dir: Option<std::path::PathBuf> = None;
+        let shot = self.ed.player_frame(capture || dump_dir.is_some());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(dir) = dump_dir
+            && !capture
+            && let Some((px, w, h)) = shot.clone()
+        {
+            let path = dir.join(format!("frame-{:05}.png", self.frames));
+            std::thread::spawn(move || {
+                if let Some(buf) = image::RgbaImage::from_raw(w, h, px) {
+                    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+                    let _ = buf.save(&path);
+                }
+            });
+        }
         #[cfg(target_arch = "wasm32")]
         {
             if self.shot.is_some() && self.frames == self.shot_at {

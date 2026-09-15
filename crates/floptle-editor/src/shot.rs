@@ -172,11 +172,20 @@ pub(crate) struct Args<'a> {
     /// default draws every enabled layer, because a scene whose whole point is
     /// a screen is otherwise photographed as its backdrop (`floptle/0224`).
     pub(crate) no_ui: bool,
+    /// `--frames N`: after the first picture, keep playing and draw N−1 more,
+    /// one fixed step apart, as `<out stem>-0001.png` … A single frame cannot
+    /// show a thing that flickers; a sequence with the world stepping and the
+    /// camera moving between frames can, and can be scanned for it.
+    pub(crate) frames: u32,
+    /// `--turn DEG`: yaw the camera by this much over the whole sequence, with
+    /// a gentle pitch nod on top — "looking around", which is when the sky
+    /// flickers were reported.
+    pub(crate) turn: f32,
 }
 
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(args: Args) -> i32 {
-    let Args { root, scene, camera, size, out, json, timing, after, seed, no_ui } = args;
+    let Args { root, scene, camera, size, out, json, timing, after, seed, no_ui, frames, turn } = args;
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -350,6 +359,15 @@ pub(crate) fn run(args: Args) -> i32 {
     // the character floating over flat grey (`floptle/0166`).
     ed.sync_map_meshes();
     ed.sync_map_paint();
+    // **The sky, too.** A Skybox node's `.flsl` is compiled — and its texture
+    // uploaded — by the frame loop, on the frame after the scene loads. With
+    // no frame loop the sky shader was never compiled, so every shot of a
+    // project with a procedural sky photographed the Skybox's plain base
+    // colour instead: a flat grey where the game shows clouds, which was
+    // indistinguishable from "the sky shader broke". Same shape as the terrain
+    // meshes, the map meshes and the baked GI above.
+    ed.sync_sky_shader();
+    ed.sync_sky_texture();
     let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui) else {
         floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
@@ -367,6 +385,56 @@ pub(crate) fn run(args: Args) -> i32 {
     if let Err(e) = buf.save(out) {
         floptle_say::say_err!("could not write {}: {e}", out.display());
         return 1;
+    }
+
+    // **The sequence.** The world keeps playing one fixed step per frame and
+    // the camera turns, exactly as a player looking around; every frame goes
+    // through the same path the first one did, housekeeping included, because
+    // the frame loop would have run it and a frame drawn without it is a
+    // picture of a different engine.
+    if frames > 1 {
+        let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = out.parent().map(Path::to_path_buf).unwrap_or_default();
+        let base_rot = wt.rotation;
+        for i in 1..frames {
+            if after.is_some() && ed.playing {
+                ed.pump_world_streaming();
+                ed.play_step(crate::run::DT, true);
+                ed.drain_script_logs();
+            }
+            let f = i as f32 / (frames - 1).max(1) as f32;
+            let yaw = floptle_core::math::Quat::from_rotation_y((turn * f).to_radians());
+            // Pitch sweeps from ten degrees below the horizon to sixty above
+            // it and back, three times over the sequence — the sky and the
+            // horizon both cross every part of the frame, corners included.
+            let pitch = floptle_core::math::Quat::from_rotation_x(
+                (25.0 + 35.0 * (f * std::f32::consts::TAU * 1.5).sin()).to_radians(),
+            );
+            let pos = floptle_core::world_transform(&ed.world, e).translation;
+            let cam_i = RenderCamera::new(
+                pos,
+                yaw * base_rot * pitch,
+                Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
+            );
+            ed.sync_terrain_gpu();
+            ed.settle_terrain_meshes(pos, std::time::Duration::from_secs(5));
+            ed.sync_map_meshes();
+            ed.sync_map_paint();
+            ed.sync_sky_shader();
+            ed.sync_sky_texture();
+            let Some(px) = render_frame_pixels(&mut ed, &cam_i, w, h, cull_mask, !no_ui) else {
+                return 1;
+            };
+            let Some(buf) = image::RgbaImage::from_raw(w, h, px) else { return 1 };
+            let path = dir.join(format!("{stem}-{i:04}.png"));
+            if let Err(e) = buf.save(&path) {
+                floptle_say::say_err!("could not write {}: {e}", path.display());
+                return 1;
+            }
+        }
+        if !json {
+            floptle_say::say_err!("wrote {} more frames beside it", frames - 1);
+        }
     }
 
     // Per-pass GPU cost, when asked. Absent — not zeroed — when it was not: a

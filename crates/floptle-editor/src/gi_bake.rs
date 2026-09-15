@@ -404,6 +404,38 @@ impl crate::Editor {
     /// bake renders through the whole scene path and there is nothing to render
     /// through before the first frame has been set up.
     pub(crate) fn drive_auto_bake(&mut self) {
+        if self.auto_play && self.gpu.is_some() {
+            self.auto_play = false;
+            if !self.playing {
+                self.toggle_play();
+            }
+        }
+        // `FLOPTLE_AUTO_LOOK=scene|game`: with the session playing, keep that
+        // tab in front and look around with the Scene view's own camera, in
+        // flicks, the way a hand on a mouse does — the condition under which
+        // the sky was reported to flicker. Opt-in and separate from the frame
+        // dump, so a person reproducing something BY HAND with the dump on is
+        // not fought for the camera. Re-asserted every few frames, because
+        // pressing Play brings the Game tab forward itself.
+        #[cfg(feature = "editor-ui")]
+        if self.playing && let Ok(which) = std::env::var("FLOPTLE_AUTO_LOOK") {
+            let game_tab = which == "game";
+            if self.frame_no.is_multiple_of(30)
+                && let Some(dock) = self.dock_state.as_mut()
+            {
+                crate::dock::focus(
+                    dock,
+                    if game_tab { crate::EditorTab::Game } else { crate::EditorTab::Scene },
+                );
+            }
+            // Deterministic, so a run can be repeated.
+            let n = self.frame_no as f32;
+            let seg = (n / 20.0).floor();
+            let r = |k: f32| (seg * k).sin().abs();
+            let (fx, fy) = ((r(12.9898) * 2.0 - 1.0) * 0.06, (r(78.233) * 2.0 - 1.0) * 0.03);
+            self.camera.yaw += fx + 0.004 * (n * 0.05).sin();
+            self.camera.pitch = (self.camera.pitch + fy).clamp(-0.3, 0.6);
+        }
         let Some(started) = self.auto_bake_gi else { return };
         if !started {
             if self.gpu.is_none() {
