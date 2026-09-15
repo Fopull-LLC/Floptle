@@ -1577,6 +1577,8 @@ pub fn run() {
             // Scanned position-independently above; consumed here so it is not
             // an "unknown argument".
             "--bake-gi" => {}
+            // Scanned position-independently below, like --bake-gi.
+            "--auto-play" => {}
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
                 floptle_say::say_err!("unknown argument: {other} (try --help)");
@@ -1590,6 +1592,9 @@ pub fn run() {
     // offscreen and exits (see `bake.rs`) — this is the shipped flag, which
     // opens the editor and bakes in it, kept behaving exactly as it always has.
     let bake_gi_on_load = args.iter().any(|a| a == "--bake-gi");
+    // `--auto-play`: press Play once the scene is up — a diagnostic for driving
+    // the whole editor (Scene view, docked Game view and all) from a script.
+    let auto_play_on_load = args.iter().any(|a| a == "--auto-play");
     if let Some((project, player)) = verb_launch {
         project_path = project;
         player_mode = player;
@@ -1662,6 +1667,7 @@ pub fn run() {
         player_mode,
         http_allow_local: !player_mode,
         auto_bake_gi: bake_gi_on_load.then_some(false),
+        auto_play: auto_play_on_load,
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
         // No Console tab in a build, so warnings and errors go to stderr
@@ -3210,6 +3216,8 @@ struct Editor {
     /// `None` = the ordinary editor. `Some(false)` = asked for, not yet started.
     /// `Some(true)` = running; quit when it finishes.
     auto_bake_gi: Option<bool>,
+    /// `--auto-play`: still to press Play on the first frame the GPU exists.
+    auto_play: bool,
     /// What the probe texture currently on the GPU was built from.
     gi_uploaded: Option<gi_bake::GiKey>,
     /// The captured reflection probes, allocated on the frame a scene first

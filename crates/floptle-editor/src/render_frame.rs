@@ -6556,6 +6556,39 @@ impl Editor {
                 for id in &full_output.textures_delta.free {
                     egui.renderer.free_texture(id);
                 }
+                // `FLOPTLE_FRAME_DUMP=<dir>`: photograph EVERY presented frame
+                // into that directory, out of the swapchain image itself. A
+                // glitch that lasts one frame while the camera moves cannot be
+                // caught by a screenshot key or a headless render; a stream of
+                // the frames the player actually saw can be scanned for it
+                // afterwards. A diagnostic, not a feature — a readback per frame.
+                if let Some(dir) = std::env::var_os("FLOPTLE_FRAME_DUMP")
+                    && let Some(px) = read_back_frame(gpu, &frame.surface.texture)
+                {
+                    let (w, h) = (frame.surface.texture.width(), frame.surface.texture.height());
+                    let path = std::path::PathBuf::from(dir)
+                        .join(format!("frame-{:05}.png", self.frame_no));
+                    // Encoded off the frame thread, at most a handful at a
+                    // time: a frame that arrives while the encoders are all
+                    // busy is dropped, named by its number, rather than
+                    // queued up until the machine runs out of memory.
+                    static BUSY: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    use std::sync::atomic::Ordering::SeqCst;
+                    if BUSY.fetch_add(1, SeqCst) < 6 {
+                        std::thread::spawn(move || {
+                            if let Some(buf) = image::RgbaImage::from_raw(w, h, px) {
+                                let _ = std::fs::create_dir_all(
+                                    path.parent().unwrap_or(std::path::Path::new(".")),
+                                );
+                                let _ = buf.save(&path);
+                            }
+                            BUSY.fetch_sub(1, SeqCst);
+                        });
+                    } else {
+                        BUSY.fetch_sub(1, SeqCst);
+                    }
+                }
                 frame.present();
             }
             None => {
