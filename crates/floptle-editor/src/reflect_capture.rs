@@ -24,7 +24,7 @@ use floptle_core::{Entity, Matter, World, math::DVec3, world_transform};
 use floptle_render::MAX_PROBES;
 
 use crate::Editor;
-use crate::render_frame::OffscreenOpts;
+use crate::offscreen::OffscreenOpts;
 
 /// What a capture was taken from. A probe whose key still matches is a probe
 /// whose picture is still the picture it would take now.

@@ -39,7 +39,10 @@
 //! If this fails after a refactor that genuinely moved the gather somewhere
 //! better, move the check with it — don't delete it.
 
+/// The main gather: `Editor::render`, the Scene view's path.
 const SRC: &str = include_str!("../src/render_frame.rs");
+/// The offscreen gather: `Editor::render_world_into`, every other view's path.
+const OFFSCREEN_SRC: &str = include_str!("../src/offscreen.rs");
 
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
@@ -101,23 +104,21 @@ const GATHERS: [(&str, &str); 12] = [
     ("set_counts", "the render counts a game reads via perf.counts()"),
 ];
 
-/// The body of `render_world_into`, from its signature to the end of the file.
+/// The body of `render_world_into`, from its signature to the end of its file.
 ///
-/// Deliberately crude: it is the last of the two gathers in the file, so
-/// everything after its signature is the offscreen path. A precise brace
-/// matcher would be more code and no more correct for this question.
+/// Deliberately crude: it is the last item in `offscreen.rs`, so everything
+/// after its signature is the offscreen path. A precise brace matcher would be
+/// more code and no more correct for this question.
 fn offscreen() -> &'static str {
-    let at = SRC.find("fn render_world_into").expect(
+    let at = OFFSCREEN_SRC.find("fn render_world_into").expect(
         "render_world_into is gone — if the offscreen gather moved, move this test with it",
     );
-    &SRC[at..]
+    &OFFSCREEN_SRC[at..]
 }
 
-/// Everything before the offscreen gather: the main (Scene view) path, plus the
-/// helpers both paths share.
+/// The main (Scene view) path: `render_frame.rs`, which holds `Editor::render`.
 fn main_path() -> &'static str {
-    let at = SRC.find("fn render_world_into").unwrap();
-    &SRC[..at]
+    SRC
 }
 
 /// Does `hay` **call** `name`, as opposed to merely declaring it?
@@ -163,16 +164,17 @@ fn every_gather_on_the_main_path_also_runs_for_offscreen_views() {
 
 /// …and the check above has to be able to fail.
 ///
-/// If `render_world_into` were renamed or the file split, `offscreen()` would
-/// return something that trivially contains every call and the test would pass
-/// forever while guarding nothing.
+/// If `render_world_into` were renamed or its file reorganised, `offscreen()`
+/// would return something that trivially contains every call and the test would
+/// pass forever while guarding nothing.
 #[test]
 fn the_two_gathers_are_actually_two() {
     let off = offscreen();
     assert!(
         off.len() < SRC.len() / 2,
-        "the offscreen gather is {} of {} bytes — that is not a function, it is most of \
-         the file, so this test is reading the main gather too and would pass no matter what",
+        "the offscreen gather is {} bytes against a {}-byte main path — that is not a \
+         function, so this test is reading more than the offscreen gather and would pass \
+         no matter what",
         off.len(),
         SRC.len()
     );

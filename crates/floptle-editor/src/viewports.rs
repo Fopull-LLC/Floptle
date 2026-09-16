@@ -695,9 +695,9 @@ impl Editor {
             cull_mask,
             None,
             (cw, ch),
-            crate::render_frame::OffscreenOpts {
+            crate::offscreen::OffscreenOpts {
                 depth_tex: depth_tex.as_ref(),
-                history: crate::render_frame::HistorySlot::GamePanel,
+                history: crate::offscreen::HistorySlot::GamePanel,
             },
         );
         // World canvases: real geometry, so they draw into the scene target with

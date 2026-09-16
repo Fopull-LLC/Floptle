@@ -563,7 +563,7 @@ pub(crate) fn render_frame_pixels(
         cull_mask,
         None,
         (cw, ch),
-        crate::render_frame::OffscreenOpts {
+        crate::offscreen::OffscreenOpts {
             depth_tex: Some(&depth_tex),
             ..Default::default()
         },
@@ -1111,7 +1111,7 @@ mod tests {
             u32::MAX,
             None,
             (w, h),
-            crate::render_frame::OffscreenOpts::default(),
+            crate::offscreen::OffscreenOpts::default(),
         );
         let look = crate::shading::post_process_uniforms(&ed.world).0;
 
