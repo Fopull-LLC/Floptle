@@ -172,7 +172,7 @@ pub struct NodeDoc {
     /// simply wired to something else. In the field this moved a whole match HUD
     /// onto a line of help text inside another panel, and since an invisible
     /// parent hides its subtree, the round clock and score pips were never drawn
-    /// in any mode. It reached players as three unrelated UI bugs. floptle/0046.
+    /// in any mode. It reached players as three unrelated UI bugs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<u32>,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
@@ -251,7 +251,7 @@ pub struct NodeDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_2d: Option<String>,
     /// **Lights only.** Full brightness out to this radius before the ramp
-    /// starts. `None` = 0, which is every light written before `floptle/0126`.
+    /// starts. `None` = 0, which is every light written before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light_inner: Option<f32>,
     /// **Lights only.** The exponent of that ramp. `None` = 2, the curve every
@@ -868,7 +868,7 @@ pub enum MatterDoc {
         #[serde(default = "all_layers", skip_serializing_if = "is_all_layers")]
         cull_mask: u32,
         /// Render-target size in pixels and refresh rate in Hz (0 = every
-        /// frame). Defaulted so a scene written before `floptle/0078` loads
+        /// frame). Defaulted so a scene written before an earlier task loads
         /// with the size it used to get.
         #[serde(default = "default_target_w", skip_serializing_if = "is_default_target_w")]
         target_w: u32,
@@ -951,7 +951,7 @@ pub enum MatterDoc {
         #[serde(default = "one_f32")]
         radius: f32,
     },
-    /// A grid of spritesheet cells drawn as one mesh (`floptle/0058`). The sheet
+    /// A grid of spritesheet cells drawn as one mesh. The sheet
     /// is the node's Material; this is only the grid.
     Tilemap {
         #[serde(default)]
@@ -2647,7 +2647,7 @@ pub struct ProjectConfigDoc {
     /// that is all of them, and the symptom is not "wrong typeface" — it is
     /// text that reads as badly spaced, because a layout built on a monospace
     /// grid is being drawn with a proportional font: wide letters overlap their
-    /// neighbours and narrow ones leave holes (`floptle/0124`).
+    /// neighbours and narrow ones leave holes.
     ///
     /// Naming it here rather than at each call site is the point: it fixes the
     /// code nobody is going to edit.
@@ -3535,7 +3535,7 @@ pub fn resolve_parent(
 /// and the root detached from whatever it hung off.
 ///
 /// This is what makes a *replicated* spawn a whole rig rather than one node
-/// (floptle/0181): the same vector goes to the server's world and down the wire,
+///: the same vector goes to the server's world and down the wire,
 /// so both ends spawn the identical hierarchy in the identical order.
 ///
 /// Both parent spellings are rewritten. `parent_id` still names a node and the
@@ -3592,7 +3592,6 @@ pub fn subtree_from(nodes: &[NodeDoc], root: usize) -> Vec<NodeDoc> {
 /// it is simply not the node the author meant, and nothing in the file records
 /// which one that was. So this reports the cases that are decidable, and the
 /// stable ids ([`NodeDoc::parent_id`]) prevent the case that is not.
-/// floptle/0046.
 pub fn validate_parents(nodes: &[NodeDoc]) -> Vec<String> {
     let mut out = Vec::new();
     let by_id = node_id_positions(nodes);
@@ -3661,7 +3660,7 @@ pub fn validate_parents(nodes: &[NodeDoc]) -> Vec<String> {
 /// An invisible parent hides its whole subtree, so this is the difference
 /// between "obviously broken" and "you cannot see any of this and nothing will
 /// tell you why" — which is how a match HUD went missing for two play sessions
-/// and was reported as three separate bugs. floptle/0046.
+/// and was reported as three separate bugs.
 pub fn validate_ui_visibility(nodes: &[NodeDoc]) -> Vec<String> {
     let by_id = node_id_positions(nodes);
     let mut out = Vec::new();
@@ -4048,7 +4047,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         // and the positional `parent` keeps an older one able to open the file.
         // Ids are the node's position at save time + 1 — unique within the
         // scene, which is all the reference needs to be, and stable across the
-        // reorder or insertion that would move an index. floptle/0046.
+        // reorder or insertion that would move an index.
         let id = index.get(&e).map(|i| *i as u32 + 1);
         let parent_id = parent.map(|p| p as u32 + 1);
         // "Default" never serializes — a node's absence of a layer is Default.
@@ -4152,7 +4151,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
-    /// floptle/0181 — a subtree lifted out of a document must carry its own
+    /// a subtree lifted out of a document must carry its own
     /// wiring, not the document's.
     ///
     /// The positional `parent` is the trap: it names an INDEX, so a child of
@@ -4551,7 +4550,7 @@ mod tests {
         assert_eq!(steps[1], p240.retro_jitter_pixels());
     }
 
-    /// floptle/0046: the whole point of a stable link. Inserting a node ahead of
+    /// the whole point of a stable link. Inserting a node ahead of
     /// a subtree must not re-point it — which is exactly what positional
     /// indices did, silently, moving a match HUD onto a line of help text in
     /// another panel and hiding it for two play sessions.

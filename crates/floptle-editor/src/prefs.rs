@@ -324,7 +324,7 @@ pub(crate) fn save_viewport_panels(p: &crate::viewport_panel::ViewportPanels) {
 /// up until the art is the colour of the overlay — and which art that is, is not
 /// knowable in advance. A 28-alpha white grid over pale pixel art is invisible at
 /// exactly the zoom you need it at, and a grey checker under grey art says
-/// nothing at all (`floptle/0097`).
+/// nothing at all.
 ///
 /// Per-user and not per-document: this is how somebody likes to look at images,
 /// not a fact about one image. (The cell grid's size is the fact — that lives in

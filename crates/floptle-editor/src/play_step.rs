@@ -11,7 +11,7 @@ use crate::{Editor, FOCUS_SECS, anim, grab_cursor};
 use crate::perf_readout::fifo_pacing_multiple;
 
 impl Editor {
-    /// Add a subsystem's cost to this frame (`floptle/0077`).
+    /// Add a subsystem's cost to this frame.
     ///
     /// A one-line helper because the alternative is `self.script_host.profile()
     /// .borrow_mut().record(...)` at every measured site, and a borrow that long
@@ -68,7 +68,7 @@ impl Editor {
             self.dt_snap_error = self.dt_snap_error.clamp(-period, period);
             // A miss is not a fault — an uncapped frame legitimately misses. A
             // long run of them means the snap is inert, which is a different
-            // thing and worth being able to see (`floptle/0160`).
+            // thing and worth being able to see.
             self.dt_snap_rate *= 0.99;
             return raw;
         }
@@ -122,7 +122,7 @@ impl Editor {
             // `1.0 / dt` averages a reciprocal, which is biased toward the fast
             // frames — and the more bimodal the distribution, the more wildly it
             // flatters. See `Editor::fps` for the capture where it read 4312 fps
-            // against a true 144 (`floptle/0160`).
+            // against a true 144.
             let ms = dt * 1000.0;
             self.frame_ms = if self.frame_ms > 0.0 { self.frame_ms * 0.9 + ms * 0.1 } else { ms };
             self.fps = 1000.0 / self.frame_ms.max(1e-4);
@@ -140,7 +140,7 @@ impl Editor {
                     // Reaches the Console too, not only the ⏱ panel and the
                     // title — the panel is opt-in and the title is easy not to
                     // read closely, and this is exactly the report a user who
-                    // is not looking for it needs to see (`floptle/0169`).
+                    // is not looking for it needs to see.
                     match fifo_pacing_multiple(self.present_wait_ms, cost, self.refresh_period * 1000.0) {
                         Some(n) if n != self.fifo_pacing_warned => {
                             self.fifo_pacing_warned = n;
@@ -247,7 +247,7 @@ impl Editor {
         // headless loop — and a settings API wired into only one of them is a
         // menu that works in the editor and does nothing in a build. Every host
         // reaches gameplay through here, so this is the one place that cannot be
-        // half-wired (`floptle/0175`).
+        // half-wired.
         if self.playing {
             self.push_app_info();
         }
@@ -462,7 +462,7 @@ impl Editor {
                 self.ui_focus_set(want);
             }
             self.pending_scene.extend(self.script_host.take_scene_requests());
-            // Accessibility (`floptle/0079`): the settings a game's options menu
+            // Accessibility: the settings a game's options menu
             // wrote this frame come back out, and the captions it asked for join
             // the on-screen queue. Read after the run so a menu that changes text
             // scale is honoured by the very next layout.
@@ -545,7 +545,7 @@ impl Editor {
                 anim_cmds,
             );
             // ANIMATION: clip sampling, blending, pose composition and CPU
-            // skinning. The number `floptle/0080` needs before and after.
+            // skinning. The number an earlier task needs before and after.
             self.profile_record(floptle_core::profile::Bucket::Animation, anim_t.ms());
             for (eid, func) in fired {
                 self.script_host.call_function(&mut self.world, eid, &func);
@@ -573,7 +573,7 @@ impl Editor {
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
                 // Water is rebuilt every frame for the same reason gravity is
-                // (`floptle/0141`): a WaterVolume spawned, moved, resized,
+                //: a WaterVolume spawned, moved, resized,
                 // disabled or destroyed while the game is running must be in
                 // the solver's field the same frame it is in the renderer's —
                 // `water_draw` already gathers from the live world every
@@ -805,7 +805,7 @@ impl Editor {
                         if self.physics_paused {
                             sim.clear_held_forces();
                         } else {
-                            // PHYSICS (`floptle/0077`). Timed per tick and
+                            // PHYSICS. Timed per tick and
                             // accumulated, because a frame can run several — a
                             // per-frame timer would report the last tick and hide
                             // a catch-up frame, which is exactly the spike a game
@@ -959,7 +959,7 @@ impl Editor {
             // Particles tick last: emitter node transforms are final for the frame
             // (scripts → animation → physics → attachments → particles). Apply any
             // play/stop/restart a script queued this frame first, so it lands now.
-            // `floptle/0115`: everything from here to the end of `advance` is the
+            // everything from here to the end of `advance` is the
             // particles bucket. It had no producer at all, so `perf.ms("particles")`
             // answered a confident 0.0 while collection was on — which reads as
             // "particles are free", the one answer a profiler must never give by
@@ -1028,7 +1028,7 @@ impl Editor {
             }
             #[cfg(not(feature = "devices"))]
             let _ = listener;
-            // `floptle/0115`: audio had no bucket at all, so a game whose mixer
+            // audio had no bucket at all, so a game whose mixer
             // was the expensive thing could profile every frame and never see it.
             self.profile_record(floptle_core::profile::Bucket::Audio, audio_t.ms());
             // Last in the step, so a setting changed in an `update` takes effect

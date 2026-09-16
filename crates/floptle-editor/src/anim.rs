@@ -56,7 +56,7 @@ pub struct RigAsset {
     pub skins: Vec<Option<SkinnedPart>>,
     /// Per part (parallel to `skins`): the part's base in the raster's GPU
     /// skinning stores, or 0 if it has no skin — or if registration failed and
-    /// the part falls back to the CPU deform (`floptle/0080`). Filled by
+    /// the part falls back to the CPU deform. Filled by
     /// [`upload_skins`] right after import, because that is where a `Raster` is
     /// in hand and the bind pose is not going to change again.
     pub skin_bases: Vec<u32>,
@@ -132,7 +132,7 @@ pub fn cpu_skin_part(
 }
 
 /// Hand every skinned part's per-vertex joints + weights to the GPU, filling
-/// [`RigAsset::skin_bases`] (`floptle/0080`).
+/// [`RigAsset::skin_bases`].
 ///
 /// Called once, at import. A part whose registration is refused (the store is
 /// bounded by the instance lane that addresses it) keeps a base of 0 and falls
@@ -2242,7 +2242,7 @@ mod tests {
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
     /// blend interpolates. This is the math that makes a vertex-skinned mesh animate.
     /// The CPU skinning cost, at a stated character count — the "before" number
-    /// for `floptle/0080`, kept because it is still the FALLBACK path's cost.
+    /// for an earlier task, kept because it is still the FALLBACK path's cost.
     ///
     /// Nothing draws through this any more unless the skinning store refused the
     /// part or a custom `.flsl` material owns the draw. The number below is what
@@ -2308,7 +2308,7 @@ mod tests {
         assert!(!out.is_empty());
     }
 
-    /// The after number for `floptle/0080`, as a ratio rather than a duration.
+    /// The after number for an earlier task, as a ratio rather than a duration.
     ///
     /// Moving the deform to the vertex shader does not make the CPU's share
     /// *zero* — every skinned draw still builds a bone palette, one

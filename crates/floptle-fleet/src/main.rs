@@ -1,4 +1,4 @@
-//! `floptle-fleet` — the fleet agent (`floptle/0197` §6, `floptle/0199` §3).
+//! `floptle-fleet` — the fleet agent (an earlier task §6, an earlier task §3).
 //!
 //! It is the only piece of the dedicated-server story that starts a process.
 //! Everything else — the builds API, the deployment rows, the portal — is a

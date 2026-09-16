@@ -1295,7 +1295,7 @@ impl ImageEditState {
                 // Dragging inside a live selection moves it. Every editor does
                 // this, it is obviously what you were about to do, and needing a
                 // tool change first is most of why moving a bit of art felt like
-                // more work than the edit (`floptle/0095`).
+                // more work than the edit.
                 if self.press_moves_selection(x, y) {
                     return;
                 }
@@ -1949,7 +1949,7 @@ impl ImageEditState {
     ///
     /// Not a copy-then-paste: that costs two actions and destroys whatever was
     /// on the clipboard, so stamping the same bit of art repeatedly meant
-    /// re-copying it every time (`floptle/0095`). `lift: false` is the whole
+    /// re-copying it every time. `lift: false` is the whole
     /// difference from a move — the original stays where it is.
     pub(crate) fn duplicate_selection(&mut self) -> bool {
         if self.xform.is_some() {
@@ -2510,8 +2510,7 @@ impl ImageEditState {
         // The SHEET's cell grid — heavier than the pixel grid, a different
         // colour, and drawn after it so it wins where they coincide. This is the
         // grid a tileset is actually cut on, and drawing it is the difference
-        // between laying out a sheet and counting texels by hand
-        // (`floptle/0096`).
+        // between laying out a sheet and counting texels by hand.
         if self.look.cell_grid
             && let Some((cw, ch)) = doc.cell_size()
         {
@@ -2739,7 +2738,7 @@ impl ImageEditState {
         // the set of texels that will change. The circle this used to draw was
         // re-derived from `radius` and was wrong for every brush that is not a
         // smooth disc — most visibly the one-pixel pencil, which showed a small
-        // circle floating between texels (`floptle/0094`).
+        // circle floating between texels.
         if let Some((cx, cy)) = self.cursor
             && self.tool.is_paint()
         {
@@ -3727,7 +3726,7 @@ mod tests {
         assert_eq!(r, Rect::from_points(2, 3, 5, 8));
     }
 
-    // ---- floptle/0095: the short paths ------------------------------------
+    // ---- the short paths ------------------------------------
 
     /// Dragging inside a live selection moves it, with no tool change first.
     #[test]

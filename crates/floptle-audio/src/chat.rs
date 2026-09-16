@@ -1,4 +1,4 @@
-//! Voice chat: the codec and the jitter buffer (`floptle/0180`).
+//! Voice chat: the codec and the jitter buffer.
 //!
 //! The path a spoken word takes is: microphone → [`VoiceEncoder`] → one 20 ms
 //! Opus packet on an unreliable datagram → the server forwards it → the

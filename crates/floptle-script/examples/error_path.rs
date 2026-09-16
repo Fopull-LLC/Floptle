@@ -1,7 +1,7 @@
 //! Does a Lua error raised from a Rust callback survive in a RELEASE build?
 //!
 //! `cargo test` silently ignores a profile's `panic` setting (tests need unwind), so the
-//! unit tests cannot answer this — the abort in floptle/0025 only reproduces in a real
+//! unit tests cannot answer this — the abort in an earlier task only reproduces in a real
 //! release binary. This is that binary.
 //!
 //!     cargo run --release -p floptle-script --example error_path

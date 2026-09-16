@@ -624,8 +624,7 @@ pub struct StyleRuntime {
     /// the first time it steps, so later passes over the same frame don't
     /// charge `dt` again.
     frame: u64,
-    /// The player asked for reduced motion, so transitions land immediately
-    /// (`floptle/0079`).
+    /// The player asked for reduced motion, so transitions land immediately.
     ///
     /// Set here rather than passed to [`apply_styles`] because it belongs to the
     /// session, not to a frame — and because SNAPPING is a property of the
@@ -1069,7 +1068,7 @@ mod tests {
     /// A `style:` naming nothing has to be reportable. It is the commonest
     /// thing a rename breaks and the hardest to spot, because the element
     /// still draws — it just draws the way it was authored, which looks
-    /// deliberate (floptle/0051).
+    /// deliberate.
     #[test]
     fn a_style_name_in_no_sheet_is_collected_once() {
         let mut roots = vec![
@@ -1089,7 +1088,7 @@ mod tests {
         assert!(rt.take_missing_styles().is_empty());
     }
 
-    /// floptle/0053: `shadow` and `glow` could name a token and these three
+    /// `shadow` and `glow` could name a token and these three
     /// could not, so one `to: "gold-none"` failed the whole file and took every
     /// style in the project with it.
     #[test]

@@ -168,7 +168,7 @@ pub(crate) fn params_table(
 /// — keep working: `me` is the same table the engine goes on updating, so `me.x` on a
 /// later hook is the current position. Building a fresh table per hook froze such a
 /// handle at the spawn pose, silently, while everything using the passed `node` stayed
-/// correct (floptle/0027).
+/// correct.
 pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     // Tag with the entity + the node metatable so `node.parent`, `node:getscript(...)`,

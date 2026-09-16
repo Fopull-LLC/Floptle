@@ -1,4 +1,4 @@
-//! What a chunk arriving looks like (`floptle/0067`) — the dissolve-in, rendered.
+//! What a chunk arriving looks like — the dissolve-in, rendered.
 //!
 //! The complaint was *"it's obvious when it pops in"*. Sizing the LOD rings to
 //! the body cut how many chunks arrive; it cannot change the fact that each one

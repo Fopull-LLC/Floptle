@@ -1,5 +1,5 @@
 //! What a 2D game pays on the LUA side for N sprites — the measurement
-//! `floptle/0059` asks for, and the other half of `sprite2d_probe`.
+//! an earlier task asks for, and the other half of `sprite2d_probe`.
 //!
 //! The 0058 probe measured the GPU and found no difference between a pool of
 //! scene-node quads and one `SpriteBatch`: 1400 quads is 1400 quads however

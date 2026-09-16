@@ -1,4 +1,4 @@
-//! Where the ceiling on script instances actually is (`floptle/0069`).
+//! Where the ceiling on script instances actually is.
 //!
 //! A scene of a few thousand scripted nodes used to panic:
 //!

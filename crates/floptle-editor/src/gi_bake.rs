@@ -158,7 +158,7 @@ fn half_to_f32(bits: u16) -> f32 {
 /// uniform slots and the light flickers".
 ///
 /// A free function rather than a method because the editor's frame already holds
-/// half of `self` mutably by the time the Inspector needs this (`floptle/0110`).
+/// half of `self` mutably by the time the Inspector needs this.
 pub(crate) fn gi_node(
     world: &floptle_core::World,
 ) -> Option<(floptle_core::Entity, floptle_core::Matter)> {
@@ -234,7 +234,7 @@ impl crate::Editor {
     /// Where this scene's bake is saved. Keyed off the scene's real relative
     /// path, not its stem: two scenes called `main.ron` in different folders are
     /// two scenes, and keying on the stem is how the terrain store once had them
-    /// overwrite each other (`floptle/0111`).
+    /// overwrite each other.
     pub(crate) fn gi_path(&self) -> std::path::PathBuf {
         let mut p = self.scene_path();
         p.set_extension("fgi");

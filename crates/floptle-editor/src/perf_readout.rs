@@ -5,8 +5,7 @@ use crate::dock::EditorTab;
 use crate::Editor;
 
 
-/// What the ⏱ readout draws, copied out of the profile before the UI closure
-/// (`floptle/0077`).
+/// What the ⏱ readout draws, copied out of the profile before the UI closure.
 ///
 /// A snapshot rather than a borrow because the UI closure runs inside the frame's
 /// split borrows and the profile is also being written this frame — and because a
@@ -20,7 +19,7 @@ pub(crate) struct PerfSnapshot {
     accounted_ms: f32,
     counts: floptle_core::profile::Counts,
     /// How the frames are actually arriving, and whether dt snapping is
-    /// managing to do anything about it (`floptle/0160`).
+    /// managing to do anything about it.
     pub(crate) pacing: Pacing,
 }
 
@@ -40,7 +39,7 @@ pub(crate) struct Pacing {
     /// Share of recent frames the dt snap actually applied to, 0..1.
     pub(crate) snap_rate: f32,
     /// Smoothed time blocked inside `acquire` (`Editor::present_wait_ms`) —
-    /// the display path, not the scene. `floptle/0169`: the piece the ⏱ panel
+    /// the display path, not the scene. an earlier task: the piece the ⏱ panel
     /// had the numbers for and never compared.
     pub(crate) present_wait_ms: f32,
     /// `mean_ms - present_wait_ms`: what the frame cost apart from waiting on
@@ -74,7 +73,7 @@ impl PerfSnapshot {
 mod readout_tests {
     /// **The readout has to smooth frame time, not its reciprocal.**
     ///
-    /// The acceptance case from `floptle/0160`: a frame sequence alternating
+    /// The acceptance case from an earlier task: a frame sequence alternating
     /// 2 ms and 30 ms. Sixty-two frames a second are genuinely arriving (16 ms
     /// mean), and an EMA over `1.0 / dt` reports something near 265 — it spends
     /// half its samples at 500 fps and a reciprocal does not average.
@@ -224,7 +223,7 @@ mod readout_tests {
     }
 
     /// The 16-light cap says so once per count, not every frame, and says
-    /// nothing while nothing is being cut (`floptle/0168`).
+    /// nothing while nothing is being cut.
     #[test]
     fn the_light_cap_warns_once_per_count_and_falls_silent_under_it() {
         fn warns(ed: &crate::Editor) -> usize {
@@ -274,7 +273,7 @@ mod readout_tests {
 /// Which refresh period to hold, given what the platform just said.
 ///
 /// Pulled out of [`Editor::reread_refresh_period`] because it is the whole of
-/// `floptle/0160`'s second half and it cannot be tested through a real window.
+/// that task's second half and it cannot be tested through a real window.
 ///
 /// * `held` — what we already believe (0 = nothing yet).
 /// * `current` — `current_monitor()`'s refresh in mHz, if it answered.
@@ -293,7 +292,7 @@ pub(crate) fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl F
 }
 
 /// Is the DISPLAY pacing the frame, rather than the scene being slow
-/// (`floptle/0169`)?
+///?
 ///
 /// The signature `docs/subsystems/renderer.md` already describes: `acquire`
 /// blocks for very close to a whole multiple (≥2) of the refresh period —
@@ -401,8 +400,8 @@ mod refresh_tests {
 /// multiple of the reported refresh, because the window is on a different output
 /// than `current_monitor()` names, or nothing is pacing to vblank — the raw
 /// scheduler jitter goes straight into the fixed-step accumulator and the render
-/// judders by `velocity x noise`. That used to happen in total silence
-/// (`floptle/0160`), which is the worst possible way for a load-bearing path to
+/// judders by `velocity x noise`. That used to happen in total silence,
+/// which is the worst possible way for a load-bearing path to
 /// be switched off.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
@@ -433,7 +432,7 @@ pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
             .color(warn),
         );
     }
-    // The display pacing the frame, not the scene being slow (`floptle/0169`):
+    // The display pacing the frame, not the scene being slow:
     // `acquire` blocked for a whole multiple of the refresh period while the
     // frame's own work barely registers. This used to be indistinguishable
     // from "the scene is heavy" — both numbers were already on screen and
@@ -651,7 +650,7 @@ impl Editor {
     /// anti-jitter path `docs/subsystems/time.md` §10 calls load-bearing was
     /// inert for the whole of startup, and for the whole poll interval after
     /// every later hiccup, on a machine where `available_monitors()` was
-    /// answering correctly the entire time (`floptle/0160`).
+    /// answering correctly the entire time.
     pub(crate) fn reread_refresh_period(&mut self) {
         let Some(w) = self.window.as_ref() else { return };
         let hz = |m: &winit::monitor::MonitorHandle| m.refresh_rate_millihertz();

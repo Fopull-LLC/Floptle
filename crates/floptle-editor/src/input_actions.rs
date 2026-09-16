@@ -234,7 +234,7 @@ impl Editor {
     pub(crate) fn load_input_map(&mut self) {
         self.input_map_mtime = input_map_mtime(&self.project_root);
         // Tell scripts which keys the editor keeps, so polling one says so
-        // instead of returning false forever (`floptle/0084`). Declared here
+        // instead of returning false forever. Declared here
         // because this is the one place the project's bindings are installed, so
         // the two facts about "what a key does" arrive together.
         self.script_host.set_reserved_keys(crate::game_keys::RESERVED);
@@ -244,7 +244,7 @@ impl Editor {
             // The map already in memory stays — a bad edit must not leave the
             // game with no bindings at all. Say which one is actually running,
             // though: "it kept working" and "your edit took" look identical
-            // from the player's side (floptle/0051).
+            // from the player's side.
             Err(e) => {
                 self.console.push(
                     floptle_script::LogLevel::Error,

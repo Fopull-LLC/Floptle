@@ -1,4 +1,4 @@
-//! **What this relay says about its own machine** (`floptle/0215`).
+//! **What this relay says about its own machine**.
 //!
 //! The fleet agent gained saturation detection when Floptle Cloud started
 //! sizing its own fleet; the relay reported nothing about itself at all, so the

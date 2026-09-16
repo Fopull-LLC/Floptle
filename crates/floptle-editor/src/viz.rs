@@ -23,7 +23,7 @@ pub(crate) fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) 
 /// sub-rect while a full-window view passes `(0,0)` and the surface size.
 ///
 /// Split out because the Game view can now draw these too: a hitbox you can only see
-/// while not playing is the wrong way round for tuning one (floptle/0024).
+/// while not playing is the wrong way round for tuning one.
 pub(crate) fn project_script_gizmos(
     cmds: &[floptle_script::GizmoCmd],
     cam_world: DVec3,

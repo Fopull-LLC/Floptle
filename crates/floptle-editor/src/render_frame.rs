@@ -24,7 +24,7 @@ use crate::mesh_instances::{wants_prepass, prepass_and_bind};
 #[cfg(feature = "editor-ui")]
 use crate::anim_ui;
 
-/// The decision behind the 16-light-cap warning (`floptle/0116`, `floptle/0168`):
+/// The decision behind the 16-light-cap warning:
 /// given how many lights just got cut and what the last warning was about,
 /// what should the latch become and what (if anything) should the Console say.
 ///
@@ -54,7 +54,7 @@ pub(crate) fn light_cap_warning(dropped: usize, last_warned: usize) -> (usize, O
 impl Editor {
 
     /// Say once when the scene's lights have gone past the sixteen-slot cap,
-    /// naming how many were cut (`floptle/0116`, `floptle/0168`). Called from
+    /// naming how many were cut. Called from
     /// both gathers — the Scene view and `render_world_into` — because either
     /// can be the first (or only) one to run in a given session.
     ///
@@ -101,7 +101,7 @@ impl Editor {
         self.sync_map_paint();
         self.map_edit_frame_update();
         self.tile_frame_viz();
-        // 2D: rebuild any tilemap whose grid or sheet changed (`floptle/0058`).
+        // 2D: rebuild any tilemap whose grid or sheet changed.
         self.sync_tilemaps();
         // The 🎓 Learn tab answers its checks from a snapshot of the scene and
         // the project's files. Taken up here with the other whole-`self` passes,
@@ -176,7 +176,7 @@ impl Editor {
         // frame + threaded writes — autosaves must never stutter the game.
         self.step_terrain_checkpoint();
         {
-            // TERRAIN (`floptle/0077`): residency, field generation and meshing.
+            // TERRAIN: residency, field generation and meshing.
             // `0074` came in as "I can see through unloaded terrain" and was a
             // priority bug; a number here would have shown the meshing queue.
             let _t = floptle_core::profile::Span::new();
@@ -458,10 +458,10 @@ impl Editor {
         // pixels go and where clicks are measured cannot disagree.
         let game_offscreen = self.game_offscreen();
         // Same reason: the terrain chunks' dissolve-in clock is read before the
-        // destructure below takes `&mut self` (`floptle/0067`).
+        // destructure below takes `&mut self`.
         let chunk_now = self.now();
         // The frame profile, cloned out before the destructure below takes
-        // `&mut self` (`floptle/0077`). It is an `Rc<RefCell<…>>` shared with the
+        // `&mut self`. It is an `Rc<RefCell<…>>` shared with the
         // Lua `perf` table, so this is a refcount bump and the numbers a game
         // reads are the same ones written here.
         let profile = self.script_host.profile().clone();
@@ -565,7 +565,7 @@ impl Editor {
         ) else {
             return;
         };
-        // One pose table per frame, not per pass (`floptle/0080`). A frame gathers
+        // One pose table per frame, not per pass. A frame gathers
         // the scene several times over — the Scene view, a docked Game view, every
         // render target, the selection mask — and each of those passes reads pose
         // indices handed out by an earlier gather. Resetting between them would
@@ -732,8 +732,7 @@ impl Editor {
                 };
                 // Posterize, here — over the art the raster and raymarch passes
                 // just drew and before a light touches it. The palette is what
-                // the setting quantizes; the light is a multiplier on top of it
-                // (`floptle/0127`).
+                // the setting quantizes; the light is a multiplier on top of it.
                 if let Some(q) = post_settings.palette() {
                     raster.quantize_palette(gpu, color, composited, q);
                 }
@@ -1296,7 +1295,7 @@ impl Editor {
             self.script_host.profile().borrow_mut().enable(on);
         }
 
-        // The frame is over: fold every bucket into its history (`floptle/0077`).
+        // The frame is over: fold every bucket into its history.
         // Once, at the very end, so a subsystem that reported in several pieces —
         // physics per tick, scripts per pass — contributes one figure per frame.
         // A no-op while collection is off.

@@ -45,7 +45,7 @@ pub enum EndBehavior {
 
 impl SpatialMode {
     /// Every spelling [`Self::parse`] accepts, for an error message that names
-    /// what it takes (`floptle/0082`). `spatial_mode_accepts_every_name_it_offers`
+    /// what it takes. `spatial_mode_accepts_every_name_it_offers`
     /// pushes all of these through the real parser, so the list cannot drift
     /// from the behaviour.
     pub const ACCEPTS: &'static [&'static str] =
@@ -71,7 +71,7 @@ impl SpatialMode {
 }
 
 impl Falloff {
-    /// Every spelling [`Self::parse`] accepts (`floptle/0082`).
+    /// Every spelling [`Self::parse`] accepts.
     pub const ACCEPTS: &'static [&'static str] =
         &["inverse", "linear", "exponential", "exp"];
 
@@ -94,7 +94,7 @@ impl Falloff {
 }
 
 impl EndBehavior {
-    /// Every spelling [`Self::parse`] accepts (`floptle/0082`).
+    /// Every spelling [`Self::parse`] accepts.
     pub const ACCEPTS: &'static [&'static str] = &["stop", "destroy", "loop"];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -175,7 +175,7 @@ impl Default for AudioSource {
 mod accepts_tests {
     use super::*;
 
-    /// Every name an error message offers has to parse (`floptle/0082`).
+    /// Every name an error message offers has to parse.
     ///
     /// The failure this prevents is the worst kind of documentation bug: an
     /// error that tells you to write something the code then refuses, so the

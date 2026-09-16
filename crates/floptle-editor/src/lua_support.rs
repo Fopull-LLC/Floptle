@@ -298,7 +298,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---
 ---`cell` is an index into the node's Material spritesheet. To clear a square,
 ---pass `-1` (any negative works, as in Tiled, Godot and LDtk), `nil`, or the
----`EMPTY_TILE` global — the three are the same value (`floptle/0083`).
+---`EMPTY_TILE` global — the three are the same value.
 ---@class TilemapHandle
 ---@field EMPTY number The cell value meaning \"no tile here\". Same as the EMPTY_TILE global; -1 and nil mean it too.
 ---@field set fun(self: TilemapHandle, x: number, y: number, cell: number|nil, xform: table|nil) Set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op, not a wrap. A negative or nil cell empties the square. The optional 4th argument turns it: { rot = 0|90|180|270, flipX = bool, flipY = bool }.
@@ -1244,7 +1244,7 @@ function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 ---@return table[]
 function findScripts(kind) end
 
----The player's accessibility settings (`floptle/0079`). A game's options menu
+---The player's accessibility settings. A game's options menu
 ---drives these; the engine honours the parts it owns (UI text sizes reflow, the
 ---colour filter is a post stage, UI transitions snap). Persist them with `save.*`.
 ---@class Access

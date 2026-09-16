@@ -11,7 +11,7 @@
 //! * **unused local** — declared, never read. Usually a rename half-done.
 //! * **reserved key** — a raw poll for a key the editor answers itself, which
 //!   reads `false` for the life of the project and looks exactly like nobody
-//!   pressing it (`floptle/0084`).
+//!   pressing it.
 //! * **upvalue pressure** — LuaJIT allows **60** upvalues per function, and a
 //!   file-scope `local` is an upvalue of every function below it. `vessel_controller`
 //!   hit the ceiling and the error ("too many upvalues") names no fix, so warn at 50
@@ -48,7 +48,7 @@ pub(crate) enum LintKind {
     /// frame, before anything visible has happened.
     HookSignature,
     /// A poll for a key the editor answers itself, which therefore reads `false`
-    /// forever (`floptle/0084`). The whole hazard is that this is
+    /// forever. The whole hazard is that this is
     /// indistinguishable from "the player did not press it", so the only way to
     /// find out used to be a confused player.
     ReservedKey,
@@ -84,7 +84,7 @@ const RAW_INPUT_ADVICE: &[(&str, &str, &str)] = &[
 
 /// LuaJIT's hard limit (`LJ_MAX_UPVAL`) and where to start warning, from the
 /// engine's own scripting layer — the runtime warns on the same numbers when a
-/// scene loads a script nobody has open in the IDE (`floptle/0086`).
+/// scene loads a script nobody has open in the IDE.
 use floptle_script::load_error::{file_scope_locals, UPVALUE_LIMIT, UPVALUE_WARN};
 
 /// Names a script may assign at file scope without declaring them: the lifecycle
@@ -499,7 +499,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 });
             }
         }
-        // Pass 6: a poll for a key the editor keeps (`floptle/0084`). The host
+        // Pass 6: a poll for a key the editor keeps. The host
         // warns at runtime too, but that needs somebody to press it and look at
         // the Console; a lint says so while you are typing the binding, which is
         // when changing it is free.
@@ -532,8 +532,8 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 });
             }
         }
-        // Pass 7: a top-level export a `findScript` handle answers itself
-        // (`floptle/0085`). The host reports this at load too, but only once the
+        // Pass 7: a top-level export a `findScript` handle answers itself.
+        // The host reports this at load too, but only once the
         // scene runs — and the failure it prevents is silent and delayed: the
         // handle resolves, the field is present, the type is wrong, and nothing
         // raises until something calls it.
@@ -716,7 +716,7 @@ print(used)
     }
 
     /// Polling a key the editor keeps is flagged where it is written, because
-    /// the runtime symptom is nothing at all (`floptle/0084`).
+    /// the runtime symptom is nothing at all.
     ///
     /// `false` forever reads exactly like "the player did not press it", so
     /// without this the only route to the truth is a player reporting that a
@@ -750,7 +750,7 @@ print(used)
     }
 
     /// Exporting a name a `findScript` handle keeps is flagged on the line that
-    /// exports it (`floptle/0085`).
+    /// exports it.
     ///
     /// The runtime message for this points at the CALLER — "attempt to call
     /// field 'kind' (a string value)" — in a different file from the mistake,

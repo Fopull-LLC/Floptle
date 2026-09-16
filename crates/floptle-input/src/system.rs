@@ -71,7 +71,7 @@ pub struct InputSystem {
     /// [`TickSnapshot`], for the same reason the frame domain is.
     sample: Vec<ActionRuntime>,
     /// Last frame's device snapshot — what `input.pads()` reports. Read-only
-    /// reporting of state the frame already holds; no new ownership. floptle/0047.
+    /// reporting of state the frame already holds; no new ownership.
     pads: Vec<crate::raw::PadState>,
     frame_state: Vec<ActionState>,
     tick_state: Vec<ActionState>,
@@ -191,7 +191,7 @@ impl InputSystem {
 
     /// Resolve every player for the render-frame domain.
     /// The devices as of the last resolved frame: index-stable, connected flag,
-    /// and the pad's reported name. floptle/0047.
+    /// and the pad's reported name.
     pub fn pads(&self) -> &[crate::raw::PadState] {
         &self.pads
     }
@@ -205,7 +205,6 @@ impl InputSystem {
         // Snapshot the devices so a script can ask "is there a controller here"
         // — the action API can only ever answer the resolved question, so
         // "not bound" and "not plugged in" are indistinguishable through it.
-        // floptle/0047.
         self.pads = raw.pads.clone();
         let allow = self.contexts.allow_mask(&self.map);
         for slot in 0..self.players() {
@@ -684,7 +683,7 @@ mod tests {
     }
 
     /// Two local players on one keyboard, each with their own quarter-circle. This is
-    /// the end of floptle/0028: the motion recogniser reads the map-level `Move` axis,
+    /// the end of an earlier task: the motion recogniser reads the map-level `Move` axis,
     /// and before per-player bindings that axis was player 1's for everyone — so P2's
     /// `dir()` and every motion answered with P1's stick, silently.
     #[test]

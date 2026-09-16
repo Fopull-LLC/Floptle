@@ -19,7 +19,7 @@
 //! Nothing. A failed poll leaves every running server running and tries again
 //! next cycle. The alternative — treating "I could not ask" as "nothing should
 //! be running" — would take a whole region down on a bad minute at the website,
-//! which is the same mistake `floptle/0189` records on the entitlements
+//! which is the same mistake an earlier task records on the entitlements
 //! endpoint and the same answer: absent is not revoked.
 
 use std::collections::BTreeMap;
@@ -165,7 +165,7 @@ impl Agent {
             crate::fetch::fetch_bundle(&d.build_url, &d.sha256, &bundle_dir)?;
         } else if !args.dry_run && bundle::ensure_readable(&bundle_dir)? {
             // Unpacked by an agent that trusted the archive's mode bits
-            // (`floptle/0200`, defect two). Once, then the marker says so.
+            // (defect two). Once, then the marker says so.
             bundle::log_line(&format!("{}: made the bundle readable by the server", d.redacted()));
         }
 
@@ -235,7 +235,7 @@ impl Agent {
         // Rewrite only on a real change: `daemon-reload` and a restart on every
         // ten-second poll would bounce every server on the box, forever.
         //
-        // ⚠ The key file counts as part of the unit (`floptle/0229`): it is
+        // ⚠ The key file counts as part of the unit: it is
         // read at start, so a rotated key that changed nothing in the unit
         // text would otherwise leave the old key running until something else
         // restarted the server — and the rotation's grace window would run
@@ -269,7 +269,7 @@ impl Agent {
             // nothing — so the agent would write a corrected unit, log that it
             // had started it, and leave the old process running the old command
             // line forever. That is not a hypothetical: it is what happened on
-            // `us-east-1` when `floptle/0200`'s fix first reached the box, and
+            // `us-east-1` when that task's fix first reached the box, and
             // the fix read as a failure because the file on disk was right and
             // the running process was a day old. Reaching this branch at all
             // means the text changed, which means the running process is
@@ -360,7 +360,7 @@ pub fn unit_state(host: &mut dyn Host, unit: &str) -> State {
 }
 
 /// **What one deployment is costing in memory**, from systemd's cgroup
-/// accounting: `(current, peak-since-start)` in megabytes (`floptle/0214`).
+/// accounting: `(current, peak-since-start)` in megabytes.
 ///
 /// Both are `None` when systemd will not answer. It says `[not set]` for a unit
 /// with no cgroup, and `infinity` where accounting is off — and older systemd
@@ -407,8 +407,8 @@ fn read_server_status(path: &Path) -> ServerStatus {
 
 /// The box's own numbers, best effort.
 ///
-/// ⚠ **A number this cannot measure is left out, never sent as zero**
-/// (`floptle/0213`). A missing `/proc/loadavg` must not fail the whole report —
+/// ⚠ **A number this cannot measure is left out, never sent as zero**.
+/// A missing `/proc/loadavg` must not fail the whole report —
 /// the deployment states are the part of this document that matters — but the
 /// control plane reads these now, and `mem_free_mb: 0` from a box that simply
 /// could not read `/proc/meminfo` is a healthy machine declaring itself out of
@@ -587,7 +587,7 @@ mod tests {
     ///
     /// The status file lives at `<run>/<id>/status.json` — inside the
     /// directory the unit declares as its own — and the agent reads it from
-    /// there. Before `floptle/0200` the agent read `<run>/<id>.json`, a file
+    /// there. Before an earlier task the agent read `<run>/<id>.json`, a file
     /// the server could never create, so the report carried a structural zero
     /// for peers and uptime and `null` for the lobby code on every deployment.
     /// Seeded at the new path; a reader still looking at the old one reports
@@ -613,8 +613,8 @@ mod tests {
         assert_eq!(s.lobby_code.as_deref(), Some("UE44B4"), "the code is a startup fact a log tail cannot carry");
         assert_eq!(s.tick_p95_ms, Some(4.25));
 
-        // **Where it is reachable is forwarded, not merely read**
-        // (`floptle/0212`). The server has reported this since 0.86.2 and the
+        // **Where it is reachable is forwarded, not merely read**.
+        // The server has reported this since 0.86.2 and the
         // agent dropped it on the floor, so the fix reached an operator on the
         // box and never reached the product — which is the same shape as the
         // lobby code before it, one layer further out.
@@ -683,7 +683,7 @@ mod tests {
     /// and leave the old process running the old command line forever.
     ///
     /// That is not hypothetical — it is what happened on `us-east-1` the first
-    /// time `floptle/0200`'s fix reached the box. The unit file on disk had the
+    /// time that task's fix reached the box. The unit file on disk had the
     /// new `RuntimeDirectory=` and the new `--status-file`; the process was a
     /// day-old one still writing to the path that never worked, so the status
     /// file was still missing and the fix looked like it had failed.
@@ -717,7 +717,7 @@ mod tests {
     }
 
     /// ⚠ **The game key is on disk for root alone, and a rotated key restarts
-    /// the server** (`floptle/0229`).
+    /// the server**.
     ///
     /// Found on `us-east-1`: the unit file carried `Environment=FLOPTLE_GAME_KEY=`
     /// at `0644`, so `sudo -u nobody cat` read another developer's credential
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(r.deployments[0].state, "running");
     }
 
-    /// ⚠ **The engine's own player ceiling reaches the report** (`floptle/0221`)
+    /// ⚠ **The engine's own player ceiling reaches the report**
     /// — asserted through `cycle`, the function production calls.
     ///
     /// The card asked for "a guard that fails when the field is DROPPED rather
@@ -811,7 +811,7 @@ mod tests {
     /// production — passes `None`. This writes a real status file and reads the
     /// field off the real report.
     ///
-    /// Same seam as `port` and `relay` (`floptle/0209`, `floptle/0212`): three
+    /// Same seam as `port` and `relay`: three
     /// fields now, each written by the server, each dropped in this one
     /// function.
     #[test]
@@ -907,8 +907,7 @@ mod tests {
         assert_eq!(unit_state(&mut h, "x.service"), State::Stopped);
     }
 
-    /// **systemd's three ways of saying "no number" are not zero**
-    /// (`floptle/0214`).
+    /// **systemd's three ways of saying "no number" are not zero**.
     ///
     /// `[not set]` is a unit with no cgroup, `infinity` is accounting turned
     /// off, and an empty value is a systemd older than v253 that has never

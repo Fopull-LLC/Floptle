@@ -297,7 +297,6 @@ fn resolve_axis1(
 /// not "the first pad anyone has plugged in". Without this, in a two-player game
 /// with one pad connected, player two borrows player one's stick — the binding
 /// form could express neither "this device" nor "this player's device".
-/// floptle/0043.
 fn own_pad(source: crate::source::Source, player: Option<u8>, slot: u8) -> crate::source::Source {
     use crate::source::{PadId, Source as S};
     match (source, player) {
@@ -310,7 +309,7 @@ fn own_pad(source: crate::source::Source, player: Option<u8>, slot: u8) -> crate
 ///
 /// A divide-by-zero guard and nothing else. Deliberately absurd (10 000 fps) so
 /// that every frame a real machine produces divides by its own true `dt` and a
-/// script's `* dt` cancels exactly — `floptle/0161` is what a floor inside the
+/// script's `* dt` cancels exactly — an earlier task is what a floor inside the
 /// real range does instead.
 const MIN_RATE_DT: f32 = 1.0 / 10_000.0;
 
@@ -357,7 +356,7 @@ fn resolve_axis2(
             }
             // A player-scoped `Any` means this player's own pad, not "any
             // player's pad" — otherwise a second player with no pad of their
-            // own silently mirrors the first player's stick. floptle/0043.
+            // own silently mirrors the first player's stick.
             let id = if player.is_some() && *id == crate::source::PadId::Any {
                 crate::source::PadId::Slot(slot)
             } else {
@@ -391,8 +390,8 @@ fn resolve_axis2(
             // the conversion exists to remove. Two consecutive 2 ms and 4 ms
             // frames turned identical mouse movement into 2x different
             // rotation, so frame-time variance fed straight into the camera at
-            // exactly the frame rates where it should have been smoothest
-            // (`floptle/0161`). "Hundreds of fps" is ordinary hardware now.
+            // exactly the frame rates where it should have been smoothest.
+            // "Hundreds of fps" is ordinary hardware now.
             //
             // The floor was doing two jobs. They are separated here, because
             // only one of them needs to touch the transfer function — and that
@@ -485,7 +484,7 @@ mod tests {
         }
     }
 
-    /// floptle/0043: two pads, two players, one axis. Before `Stick` carried a
+    /// two pads, two players, one axis. Before `Stick` carried a
     /// `player`, the obvious map — `Slot(0)` and `Slot(1)` side by side — made
     /// both sticks contribute to both players, and largest-magnitude-wins meant
     /// whichever stick was pushed harder drove both characters at once.
@@ -702,7 +701,7 @@ mod tests {
 
     /// Two players on one keyboard. A binding scoped to a slot fires only for that
     /// slot, so a single action name serves both fighters instead of the map having to
-    /// carry a duplicate `Light2` (floptle/0028).
+    /// carry a duplicate `Light2`.
     #[test]
     fn a_player_scoped_binding_serves_only_its_slot() {
         let map = InputMap {
@@ -919,7 +918,7 @@ mod tests {
     /// frame rate.** That is the entire promise of `rate: true` — the axis
     /// reports pixels per second so a script's `* dt` cancels the frame time
     /// back out. A floor under the divisor broke the cancellation above 240 fps
-    /// and put frame-time variance straight into the camera (`floptle/0161`).
+    /// and put frame-time variance straight into the camera.
     ///
     /// So: drive one physical 600-pixel sweep three ways and integrate the
     /// rotation a documented `yaw -= lookX * dt` script would apply.
@@ -1041,7 +1040,7 @@ mod tests {
         // from. It used to be a bare `< 100.0` — a number that was really
         // `40 px x 0.006 x 240`, i.e. a restatement of the `1/240 s` floor
         // rather than of the property. The floor had to move to fix
-        // `floptle/0161`, and the assertion moved with it, which is exactly the
+        // an earlier task, and the assertion moved with it, which is exactly the
         // situation where a guard written around an implementation stops
         // guarding anything. The property is: finite, and bounded by a stated
         // ceiling.

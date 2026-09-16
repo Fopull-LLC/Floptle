@@ -1,4 +1,4 @@
-//! floptle/0180 — voice forwarding, and the range gating that makes proximity
+//! voice forwarding, and the range gating that makes proximity
 //! voice a real thing rather than a volume slider.
 //!
 //! The card was blunt about why this lives on the server: "attenuating a stream

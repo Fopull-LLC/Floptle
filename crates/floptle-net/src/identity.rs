@@ -1,4 +1,4 @@
-//! Who a peer is, and whether this server will have them (`floptle/0183`).
+//! Who a peer is, and whether this server will have them.
 //!
 //! Two gaps that are really one: a server did not know **who** a peer was, and
 //! could not do anything about it if it did. A peer was a transport id plus

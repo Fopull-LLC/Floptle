@@ -123,8 +123,7 @@ pub struct Light2dUniform {
     /// x = how many lights are live. z = how many steps the shadow march may
     /// take, and `0` switches shadowing off for the whole frame — the gather
     /// sets it only when something in the G-buffer actually casts, so a scene
-    /// with no casters pays exactly what it paid before shadows existed
-    /// (`floptle/0125`).
+    /// with no casters pays exactly what it paid before shadows existed.
     pub count: [f32; 4],
     /// rgb = the flat ambient every 2D surface gets.
     ///
@@ -149,7 +148,7 @@ pub struct Light2dUniform {
     pub color: [[f32; 4]; 16],
     /// Per light: `[inner radius, exponent, casts-are-honoured, spare]`.
     ///
-    /// `[0, 2, …]` is the curve every light had before `floptle/0126` — a ramp
+    /// `[0, 2, …]` is the curve every light had before an earlier task — a ramp
     /// that starts at the light and falls as `x²` — so the defaults leave every
     /// existing scene where it was.
     pub falloff: [[f32; 4]; 16],
@@ -167,7 +166,7 @@ pub struct Light2dUniform {
 impl Light2dUniform {
     /// Which sorting **ranks** anything in this frame can change the look of,
     /// as a 64-bit set — the union of every live light's layer mask, and every
-    /// rank at once when the base light is not white (`floptle/0122`).
+    /// rank at once when the base light is not white.
     ///
     /// This is the filter the gather applies before it builds a single
     /// instance. `Lit2D::Auto` answers *true* for every tilemap and every
@@ -184,8 +183,8 @@ impl Light2dUniform {
     ///   everything, so a base that has been turned down means every rank — or
     ///   a dimmed room would quietly stop being dim the moment you deleted the
     ///   last torch.
-    /// * **A parked light holds no slot** and is already absent from `count`
-    ///   (`floptle/0116`), so it cannot put a rank back in the set. A pool of
+    /// * **A parked light holds no slot** and is already absent from `count`,
+    ///   so it cannot put a rank back in the set. A pool of
     ///   spares at `intensity = 0` is the shape that card blessed, and it must
     ///   stay free.
     ///
@@ -239,7 +238,7 @@ pub const SHADOW_STEPS: f32 = 28.0;
 /// arithmetic on — going through an sRGB encode and decode between the two
 /// stages would darken every lit pixel by the gamma curve.
 ///
-/// **Half-float and not `Rgba8Unorm`**, since `floptle/0121` made the composite a
+/// **Half-float and not `Rgba8Unorm`**, since an earlier task made the composite a
 /// *difference* rather than a redraw. Eight linear bits put a 0.004 floor under
 /// every value, which is nothing when you multiply by it and a visible step when
 /// you subtract it back out of a dark pixel — linear 8-bit has ~1/255 of its
@@ -262,7 +261,7 @@ struct Targets {
 /// Pipelines and per-frame targets for the 2D lighting pass.
 pub struct Light2d {
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
-    /// The two halves of the signed correction (`floptle/0121`): `dst - src` for
+    /// The two halves of the signed correction: `dst - src` for
     /// where a light darkens, `dst + src` for where it brightens. Two pipelines
     /// and not two passes — they share every attachment and bind group, so they
     /// run back to back in one render pass.
@@ -400,7 +399,7 @@ impl Light2d {
             bind_group_layouts: &[Some(&lights_layout), Some(&read_layout)],
             immediate_size: 0,
         });
-        // The two halves of `floptle/0121`'s signed delta. Identical but for the
+        // The two halves of that task's signed delta. Identical but for the
         // entry point and the blend OPERATION — both take the source as-is
         // (`One`/`One`), one subtracting it from the frame and one adding it.
         //
@@ -622,7 +621,7 @@ mod tests {
     }
 
     /// The defaults are "what a light did before any of this was authorable",
-    /// and that is the whole compatibility story for `floptle/0125` and `0126`:
+    /// and that is the whole compatibility story for an earlier task and `0126`:
     /// a caller that fills only what it always filled gets the old picture.
     #[test]
     fn an_unfilled_light_keeps_the_curve_it_always_had() {
@@ -643,7 +642,7 @@ mod tests {
         assert_eq!(u.ambient[..3], [1.0, 1.0, 1.0]);
     }
 
-    /// `floptle/0122`: what the pass can reach decides what is gathered for it,
+    /// what the pass can reach decides what is gathered for it,
     /// so an empty reach has to mean *nothing at all*, and a base light that has
     /// been turned down has to mean *everything*.
     #[test]
@@ -662,7 +661,7 @@ mod tests {
         assert_eq!(two.reach(), (1 << 2) | (1u64 << 40));
 
         // A light beyond `count` is a parked spare and holds nothing open
-        // (`floptle/0116`) — a pool at intensity 0 must stay free.
+        // — a pool at intensity 0 must stay free.
         let mut parked = Light2dUniform { count: [1.0, 0.0, 0.0, 0.0], ..Default::default() };
         parked.mask[0] = [1 << 3, 0, 0, 0];
         parked.mask[1] = [u32::MAX, u32::MAX, 0, 0];

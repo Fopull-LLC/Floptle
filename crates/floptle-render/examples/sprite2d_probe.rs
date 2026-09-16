@@ -1,5 +1,5 @@
 //! What the 2D layer costs, measured against the way a 2D game had to do it
-//! before (`floptle/0058`).
+//! before.
 //!
 //! Run: `cargo run -p floptle-render --release --example sprite2d_probe`
 //!

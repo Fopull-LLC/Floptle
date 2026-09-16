@@ -123,7 +123,7 @@ pub struct Body {
     /// that genuinely need it: buoyancy compares the body's density against the
     /// water's, which is the difference between a cork and a cannonball.
     pub mass: f32,
-    /// SLEEPING (`floptle/0143`): grounded and below rest speed for long
+    /// SLEEPING: grounded and below rest speed for long
     /// enough that the step skips it entirely — no gravity, no depenetration,
     /// no ground detection — the same near-zero cost `kinematic` already
     /// gets. Woken by a kinematic hull touching it, a Lua velocity/impulse
@@ -248,7 +248,7 @@ impl Body {
     /// outside its own bounding sphere is at least `|c − bc| − br`. So a
     /// collider whose bound is further than this from `pos` cannot produce a
     /// single overlapping center, and the whole body can be skipped without
-    /// calling `distance` once (`floptle/0171`).
+    /// calling `distance` once.
     ///
     /// Conservative on purpose — it over-covers rather than clipping, so the
     /// reject can never lose a touch event that the exact test would have found.

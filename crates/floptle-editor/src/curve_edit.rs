@@ -305,8 +305,8 @@ pub(crate) fn curve_editor(
     });
 
     // Common shapes, one click. Every curve was dragged by hand from a straight
-    // line, which is where most of the authoring time in the tab actually went
-    // (`floptle/0099`). These rewrite the two ENDS' tangents and leave the
+    // line, which is where most of the authoring time in the tab actually went.
+    // These rewrite the two ENDS' tangents and leave the
     // values alone, so an ease is a shape applied to a curve you already have
     // rather than a curve that replaces it.
     ui.horizontal(|ui| {
@@ -656,7 +656,7 @@ fn axis_label(v: f32) -> String {
 /// The graph used to carry no numbers at all — an unlabelled point in an
 /// unlabelled box — and drew its zero line only `if lo < 0.0 && hi > 0.0`, i.e.
 /// only once the curve had already gone negative. Both halves of "I can't tell
-/// what this is going to do" (`floptle/0098`).
+/// what this is going to do".
 ///
 /// When zero is off the top or bottom, the edge says so rather than the graph
 /// staying silent about which side of it you are on.
@@ -837,7 +837,7 @@ mod tests {
         assert!(axis_label(0.125).len() <= 5);
     }
 
-    // ---- floptle/0099: shapes without dragging ------------------------------
+    // ---- shapes without dragging ------------------------------
 
     /// An ease is a shape applied to the curve you have — it must not move the
     /// values you authored.

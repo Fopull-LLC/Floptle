@@ -32,8 +32,7 @@ pub enum NetRole {
     Client,
 }
 
-/// **How long a joiner waits on a waking server** before calling it refused
-/// (`floptle/0217`).
+/// **How long a joiner waits on a waking server** before calling it refused.
 ///
 /// W targets under thirty seconds from the wake request to a server answering,
 /// so ninety is three times the expected worst case — long enough that a slow
@@ -80,7 +79,7 @@ pub enum NetEvent {
     PeerJoined(PeerId),
     /// A player left. The reason is present when the server decided — a kick,
     /// with the words the operator gave — and `None` when they simply went
-    /// away, which is every other case. floptle/0183.
+    /// away, which is every other case.
     PeerLeft(PeerId, Option<String>),
     /// Client: the server removed us, and this is why. Distinct from
     /// `Disconnected` on purpose: a kick has an explanation a player is owed,
@@ -245,7 +244,7 @@ pub struct NetSession {
     /// Client: how the join attempt is going. `net.joinState()` reads it, so a
     /// lobby screen can say "no such lobby" instead of counting to ten.
     join_state: JoinState,
-    /// When this client first heard that a server was waking (`floptle/0217`),
+    /// When this client first heard that a server was waking,
     /// for the deadline below. `None` for a join that never waited on one.
     starting_since: Option<floptle_core::time::Instant>,
     /// How long to wait on a waking server before calling it refused.
@@ -259,7 +258,7 @@ pub struct NetSession {
     /// What the last snapshot cost each client — read by the 🌐 panel so the
     /// feature is visible while it runs. Also empty while interest is off.
     interest_stats: HashMap<PeerId, crate::interest::InterestStat>,
-    /// Who each connected peer is (`floptle/0183`). An anonymous peer has an
+    /// Who each connected peer is. An anonymous peer has an
     /// entry too — it says it is anonymous, which is different from having no
     /// answer at all.
     identities: HashMap<PeerId, crate::identity::Identity>,
@@ -290,7 +289,7 @@ pub struct NetSession {
     /// knowing where they are, that is the difference between a mode that can
     /// ship competitively and one that cannot. So a speaker's frames are
     /// forwarded only to the peers the game names, and a client it does not
-    /// name never receives the bytes at all. floptle/0180.
+    /// name never receives the bytes at all.
     voice_forward: HashMap<PeerId, Vec<PeerId>>,
     /// Voice frames received since the last drain — (speaker, seq, payload).
     ///
@@ -309,7 +308,6 @@ pub struct NetSession {
     /// A pin can never expose or hide a client's own avatar: it is what that
     /// client reconciles its prediction against, and a game that hid it would
     /// get a player who cannot see themselves rather than an error.
-    /// floptle/0182.
     relevance_pins: HashMap<(PeerId, u64), bool>,
     /// Current synced values, refreshed by the driver each tick (diffed here).
     synced_now: SyncedVars,
@@ -466,7 +464,7 @@ pub struct NetSession {
     /// does, that being the whole loss strategy) evicts other peers' oldest
     /// entries — and the oldest entry is exactly the tick a starved peer is
     /// waiting for. That deadlocked a live match permanently off one lost
-    /// datagram (floptle/0039). Per-peer rings make crowding impossible.
+    /// datagram. Per-peer rings make crowding impossible.
     ///
     /// `BTreeMap`, not `HashMap`: the fan-out is built by iterating this, and a
     /// packet whose contents depend on hash order is a packet that differs
@@ -523,7 +521,7 @@ pub struct NetSession {
     /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
     state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
     /// Post-mortem breakdowns for a tick that already desynced, per peer.
-    /// Only ever populated after the match is lost. floptle/0045.
+    /// Only ever populated after the match is lost.
     state_details: HashMap<u64, Vec<PeerDetail>>,
     /// Ticks a desync was detected or announced for, for the driver to surface.
     desyncs_in: Vec<u64>,
@@ -548,7 +546,7 @@ pub type PeerDetail = (PeerId, Vec<(String, u64)>);
 ///
 /// Only the values that actually differ come back: the report's whole job is to
 /// point at one thing, and a list that also contains everything that AGREED is
-/// the report that named nothing. floptle/0045.
+/// the report that named nothing.
 #[allow(clippy::type_complexity)]
 pub fn diff_details(reports: &[PeerDetail]) -> Vec<(String, Vec<(PeerId, u64)>)> {
     if reports.len() < 2 {
@@ -618,8 +616,7 @@ impl NetSession {
         Self::client_as(transport, input_map_hash, None)
     }
 
-    /// [`Self::client`], presenting an account identity in the handshake
-    /// (`floptle/0183`).
+    /// [`Self::client`], presenting an account identity in the handshake.
     ///
     /// Optional by design: a LAN or friends game with nobody signed in has to
     /// keep working exactly as it does today, so an absent claim is a normal
@@ -751,8 +748,7 @@ impl NetSession {
     /// reading it as "what this client can see" reports a working interest
     /// filter as though it were doing nothing. This counts nodes with at least
     /// one snapshot sample, which is what `net.setRelevant(node, peer, false)`
-    /// takes away and therefore the number a relevancy test has to read
-    /// (`floptle/0193`, verifying `floptle/0182`).
+    /// takes away and therefore the number a relevancy test has to read.
     ///
     /// It is a client-side measure and answers 0 on a server.
     pub fn nodes_receiving(&self) -> usize {
@@ -764,7 +760,7 @@ impl NetSession {
         &self.peers
     }
 
-    // -- identity and moderation (floptle/0183) -----------------------------
+    // -- identity and moderation -----------------------------
 
     /// Who a connected peer is. `None` for a peer that is not on the roster.
     ///
@@ -845,7 +841,7 @@ impl NetSession {
         true
     }
 
-    // -- voice chat (floptle/0180) ------------------------------------------
+    // -- voice chat ------------------------------------------
 
     /// CLIENT: send one encoded 20 ms frame from this machine's microphone.
     ///
@@ -1322,7 +1318,7 @@ impl NetSession {
     /// `Some(false)` withholds it, `Some(true)` pins it regardless of distance
     /// or line of sight, `None` hands the decision back to the two tests.
     ///
-    /// This is the hidden-role hook (floptle/0182). It is a **server-side**
+    /// This is the hidden-role hook. It is a **server-side**
     /// decision by construction: attenuating, hiding or not drawing something a
     /// client has already been sent is a volume slider a modified client turns
     /// back up, and in a game where hearing or seeing someone is knowing where
@@ -1387,7 +1383,7 @@ impl NetSession {
     /// installed a frame later from a queued signal. Any ordering that leaves
     /// the flag off while the driver is on turns every guard here off, and the
     /// symptom is a stale snapshot pose written over a locally-simulated node
-    /// forever after (floptle/0048).
+    /// forever after.
     ///
     /// A set refreshed from the driver itself cannot disagree with the driver.
     /// Samples already buffered for a newly-driven node are dropped here for
@@ -1596,8 +1592,8 @@ impl NetSession {
     ///
     /// It is also what shipped: v0.10.4's referee ran the match in freefall with
     /// no floor while both players stood on a stage, so every online match died
-    /// at its first checksum with both players told they had desynced
-    /// (floptle/0041). The anti-cheat property is unchanged — a single peer that
+    /// at its first checksum with both players told they had desynced.
+    /// The anti-cheat property is unchanged — a single peer that
     /// disagrees is still judged against the referee, not against a quorum.
     fn judge_against_referee(&mut self, tick: u64) {
         let Some(&truth) = self.referee_hashes.get(&tick) else { return };
@@ -1843,7 +1839,7 @@ impl NetSession {
         // whole match is the worst available response. It is what shipped:
         // 0.10.4's referee ran the match in freefall with no floor while both
         // players stood on a stage, so every online match died at its first
-        // checksum with both players told they had desynced (floptle/0041).
+        // checksum with both players told they had desynced.
         if self.referee_hashes.contains_key(&tick) {
             self.judge_against_referee(tick);
             return;
@@ -2639,7 +2635,7 @@ impl NetSession {
                 continue;
             }
             // ⚠ **In a rollback session, a rollback node's transform is bytes
-            // nobody will read** (`floptle/0218`).
+            // nobody will read**.
             //
             // Every peer simulates these locally from inputs, and the receiving
             // side already refuses them — `driven_locally` returns true for
@@ -3280,7 +3276,7 @@ impl NetSession {
             //
             // Two questions, deliberately: the DRIVER's set (which cannot get
             // out of step with the driver) and the session flag (which can, and
-            // once did — floptle/0048). Either one is enough to refuse.
+            // once did — an earlier task). Either one is enough to refuse.
             let driven = self.locally_driven.contains(&e.index())
                 || (self.rollback
                     && world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback()));
@@ -3422,8 +3418,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **A rollback session does not ship state nobody will read**
-    /// (`floptle/0218`).
+    /// ⚠ **A rollback session does not ship state nobody will read**.
     ///
     /// A real ten-minute match measured **234 kbps per player — 487 bytes a
     /// frame** for a game whose netcode is a handful of input bits. The cause
@@ -3480,8 +3475,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **A wake that never lands becomes a refusal, not a permanent wait**
-    /// (`floptle/0217`).
+    /// ⚠ **A wake that never lands becomes a refusal, not a permanent wait**.
     ///
     /// Without a deadline a joiner sits on "about 30 seconds" forever for a
     /// server that is never coming — a box that is full, a deployment that
@@ -3567,7 +3561,7 @@ mod tests {
         (s, world, e)
     }
 
-    /// field regression (floptle/0048): a stale snapshot pose must not be
+    /// field regression: a stale snapshot pose must not be
     /// written over a node the local driver is simulating — **even when the
     /// session's own `rollback` flag says the match is not running**.
     ///
@@ -3613,7 +3607,7 @@ mod tests {
     }
 
     /// A sample that gets past the ingest guard is REPORTED, not silently
-    /// dropped — the detector floptle/0048 asked for. It fires on the machine
+    /// dropped — the detector an earlier task asked for. It fires on the machine
     /// that has the problem, while it has it, naming the node.
     #[test]
     fn a_snapshot_that_slips_past_the_guard_is_reported_once() {

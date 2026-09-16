@@ -1,4 +1,4 @@
-//! Headless colour-vision probe (`floptle/0079`) — renders a chart of the colour
+//! Headless colour-vision probe — renders a chart of the colour
 //! pairs a deficiency confuses, runs it through each filter, and checks the
 //! correction actually SEPARATES them.
 //!

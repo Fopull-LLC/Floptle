@@ -163,7 +163,7 @@ impl HttpState {
     }
 }
 
-/// Every key an `http.get`/`http.post` options table reads (`floptle/0082`).
+/// Every key an `http.get`/`http.post` options table reads.
 pub(crate) const OPT_KEYS: &[&str] = &["headers", "timeout", "json"];
 
 /// What `read_opts` pulls out of an options table: headers, timeout seconds, and
@@ -997,7 +997,7 @@ mod tests {
     /// The empty list. `{}` is both an empty list and an empty object, and the
     /// encoder has to pick one — it picks the object, because an empty body
     /// posted to an API that reads objects has to stay an object. `json.array`
-    /// is how a script says the other thing (`floptle/0152`).
+    /// is how a script says the other thing.
     #[test]
     fn an_empty_list_can_be_sent_and_a_decoded_list_stays_one() {
         let (lua, _, _) = lua_with_http();
@@ -1198,7 +1198,7 @@ mod tests {
 }
 
 /// Live checks against the real Floptle Cloud API on `fopull.com`
-/// (floptle-platform `tasks/floptle/0054`). `#[ignore]`d: they need the
+/// (floptle-platform `tasks/an earlier task`). `#[ignore]`d: they need the
 /// network, so CI never runs them — `cargo test -p floptle-script -- --ignored
 /// --nocapture live_` when you want to prove the chain by hand.
 /// Where a request may go — proved against a real socket on this machine, not

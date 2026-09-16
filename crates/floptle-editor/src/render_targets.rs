@@ -9,7 +9,7 @@
 //! function ([`plan_render_targets`]) so it is testable without a GPU — the part
 //! that allocates textures is deliberately thin.
 //!
-//! `floptle/0078`: before this, every target was 480×270 and redrew every frame,
+//! before this, every target was 480×270 and redrew every frame,
 //! and a fifth target was dropped silently in whatever order the ECS query
 //! happened to return. All three are now the game's choice, and the one thing
 //! that remains a limit says so.

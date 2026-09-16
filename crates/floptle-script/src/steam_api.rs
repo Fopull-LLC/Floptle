@@ -2194,7 +2194,7 @@ mod tests {
     }
 
     /// An options table is read by name, so a typo must be refused rather than
-    /// silently taking the default (`floptle/0082`).
+    /// silently taking the default.
     #[test]
     fn an_unknown_option_key_is_refused() {
         let (f, _boards) = with_boards();

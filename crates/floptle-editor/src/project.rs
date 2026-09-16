@@ -179,7 +179,7 @@ impl Editor {
     /// Keys are normalised to the project-relative form scenes and materials reference
     /// textures by. Older files stored the Assets browser's absolute paths, which no
     /// renderer ever looked up — those migrate here, and are written back relative by
-    /// the next save (floptle/0026).
+    /// the next save.
     pub(crate) fn load_texture_settings(&mut self) {
         let path = self.project_root.join(".floptle").join("textures.ron");
         let raw: std::collections::HashMap<String, crate::assets::TexSetting> =
@@ -301,8 +301,7 @@ impl Editor {
                 }
                 let mut rig = anim::rig_from_model(&model, &overrides);
                 // Bind pose + per-vertex weights to the GPU once, here: from now on
-                // this model's characters are deformed in the vertex shader
-                // (`floptle/0080`).
+                // this model's characters are deformed in the vertex shader.
                 anim::upload_skins(gpu, raster, &mut rig);
                 let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
@@ -385,7 +384,7 @@ impl Editor {
     /// Create a new blank scene `<name>.ron`, save it, and switch the editor to it.
     pub(crate) fn new_scene(&mut self, name: &str) {
         self.reset_anim_bindings();
-        self.editing_prefab = None; // a new scene is a scene (`floptle/0090`)
+        self.editing_prefab = None; // a new scene is a scene
         let name = {
             let n = name.trim();
             if n.is_empty() { "untitled".to_string() } else { n.to_string() }
@@ -448,8 +447,7 @@ impl Editor {
     pub(crate) fn open_scene_file(&mut self, path: &str) {
         self.reset_anim_bindings();
         // Opening a scene is the way out of prefab editing, and the only one —
-        // which is what keeps "am I editing a prefab" a question with one answer
-        // (`floptle/0090`).
+        // which is what keeps "am I editing a prefab" a question with one answer.
         self.editing_prefab = None;
         let p = Path::new(path);
         let doc = match floptle_scene::load(p) {
@@ -527,7 +525,7 @@ impl Editor {
     ///
     /// Prefer this to [`Self::register_scene_meshes`] whenever the caller knows
     /// which models arrived. Registering "everything in the scene" to account for
-    /// one new prop is `floptle/0138`: spawning a desk into a room holding two
+    /// one new prop is an earlier task: spawning a desk into a room holding two
     /// thousand props cloned two thousand asset paths and re-imported all of
     /// them, per desk.
     pub(crate) fn register_meshes<'a>(&mut self, paths: impl IntoIterator<Item = &'a str>) {
@@ -559,7 +557,7 @@ impl Editor {
 
     /// The file the open scene loads from and saves to.
     ///
-    /// **This is `scene_rel`, not `scenes/{scene_name}.ron`** (`floptle/0111`).
+    /// **This is `scene_rel`, not `scenes/{scene_name}.ron`**.
     /// `scene_name` is only the file STEM — it is what the hierarchy header and
     /// the window title show, and what `scene.current()` hands a script. Building
     /// a save path out of it threw the subfolder away, so
@@ -1211,7 +1209,7 @@ impl Editor {
     /// is just not the node the author meant — so nothing could ever catch it
     /// from the file. What can be caught is reported here, loudly, because the
     /// symptom otherwise reaches you as a UI bug and sends you reading UI
-    /// scripts that are correct. floptle/0046.
+    /// scripts that are correct.
     pub(crate) fn report_scene_wiring(&mut self, doc: &floptle_scene::SceneDoc) {
         for line in floptle_scene::validate_parents(&doc.nodes) {
             self.console.push(floptle_script::LogLevel::Error, format!("🔗 {line}"), None);
@@ -1224,7 +1222,7 @@ impl Editor {
     /// Write `input.ron` if absent, and top up an existing one with any starter
     /// entry it has no name for. Never overwrites and never re-adds: a project
     /// that deleted or re-scoped a binding keeps that decision across every
-    /// version bump, and anything that is added is printed. floptle/0044.
+    /// version bump, and anything that is added is printed.
     pub(crate) fn seed_input_map(&self) {
         let mut had_map = true;
         let mut map = match floptle_input::load_map(&self.project_root) {
@@ -1248,7 +1246,6 @@ impl Editor {
         // binding serves every local slot, so the re-seeded Space jumped both
         // fighters — and the rewrite took the file's explanatory comments with
         // it. That shipped into two builds before anyone re-read the file.
-        // floptle/0044.
         let added = if had_map {
             map.top_up_missing(&floptle_input::InputMap::starter())
         } else {
@@ -1332,7 +1329,7 @@ impl Editor {
         self.collapsed.clear();
     }
 
-    /// Say so when this project is already split by `floptle/0111`.
+    /// Say so when this project is already split by.
     ///
     /// The fix stops new saves going astray; it cannot know that the stray file
     /// is there, and the user has no reason to look. Left unsaid, they reopen
@@ -1641,7 +1638,7 @@ impl Editor {
             );
             return false;
         }
-        // Editing a prefab on its own (`floptle/0090`): the world is the prefab,
+        // Editing a prefab on its own: the world is the prefab,
         // so a save writes it back over that file and stops. None of what
         // follows applies — a prefab has no terrain fields, no map geometry and
         // no paint sidecars, and writing them out under its name is exactly the
@@ -1658,8 +1655,7 @@ impl Editor {
         let path = self.scene_path();
         // The scene's own directory, not `scenes/` — a scene under
         // `scenes/cutscenes/` needs that folder to exist, and hardcoding the
-        // parent was half of why a subfolder scene could never be written back
-        // (`floptle/0111`).
+        // parent was half of why a subfolder scene could never be written back.
         if let Some(dir) = path.parent() {
             let _ = floptle_vfs::create_dir_all(dir);
         }
@@ -1813,7 +1809,7 @@ impl Editor {
     pub(crate) fn autosave_path(&self) -> PathBuf {
         let dir = self.project_root.join(".floptle/autosave");
         match &self.editing_prefab {
-            // A prefab's autosave gets its own name (`floptle/0090`). Sharing the
+            // A prefab's autosave gets its own name. Sharing the
             // scene's would mean a project that later grows a scene of the same
             // name is offered a recovery holding a prefab's nodes — a trap worth
             // one suffix to close.
@@ -2449,7 +2445,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Scenes in a subfolder that have a same-named file sitting at `scenes/` root.
 ///
-/// That pair is the signature of `floptle/0111`: before the fix, editing
+/// That pair is the signature of an earlier task: before the fix, editing
 /// `scenes/<sub>/<name>.ron` wrote `scenes/<name>.ron` instead. A project
 /// carrying both has edits in the root copy that the game has never loaded, and
 /// the root one is almost certainly the newer, wanted work.
@@ -2663,8 +2659,7 @@ mod path_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A scene loaded from a subfolder must save back to that same file
-    /// (`floptle/0111`).
+    /// A scene loaded from a subfolder must save back to that same file.
     ///
     /// It used to save to `scenes/<stem>.ron` — the subfolder thrown away — so
     /// the editor loaded one file and wrote another, reported success, cleared

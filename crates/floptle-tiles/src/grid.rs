@@ -392,8 +392,8 @@ impl Stamp {
         Self::from_page(0, sheet_cols, px, py, w, h)
     }
 
-    /// The same rectangle, of a named PAGE of a multi-sheet tileset
-    /// (`floptle/0092`). Page 0 is the first sheet, so `from_sheet` is this with
+    /// The same rectangle, of a named PAGE of a multi-sheet tileset.
+    /// Page 0 is the first sheet, so `from_sheet` is this with
     /// the page every pre-paging index already had.
     pub fn from_page(page: u32, sheet_cols: u32, px: u32, py: u32, w: u32, h: u32) -> Self {
         let sheet_cols = sheet_cols.max(1);

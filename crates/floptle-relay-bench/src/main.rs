@@ -1,8 +1,8 @@
-//! **What a relay's link actually carries** (`floptle/0218`).
+//! **What a relay's link actually carries**.
 //!
 //! Two decisions are waiting on one number nobody has: whether the free tier can
 //! go to 100 CCU, and whether the relay stays on a `VM.Standard.E2.1.Micro`
-//! (1 OCPU, 954 MB, **0.48 Gbps**). `floptle/0215` gave the relay instruments;
+//! (1 OCPU, 954 MB, **0.48 Gbps**). an earlier task gave the relay instruments;
 //! this points something at them.
 //!
 //! ⚠ **This drives the real client and host legs against a real relay.** The
@@ -24,7 +24,7 @@
 //!
 //! The host in the loop does as little as it can: it echoes each ping to its
 //! sender and — because a game host tells every player what the others did —
-//! sends the same bytes to each other member of the lobby (`floptle/0234`;
+//! sends the same bytes to each other member of the lobby (an earlier task;
 //! `--echo-only` for the older shape). Anything more spent here is noise in a
 //! relay measurement.
 //!
@@ -63,8 +63,8 @@ fn main() {
     }
 }
 
-/// **Which certificate a relay presents, and whether it verifies**
-/// (`floptle/0227`). Two handshakes: one under the dev-trust model, to read
+/// **Which certificate a relay presents, and whether it verifies**.
+/// Two handshakes: one under the dev-trust model, to read
 /// the leaf whatever it is — so an operator can compare its fingerprint with
 /// the file on the box — and one verified against the public roots for the
 /// name in `--relay`, with no fallback. The second is what every managed
@@ -503,7 +503,7 @@ mod tests {
         }
     }
 
-    /// ⚠ **A step past the limit prints no ceiling** (`floptle/0234`).
+    /// ⚠ **A step past the limit prints no ceiling**.
     ///
     /// At 400 CCU the relay was dropping, every sender was stalled on an echo
     /// that never came, the payload rate fell, and the arithmetic printed

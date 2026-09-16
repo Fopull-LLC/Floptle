@@ -1,4 +1,4 @@
-//! 2D lighting probe (`floptle/0113`, step 2): a dark room with a torch in it.
+//! 2D lighting probe (step 2): a dark room with a torch in it.
 //!
 //! A flat tilemap under an orthographic camera, drawn three times:
 //!
@@ -197,7 +197,7 @@ fn main() {
 
     // ---- an authored alpha is the alpha that reaches the screen ------------
     //
-    // `floptle/0121`. The composite used to write `albedo × light` over the
+    // an earlier task. The composite used to write `albedo × light` over the
     // frame at the surface's own alpha — but the raster pass had already blended
     // that same sprite in, so a translucent one arrived twice and landed at an
     // effective `1 - (1-a)²`. 0.5 drew at 0.75; 0.72 drew at 0.92. In every 2D
@@ -298,9 +298,8 @@ fn main() {
             assert!(
                 (got as i32 - want as i32).abs() <= 3,
                 "alpha {a}: channel {c} lit to {got} where `C·light` over the background at \
-                 the AUTHORED alpha is {want}. A sprite that reaches the screen at an opacity \
-                 its author did not type is a readability budget nobody can spend — that is \
-                 the whole of `floptle/0121`."
+                 the authored alpha is {want}. A sprite must reach the screen at the opacity \
+                 its author typed."
             );
         }
     }

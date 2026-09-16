@@ -1,5 +1,5 @@
 //! `floptle lint --vec3` — what a project would have to change to switch its
-//! `vec3` to `fast` (ADR-0028, Phase 3; platform card `floptle/0176`).
+//! `vec3` to `fast` (ADR-0028, Phase 3; platform card).
 //!
 //! **This is a textual scan, and it says so.** A Lua file has no types to read,
 //! so nothing here can be complete, and a lint that implied otherwise would be

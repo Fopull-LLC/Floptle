@@ -1042,7 +1042,7 @@ impl Editor {
         // component). `spawn_into` makes exactly one, and `spawn_additive`
         // deliberately brings no second — so `next()` is *the* Lighting node
         // rather than the first of several, and `find("Lighting")` from a script
-        // reaches the same one this reads (`floptle/0123`).
+        // reaches the same one this reads.
         //
         // If something made a second anyway, say so once: a script writing "the"
         // 2D base light and this reading "the" 2D base light would then be
@@ -1069,7 +1069,7 @@ impl Editor {
             matches!(self.world.get::<Matter>(ce), Some(Matter::Camera { ortho: true, .. }))
         });
         // One split serves both: the 3D slots the raster globals want, and the
-        // count of what the sixteen-slot cap refused (`floptle/0116`). Asked here
+        // count of what the sixteen-slot cap refused. Asked here
         // rather than beside the counts below so the scene's lights are walked
         // once a frame instead of twice.
         let lights_split = crate::shading::split_point_lights(
@@ -1093,8 +1093,7 @@ impl Editor {
         // conflicts with `gpu` above (a live `self.gpu.as_mut()` borrow through
         // most of this function) even though the two touch disjoint fields —
         // so the frame-guard is inlined here, but the actual decision is the
-        // same `light_cap_warning` `render_world_into`'s copy calls
-        // (`floptle/0168`).
+        // same `light_cap_warning` `render_world_into`'s copy calls.
         if self.lights_dropped_checked_frame != self.frame_no {
             self.lights_dropped_checked_frame = self.frame_no;
             let (warned, msg) = light_cap_warning(lights_split.dropped, self.lights_dropped_warned);
@@ -1233,7 +1232,7 @@ impl Editor {
                 Some((e, b.parts.iter().map(|&(base, _)| base).collect()))
             })
             .collect();
-        // RENDER, first half (`floptle/0077`): turning the scene into instances.
+        // RENDER, first half: turning the scene into instances.
         // The submission itself is timed separately below and lands in the same
         // bucket — a game asking "what does rendering cost" wants one number, and
         // the two halves are not separable from Lua anyway.
@@ -1244,7 +1243,7 @@ impl Editor {
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
         let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
-        // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
+        // GPU-skinned parts, gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
@@ -1274,7 +1273,7 @@ impl Editor {
         // actually culls (the editor Scene view renders with MAX = no table).
         let game_layer_table =
             (game_cull_mask != u32::MAX).then(|| self.project.build_layers());
-        // FRUSTUM CULL (`floptle/0075`). Until this existed, terrain chunks were
+        // FRUSTUM CULL. Until this existed, terrain chunks were
         // the only thing in the engine that asked whether it was on screen —
         // every mesh, map mesh, tilemap, batch and primitive became an instance
         // every frame, and roughly half of any scene is behind the camera.
@@ -1286,7 +1285,7 @@ impl Editor {
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
         let mut culled_nodes = 0usize;
-        // Scatter props submitted this frame — the count `floptle/0071` needed.
+        // Scatter props submitted this frame — the count an earlier task needed.
         let mut scatter_props = 0usize;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
@@ -1313,7 +1312,7 @@ impl Editor {
             // Resolved before the loop (`raster` is borrowed mutably in here).
             t.translation += sort_z.get(e).copied().unwrap_or_default();
             // Off screen? Skip the whole node — the material lookups, the matrix,
-            // every arm below (`floptle/0075`). Answers false for anything whose
+            // every arm below. Answers false for anything whose
             // extent the scene does not know, and for the Blob, which is an SDF
             // primitive that shadows things it is not itself beside.
             // A pixels-per-unit sprite is drawn at its texture's size, not at
@@ -1399,12 +1398,12 @@ impl Editor {
                         }
                     }
                 }
-                // The 2D layer (`floptle/0058`). A tilemap is one uploaded
+                // The 2D layer. A tilemap is one uploaded
                 // mesh; a sprite batch is N instances off the unit quad, each
                 // with its own cell and tint.
                 Matter::Tilemap { .. } => {
                     let model = t.render_matrix(cam.world_position);
-                    // One draw per sheet the layer actually uses (`floptle/0092`).
+                    // One draw per sheet the layer actually uses.
                     let mut draws = Vec::new();
                     crate::sprite2d::tilemap_draws(
                         &self.tilemaps,
@@ -1418,7 +1417,7 @@ impl Editor {
                     for mut draw in draws {
                         // On the 2D lighting path: the raster pass draws it
                         // UNLIT, and the composite corrects that by the light's
-                        // difference (`floptle/0121`). The G-buffer instance is
+                        // difference. The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
                         if let Some(&(rank, casts)) = lit2d.get(e) {
@@ -1599,14 +1598,14 @@ impl Editor {
             &mut instances,
         );
 
-        // SCATTER (`floptle/0036`): thousands of props from a seed, resolved to
+        // SCATTER: thousands of props from a seed, resolved to
         // instances and drawn through the ordinary raster path — so they get the
         // ordinary lighting, fog and shadows, including the underwater fog that
         // makes a shoreline forest go murky at the same rate as its ground.
         // Nothing here is a scene node.
         {
-            // Where each anchored source's node has got to this frame
-            // (`floptle/0073`). A celestial body orbits at ~99 units/s, so a
+            // Where each anchored source's node has got to this frame.
+            // A celestial body orbits at ~99 units/s, so a
             // region pinned to the world slides out from under its own props in
             // about two seconds. Refreshing one transform per source is the
             // whole cost of following it: placement lives in this frame, so
@@ -1682,19 +1681,19 @@ impl Editor {
 
         // The gather is finished: record what it cost. `instances` is taken here
         // rather than in the loop because terrain and scatter push after it, and
-        // the number a game wants is the whole submission (`floptle/0075`).
+        // the number a game wants is the whole submission.
         self.render_counts = crate::node_bounds::Counts {
             nodes: ents.len(),
             culled: culled_nodes,
             instances: instances.len(),
         };
-        // …and the same numbers into the profile a game can read (`floptle/0077`).
+        // …and the same numbers into the profile a game can read.
         // Terrain chunk and particle counts come from the systems that own them.
         {
             let chunks: usize =
                 self.terrain_render.values().map(|r| r.slots.len()).sum();
             let particles = self.vfx.live_particles();
-            // `floptle/0114` and `floptle/0116`: how many one-shots and lights
+            // an earlier task and an earlier task: how many one-shots and lights
             // are live, and how many of each a ceiling refused. A cap nobody can
             // see is the thing both cards are actually about — `effects` is what
             // it costs, `effectsDropped` is what it cut.
@@ -1711,7 +1710,7 @@ impl Editor {
             // over the whole submission — worth its cost only when collection
             // is actually on and something will read the number. `set_counts`
             // already no-ops while off; this keeps the SUM ahead of it off too
-            // ("off means off", `floptle/0082`, applied to the one count here
+            // ("off means off", an earlier task, applied to the one count here
             // pricier than a `.sum()` over an existing small collection).
             let draws = if prof.enabled() {
                 count_draw_batches(&instances, &flsl_draws, &skin_draws)
@@ -1732,7 +1731,7 @@ impl Editor {
                 lights_dropped,
                 voices,
                 // What the 2D lighting pass will actually rasterize a second
-                // time (`floptle/0122`) — 0 when no light can reach anything.
+                // time — 0 when no light can reach anything.
                 flat2d: flat2d.len(),
             });
             prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
@@ -1800,7 +1799,7 @@ impl Editor {
         let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
         // The player's colour-vision filter rides on top of the scene's chain,
         // and deliberately survives a scene whose PostProcess node is disabled
-        // (`floptle/0079`): a scene must not be able to veto an accessibility
+        //: a scene must not be able to veto an accessibility
         // setting the player turned on.
         post_settings.color_filter = self.access.color_filter.lane();
         post_settings.color_filter_strength = self.access.color_filter_strength;

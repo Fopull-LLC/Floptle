@@ -62,8 +62,8 @@ fn export_platforms() -> Vec<String> {
     v.extend(floptle_dist::PLATFORMS.iter().map(|s| (*s).to_string()));
     v.push(floptle_dist::WEB_PLATFORM.to_string());
     // Not a platform in the sense the others are — a server bundle carries no
-    // binary at all, because the fleet box runs its own engine against it
-    // (`floptle/0197`). It sits in this list because it is the same question a
+    // binary at all, because the fleet box runs its own engine against it.
+    // It sits in this list because it is the same question a
     // developer is answering: what am I stamping this for.
     v.push(crate::export::SERVER_PLATFORM.to_string());
     v

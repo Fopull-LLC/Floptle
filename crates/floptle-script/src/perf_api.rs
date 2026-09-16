@@ -1,4 +1,4 @@
-//! The Lua `perf` table — a game reading its own frame cost (`floptle/0077`).
+//! The Lua `perf` table — a game reading its own frame cost.
 //!
 //! The point of this existing at all is that "the engine is slow" was the only
 //! report a game could make. Four separate tickets came in that way and every one
@@ -30,7 +30,7 @@
 //! profiler stays switched on. But that makes "off" and "free" the same shape, and
 //! a smoke test asserting `perf.ms("scripts") < 4` would then pass by measuring
 //! nothing. So every getter raises while collection is off and says to call
-//! `perf.enable(true)`. Same reasoning as `floptle/0082`, applied to this task's
+//! `perf.enable(true)`. Same reasoning as an earlier task, applied to this task's
 //! own API.
 
 use mlua::Lua;
@@ -156,7 +156,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             out.set("particles", c.particles)?;
             // The capped resources, and what each cap actually cut. A ceiling a
             // game cannot see is one it discovers as "my seventeenth torch does
-            // nothing" (`floptle/0114`, `floptle/0116`), so the pair is the
+            // nothing", so the pair is the
             // point: one number for the cost, one for what was refused.
             out.set("effects", c.effects)?;
             out.set("effectsDropped", c.effects_dropped)?;
@@ -164,7 +164,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             out.set("lightsDropped", c.lights_dropped)?;
             out.set("voices", c.voices)?;
             // What 2D lighting costs this frame: flat surfaces rasterized a
-            // second time into its G-buffer (`floptle/0122`). Zero when no light
+            // second time into its G-buffer. Zero when no light
             // can reach them, which is the answer a 2D game most wants to be
             // able to check.
             out.set("flat2d", c.flat2d)?;
@@ -207,7 +207,7 @@ fn cost(
     let prof = p.borrow();
     require_on(&prof, call)?;
     // An unrecognised bucket names the whole set rather than answering zero — the
-    // property, the value, and what is accepted (`floptle/0082`).
+    // property, the value, and what is accepted.
     let Some(bucket) = Bucket::from_name(name) else {
         let all: Vec<&str> = Bucket::ALL.iter().map(|b| b.name()).collect();
         return Err(mlua::Error::runtime(format!(

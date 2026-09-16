@@ -1,4 +1,4 @@
-//! Water probe (`floptle/0038`): a body of water has to look like water, not
+//! Water probe: a body of water has to look like water, not
 //! like a coloured wall.
 //!
 //! Three things this checks, because all three were wrong at some point while

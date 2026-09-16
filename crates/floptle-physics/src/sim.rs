@@ -170,7 +170,7 @@ pub struct BodySnapshot {
     pub pos: DVec3,
     pub vel: Vec3,
     pub grounded: bool,
-    /// SLEEPING (`floptle/0143`), and how long it has been settling. Part of
+    /// SLEEPING, and how long it has been settling. Part of
     /// the snapshot for the same reason `pos`/`vel` are: a rollback
     /// resimulation restores a body to exactly this state and then replays
     /// it forward, and if the sleep timer were left out, a replay would
@@ -673,7 +673,7 @@ impl Sim {
     /// [`CollisionShape::face_label`](crate::shapes::CollisionShape::face_label));
     /// the editor fills them with a map mesh's material-slot names, which is what
     /// lets a script ask what it is standing on rather than what node it is
-    /// standing on (`floptle/0174`).
+    /// standing on.
     pub fn add_static_mesh_labelled(
         &mut self,
         anchor: DVec3,
@@ -1161,7 +1161,7 @@ impl Sim {
         // mask in front of it. For a `TriMeshCollider` that is 125 spatial-hash
         // lookups per center per body per tick, at any distance — one trigger on
         // a 1,037-triangle mesh put a ~57 ms stall on 20% of frames while the
-        // scene's other 29 mesh props were free (`floptle/0171`). The mesh was
+        // scene's other 29 mesh props were free. The mesh was
         // never the problem; the missing reject was.
         for col in self.world.colliders.iter().filter(|c| c.sensor) {
             let Some(b_eid) = col.eid else { continue };
@@ -1214,7 +1214,7 @@ impl Sim {
                     continue;
                 }
                 // Same reject as §2, the other way round: one sensor body against
-                // every static collider in the world (`floptle/0171`).
+                // every static collider in the world.
                 if let Some((bc, br)) = col.bounds()
                     && (bc - pc).length() > br + pr
                 {
@@ -1761,7 +1761,7 @@ impl Sim {
                 }
                 // A teleport moves the body out from under whatever it was
                 // resting on — asleep or not, the ground underneath it is
-                // now a question the solver has not asked yet (`floptle/0143`).
+                // now a question the solver has not asked yet.
                 self.world.bodies[l.body].asleep = false;
                 self.world.bodies[l.body].sleep_time = 0.0;
                 return;
@@ -1807,7 +1807,7 @@ impl Sim {
                 // A script that just handed a sleeping body a velocity means
                 // it, and the next step must actually integrate it rather
                 // than silently discard the write until something else wakes
-                // the body (`floptle/0143`).
+                // the body.
                 self.world.bodies[l.body].asleep = false;
                 self.world.bodies[l.body].sleep_time = 0.0;
                 return;
@@ -1862,8 +1862,7 @@ impl Sim {
                     // pose, and genuinely awake — `rig.kinematic = 0` (the
                     // documented live switch a grabbed prop uses on release)
                     // must not hand back a body the solver still thinks is
-                    // asleep from before it was ever picked up
-                    // (`floptle/0143`).
+                    // asleep from before it was ever picked up.
                     b.vel = Vec3::ZERO;
                     b.asleep = false;
                     b.sleep_time = 0.0;
@@ -2006,7 +2005,7 @@ mod runtime_body_tests {
 
     /// One trigger on a 1,037-triangle mesh put a **~57 ms stall on 20% of
     /// frames**; removing only `trigger: true` took the same scene to zero slow
-    /// frames out of 300 (`floptle/0171`). The geometry was never the problem —
+    /// frames out of 300. The geometry was never the problem —
     /// 29 other mesh props in that scene were free — and neither was the
     /// animation, which ablated without moving the number.
     ///
@@ -2367,7 +2366,7 @@ mod runtime_body_tests {
         );
     }
 
-    /// `floptle/0143`: the rollback checkpoint (`rollback.rs`'s `SavedTick`)
+    /// the rollback checkpoint (`rollback.rs`'s `SavedTick`)
     /// is built entirely out of `body_snapshot`/`restore_body` — this is the
     /// one place that has to carry sleep state through, or every rollback
     /// node in the game silently loses it on the first correction.

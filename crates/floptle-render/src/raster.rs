@@ -134,7 +134,7 @@ pub struct InstanceRaw {
     /// Alpha is opacity, and below 1 routes the instance to the blended pass —
     /// EXCEPT on terrain ([`is_terrain`]), where the surface is opaque by
     /// definition and the lane carries a newly meshed chunk's dissolve-in
-    /// progress instead (`floptle/0067`).
+    /// progress instead.
     pub color: [f32; 4],
     /// Emissive color (rgb) + strength (a).
     pub emissive: [f32; 4],
@@ -663,8 +663,8 @@ pub struct Raster {
     /// Depth-only prepass pipeline (see [`depth_prepass`](Self::depth_prepass)).
     prepass_pipeline: wgpu::RenderPipeline,
     /// The same four pipelines through the `vs_skin` entry point, which deforms
-    /// the vertex by its bone palette before the shared shading tail
-    /// (`floptle/0080`). Four rather than one because the prepass must agree with
+    /// the vertex by its bone palette before the shared shading tail.
+    /// Four rather than one because the prepass must agree with
     /// the color pass about where a skinned vertex ended up, or the character
     /// depth-fails against its own prepass — and the outline must hug the POSE,
     /// which was the whole reason the CPU path needed per-entity vertex buffers.
@@ -717,7 +717,7 @@ pub struct Raster {
     tpaint_free: HashMap<u32, Vec<u32>>,
     /// Freed dynamic mesh slots (indices into `meshes`), re-used by `register_dynamic`.
     dyn_free: Vec<u32>,
-    /// GPU skinning (`floptle/0080`). Per-vertex joint slots and weights for every
+    /// GPU skinning. Per-vertex joint slots and weights for every
     /// registered skinned part, packed back to back and read as
     /// `skin_joints[skin_base + vertex_index]`. Bump-allocated like `vpaint` and
     /// never freed: a skin belongs to its mesh for the scene's life.
@@ -759,8 +759,8 @@ pub struct Raster {
     /// with nothing flat in it.
     light2d: crate::light2d::Light2d,
     /// The palette (posterize) pass. It lives next to the 2D light because it
-    /// has to run immediately before it — that ordering is the whole feature
-    /// (`floptle/0127`), and a caller that has one to hand has the other.
+    /// has to run immediately before it — that ordering is the whole feature,
+    /// and a caller that has one to hand has the other.
     palette: crate::palette::Palette,
     /// Fallback group(2) for callers without a raymarch pass: zeroed field
     /// globals (no volumes/blobs, shadows + AO off) → the field branches skip.
@@ -946,7 +946,7 @@ struct FlslBinding {
 /// also what the depth prepass alpha-tests) + the material's flsl binding.
 pub type FlslDraw = (MeshId, Option<TexId>, FlslBindingId, InstanceRaw);
 
-/// One GPU-skinned draw (`floptle/0080`): a mesh part whose vertices are deformed
+/// One GPU-skinned draw: a mesh part whose vertices are deformed
 /// in the vertex shader by the pose in `pose`, rather than on the CPU and
 /// re-uploaded.
 ///
@@ -1055,7 +1055,7 @@ impl Raster {
                     },
                     count: None,
                 },
-                // Bindings 6/7/8: GPU skinning (`floptle/0080`) — per-vertex joint
+                // Bindings 6/7/8: GPU skinning — per-vertex joint
                 // indices and weights, and the frame's bone palettes. Same shape and
                 // same vertex-only visibility as `vpaint`, and here for the same
                 // reason: one store indexed by a per-instance base keeps skinned
@@ -2516,7 +2516,7 @@ impl Raster {
         }
     }
 
-    // ---- GPU skinning (`floptle/0080`) ---------------------------------------------
+    // ---- GPU skinning ---------------------------------------------
     //
     // Three moving parts, on two different clocks:
     //
@@ -3145,7 +3145,7 @@ impl Raster {
         const OPAQUE_CUTOFF: f32 = 0.999;
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         // Terrain's alpha lane is a DISSOLVE threshold, not opacity
-        // (`floptle/0067`): the fragment shader discards a matching fraction of
+        //: the fragment shader discards a matching fraction of
         // a newly meshed chunk's pixels and what survives is fully opaque. So a
         // fading chunk belongs in the OPAQUE pass — blending it instead would
         // dim it toward the sky rather than reveal it, drop it out of the depth
@@ -3522,7 +3522,7 @@ impl Raster {
         self.depth_prepass_with(gpu, globals, instances, &[], &[], main_depth);
     }
 
-    /// **The palette pass** (`floptle/0127`): quantize `color` in place to the
+    /// **The palette pass**: quantize `color` in place to the
     /// scene's posterize settings.
     ///
     /// Run it after the raster and raymarch passes and immediately before
@@ -3570,7 +3570,7 @@ impl Raster {
         flat: &[(MeshId, Option<TexId>, crate::light2d::Light2dInstance)],
     ) {
         // Nothing flat, or nothing that can change how it looks. The gather
-        // already filters by [`Light2dUniform::reach`] (`floptle/0122`), so this
+        // already filters by [`Light2dUniform::reach`], so this
         // is the belt to that pair of braces — and the one place a caller
         // building `flat` by hand still gets the guarantee.
         if flat.is_empty() || lights.reach() == 0 {
@@ -3584,7 +3584,7 @@ impl Raster {
         // The shadow budget is `0` unless something in this frame actually
         // casts, which is what makes the whole feature free for a scene with no
         // occluders: `occluded` returns on the first line and the march is never
-        // walked (`floptle/0125`).
+        // walked.
         let mut lights = *lights;
         lights.view_proj = view_proj;
         lights.viewport = [size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 0.0];
@@ -3690,8 +3690,8 @@ impl Raster {
             });
             rp.set_bind_group(0, &self.light2d.lights_bind, &[]);
             rp.set_bind_group(1, read, &[]);
-            // The signed correction, in its two non-negative halves
-            // (`floptle/0121`). Same attachments, same bind groups, same
+            // The signed correction, in its two non-negative halves.
+            // Same attachments, same bind groups, same
             // fullscreen triangle — only the blend operation differs, so this is
             // two draws rather than two passes.
             rp.set_pipeline(&self.light2d.darken_pipeline);
@@ -4041,7 +4041,7 @@ impl InstanceRaw {
     /// Force this instance onto the UNLIT path, keeping whatever vertex-paint
     /// base it already carries.
     ///
-    /// For the 2D lighting composite (`floptle/0121`), which corrects the frame
+    /// For the 2D lighting composite, which corrects the frame
     /// by the *difference* between what the raster pass drew and what the 2D
     /// lights say it should be. That subtraction is only right if the raster
     /// pass drew `albedo × alpha` and nothing else — a surface the 3D sun had

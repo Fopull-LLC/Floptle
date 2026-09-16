@@ -98,7 +98,7 @@ pub struct VfxSystem {
     /// OLDEST in O(1). A `Vec::remove(0)` would memmove the whole pool on every
     /// over-budget spawn, which is precisely the frame that could least afford it.
     pub detached: std::collections::VecDeque<DetachedEffect>,
-    /// The ceiling on live one-shots (`floptle/0114`).
+    /// The ceiling on live one-shots.
     ///
     /// `spawnEffect` had none, so the live particle count was `spawn rate ×
     /// lifetime × particles per effect` — entirely the caller's to decide, with
@@ -253,7 +253,7 @@ impl VfxSystem {
             let seed = self.detached_seq.wrapping_add(
                 bits(pos.x) ^ bits(pos.y).rotate_left(11) ^ bits(pos.z).rotate_left(22),
             );
-            // The ceiling (`floptle/0114`). Drop the OLDEST rather than refuse
+            // The ceiling. Drop the OLDEST rather than refuse
             // the newest: the effect just asked for is the one the player is
             // looking at — the impact they caused, the shot they fired — and the
             // one at the front of the queue is already most of the way through
@@ -268,7 +268,7 @@ impl VfxSystem {
     }
 
     /// Live one-shot effects, and how many have been dropped at the ceiling
-    /// since the counter was last taken (`floptle/0114`).
+    /// since the counter was last taken.
     pub fn detached_counts(&mut self) -> (usize, usize) {
         (self.detached.len(), std::mem::take(&mut self.detached_dropped))
     }
@@ -343,8 +343,7 @@ impl VfxSystem {
     /// The per-node particle state scripts read via `node:particles()`: one entry per
     /// ParticleSystem node — `playing`/`alive` from its live instance (if any) plus the
     /// effect asset key. Fed to the script host before each Play-mode script frame.
-    /// Live particles across every effect, attached and detached
-    /// (`floptle/0077`).
+    /// Live particles across every effect, attached and detached.
     ///
     /// One number for the frame readout. Per-effect counts are already reachable
     /// as `node:particles():alive()`; this is the one a game checks against a
@@ -1040,7 +1039,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// What an effect COSTS (`floptle/0099`)
+// What an effect COSTS
 // ---------------------------------------------------------------------------
 
 /// How many particles an effect has alive over its own lifetime, and where it

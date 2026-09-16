@@ -1,4 +1,4 @@
-//! floptle/0182 — relevance is the game's decision and the geometry's, not the
+//! relevance is the game's decision and the geometry's, not the
 //! radius's alone.
 //!
 //! An interest radius is a **bandwidth** boundary. A hidden-role or competitive

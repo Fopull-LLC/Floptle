@@ -1,4 +1,4 @@
-//! Drawing scatter sources (`floptle/0036`): seed → instances → one instanced
+//! Drawing scatter sources: seed → instances → one instanced
 //! draw per (mesh, LOD band).
 //!
 //! Nothing here creates a scene node, which is the entire point. The old answer
@@ -32,7 +32,7 @@ pub(crate) struct ResolvedChunk {
 }
 
 /// How many props may be dropped onto the ground in one frame, across every
-/// source (`floptle/0071`).
+/// source.
 ///
 /// Settling is a raycast per prop, cached per chunk — so the first frame a
 /// chunk comes into range pays for all of its props at once. A third-person
@@ -60,7 +60,7 @@ struct Sweep {
 pub(crate) struct ScatterCache {
     chunks: HashMap<(u32, ChunkKey), ResolvedChunk>,
     /// The resident key list per source — swept when the eye crosses a chunk
-    /// boundary, not once a frame (`floptle/0071`).
+    /// boundary, not once a frame.
     sweeps: HashMap<u32, Sweep>,
 }
 
@@ -78,7 +78,7 @@ impl ScatterCache {
     pub(crate) fn invalidate_near(&mut self, sources: &[ScatterSource], p: DVec3, radius: f64) {
         for src in sources {
             // `p` is where the ground changed, in the world. The chunks are
-            // keyed in the source's own frame (`floptle/0073`).
+            // keyed in the source's own frame.
             let pl = src.frame.to_local(p);
             for key in scatter::chunks_near(src, pl, radius) {
                 self.chunks.remove(&(src.id, key));
@@ -99,7 +99,7 @@ impl ScatterCache {
 /// region's nominal height — a tree hanging in the air over a canyon reads as a
 /// bug, and a missing tree reads as a canyon.
 /// The instance stays in the source's own frame; only the RAY goes out to the
-/// world and only the normal comes back (`floptle/0073`). That is what lets a
+/// world and only the normal comes back. That is what lets a
 /// settled chunk survive its planet moving — the cached answer never mentioned
 /// the world, so the world moving cannot invalidate it.
 fn settle(
@@ -130,7 +130,7 @@ fn settle(
 /// A `.glb` is one part at identity. A prefab is however many Mesh nodes it
 /// holds, each at its authored place — which is what lets a plant be a trunk
 /// and three fronds and still cost one instanced draw per piece rather than a
-/// scene node per piece (`floptle/0065`).
+/// scene node per piece.
 pub(crate) type Part = (MeshId, Option<TexId>, Mat4);
 
 /// Everything visible from `eye`, packed as instanced draws.
@@ -180,10 +180,10 @@ pub(crate) fn build_instances(
             .try_fold(0.0f32, |acc, r| r.map(|r| acc.max(r)))
             .filter(|r| r.is_finite() && *r > 0.0);
         // The key set changes when the eye crosses a chunk boundary, not when
-        // the frame advances (`floptle/0071`). Standing still, or walking
+        // the frame advances. Standing still, or walking
         // within one chunk, this is a hash lookup — it used to be a square
         // sweep, allocated and thrown away sixty times a second.
-        // Everything below happens in the source'S own frame (`floptle/0073`).
+        // Everything below happens in the source'S own frame.
         // The eye comes to the region rather than the region going to the world,
         // so a body that orbits at 99 units/s changes exactly one number here —
         // and no id, no local position, no settled height and no cached chunk.
@@ -232,7 +232,7 @@ pub(crate) fn build_instances(
                 let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
                 // …and only then, is it on screen? Distance was the only test a
                 // field ever applied, so a full disc submitted everything behind
-                // you (`floptle/0075`). after the band test, which is the cheaper
+                // you. after the band test, which is the cheaper
                 // one and also the one that rejects most.
                 if let Some(pr) = prop_radius
                     && !frustum
@@ -287,7 +287,7 @@ impl crate::Editor {
     ///
     /// A mesh file is one part at identity — what scatter has always drawn. A
     /// **prefab** is each of its `Mesh` nodes at its authored place inside the
-    /// prop, which is the point of `floptle/0065`: a game whose props are
+    /// prop, which is the point of an earlier task: a game whose props are
     /// generated (Solar's plants are a trunk and a handful of fronds, assembled
     /// by a script) had nothing to hand scatter, because scatter took a file
     /// path and a plant is not a file.
@@ -333,7 +333,7 @@ impl crate::Editor {
             // draws nothing at all. Printing this there said a project's props
             // were broken when they were fine, several times, in every single
             // headless run: exactly the kind of warning that teaches a reader to
-            // skip the warning block (`floptle/0157`).
+            // skip the warning block.
             //
             // A missing file is still worth saying and is knowable either way,
             // so that half is unconditional and the rest waits for a process
@@ -391,7 +391,7 @@ impl crate::Editor {
             let mut out = Vec::new();
             // The prop's bounding radius, accumulated as its pieces are found:
             // a frond three metres up the trunk reaches its own radius further
-            // than the trunk does (`floptle/0075`).
+            // than the trunk does.
             let mut radius = 0.0f32;
             for (i, d) in docs.iter().enumerate() {
                 let floptle_scene::MatterDoc::Mesh { asset_path } = &d.matter else { continue };
@@ -452,8 +452,7 @@ mod tests {
     use super::*;
     use floptle_core::scatter::{Band, Region};
 
-    /// A headless process must not report a project's props as broken
-    /// (`floptle/0157`).
+    /// A headless process must not report a project's props as broken.
     ///
     /// The bake registers meshes on the GPU, so with no GPU it comes back empty
     /// for every asset alike — and `floptle run` has no GPU. It printed
@@ -516,9 +515,9 @@ mod tests {
     }
 
     /// A prototype of several parts draws one instance per part, each at its
-    /// place within the prop and all sharing the prop's transform
-    /// (`floptle/0065`). That is what lets a generated plant — a trunk and
-    /// A field is culled by DIRECTION, not only by distance (`floptle/0075`).
+    /// place within the prop and all sharing the prop's transform.
+    /// That is what lets a generated plant — a trunk and
+    /// A field is culled by DIRECTION, not only by distance.
     ///
     /// `band_at` has always rejected props past the last LOD band, so a field was
     /// bounded — but never oriented. A full disc submitted its whole area
@@ -714,8 +713,7 @@ mod tests {
     /// Settling is a raycast per prop, and a chunk arriving pays for all of its
     /// props at once. Crossing a chunk boundary used to drag thousands of them
     /// into one frame — "it freezes more as I'm looking around", which is what
-    /// a third-person camera swinging the eye several metres does
-    /// (`floptle/0071`).
+    /// a third-person camera swinging the eye several metres does.
     #[test]
     fn arriving_ground_is_settled_over_several_frames_not_all_at_once() {
         let s = big_field();
@@ -810,7 +808,7 @@ mod tests {
         assert!(far < 120.0, "a budgeted draw reached {far:.0} m out — the order is wrong");
     }
 
-    /// A body that orbits carries its props (`floptle/0073`).
+    /// A body that orbits carries its props.
     ///
     /// The reported symptom: *"the scattered props seem to just be being left
     /// behind by the planet traveling in orbit"*. A region was pinned to the
@@ -835,7 +833,7 @@ mod tests {
             Some((60.0f32, Vec3::Y))
         };
         // Stream in fully first — arriving ground settles over several frames
-        // on purpose (`floptle/0071`), and that is not what is being measured.
+        // on purpose, and that is not what is being measured.
         let mut before = Vec::new();
         for _ in 0..40 {
             before.clear();

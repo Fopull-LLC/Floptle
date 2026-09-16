@@ -91,7 +91,7 @@ pub struct UserInfo {
 
 /// What the account is entitled to, as `/entitlements` answers it.
 ///
-/// ## "we could not ask" is not a tier (`floptle/0189`)
+/// ## "we could not ask" is not a tier
 ///
 /// This endpoint is allowed to fail soft — a developer whose network blinked
 /// must not be locked out of their own editor — and for a long time the way it
@@ -901,8 +901,7 @@ mod tests {
         assert!(is_local_host("http://127.0.0.1:8000/oauth/device"));
     }
 
-    /// **An outage and a downgrade must not produce the same session**
-    /// (`floptle/0189`).
+    /// **An outage and a downgrade must not produce the same session**.
     ///
     /// The values here are chosen so a regression cannot pass: `"free"` is a
     /// real tier the server sells, so asserting `tier != "free"` on the unknown

@@ -222,7 +222,7 @@ fn doc_links_resolve() {
 
 /// A **published** page may only link to another published page.
 ///
-/// `floptle/0102`: 33 links across the docs site pointed at documents the site
+/// 33 links across the docs site pointed at documents the site
 /// map holds back. The website renders those as plain text — dropping the link
 /// and keeping the words, which is the right call, because a 404 and a bounce
 /// into the repo mid-sentence are both worse. What it leaves is a reader being
@@ -304,7 +304,7 @@ fn published_pages_only_link_to_published_pages() {
 
 /// **A published page may not disclaim itself.**
 ///
-/// `floptle/0190`: three pages written for the people BUILDING the engine were
+/// three pages written for the people BUILDING the engine were
 /// classified as documentation for the people USING it, and the website
 /// publishes whatever the feed calls published. One of them turned up on
 /// fopull.com — a north star telling a prospective user that the engine was not

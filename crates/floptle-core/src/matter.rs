@@ -270,7 +270,7 @@ impl Lit2D {
     }
 
     /// Every spelling accepted from Lua / a `.ron`, and the list an error
-    /// message prints. One list, one parser (`floptle/0082`).
+    /// message prints. One list, one parser.
     pub const ACCEPTS: &'static [&'static str] = &["auto", "2d", "3d"];
 
     pub fn parse(s: &str) -> Option<Lit2D> {
@@ -375,7 +375,7 @@ pub struct Lighting2D {
     /// way out is to shape the ramp so that the whole of it falls inside one
     /// band, and you cannot do that when the ramp always spans the full radius.
     /// An inner radius of `0.8 × range` puts the entire falloff in the outer
-    /// fifth (`floptle/0126`).
+    /// fifth.
     pub inner: f32,
     /// **Lights only.** The exponent of that ramp. `2` — the default — is the
     /// curve every light has always had; below 1 holds the brightness out and
@@ -383,7 +383,7 @@ pub struct Lighting2D {
     pub falloff: f32,
     /// **Lights only.** Whether casters stop this light. On by default, because
     /// a light that passes through walls reads as a decal rather than as light
-    /// (`floptle/0125`) — and because the per-node `blocks light` control, which
+    /// — and because the per-node `blocks light` control, which
     /// is what actually decides *what* casts, has always said it would.
     pub shadows: bool,
 }
@@ -628,7 +628,7 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// Every spelling [`Shape::parse`] accepts (`floptle/0082`), for an error
+    /// Every spelling [`Shape::parse`] accepts, for an error
     /// message that names what it takes.
     pub const ACCEPTS: &'static [&'static str] = &["Cube", "Sphere", "Capsule", "Plane"];
 
@@ -1447,7 +1447,7 @@ pub enum Matter {
     /// `target_w`/`target_h` are the target texture's size in pixels and
     /// `target_hz` how often it redraws (0 = every frame). A minimap that only
     /// needs 256×256 at 10 Hz costs a sixth of what it cost when every target
-    /// was 480×270 every frame (`floptle/0078`). Use [`Matter::TARGET_W`],
+    /// was 480×270 every frame. Use [`Matter::TARGET_W`],
     /// [`Matter::TARGET_H`] for the defaults.
     ///
     /// `ortho` switches the camera to an **orthographic** projection of
@@ -1524,7 +1524,7 @@ pub enum Matter {
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
-    /// A body of water (`floptle/0038`): a planet's sea (`Sea`, a sphere of
+    /// A body of water: a planet's sea (`Sea`, a sphere of
     /// `radius` about the node) or a lake / tank / flooded room (`Pool`, an
     /// oriented box of `half_extents` — the node's rotation orients it, so a
     /// tilted tank has a tilted surface).
@@ -1567,8 +1567,7 @@ pub enum Matter {
     /// shadows and spans all key off it, so keep it snug. Visual only for now
     /// (no collision until the CPU field evaluator lands — proposal §7.3).
     FieldShape { radius: f32 },
-    /// A grid of spritesheet cells drawn as **one mesh, one draw call**
-    /// (`floptle/0058`).
+    /// A grid of spritesheet cells drawn as **one mesh, one draw call**.
     ///
     /// The sheet comes from the node's [`crate::Material`] — its `texture`,
     /// `sheet_cols`/`sheet_rows` and `filter`. This component is only the grid,
@@ -1613,7 +1612,7 @@ pub enum Matter {
         tileset: String,
     },
     /// N sprites drawn from one node, each with its own position, rotation,
-    /// scale, sheet cell **and tint** (`floptle/0058`).
+    /// scale, sheet cell **and tint**.
     ///
     /// Like [`Tilemap`](Self::Tilemap) the sheet is the node's Material. The
     /// sprites themselves are a runtime-only [`Sprites`] component, written per
@@ -1715,7 +1714,7 @@ pub enum Matter {
         /// Ordered-dither the posterize so smooth gradients don't hard-step.
         posterize_dither: bool,
         /// Quantize **brightness** and carry the colour along, instead of
-        /// quantizing each channel on its own (`floptle/0126`).
+        /// quantizing each channel on its own.
         ///
         /// Per channel is a real look and stays the default, but it is not what
         /// anybody expects from a *light*: a smooth radial ramp crosses each
@@ -2135,7 +2134,7 @@ impl Matter {
     /// Every spelling `projection = ...` accepts, and the list an error prints.
     ///
     /// One list, read by both [`parse_projection`](Self::parse_projection) and
-    /// the message — `floptle/0082`'s rule, because the two drifting is how
+    /// the message — that task's rule, because the two drifting is how
     /// `pin = "topCenter"` ended up silently meaning top-left.
     pub const PROJECTION_ACCEPTS: &'static [&'static str] =
         &["perspective", "persp", "3d", "orthographic", "ortho", "2d"];
@@ -2175,7 +2174,7 @@ impl Matter {
     /// mistake rather than a choice, and refusing beats a device-lost.
     pub const TARGET_MAX: u32 = 4096;
     /// How many live render targets one scene may hold. Past this the extras
-    /// are dropped — loudly, by name (`floptle/0078`).
+    /// are dropped — loudly, by name.
     pub const TARGET_LIMIT: usize = 8;
 
     /// A render target's size, clamped to what the engine will allocate.
@@ -2733,8 +2732,7 @@ mod lighting_2d_tests {
     }
 
     /// An enum parser and the list of values it accepts have to be the same
-    /// code, or the error message names spellings that do not work
-    /// (`floptle/0082`).
+    /// code, or the error message names spellings that do not work.
     #[test]
     fn every_accepted_spelling_parses_and_every_value_round_trips() {
         for s in Lit2D::ACCEPTS {

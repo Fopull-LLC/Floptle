@@ -21,7 +21,7 @@ pub const PROTO_VERSION: u16 = 16;
 /// enough that hashing the state ring is free.
 pub const CHECKSUM_EVERY: u64 = 30;
 
-/// What a joining client says about who it is (`floptle/0183`).
+/// What a joining client says about who it is.
 ///
 /// A peer used to be a transport id plus whatever display name the game's own
 /// handshake carried, so a server could not ban, allow-list, keep per-account
@@ -221,7 +221,7 @@ pub enum Msg {
     /// The whole subtree travels because every avatar a real game has is a
     /// hierarchy — a capsule with a camera child, an arms mesh, a bone-attached
     /// item socket. Sending only the root (which is what this carried before
-    /// floptle/0181) meant a game could not spawn its own player, so projects
+    /// an earlier task) meant a game could not spawn its own player, so projects
     /// authored fixed slots into the map scene instead and capped their player
     /// count at authoring time.
     ///
@@ -264,7 +264,7 @@ pub enum Msg {
     /// re-sending a tick. Its own frontier says "I have everyone's input for
     /// T", which is a different claim from "everyone has everyone's input for
     /// T" — and dropping on the former is what let a single lost datagram
-    /// deadlock a match permanently (floptle/0039).
+    /// deadlock a match permanently.
     Input { entries: Vec<InputCmd>, confirmed: u64 },
     /// Either direction: a named remote call. `sender` is stamped by the
     /// server when relaying/receiving (clients can't spoof it). `tick` is the
@@ -308,7 +308,7 @@ pub enum Msg {
     /// Ordered **oldest first**, and built from every peer's ring separately,
     /// so the tick a starved peer is waiting for is always in the packet and no
     /// peer's traffic can crowd out another's. Both were true only by accident
-    /// before floptle/0039, and stopped being true the moment anyone stalled.
+    /// before an earlier task, and stopped being true the moment anyone stalled.
     Inputs { entries: Vec<(PeerId, InputCmd)> },
     /// Any peer → host → all: the state checksum for a confirmed tick (§6).
     ///
@@ -329,7 +329,7 @@ pub enum Msg {
     /// healthy session — and it is the difference between "desynced" and
     /// `Player2/fighterController/visYaw`. Without it the checksum knew exactly
     /// which value diverged and reported none of it, and finding the real cause
-    /// meant reading engine source for a day. floptle/0045.
+    /// meant reading engine source for a day.
     StateDetail { tick: u64, entries: Vec<(String, u64)> },
     /// Server → one client, periodically: input-timing feedback. `margin` is
     /// the smoothed number of ticks of that client's input still buffered
@@ -339,8 +339,7 @@ pub enum Msg {
     /// input lead from this, so clock hitches and drift self-heal instead of
     /// turning into permanent correction storms (`docs/multiplayer.md` §6).
     InputAck { margin: i32, late: u64 },
-    /// Client → server: one 20 ms Opus frame from this peer's microphone
-    /// (`floptle/0180`).
+    /// Client → server: one 20 ms Opus frame from this peer's microphone.
     ///
     /// [`Channel::UnreliableSequenced`], never reliable: a retransmitted word
     /// arrives after the moment it belonged to, so the cost of resending it is
@@ -368,7 +367,7 @@ pub enum Msg {
     Pong { id: u32 },
 }
 
-/// **What each kind of message is costing on the wire** (`floptle/0218`).
+/// **What each kind of message is costing on the wire**.
 ///
 /// ⚠ **A real match measured 234 kbps per player — 487 bytes per frame at
 /// 60 Hz.** A rollback fighter should be sending *inputs*: a handful of bytes,

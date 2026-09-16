@@ -93,7 +93,7 @@ fn world_vec(mesh: &floptle_nav::NavMesh, local: [f32; 3]) -> LuaVec3 {
 
 /// Keys `nav.agent(node, opts)` and `agent:set{...}` read — the registry
 /// entries that make a typo an error instead of a silent default, which is
-/// this engine's most-filed bug shape (`floptle/0082`).
+/// this engine's most-filed bug shape.
 pub(crate) const AGENT_KEYS: &[&str] = &[
     "radius",
     "speed",
@@ -977,7 +977,7 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
     // covers on every single call, so its cost grows with the window: a game
     // reported 0.014 ms at r=8 rising to 0.71 ms at r=80, which made a dozen
     // agents redrawing a destination in one frame a 4 ms frame, and it had to
-    // cache around the engine (`floptle/0177`). A squad wanders around the same
+    // cache around the engine. A squad wanders around the same
     // place, so the gather is the part worth holding.
     //
     // It is a SNAPSHOT of the mesh at the moment it was made. `nav.splice`

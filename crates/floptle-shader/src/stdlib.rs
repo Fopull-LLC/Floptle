@@ -99,7 +99,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sin", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sin"), doc: "Sine (radians).", category: "math" },
     OpSpec { name: "cos", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("cos"), doc: "Cosine (radians).", category: "math" },
     OpSpec { name: "tan", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("tan"), doc: "Tangent (radians).", category: "math" },
-    // The inverses (`floptle/0119`). Without them a shader could produce an
+    // The inverses. Without them a shader could produce an
     // angle and never read one, which rules out every polar effect there is:
     // radial wipes, cooldown dials, swirls, anything laid out around a horizon.
     // `atan2` is the one that matters; the rest are free while the door is open.
@@ -248,7 +248,7 @@ pub const PALETTE_NAMES: &[&str] = &["sunset", "bruise", "neon", "ocean", "ember
 pub const SUPPORT_WGSL: &str = r#"
 // ---- floptle-shader stdlib support (generated modules only) ----------------
 
-// Floored modulo (`floptle/0119`). NOT WGSL's `%`, which truncates toward zero
+// Floored modulo. NOT WGSL's `%`, which truncates toward zero
 // and so returns a NEGATIVE remainder for negative x — the wrong half of the
 // answer for every wrapping use there is. An angle from `atan2` is negative for
 // half the circle, which is exactly when you reach for this.

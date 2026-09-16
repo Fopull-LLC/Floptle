@@ -241,8 +241,7 @@ impl ImageCtx<'_> {
     ///
     /// The two toggles here had no UI at all before: `show_grid` and
     /// `show_checker` were fields hard-coded to `true` and reachable from
-    /// nowhere. Everything below them was a literal in the draw code
-    /// (`floptle/0096`, `floptle/0097`).
+    /// nowhere. Everything below them was a literal in the draw code.
     fn image_view_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("View", |ui| {
             let before = self.st.look;
@@ -1703,8 +1702,8 @@ impl ImageCtx<'_> {
     /// The numeric half of a free transform, shown only while one is in flight.
     ///
     /// Scale and rotation were drag-only, and "make this 16x16 block exactly
-    /// 32x32" is a typed number in pixel art, not a drag you squint at
-    /// (`floptle/0095`). The numbers write `xf` and re-apply from the same
+    /// 32x32" is a typed number in pixel art, not a drag you squint at.
+    /// The numbers write `xf` and re-apply from the same
     /// snapshot a drag does, so there is one apply and not two — and the whole
     /// thing still collapses to one undo.
     fn image_transform_bar(&mut self, ui: &mut egui::Ui) {
@@ -1786,8 +1785,7 @@ impl ImageCtx<'_> {
                 }
                 // The selection's origin and size, in pixels. It used to say
                 // only "selection active", which is how you end up counting
-                // pixels on screen to check a region is square
-                // (`floptle/0095`).
+                // pixels on screen to check a region is square.
                 if let Some(b) = self.st.selection_bounds() {
                     ui.separator();
                     ui.label(

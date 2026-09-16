@@ -1,4 +1,4 @@
-//! Orthographic gameplay camera probe (`floptle/0091`): a flat game puts its art
+//! Orthographic gameplay camera probe: a flat game puts its art
 //! on one plane and its camera on that plane, and that must draw.
 //!
 //! The exact reported scene — an orthographic `Matter::Camera` at `z = 0` and a

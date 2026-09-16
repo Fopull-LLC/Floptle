@@ -1,4 +1,4 @@
-//! Which keys reach a running game, and which the editor keeps (`floptle/0084`).
+//! Which keys reach a running game, and which the editor keeps.
 //!
 //! A game running in the Game view is supposed to behave like a build. The raw
 //! key set scripts read is filled from the window events directly, so almost

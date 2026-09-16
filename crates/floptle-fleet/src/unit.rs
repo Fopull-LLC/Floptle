@@ -2,7 +2,7 @@
 //!
 //! ## Why systemd rather than child processes
 //!
-//! `floptle/0197` asks for "a separate unprivileged systemd unit per deployment
+//! an earlier task asks for "a separate unprivileged systemd unit per deployment
 //! with the plan's memory cap". That is not only a packaging preference: the
 //! memory cap, the CPU quota and the restart backoff are all things systemd
 //! already does correctly, per-unit, in the kernel — and a cap the agent
@@ -69,14 +69,14 @@ pub struct UnitPlan<'a> {
     pub runtime_dir: Option<String>,
     /// The `0600 root` file holding `FLOPTLE_GAME_KEY=…`, written by the
     /// agent for this unit's `EnvironmentFile=` — `None` for a keyless
-    /// deployment (`floptle/0229`).
+    /// deployment.
     pub key_file: Option<PathBuf>,
 }
 
 /// Render the unit file.
 ///
 /// **`game_key` goes in through the environment, never the command line —
-/// and never through this file either** (`floptle/0229`). A key on an
+/// and never through this file either**. A key on an
 /// `ExecStart` is readable by every `ps` on the box and is copied into the
 /// journal by systemd's own "Starting…" line — which this agent then ships to
 /// the control plane as `last_lines` and W renders on a web page. And a unit
@@ -119,7 +119,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     // `[Service]` systemd logs "Unknown key name … ignoring" and the
     // give-up-after-five-starts promised below never happens, so a build that
     // cannot start restarts forever and the journal fills with one traceback
-    // (`floptle/0200`, defect three). The guard checks the SECTION.
+    // (defect three). The guard checks the SECTION.
     s.push_str("StartLimitIntervalSec=300\nStartLimitBurst=5\n\n");
 
     s.push_str("[Service]\n");
@@ -139,7 +139,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
         systemd_escape(&d.deployment_id)
     ));
     // ⚠ **The lobby code, when the control plane has one to give — and today it
-    // never does.** The relay mints codes (`floptle/0216`), so this is empty on
+    // never does.** The relay mints codes, so this is empty on
     // every deployment now and the variable is simply not written. It is here
     // because the agent is the only thing positioned to carry a code from
     // `/desired` to the process, and wiring that after the fact would mean
@@ -149,7 +149,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     if let Some(code) = &d.lobby_code {
         s.push_str(&format!("Environment=FLOPTLE_LOBBY_CODE={}\n", systemd_escape(code)));
     }
-    // stdout is the log, and the journal is where it goes — `floptle/0197`
+    // stdout is the log, and the journal is where it goes
     // asks for no file logging on the box.
     s.push_str("StandardOutput=journal\nStandardError=journal\n");
 
@@ -162,7 +162,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
         s.push_str(&format!("CPUQuota={pct}%\n"));
     }
 
-    // Restart with backoff, which is what `floptle/0197` asks for and what
+    // Restart with backoff, which is what an earlier task asks for and what
     // systemd does better than a loop in this agent would. The burst limit is
     // deliberately not `always`: a build that cannot start must eventually stop
     // trying and sit in `failed`, where the agent reports it and a developer
@@ -177,7 +177,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     // user under `ProtectSystem=strict` can write nowhere it is not handed,
     // and the agent's root-owned runtime directory was not such a place — so
     // the file was never written and every deployment reported zeros forever
-    // (`floptle/0200`, defect one). systemd creates this one owned by the
+    // (defect one). systemd creates this one owned by the
     // server's user; see `Args::runtime_directory` for why it is not nested
     // under the agent's.
     if let Some(rd) = &plan.runtime_dir {
@@ -315,7 +315,7 @@ mod tests {
 
     /// **The status file is in a directory the server's own user owns.**
     ///
-    /// `floptle/0200`, defect one: the server runs `DynamicUser=yes` under
+    /// an earlier task, defect one: the server runs `DynamicUser=yes` under
     /// `ProtectSystem=strict`, and the file used to be pointed at the AGENT's
     /// runtime directory — root-owned, `0755` — so it was never written, and
     /// every deployment reported zero players, zero uptime and no lobby code
@@ -340,7 +340,7 @@ mod tests {
 
     /// **`StartLimitIntervalSec` and `StartLimitBurst` are `[Unit]` keys.**
     ///
-    /// `floptle/0200`, defect three: in `[Service]` systemd logs "Unknown key
+    /// an earlier task, defect three: in `[Service]` systemd logs "Unknown key
     /// name … ignoring" and the documented give-up-after-five-starts never
     /// happens, so a build that cannot start restarts forever, writing the
     /// same traceback into a journal the agent then ships every ten seconds.
@@ -366,7 +366,7 @@ mod tests {
     /// and W renders on a public page. Three ways out of the box for one
     /// mistake, so this is asserted rather than reviewed.
     ///
-    /// And a fourth (`floptle/0229`): the unit file itself is 0644 under
+    /// And a fourth: the unit file itself is 0644 under
     /// `/etc/systemd/system`, so the key must not be in it at all — it is
     /// named by `EnvironmentFile=`, in a file the agent writes `0600 root`.
     #[test]
@@ -400,8 +400,8 @@ mod tests {
     /// in its journal could be traced back to a row on the portal.
     ///
     /// ⚠ The code is written **only when `/desired` carried one**, and today it
-    /// never does — the relay mints codes, not the control plane
-    /// (`floptle/0216`). An empty `Environment=FLOPTLE_LOBBY_CODE=` would be
+    /// never does — the relay mints codes, not the control plane.
+    /// An empty `Environment=FLOPTLE_LOBBY_CODE=` would be
     /// worse than the variable being absent: a server reading it would find a
     /// set-but-empty code rather than no code, which is the same
     /// zero-versus-unmeasured confusion that bit the box stats.

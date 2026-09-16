@@ -33,7 +33,7 @@ pub(crate) struct MirrorNode {
     /// Absolute world rotation, parents applied. Read fresh from here rather
     /// than cached anywhere per-tilemap: unlike a grid's cells, a node's
     /// transform can change on a frame that touches nothing else about it, and
-    /// `MirrorNode` is rebuilt every time the mirror is (`floptle/0155`).
+    /// `MirrorNode` is rebuilt every time the mirror is.
     pub(crate) world_rot: [f32; 4],
     /// Absolute world scale, parents applied — see `world_rot`.
     pub(crate) world_scale: [f32; 3],
@@ -61,7 +61,7 @@ pub(crate) struct MirrorNode {
     pub(crate) asset: Option<String>,
 }
 
-/// One tilemap's grid, as a package sees it (`floptle/0155`) — a read-only
+/// One tilemap's grid, as a package sees it — a read-only
 /// snapshot of `Matter::Tilemap`, kept in `Rc` so a scene revision bump for
 /// something ELSE in the level does not cost a copy of a map that has not
 /// itself changed. `Editor::fill_mirror_tilemaps` is what decides whether a
@@ -103,7 +103,7 @@ pub(crate) struct SceneMirror {
     /// path. A tileset describes tile TYPES, not per-instance cells, so
     /// unlike the grids it costs nothing worth avoiding to clone fresh.
     pub(crate) tilesets: HashMap<String, floptle_tiles::TileSet>,
-    /// The scene's gravity, as the sim would build it — `floptle/0173`.
+    /// The scene's gravity, as the sim would build it.
     ///
     /// A package that analyses a 2D level is mostly asking about **jumping**,
     /// and every one of those questions is a gravity times a jump impulse. The

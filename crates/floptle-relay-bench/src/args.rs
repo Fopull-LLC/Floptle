@@ -1,6 +1,6 @@
 //! The bench's command line.
 //!
-//! ⚠ **Rate and payload are flags, not constants** (`floptle/0218`). A relay
+//! ⚠ **Rate and payload are flags, not constants**. A relay
 //! multiplies traffic, so the shape of it decides the ceiling far more than the
 //! volume: big infrequent packets and small frequent ones find completely
 //! different limits, and games are the second kind.

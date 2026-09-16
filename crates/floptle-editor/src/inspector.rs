@@ -444,7 +444,7 @@ fn pins(declared: Option<&str>, stored: &str) -> Option<String> {
 /// The "this scene is pinning the script's number" badge. Returns whether the
 /// reset was clicked.
 ///
-/// This is the half of `floptle/0068` the Console cannot catch: the name is
+/// This is the half of an earlier task the Console cannot catch: the name is
 /// legitimate, the value is legitimate, and the only wrong thing about it is
 /// its AGE. From the outside it is indistinguishable from a script whose
 /// numbers do nothing — you edit one, press Play, and nothing happens.
@@ -1764,7 +1764,7 @@ impl EditorTabViewer<'_> {
         let sel_all: Vec<floptle_core::Entity> = self.selection.to_vec();
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
-        // Read before `self` is split up below (`floptle/0110`).
+        // Read before `self` is split up below.
         let playing = self.playing;
         let bone_names = self.bone_names;
         // Snapshot the selected object/bone before `world` reborrows `self` — the
@@ -2612,7 +2612,7 @@ impl EditorTabViewer<'_> {
                                     .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
                                     .changed();
                             }
-                            // 2D (`floptle/0058`). The grid is edited from
+                            // 2D. The grid is edited from
                             // Lua — a room is re-dressed per floor — so the
                             // Inspector states the shape and the one thing that
                             // is easy to get wrong: the sheet is the MATERIAL's.
@@ -3020,7 +3020,7 @@ impl EditorTabViewer<'_> {
                                 if !target.is_empty() {
                                     ui.small(format!("live texture: rt:{target}"));
                                     // Size + refresh rate: a minimap is not worth a
-                                    // full-rate 480×270 (floptle/0078).
+                                    // full-rate 480×270.
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("size").on_hover_text(
                                             "the target texture's pixel size — smaller is \
@@ -3109,8 +3109,8 @@ impl EditorTabViewer<'_> {
                                 let aimed = floptle_core::is_spot(*spot_angle);
                                 ui.label(if aimed { "spot light" } else { "light" });
                                 ui.small("position and facing come from the transform below");
-                                // **Where this scene stands against the cap**
-                                // (`floptle/0116`). Naming the sixteen is the
+                                // **Where this scene stands against the cap**.
+                                // Naming the sixteen is the
                                 // easy half and it is the half that does not
                                 // help: "twelve, plus whatever the room has" is
                                 // exactly the arithmetic that crosses it, and a
@@ -4442,8 +4442,8 @@ impl EditorTabViewer<'_> {
                                             .changed();
                                     }
                                     // Posterize — crush the ART to a limited palette. It runs
-                                    // before the 2D light rather than at the end of the frame
-                                    // (`floptle/0127`), which is why the tooltip says palette.
+                                    // before the 2D light rather than at the end of the frame,
+                                    // which is why the tooltip says palette.
                                     ui.separator();
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("Posterize")
@@ -5055,7 +5055,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Transform (always present) =====
                 ui.separator();
-                // `floptle/0110`: Stop reverts the world, so a transform typed
+                // Stop reverts the world, so a transform typed
                 // here while playing is thrown away — `push_history` no-ops
                 // during Play, which also means it is not undoable and never
                 // marks the scene unsaved. Nothing used to say so.
@@ -7123,10 +7123,10 @@ fn lighting_2d_row(
                  keep it off, e.g. a background that should stay flat",
             );
         }
-        // The shape of the falloff (`floptle/0126`). An art control: a hard pool
+        // The shape of the falloff. An art control: a hard pool
         // with a defined edge, or a soft glow that reaches. It was also sold as
         // the way to dodge posterize banding, and that is withdrawn — the light
-        // is never quantised now (`floptle/0127`).
+        // is never quantised now.
         let range = match world.get::<Matter>(e) {
             Some(Matter::PointLight { range, .. }) => *range,
             _ => 10.0,
@@ -7391,7 +7391,7 @@ fn node_has_component(
 }
 
 /// What a light's Inspector says about the sixteen shader slots, and whether it
-/// says it as a warning (`floptle/0116`).
+/// says it as a warning.
 ///
 /// A free function because the decision is the part worth testing and the
 /// `ui.small` around it is not. The complaint the card carries is that the cap
@@ -7415,7 +7415,7 @@ fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
 mod tests {
     use super::*;
 
-    /// **A cap the scene can see** (`floptle/0116`).
+    /// **A cap the scene can see**.
     ///
     /// The load-bearing assertion is that the live count is in the string. The
     /// original state of this was a hover naming sixteen and nothing else, which

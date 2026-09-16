@@ -1,5 +1,5 @@
 //! Sky-shader **contact sheet**: one uniform swept across its range, every step
-//! rendered and tiled into a single PNG (`floptle/0119`).
+//! rendered and tiled into a single PNG.
 //!
 //! `sky_shader_probe` renders one frame with one set of values, which is the
 //! right test for "does the splice work" and the wrong one for a sky whose
@@ -30,7 +30,7 @@ const ACROSS: u32 = 4;
 
 /// A sky that visibly PROGRESSES, so the sheet has something to show: a dark
 /// void that catches fire from the horizon up as `burn` runs 0 → 1. Uses
-/// `atan2` for the azimuth, which is the thing `floptle/0119` added and the
+/// `atan2` for the azimuth, which is the thing an earlier task added and the
 /// reason a shader can lay anything out around a horizon at all.
 const DEMO_FLSL: &str = r#"shader ashfallDemo {
   stage sky

@@ -233,7 +233,7 @@ impl ChunkField {
     ///
     /// `None` for untextured voxels (slot 0, and the legacy 255 sentinel), so a
     /// caller can tell "plain rock" from "slot 255". The read half of what
-    /// `paint_texture` writes: until floptle/0037 the palette was write-only
+    /// `paint_texture` writes: until an earlier task the palette was write-only
     /// from script, so a mining game could not ask what it had just dug.
     pub fn slot_at(&self, p: Vec3) -> Option<u8> {
         match self.color(p)[3] {
@@ -526,7 +526,7 @@ impl ChunkField {
     /// A dig that says nothing about what it removed leaves a mining game
     /// guessing: the palette slot each voxel carries is what the generator wrote
     /// when it laid down strata, ore pockets and cave seams, and it was
-    /// write-only from script (floptle/0037).
+    /// write-only from script.
     ///
     /// Volume comes from each voxel's **occupancy** — the fraction of it that is
     /// solid, `clamp(0.5 - d/voxel, 0, 1)` — differenced across the write. That
@@ -2275,7 +2275,7 @@ mod yield_tests {
     /// The measurement has to be ADDITIVE: sum the reports over a shaft and you
     /// get the volume that actually left the field. A mining game that pays out
     /// per dab needs a careful shaft and a sloppy cavern to differ by the truth,
-    /// not by the dab count (floptle/0037).
+    /// not by the dab count.
     #[test]
     fn summed_yield_equals_the_volume_that_left_the_field() {
         let mut f = ChunkField::new(0.5);

@@ -1,4 +1,4 @@
-//! **2D shadows and falloff shaping** (`floptle/0125`, `floptle/0126`).
+//! **2D shadows and falloff shaping**.
 //!
 //! A flat grey floor under an orthographic camera, one 2D light off to the left,
 //! and a one-tile-wide wall standing between the light and the right-hand side.
@@ -180,7 +180,7 @@ fn main() {
         off.1
     );
 
-    // ---- falloff shaping (`floptle/0126`) ----------------------------------
+    // ---- falloff shaping ----------------------------------
     //
     // The far column is six units from the light against a range of twelve, so
     // the default ramp has it at a quarter brightness. `inner` and the exponent
@@ -189,7 +189,7 @@ fn main() {
     //
     // They were also, briefly, the recommended way to dodge posterize banding:
     // squash the whole falloff inside one band and it cannot draw rings. That
-    // recommendation is withdrawn (`floptle/0127`) — it replaced N soft rings
+    // recommendation is withdrawn — it replaced N soft rings
     // with one hard disc edge, and the edge survived turning posterize off,
     // which is how you know a workaround was never the fix. The knobs stay
     // because shaping a light is a real thing to want.

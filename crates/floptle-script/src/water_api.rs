@@ -1,5 +1,4 @@
-//! `water.*` — what a script asks about the wet parts of the world
-//! (`floptle/0038`).
+//! `water.*` — what a script asks about the wet parts of the world.
 //!
 //! The engine owns the volume, the buoyancy and the drag. What a game still has
 //! to decide is everything *meaningful*: whether the player is swimming or

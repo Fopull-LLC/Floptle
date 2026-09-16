@@ -74,7 +74,7 @@ pub(crate) struct ParamMeta {
     /// Kept so the Inspector can tell a row that is overriding it from a row
     /// that is merely showing it. A scene's stored param wins over the script's
     /// default, silently and forever — so a number you edit in the script does
-    /// nothing, and there is nothing on screen to say why (`floptle/0068`).
+    /// nothing, and there is nothing on screen to say why.
     pub(crate) default: Option<String>,
 }
 
@@ -434,7 +434,7 @@ function roll(node) end
     }
 
     /// The declared literal, kept so the Inspector can say "this scene is
-    /// overriding the script" (`floptle/0068`). Values it cannot make sense of
+    /// overriding the script". Values it cannot make sense of
     /// are absent rather than guessed at — a wrong answer here would put a
     /// "you are overriding this" badge on a row that is not.
     #[test]

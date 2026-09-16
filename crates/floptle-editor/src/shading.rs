@@ -144,7 +144,7 @@ pub(crate) struct SplitLights {
     pub two_d: LightSlots,
     /// How many lights qualified but were ranked out of the sixteen, both sides
     /// together. Reported through `perf.counts().lightsDropped`: a cap nobody
-    /// can see is the whole complaint in `floptle/0116`, and "my seventeenth
+    /// can see is the whole complaint in an earlier task, and "my seventeenth
     /// torch does nothing" is not a thing anybody should have to guess.
     pub dropped: usize,
 }
@@ -187,7 +187,7 @@ pub(crate) fn split_point_lights(
         // the spare ones at zero is the standard way to pool a capped resource —
         // and scripts cannot create a PointLight, so it is the only way. A
         // parked light holding a slot would mean a pool exhausts the budget and
-        // lights nothing (`floptle/0116`).
+        // lights nothing.
         if *intensity <= 0.0 || *range <= 0.0 {
             continue;
         }
@@ -196,7 +196,7 @@ pub(crate) fn split_point_lights(
         // scripts, and a water volume beside this one already goes with it —
         // a lamp prefab you disabled still lighting the room is the reading
         // nobody expects. It costs a slot too, which is exactly the pool
-        // exhaustion `floptle/0116` is about.
+        // exhaustion an earlier task is about.
         if floptle_core::is_disabled(world, e) {
             continue;
         }
@@ -310,7 +310,7 @@ struct Candidate {
 /// It depends only on the light and the camera. That is the whole point: the
 /// same scene and the same camera choose the same sixteen every frame, so a
 /// torch cannot go out for four frames because an enemy died somewhere else and
-/// moved the ECS's iteration order (`floptle/0116`).
+/// moved the ECS's iteration order.
 fn contribution(distance: f32, range: f32, color: [f32; 3], intensity: f32) -> f32 {
     let bright = (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]).max(0.0) * intensity;
     bright / (distance - range).max(1.0)
@@ -1050,7 +1050,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 motion_blur: *motion_blur,
                 motion_samples: *motion_samples,
                 // The accessibility filter is a PREFERENCE, not a scene
-                // setting — the caller folds it in after this (`floptle/0079`),
+                // setting — the caller folds it in after this,
                 // and `time` likewise comes from the frame, not the node.
                 ..floptle_render::PostSettings::default()
             };

@@ -1,4 +1,4 @@
-//! floptle/0183 — a session peer has an identity, and a server can remove one.
+//! a session peer has an identity, and a server can remove one.
 //!
 //! Two gaps that are really one: a server did not know **who** a peer was, and
 //! could not do anything about it if it did. The Lua net surface had no `kick`,

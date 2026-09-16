@@ -927,7 +927,7 @@ impl Editor {
         if let Some(a) = cmd.access {
             // One set of values, two ways in: this pane and a game's own options
             // menu (`access.*`). Pushed into the host so Lua reads back what the
-            // editor just set, rather than the two disagreeing (`floptle/0079`).
+            // editor just set, rather than the two disagreeing.
             self.access = a;
             self.script_host.set_access(a);
         }
@@ -1467,7 +1467,7 @@ impl Editor {
         }
         if let Some(path) = cmd.open_prefab {
             // Same shape as opening a scene, for the same reason: this replaces
-            // the world (`floptle/0090`).
+            // the world.
             if self.playing {
                 self.toggle_play();
             }

@@ -60,8 +60,8 @@ pub const MAX_DELAY: u8 = 6;
 /// It was the only delay for two releases, which is right for peers in the same
 /// building and wrong for everyone else: past 33 ms one way the opponent's
 /// input lands after the tick that needed it on every tick, so the driver
-/// guesses and re-simulates forever. Correct, and six times the work
-/// (floptle/0049). The host now derives a starting value from the worst peer's
+/// guesses and re-simulates forever. Correct, and six times the work.
+/// The host now derives a starting value from the worst peer's
 /// measured RTT, and a game can name one outright.
 ///
 /// Still fixed per session, never auto-adjusted mid-match: adaptive delay hides
@@ -421,7 +421,7 @@ fn sustain(i: &NetInput) -> NetInput {
 
 #[cfg(test)]
 mod tests {
-    /// floptle/0045: two peers whose script state differs by one value must be
+    /// two peers whose script state differs by one value must be
     /// told which value, on which node, in which script.
     ///
     /// The cross-platform failure that motivated this was a single Lua number —
@@ -482,7 +482,7 @@ mod tests {
         Rollback::new(P1, vec![P1, P2], delay)
     }
 
-    /// field regression (floptle/0049): the input delay has to be choosable,
+    /// field regression: the input delay has to be choosable,
     /// because the constant 2 is right only for peers in the same building.
     ///
     /// Both sides of this run the same inputs over the same link — one-way

@@ -355,7 +355,7 @@ impl Editor {
         // one split, both halves — the 3D slots the globals want and the 2D ones
         // the gather filters by. This path used to walk the scene's lights twice
         // (`collect_point_lights` here, and again to build the 2D uniform at the
-        // pass), which is half of what `floptle/0122` measured.
+        // pass), which is half of what an earlier task measured.
         let off_split = crate::shading::split_point_lights(
             &self.world,
             cam.world_position,
@@ -442,7 +442,7 @@ impl Editor {
 
         // The same one value the pass is handed below, from the same split — and
         // the same helper the Scene view uses, so this view cannot decide a
-        // different set of lit surfaces from that one (`floptle/0122`).
+        // different set of lit surfaces from that one.
         let lights_2d = light2d_uniform(&self.world, &off_split.two_d, view_proj);
         let reach_2d = lights_2d.reach();
         // Which flat nodes take part in 2D lighting, and at which sorting rank —
@@ -463,7 +463,7 @@ impl Editor {
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
         let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
-        // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
+        // GPU-skinned parts, gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom `.flsl` materials draw offscreen too (bindings were refreshed
@@ -474,7 +474,7 @@ impl Editor {
         // exactly like the main gather — so offscreen views animate skinned meshes too.
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
         // How much the frustum cull skipped, published below alongside the rest
-        // of this gather's counts — see `floptle/0167`: this whole gather used
+        // of this gather's counts — see an earlier task: this whole gather used
         // to publish nothing, so a Game-view session's `perf.counts()` was
         // whatever the Scene view had last computed, or all zero if it never
         // ran this session.
@@ -497,7 +497,7 @@ impl Editor {
             // from the Scene view — the drift this file has already had three
             // times over.
             t.translation += sort_z.get(ent).copied().unwrap_or_default();
-            // …and the same cull the screen uses (`floptle/0075`), against this
+            // …and the same cull the screen uses, against this
             // camera's frustum. An offscreen target that culled differently from
             // the window would be a mirror showing a different room.
             // A pixels-per-unit sprite is drawn at its texture's size, not at
@@ -651,7 +651,7 @@ impl Editor {
                     for mut draw in draws {
                         // On the 2D lighting path: the raster pass draws it
                         // UNLIT, and the composite corrects that by the light's
-                        // difference (`floptle/0121`). The G-buffer instance is
+                        // difference. The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
                         if let Some(&(rank, casts)) = lit2d.get(ent) {
@@ -793,8 +793,8 @@ impl Editor {
                 &mut instances,
             );
         }
-        // …and the counts a game can read via `perf.counts()` (`floptle/0077`,
-        // `floptle/0167`). This gather used to publish none of this: every view
+        // …and the counts a game can read via `perf.counts()` (an earlier task,
+        // an earlier task). This gather used to publish none of this: every view
         // that comes through it — the docked or split Game view, `floptle
         // shot`, a render target — left the profile holding whatever the
         // Scene-view gather in `render()` had last written, or all zero if that
@@ -1078,7 +1078,7 @@ impl Editor {
             );
             // The palette quantize, before the light — the same order the surface
             // path uses, and it has to be the same or a docked Game view would
-            // posterize its lighting while the Scene view did not (`floptle/0127`,
+            // posterize its lighting while the Scene view did not (an earlier task,
             // and the two gathers have drifted over exactly this shape before).
             if let Some(q) = palette {
                 raster.quantize_palette(gpu, color, (size.0.max(1), size.1.max(1)), q);

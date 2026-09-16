@@ -1,7 +1,7 @@
 //! The palette pass: posterize, run over the art and before the light.
 //!
 //! See `palette.wgsl` for why this is its own pass and not the tail of the post
-//! chain (`floptle/0127`). The short version: posterize quantizes the *palette*,
+//! chain. The short version: posterize quantizes the *palette*,
 //! and a light is a multiplier on the palette rather than a member of it, so the
 //! quantize has to happen while the frame still holds only art. Everything the
 //! renderer adds after this point — the 2D light delta, SSAO, bloom, the
@@ -27,8 +27,7 @@ pub struct PaletteQuantize {
     /// Ordered-dither the step, so a smooth ramp in the *art* becomes a stipple
     /// rather than a hard edge. It no longer has anything to do with lighting.
     pub dither: bool,
-    /// Step brightness and carry the chroma, rather than each channel on its own
-    /// (`floptle/0126`).
+    /// Step brightness and carry the chroma, rather than each channel on its own.
     pub chroma: bool,
 }
 

@@ -47,7 +47,7 @@ pub struct AudioSystem {
 
 impl AudioSystem {
     /// Voices this frame is mixing: every `AudioSource` node playing, plus every
-    /// script one-shot still running (`floptle/0115`).
+    /// script one-shot still running.
     ///
     /// The preview voice is deliberately excluded — it only exists outside Play,
     /// and a number a game reads to check its own budget should not count the

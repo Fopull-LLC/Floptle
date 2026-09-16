@@ -1,4 +1,4 @@
-//! **`floptle shot` draws the UI** (`floptle/0224`).
+//! **`floptle shot` draws the UI**.
 //!
 //! `shot` is how a project is looked at from a terminal — `run` reports what
 //! raised, `shot` shows what a player would see. Except that it ran the world

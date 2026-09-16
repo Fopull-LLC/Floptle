@@ -76,7 +76,7 @@ pub fn import(path: &Path) -> Result<ImportedModel, ImportError> {
 /// For every caller that wants a model's *shape*: the navmesh bake, a mesh
 /// collider, a measurement. Decoding a model's textures to answer a question
 /// about its vertex positions is pure waste, and it is not small waste — a
-/// streamed level of 313 props in `floptle/0140` spent ~43 MB of RGBA
+/// streamed level of 313 props in an earlier task spent ~43 MB of RGBA
 /// allocation, per bake, on pixels it dropped on the next line.
 ///
 /// Geometry is produced by the same walk as [`import`], deliberately: two
@@ -468,7 +468,7 @@ mod geometry_tests {
         assert!(Arc::ptr_eq(&a, &b), "the second read went back to disk");
     }
 
-    /// The numbers `floptle/0140` asks for, printed rather than asserted —
+    /// The numbers an earlier task asks for, printed rather than asserted —
     /// a threshold in wall-clock on a shared runner is a coin flip.
     ///
     /// `cargo test -p floptle-assets --release geometry_cost -- --nocapture`

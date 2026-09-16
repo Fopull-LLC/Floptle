@@ -149,7 +149,7 @@ fn alloc(gpu: &Gpu, dims: [u32; 3]) -> wgpu::Texture {
 /// Float32 textures are not filterable, so this entry must say so — and it must
 /// say so identically on both sides, which is the whole reason it is a function.
 /// A hand-copied second entry is how two structurally-equal layouts stop being
-/// equal (`floptle/0113`, and again in v0.44's post chain).
+/// equal (and again in v0.44's post chain).
 pub(crate) fn probe_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,

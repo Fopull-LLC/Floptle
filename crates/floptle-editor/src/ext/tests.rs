@@ -216,7 +216,7 @@ fn a_hook_that_raises_is_reported_once_and_stops_being_called() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// `floptle/0173`: a 2D level's analysis is a jump-arc question, and the package
+/// a 2D level's analysis is a jump-arc question, and the package
 /// API could not say what gravity was — so the editor's own 2D extractor sent
 /// `-9.81` and flagged it a guess.
 ///
@@ -480,7 +480,7 @@ fn json_null_writes_a_null_where_nil_removes_the_key() {
 
 /// `json.array` is the only way to write `[]`, and a decoded list stays a list.
 ///
-/// The case that forced it (`floptle/0152`): a package building a request body
+/// The case that forced it: a package building a request body
 /// with a `selected_ids` list that is sometimes empty had no value it could put
 /// there. `{}` is an object, and the API on the other end reads an array — with
 /// nothing at the Lua end to tell the two apart. The workaround was to omit the
@@ -1475,7 +1475,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// `floptle/0154`: the walk above reaches every top-level TABLE, and cannot
+/// the walk above reaches every top-level TABLE, and cannot
 /// see the fields of a table a binding *returns* — `scene.info(id).ui` is
 /// real, was undocumented for exactly that reason (invisible from inside the
 /// engine, only found once a substantial package was built against it), and
@@ -1784,7 +1784,7 @@ fn a_baked_floor() -> floptle_nav::NavMesh {
     floptle_nav::bake(&tris, &floptle_nav::NavSettings::default()).expect("this floor bakes")
 }
 
-/// `floptle/0155`: a package can read a 2D level's floor — size, a square's
+/// a package can read a 2D level's floor — size, a square's
 /// cell, its solidity and tags, and the world transform both ways — and gets
 /// `nil` for a node that is not a tilemap. Read-only: there is no `set` on
 /// the handle to try.
@@ -2127,7 +2127,7 @@ fn random_bytes_are_the_length_asked_for_and_not_the_same_twice() {
 }
 
 // ---------------------------------------------------------------------------
-// Fonts (`floptle/0139`). A package ships a typeface and draws a run of widgets
+// Fonts. A package ships a typeface and draws a run of widgets
 // in it. The interesting cases are all failure cases: a face that is not there,
 // a path that tries to leave the folder, and a reload that must not accumulate.
 // ---------------------------------------------------------------------------
@@ -2318,7 +2318,7 @@ fn a_declared_face_egui_has_not_been_given_yet_draws_instead_of_panicking() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// The node document, from Lua's side (`floptle/0142`). What a level-design tool
+/// The node document, from Lua's side. What a level-design tool
 /// does after it has finished analysing: put something in the level.
 #[test]
 fn a_package_writes_a_node_document_and_builds_a_subtree() {
@@ -2761,7 +2761,7 @@ fn a_mesh_read_that_fails_still_calls_back_and_says_why() {
 ///
 /// A package can hand a string to the clipboard, and cannot take one from it.
 ///
-/// The case that forced it (`floptle/0153`): a panel rendering a code block had
+/// The case that forced it: a panel rendering a code block had
 /// no way to build a copy button, so the only exit for four lines of generated
 /// code was `ed.write` — a file, a path, an overwrite policy and a `Files`
 /// permission, for text somebody wanted to paste into a file already open.

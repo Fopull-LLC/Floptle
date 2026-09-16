@@ -1,5 +1,4 @@
-//! How big a node's geometry is, so the draw loop can skip what is off screen
-//! (`floptle/0075`).
+//! How big a node's geometry is, so the draw loop can skip what is off screen.
 //!
 //! One function, [`local_radius`], answering per `Matter` kind. It returns
 //! `Option<f32>`: `None` means **do not cull this**, and that is the answer for
@@ -26,9 +25,9 @@ const PRIMITIVE_RADIUS: f32 = crate::matter_catalog::PRIMITIVE_HALF * 1.732_050_
 
 /// What the last gather submitted, and what it skipped.
 ///
-/// Counts, not times. `floptle/0071` — a scatter field asking for 117,000 props,
+/// Counts, not times. an earlier task — a scatter field asking for 117,000 props,
 /// reported as "currently unplayable" — was diagnosable from a count alone, and
-/// the engine kept none. `floptle/0077` extends this with per-subsystem times and
+/// the engine kept none. an earlier task extends this with per-subsystem times and
 /// a Lua surface; these are the numbers frustum culling moves, so they start here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {

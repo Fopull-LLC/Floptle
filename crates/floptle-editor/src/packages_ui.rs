@@ -21,7 +21,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use floptle_package::{Index, Listing, Permission, Registry, Severity, Source};
 
 /// The browser's whole visual vocabulary: four type steps, one panel, one
-/// primary action, and the accent read from the user's theme (`floptle/0135`).
+/// primary action, and the accent read from the user's theme.
 /// Nothing in this file spells out a size, a weight or a chrome colour — that
 /// is the point of it living in [`crate::theme`].
 use crate::theme::look;
@@ -931,7 +931,7 @@ fn toggle<T: PartialEq + Copy>(list: &mut Vec<T>, v: T) {
 }
 
 /// The Browse-tile permissions warning, or `None` when there is nothing to
-/// warn about (`floptle/0137`).
+/// warn about.
 ///
 /// A pure function on purpose, separate from the `ui.label` call that paints
 /// it: the catalogue's own claim vs fact split means `None` covers two
@@ -1750,7 +1750,7 @@ mod tests {
         assert_eq!(non_empty(" v1.0 "), Some("v1.0".to_string()));
     }
 
-    /// `floptle/0137`: asserted against the chip's own content, not against
+    /// asserted against the chip's own content, not against
     /// substring text anywhere in the panel — "Network" and "Browser" also
     /// appear in this file's explanatory prose, so a text-scan assertion
     /// would pass for the wrong reason (the card's own account of why its
@@ -1781,7 +1781,7 @@ mod tests {
         );
     }
 
-    /// The end-to-end case `floptle/0137`'s adversarial-review follow-up
+    /// The end-to-end case that task's adversarial-review follow-up
     /// exists for: a catalogue entry whose permissions field is present but
     /// unreadable must still show a chip, not read as though nothing were
     /// declared — this is the one field whose whole job is warning someone

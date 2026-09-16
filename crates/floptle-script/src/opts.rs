@@ -2,7 +2,7 @@
 //!
 //! **Why this module exists.** 32 of the 74 bugs ever filed against this engine
 //! — 43% — are one shape: the engine answered something it did not understand
-//! instead of refusing it (`floptle/0082`). A `collide` option parsed, stored and
+//! instead of refusing it. A `collide` option parsed, stored and
 //! read by nothing, for two releases. A `pin = "topCenter"` that meant top-LEFT,
 //! silently, forever. A typo'd `perchunk` that took the default and said
 //! nothing. Every one was found by somebody playing, and every one was fixed on
@@ -132,7 +132,7 @@ pub fn near_miss_hint(key: &str, known: &[&str]) -> String {
 /// Resolve an enumerated string value, or refuse it naming what is accepted.
 ///
 /// `parse` is the same parser the engine uses to act on the value — that is the
-/// whole point of the shape (`floptle/0072`): a check that reimplements the list
+/// whole point of the shape: a check that reimplements the list
 /// drifts from it, and the drift is invisible until a player types a name the
 /// check allows and the parser doesn't.
 pub fn parse_enum<T>(
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// Every registered option table refuses a key the engine does not read —
-    /// checked by CALLING it, from Lua, through the real host (`floptle/0082`).
+    /// checked by CALLING it, from Lua, through the real host.
     ///
     /// 32 of the 74 bugs filed against this engine were one shape: the engine
     /// answered something it did not understand. Every one was fixed on its own,
@@ -383,7 +383,7 @@ mod tests {
         }
     }
 
-    /// No option table escapes the registry (`floptle/0082`).
+    /// No option table escapes the registry.
     ///
     /// This is the half that stops the audit decaying. It scans this crate's own
     /// source for the shape of an options table — a Lua closure taking a
@@ -399,7 +399,7 @@ mod tests {
         const NOT_OPTIONS: &[(&str, &str)] = &[
             ("math_api.rs", "list helpers (map/filter/sort) take DATA, not options"),
             ("http_api.rs", "the reply table is built by the engine and read by the game"),
-            ("ui_make.rs", "ui.make validates every property AND value itself (floptle/0072)"),
+            ("ui_make.rs", "ui.make validates every property AND value itself"),
             ("api.rs", "handle metatables and the construction calls, all checked at the call"),
             ("audio_api.rs", "sound/track handles; the one options table is audio.play"),
             ("net_api.rs", "node handles and the synced store's __index/__newindex"),

@@ -1,4 +1,4 @@
-//! floptle/0181 — a replicated spawn is a SUBTREE, and ownership is reassignable.
+//! a replicated spawn is a SUBTREE, and ownership is reassignable.
 //!
 //! Every avatar a real game has is a hierarchy: a capsule with a camera child,
 //! an arms mesh, a bone-attached item socket. `net.spawn` used to send the

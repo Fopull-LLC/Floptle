@@ -1,4 +1,4 @@
-//! **A warm ramp must not band into hues** (`floptle/0126`).
+//! **A warm ramp must not band into hues**.
 //!
 //! A retro project posterizes. Quantize each colour channel on its own and a
 //! smooth warm ramp crosses each channel's band boundary at a *different* value,
@@ -11,7 +11,7 @@
 //! exact grey or strongly saturated, which rules out a torch, a lamp, a fire and
 //! a muzzle flash.
 //!
-//! **The subject moved in `floptle/0127`.** Posterize now quantizes the palette —
+//! **The subject moved in an earlier task.** Posterize now quantizes the palette —
 //! the art — and runs before the light, so a light is never quantized at all and
 //! cannot band into anything (`light2d_smooth_probe` is the assertion for that).
 //! What is still quantized, and still has to keep its hue, is warm *art*: a
@@ -155,7 +155,7 @@ fn main() {
 }
 
 /// Draw the ramp into the post chain's input, quantize the palette, run the
-/// chain. The palette pass is where the quantize lives now (`floptle/0127`).
+/// chain. The palette pass is where the quantize lives now.
 fn shot(
     gpu: &Gpu,
     raster: &mut Raster,

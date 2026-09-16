@@ -158,7 +158,7 @@ impl Editor {
         let light_node = gather.light_node;
         // ---- build the egui UI (mutating the World) ----
         let mut raw_input = egui.state.take_egui_input(window);
-        // A focused game owns the keyboard (`floptle/0084`). egui hands Tab to
+        // A focused game owns the keyboard. egui hands Tab to
         // widget focus traversal before anything else sees it, which put every
         // press on the dock's tab bar and left `input.pressed("tab")` returning
         // false — the same as not being pressed, so a game bound to the most
@@ -417,7 +417,7 @@ impl Editor {
         // Project Settings. A script setting `app.setRetroHeight` runs before
         // that capture, so its new value was already there to be captured as the
         // "old" one and the target was never resized — the setting appeared to
-        // do nothing, for ever (`floptle/0175`). Comparing against what the
+        // do nothing, for ever. Comparing against what the
         // target actually is has no such blind spot, whoever moved the number.
         let want_retro =
             self.project.retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32);
@@ -819,7 +819,7 @@ impl Editor {
                 {
                     self.show_net_panel = !self.show_net_panel;
                 }
-                // ⏱ Frame cost (`floptle/0077`). Opening it turns collection
+                // ⏱ Frame cost. Opening it turns collection
                 // on; closing it turns collection off, so the profiler costs
                 // nothing when nobody is looking at it — which is the only
                 // way one stays switched on.
@@ -896,13 +896,13 @@ impl Editor {
 
     }
 
-    /// ⏱ frame cost (`floptle/0077`)
+    /// ⏱ frame cost
     fn ui_frame_cost_window(
         &mut self,
         ui: &mut egui::Ui,
         out: &mut UiOut,
     ) {
-        // ---- ⏱ frame cost (`floptle/0077`) ----
+        // ---- ⏱ frame cost ----
         if self.show_perf_panel {
             let mut open = true;
             egui::Window::new("⏱ Frame cost")
@@ -962,7 +962,7 @@ impl Editor {
             let cfg = s.interest();
             cfg.enabled.then(|| (cfg, s.interest_stats()))
         });
-        // Voice chat (floptle/0180): `None` when nothing is captured or heard,
+        // Voice chat: `None` when nothing is captured or heard,
         // which is a different statement from "on, and silent". A voice that
         // is quiet because the jitter buffer is starving looks exactly like a
         // player who stopped talking, and these are the numbers that tell them
@@ -1172,8 +1172,7 @@ impl Editor {
                             // neither means anything alone: a rollback
                             // implementation working perfectly and one badly
                             // misconfigured look identical from outside, and
-                            // "delay 2 — 99% guessed" is the whole diagnosis
-                            // (floptle/0049).
+                            // "delay 2 — 99% guessed" is the whole diagnosis.
                             let line = format!(
                                 "⚔ ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
                                 rb.fighters,
@@ -1220,7 +1219,7 @@ impl Editor {
                         );
                         // who is starved, and on what. A frozen match used
                         // to look identical from both screens; this names
-                        // the side that stopped keeping up (floptle/0039).
+                        // the side that stopped keeping up.
                         ui.small(format!(
                             "frontier · confirmed {} of {} simulated ({} ahead)",
                             rb.confirmed,
@@ -1780,7 +1779,7 @@ impl Editor {
         let ui_overlay_snapshot = self.ui_overlay.clone();
         let ui_canvas_snapshot = self.ui_canvas.clone();
         // Accessibility is `Copy`, so the tab edits a copy and reports back
-        // (`floptle/0079`) — no field borrow to thread through the tab viewer.
+        // — no field borrow to thread through the tab viewer.
         let access = self.access;
         // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
         // The Scene tab is transparent so the 3D render shows through; the others
@@ -3275,7 +3274,7 @@ impl Editor {
             let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             // One gate, both directions: a prefab replaces the world exactly
             // as thoroughly as a scene does, so it comes through here too and
-            // only the wording differs (`floptle/0090`).
+            // only the wording differs.
             let kind = if crate::assets::is_prefab(&path) { "prefab" } else { "scene" };
             let name = name.trim_end_matches(".prefab").to_string();
             let mut keep = true;

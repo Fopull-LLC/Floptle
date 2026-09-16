@@ -363,8 +363,7 @@ pub struct TextSpec {
 /// match the key it names, an item name in its rarity. The only way to do that
 /// was to split the line into sibling elements and lay them out by hand, which
 /// re-wraps wrong at every resolution, breaks the moment the string is
-/// translated, and is impossible for text revealed a glyph at a time
-/// (`floptle/0172`).
+/// translated, and is impossible for text revealed a glyph at a time.
 ///
 /// **Spans style; they never lay out.** Wrapping, alignment, `max_lines` and
 /// ellipsis are all computed across the whole string exactly as before, so a
@@ -1340,8 +1339,7 @@ pub fn sort_roots(roots: &mut [Node]) {
     roots.sort_by_key(|n| n.spec.order);
 }
 
-/// Multiply every text size in a tree by the player's text scale
-/// (`floptle/0079`).
+/// Multiply every text size in a tree by the player's text scale.
 ///
 /// Call this on the built tree **before** [`solve`], which is what makes text
 /// scaling *reflow*: the solver measures the scaled run, so a `fit`-height box
@@ -1848,7 +1846,7 @@ pub struct DrawList {
 
 impl DrawList {
     /// Tag this list with the layer it was built for, so the text in it
-    /// rasterizes on that layer's own grid (`floptle/0120`).
+    /// rasterizes on that layer's own grid.
     ///
     /// A method rather than a field poke at each call site: it reads as part of
     /// the expression that builds the list, which is harder to leave off than a
@@ -2663,8 +2661,7 @@ mod tests {
         assert_eq!([r[2], r[3]], [200.0, 100.0]);
     }
 
-    /// Text scaling REFLOWS: the box grows and its neighbour moves down
-    /// (`floptle/0079`).
+    /// Text scaling REFLOWS: the box grows and its neighbour moves down.
     ///
     /// The failure this rules out is the one that makes a text-size setting
     /// useless: bigger glyphs painted into the same rect, clipped at exactly the
@@ -3260,7 +3257,7 @@ mod tests {
         assert!(t.stroke.is_none());
     }
 
-    /// `floptle/0172`: spans round-trip, and an old scene stays an old scene.
+    /// spans round-trip, and an old scene stays an old scene.
     ///
     /// The absence half is checked by `unused_extras_do_not_serialize`, which
     /// names both new fields — this is the other direction: a run that does
@@ -3646,7 +3643,7 @@ mod tests {
         assert_eq!(pixel(true).scale_for([200.0, 120.0]), 0.5);
     }
 
-    /// `floptle/0120`: a pixel font's cell only *looks* like a pixel when it
+    /// a pixel font's cell only *looks* like a pixel when it
     /// lands on a whole one, and `text size × layer scale` almost never does —
     /// the scale belongs to the window, not the author, so there is no size an
     /// author could pick that would fix it.

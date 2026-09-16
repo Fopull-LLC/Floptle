@@ -17,7 +17,7 @@
 //! play zero-config, and it is exactly as trustworthy as a Minecraft server —
 //! the connection is encrypted, but the server's identity is not verified.
 //!
-//! **Verified identity, for a relay reached by name** (`floptle/0227`): a
+//! **Verified identity, for a relay reached by name**: a
 //! server can instead be handed a certificate ([`ServerCertificate`], PEM as
 //! certbot writes it) and can be handed a NEWER one while it runs
 //! ([`QuicServer::set_certificate`]) — new handshakes present the new chain
@@ -181,7 +181,7 @@ pub struct QuicServer {
     buffers: Option<SocketBuffers>,
 }
 
-/// **The UDP socket's kernel buffers, as granted** (`floptle/0234`).
+/// **The UDP socket's kernel buffers, as granted**.
 ///
 /// A relay's inbox is its receive buffer. Left at the kernel default (212,992
 /// bytes on a stock Linux box — on the order of 100–200 datagrams once the
@@ -657,7 +657,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 /// that verifies, a failed verification falls back to the dev-trust model
 /// with a warning the host and the joiner both surface — so a managed session
 /// keeps working the day this ships, and refusing is one line to flip once
-/// the certificate is live (`floptle/0227`).
+/// the certificate is live.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientTrust {
     /// Verify against the public roots, presenting `server_name`.
@@ -746,7 +746,7 @@ impl QuicClient {
     /// [`Incoming::Disconnected`] carrying the reason, never a connection.
     /// What `floptle-relay-bench --verify` runs, and what every managed
     /// connection becomes once the fallback in [`Self::connect_with_trust`]
-    /// is removed (`floptle/0227`).
+    /// is removed.
     pub fn connect_verified(addr: &str, server_name: &str) -> Result<Self, String> {
         Self::connect_inner(addr, ClientTrust::Verify { server_name: server_name.into() }, false)
     }
@@ -954,7 +954,7 @@ mod tests {
     use super::*;
 
     /// ⚠ **The buffer a relay gets is the one the kernel reports, not the one
-    /// it asked for** (`floptle/0234`).
+    /// it asked for**.
     ///
     /// Two asks against the real kernel: a small one every box grants, and
     /// one no box grants (a gibibyte, above any `rmem_max`). The small one
@@ -1294,8 +1294,8 @@ mod tests {
         (client, leaf)
     }
 
-    /// **A server presents the certificate it was given, not one it minted**
-    /// (`floptle/0227`). The managed relay has to answer with the chain a CA
+    /// **A server presents the certificate it was given, not one it minted**.
+    /// The managed relay has to answer with the chain a CA
     /// issued for its region name; this is the seam that lets it, checked by
     /// reading the leaf back off a live connection.
     #[test]

@@ -194,7 +194,7 @@ pub fn tile_is_empty(packed: u32, cells: u32) -> bool {
     packed == crate::EMPTY_TILE || tile_index(packed) >= cells
 }
 
-// --- pages: more than one image behind one grid (`floptle/0092`) ------------
+// --- pages: more than one image behind one grid ------------
 
 /// How many low bits of the cell index address a cell within one sheet. The
 /// bits above it are the sheet — the "page" — the cell lives on.

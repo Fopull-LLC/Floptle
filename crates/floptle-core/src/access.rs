@@ -1,5 +1,5 @@
 //! Accessibility settings — text scale, colour-vision filter, reduced motion,
-//! captions (`floptle/0079`).
+//! captions.
 //!
 //! **Why these live in the engine.** Before this, the whole accessibility
 //! surface was input rebinding, which exists by accident of the action-map work
@@ -37,8 +37,7 @@ pub enum ColorFilter {
 }
 
 impl ColorFilter {
-    /// Every spelling [`Self::parse`] accepts, for an error naming what it takes
-    /// (`floptle/0082`).
+    /// Every spelling [`Self::parse`] accepts, for an error naming what it takes.
     pub const ACCEPTS: &'static [&'static str] = &[
         "none",
         "off",
@@ -102,7 +101,7 @@ impl ColorFilter {
 /// The player's accessibility settings.
 ///
 /// Defaults are "everything off, text at 1×", so a project that never touches
-/// this is exactly what it was before (`floptle/0079`).
+/// this is exactly what it was before.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Accessibility {
     /// Multiplies every UI text size. Layout runs on the scaled size, so a

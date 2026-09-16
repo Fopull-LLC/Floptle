@@ -53,7 +53,7 @@ pub struct InterestConfig {
     /// competitive game, seeing another player through a wall is the game, and
     /// this is the only part of it a project cannot write for itself. Off by
     /// default: it costs a ray per candidate per client, and most games do not
-    /// need it. floptle/0182.
+    /// need it.
     pub occlusion: bool,
     /// Consecutive snapshots a node the client already holds must test BLOCKED
     /// before it goes quiet. Coming back is immediate — a player stepping out
@@ -117,7 +117,7 @@ pub struct InterestStat {
     pub bytes: usize,
     /// Replicable nodes this client was not told about, and why. "Is my filter
     /// working" has to be a number, or a project turns one on and has no way to
-    /// tell it from a typo. floptle/0182.
+    /// tell it from a typo.
     pub withheld_radius: usize,
     pub withheld_occluded: usize,
     pub withheld_filter: usize,

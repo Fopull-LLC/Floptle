@@ -1,4 +1,4 @@
-//! What the control plane says, and what this box says back (`floptle/0199` §3).
+//! What the control plane says, and what this box says back (an earlier task §3).
 //!
 //! These types are written against the **live** payloads W generated from a real
 //! production row, not against the §6 draft — the draft is missing three fields
@@ -50,7 +50,7 @@ pub struct Deployment {
     pub port: u16,
     /// The lobby code this deployment should present, when the control plane
     /// allocates one. ⚠ **Absent on every deployment today** — the relay mints
-    /// codes, not the control plane (`floptle/0216`). Read here so the agent
+    /// codes, not the control plane. Read here so the agent
     /// can carry one the day that inverts, and ignored until then.
     #[serde(default)]
     pub lobby_code: Option<String>,
@@ -76,7 +76,7 @@ pub struct DeployArgs {
 
 /// The plan's caps.
 ///
-/// ⚠ **Zero means "not entitled yet", not "no memory"** (`floptle/0199` §3).
+/// ⚠ **Zero means "not entitled yet", not "no memory"** (an earlier task §3).
 /// `billing.server_slots_available` is off on production today and zeroes the
 /// slot entitlement everywhere by design, so `/desired` currently answers
 /// `{"cpu_quota_pct":0,"memory_max_mb":0}`. Writing `MemoryMax=0` into a unit
@@ -218,7 +218,7 @@ impl Report {
 /// What this machine says about itself, alongside what its deployments are doing.
 ///
 /// ⚠ **Every measurement is optional, and an unmeasurable one is OMITTED rather
-/// than sent as zero** (`floptle/0213`). The control plane reads `mem_free_mb`
+/// than sent as zero**. The control plane reads `mem_free_mb`
 /// now, and treats a box that reports little free memory as full regardless of
 /// how many slots its declaration still shows — so a `/proc/meminfo` this agent
 /// could not read, sent as `0`, is a healthy box declaring itself out of memory.
@@ -232,7 +232,7 @@ impl Report {
 #[derive(Debug, Default, Serialize)]
 pub struct BoxStats {
     pub host: String,
-    /// **This agent's own version** (`floptle/0232`), the string compiled into
+    /// **This agent's own version**, the string compiled into
     /// the binary — never read from a file, a unit or a row, so an upgrade
     /// cannot leave it saying the old number. The control plane had one
     /// version field, hand-maintained, and it read `0.86.3` for a box running
@@ -257,7 +257,7 @@ pub struct DeploymentStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_p95_ms: Option<f32>,
     /// **What this deployment actually costs in memory**, from systemd's own
-    /// cgroup accounting (`floptle/0214`).
+    /// cgroup accounting.
     ///
     /// `servers_per_box` is arithmetic on DECLARED quotas — six Studio slots at
     /// 1536 MB inside 11.9 GB — and had never been checked against a running
@@ -269,11 +269,11 @@ pub struct DeploymentStatus {
     /// the server forks, and it is the same number the `MemoryMax` cap is
     /// enforced against, so a deployment nearing its limit reads as nearing its
     /// limit rather than as merely large.
-    /// **The ceiling the engine is actually enforcing** (`floptle/0221`).
+    /// **The ceiling the engine is actually enforcing**.
     ///
     /// ⚠ **Third time this seam has been wrong in one direction**: `port` and
-    /// `relay` were written by the server and dropped here too (`floptle/0209`,
-    /// `floptle/0212`). The server has written `max_players` into its status
+    /// `relay` were written by the server and dropped here too (an earlier task,
+    /// an earlier task). The server has written `max_players` into its status
     /// file all along and the agent parsed the file without carrying this one
     /// field, so the control plane stored null while the box knew the answer.
     ///
@@ -317,10 +317,9 @@ pub struct DeploymentStatus {
     /// The control plane was building `quic://<host>:<allocated port>` for every
     /// deployment, and for a relayed one nothing is listening there at all —
     /// for two days that address reached a *different* game, a stray process
-    /// that happened to hold the port (`floptle/0209`). The server has known
+    /// that happened to hold the port. The server has known
     /// the answer since 0.86.2 and the agent simply did not carry it, so the
-    /// fix reached an operator on the box and not the product
-    /// (`floptle/0212`).
+    /// fix reached an operator on the box and not the product.
     ///
     /// Both are skipped when absent, so a control plane that ignores them —
     /// and an older server that does not report them — are unaffected.
@@ -329,7 +328,7 @@ pub struct DeploymentStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
     /// **Which key the running server was started with** — the first twelve
-    /// characters, never the key (`floptle/0229`). Shown beside the rotate
+    /// characters, never the key. Shown beside the rotate
     /// control, so a developer mid-rotation can see what the process that
     /// is running presented.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -337,7 +336,7 @@ pub struct DeploymentStatus {
 }
 
 impl DeploymentStatus {
-    /// **The one place the status file becomes the wire** (`floptle/0229`).
+    /// **The one place the status file becomes the wire**.
     ///
     /// The server writes a field; the agent parses it; the control plane
     /// stores null — four times in one direction (`lobby_code` 0200,
@@ -400,16 +399,16 @@ pub struct ServerStatus {
     /// The player ceiling the engine is enforcing, as the server reports it.
     #[serde(default)]
     pub max_players: Option<u32>,
-    /// **Where this server is actually reachable** (`floptle/0209`, forwarded
-    /// by `floptle/0212`): the UDP port it bound, or `None` when it listens on
+    /// **Where this server is actually reachable** (forwarded
+    /// by an earlier task): the UDP port it bound, or `None` when it listens on
     /// nothing because it went out through a relay.
     #[serde(default)]
     pub port: Option<u16>,
     /// The relay it registered with, or `None` when it listens directly.
     #[serde(default)]
     pub relay: Option<String>,
-    /// The first twelve characters of the key the server was started with
-    /// (`floptle/0229`). The whole key is never in the file.
+    /// The first twelve characters of the key the server was started with.
+    /// The whole key is never in the file.
     #[serde(default)]
     pub game_key_prefix: Option<String>,
 }
@@ -420,7 +419,7 @@ mod tests {
 
     /// **The real `/desired` payload parses**, field for field.
     ///
-    /// Copied from `floptle/0199` §3, which W generated from the live
+    /// Copied from an earlier task §3, which W generated from the live
     /// production row rather than writing by hand — so this is the one fixture
     /// in the crate that is known to match what the endpoint emits.
     #[test]
@@ -535,13 +534,13 @@ mod tests {
         assert_eq!(v["deployments"][0]["peers"], 3);
         assert_eq!(v["deployments"][0]["lobby_code"], "UQK7RM");
         assert_eq!(v["deployments"][0]["relay"], "us-east.relay.fopull.com:7788");
-        // The numbers a slot is about to be priced from (`floptle/0214`).
+        // The numbers a slot is about to be priced from.
         assert_eq!(v["deployments"][0]["mem_mb"], 203);
         assert_eq!(v["deployments"][0]["mem_peak_mb"], 311);
         assert_eq!(v["deployments"][0]["max_players"], 8);
     }
 
-    /// ⚠ **The engine's own ceiling reaches the wire** (`floptle/0221`).
+    /// ⚠ **The engine's own ceiling reaches the wire**.
     ///
     /// The server has written `max_players` into its status file all along; the
     /// agent parsed that file and carried every field but this one, so the
@@ -577,7 +576,7 @@ mod tests {
     }
 
     /// ⚠ **Every field the server writes reaches the wire, or is named here as
-    /// deliberately left behind** (`floptle/0229`, the fourth time). The file
+    /// deliberately left behind** (the fourth time). The file
     /// below is what `dedicated.rs::status_document` writes on `us-east-1`;
     /// the test runs it through the same function the agent's report does, so
     /// a field the agent parses and then forgets to copy fails here — which
@@ -676,7 +675,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **A measurement that failed is ABSENT, never `0`** (`floptle/0213`).
+    /// ⚠ **A measurement that failed is ABSENT, never `0`**.
     ///
     /// The control plane reads `mem_free_mb` now and treats a box with little
     /// free memory as full — so a healthy machine whose `/proc/meminfo` this

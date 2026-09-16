@@ -23,7 +23,7 @@ pub struct Args {
     /// Where unit files are written.
     pub units: PathBuf,
     /// Where each deployment's game key is written, `0600 root`, for the
-    /// unit's `EnvironmentFile=` (`floptle/0229`). The unit itself is
+    /// unit's `EnvironmentFile=`. The unit itself is
     /// world-readable, as units are, and carries no secret.
     pub keys: PathBuf,
     /// The directory under `/run` that holds one runtime directory per
@@ -33,7 +33,7 @@ pub struct Args {
     /// Seconds between polls.
     pub interval: u64,
     /// The relay a dedicated server hosts through, so players still join by a
-    /// six-character code (`floptle/0199` §3 — W built for exactly this).
+    /// six-character code (an earlier task §3 — W built for exactly this).
     pub relay: Option<String>,
     /// Do one cycle and exit. What CI and a first run on a box use.
     pub once: bool,
@@ -177,7 +177,7 @@ an endpoint that will refuse it every ten seconds forever.
     /// directory is what a unit can be given. The server runs `DynamicUser=yes`
     /// under `ProtectSystem=strict`, so it can write nowhere it is not handed
     /// explicitly, and the agent's own runtime directory (root, `0755`) was
-    /// exactly such a place: `floptle/0200`'s first defect was every deployment
+    /// exactly such a place: that task's first defect was every deployment
     /// reporting zero players and no lobby code forever, because the file was
     /// never written and nothing said so. Each server now declares
     /// [`Args::runtime_directory`] and systemd creates it owned by that
@@ -359,7 +359,7 @@ mod tests {
     ///
     /// The unit's `RuntimeDirectory=` is relative to `/run`, so a `--run`
     /// anywhere else is a unit whose status file silently never appears —
-    /// the exact shape of `floptle/0200`'s first defect — and the agent says
+    /// the exact shape of that task's first defect — and the agent says
     /// so instead of writing one. The id is sanitised on the way in, the same
     /// way the unit name is, because it becomes a path.
     #[test]

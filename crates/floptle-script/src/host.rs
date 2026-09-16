@@ -72,7 +72,7 @@ use crate::{
     VfxCmd, VfxInfo,
 };
 
-/// Every key a `scene.load` options table reads (`floptle/0082`).
+/// Every key a `scene.load` options table reads.
 pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment"];
 
 /// Render any Lua value as readable Console text: primitives plainly, engine
@@ -246,8 +246,8 @@ thread_local! {
 }
 
 /// `node:setShaderParam` on a model that has per-part overrides and no node
-/// Material: the uniform goes to every part that wears a shader
-/// (`floptle/0225`). `false` when no part does — the caller says so.
+/// Material: the uniform goes to every part that wears a shader.
+/// `false` when no part does — the caller says so.
 fn fan_out_param(world: &mut World, ent: Entity, name: &str, v: [f32; 4]) -> bool {
     let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(ent) else { return false };
     let mut landed = false;
@@ -371,7 +371,7 @@ impl ScriptHost {
         // Mouse-lock request channel (drained by the editor each frame). See the field docs.
         let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
         // Keys the host keeps for itself, and which of them a script has already
-        // been told about (`floptle/0084`). The driver fills the list — the editor
+        // been told about. The driver fills the list — the editor
         // reserves Play/Pause/Step; a headless test reserves nothing — and the
         // first poll of a reserved key writes one Console line naming it and what
         // takes it. A key that is never going to arrive must not be
@@ -660,7 +660,7 @@ impl ScriptHost {
                             // same list `shape_api`'s queries use, because this
                             // is a second copy of that parsing and the two lists
                             // drifting is how `layers` ends up honoured by one
-                            // and ignored by the other (`floptle/0082`).
+                            // and ignored by the other.
                             crate::opts::check_keys(
                                 t,
                                 crate::shape_api::QUERY_KEYS,
@@ -717,7 +717,7 @@ impl ScriptHost {
                 // returning the same fields — named the map mesh. The march had
                 // the collider in hand the whole time; the field was dropped,
                 // not unavailable, and reading the docs it looked like the
-                // engine could not tell you (`floptle/0174`).
+                // engine could not tell you.
                 let h = match (solid, body) {
                     (Some(s), Some((_, b))) if b.distance < s.distance => b,
                     (Some(s), _) => s,
@@ -748,7 +748,7 @@ impl ScriptHost {
             },
         );
 
-        // `water.*` — the volume half of `floptle/0038`. The engine floats
+        // `water.*` — the volume half of an earlier task. The engine floats
         // things; a game still decides what being wet means, and every one of
         // those decisions is the same question with a different answer.
         let water_volumes: Rc<RefCell<Vec<crate::water_api::WaterInfo>>> =
@@ -762,7 +762,7 @@ impl ScriptHost {
             },
         );
 
-        // `scatter.*` — thousands of props from a seed (`floptle/0036`). The
+        // `scatter.*` — thousands of props from a seed. The
         // game keeps deciding what grows where; the engine draws them.
         let scatter_sources: crate::scatter_api::Sources = Rc::new(RefCell::new(Vec::new()));
         let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
@@ -1038,7 +1038,7 @@ impl ScriptHost {
                     // `addative = true` reads as `additive = false`, which
                     // DESTROYS the running scene instead of layering onto it.
                     // Every node it held is gone, the request queue is cleared,
-                    // and nothing anywhere mentions a key (`floptle/0082`).
+                    // and nothing anywhere mentions a key.
                     //
                     // `{ environment = true }` additionally hands the world's
                     // environment to the layer: its sun, fog, skybox and post
@@ -1805,7 +1805,7 @@ impl ScriptHost {
                                 },
                                 // Absent = the project's UI font, which is the
                                 // answer a game wants often enough that naming
-                                // it here should be the exception (`floptle/0124`).
+                                // it here should be the exception.
                                 font: font.unwrap_or_default(),
                             });
                             Ok(())
@@ -1968,14 +1968,14 @@ impl ScriptHost {
         if let Err(e) = crate::math_api::install(&lua) {
             floptle_say::say_err!("[lua] failed to install the vector math API: {e}");
         }
-        // `perf.*` — a game reading its own frame cost (`floptle/0077`). Off by
+        // `perf.*` — a game reading its own frame cost. Off by
         // default and free while off, so this costs nothing but the table.
         let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
         if let Err(e) = crate::perf_api::install(&lua, &profile) {
             floptle_say::say_err!("[lua] failed to install the perf API: {e}");
         }
         // `access.*` + `caption(...)` — the accessibility surface a game offers
-        // its players (`floptle/0079`).
+        // its players.
         let access: crate::access_api::SharedAccess =
             Rc::new(RefCell::new(floptle_core::access::Accessibility::default()));
         let caption_queue: crate::access_api::CaptionQueue = Rc::new(RefCell::new(Vec::new()));
@@ -1983,7 +1983,7 @@ impl ScriptHost {
             floptle_say::say_err!("[lua] failed to install the access API: {e}");
         }
         // `app.*` — the settings a game offers a player, and the one thing every
-        // main menu needs: quit (`floptle/0175`).
+        // main menu needs: quit.
         let app_info: crate::app_api::SharedAppInfo = Rc::new(RefCell::new(Default::default()));
         let app_requests: crate::app_api::SharedAppRequests =
             Rc::new(RefCell::new(Default::default()));
@@ -2042,7 +2042,7 @@ impl ScriptHost {
         // answer it, which is the escape hatch for any cosmetic the engine's
         // queue gating can't see (a script writing a material, say).
         let replaying: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
-        // The `voice.*` API (floptle/0180) — proximity voice chat. Same
+        // The `voice.*` API — proximity voice chat. Same
         // queue-drain shape as `net.*`.
         let voice = crate::voice_api::SharedVoice::new(logs.clone());
         if let Err(e) = crate::voice_api::install_voice_api(&lua, &voice) {
@@ -2337,7 +2337,7 @@ impl ScriptHost {
     /// frame cannot be read off [`lua_used_memory`](Self::lua_used_memory)
     /// while the collector runs: an incremental step inside the window frees
     /// part of what the window allocated, and the difference then reads far
-    /// below the truth — `floptle/0176` records chasing exactly that artefact,
+    /// below the truth — an earlier task records chasing exactly that artefact,
     /// and a hand-rolled Lua harness in a real project under-reported by 60x
     /// against this. Stop it, run a fixed number of frames, take the
     /// difference, start it again.
@@ -2513,7 +2513,7 @@ impl ScriptHost {
 
     /// Run one line of Lua against a real host, with `node` bound to a node
     /// handle — the harness `opts::TABLES`' guard test uses to call every option
-    /// table for real (`floptle/0082`).
+    /// table for real.
     ///
     /// A real host, not a bare `Lua`: the whole point of that test is that the
     /// check runs in the code a game reaches, and a hand-built table proves
@@ -2530,7 +2530,7 @@ impl ScriptHost {
     }
 
     /// The player's accessibility settings as they stand — a game's options menu
-    /// writes them from Lua, and the driver honours them (`floptle/0079`).
+    /// writes them from Lua, and the driver honours them.
     pub fn access(&self) -> floptle_core::access::Accessibility {
         self.access.borrow().clamped()
     }
@@ -2614,7 +2614,7 @@ impl ScriptHost {
         self.scatter_sources.borrow()
     }
 
-    /// Tell a source where its anchor node has got to (`floptle/0073`).
+    /// Tell a source where its anchor node has got to.
     ///
     /// Called once a frame by the driver, before the sources are drawn or
     /// queried. This is the only thing that changes when a planet orbits — every
@@ -3195,7 +3195,7 @@ impl ScriptHost {
     }
 
     /// Tell `app.*` what the game currently is — its title, its version and the
-    /// video settings a player can change (`floptle/0175`).
+    /// video settings a player can change.
     ///
     /// Pushed by the driver rather than reached for, because these live in the
     /// project config, which the script layer has no business knowing about.
@@ -3596,7 +3596,7 @@ impl ScriptHost {
     ///
     /// **`new` is the entities this spawn created, and only those.** This used to
     /// re-mirror the whole scene per spawn, which is fine for a bullet and
-    /// quadratic for a script that builds a level: `floptle/0138`, where a
+    /// quadratic for a script that builds a level: an earlier task, where a
     /// streamer spawning ~800 nodes a chunk into a 7,000-node scene rebuilt a
     /// twenty-collection table 800 times to add 800 rows to it.
     /// The full write flush runs (not just transforms): a `createNode` callback
@@ -3816,7 +3816,7 @@ impl ScriptHost {
         self.voice.is_server.set(state_is_server(&self.net.state.borrow()));
     }
 
-    /// `voice.*` calls queued this tick (floptle/0180).
+    /// `voice.*` calls queued this tick.
     pub fn take_voice_commands(&self) -> Vec<crate::VoiceCmd> {
         std::mem::take(&mut *self.voice.cmds.borrow_mut())
     }
@@ -3877,7 +3877,7 @@ impl ScriptHost {
     /// the script, not the key — so a game could not tell a player whether
     /// their connection or their build was at fault, and "desynced",
     /// "disconnected" and "opponent quit" all reached them as the same thing:
-    /// the game closed the match. Which is what they reported. floptle/0045.
+    /// the game closed the match. Which is what they reported.
     pub fn fire_desync(&mut self, world: &mut World, tick: u64, node: Option<&str>) {
         let _budget = self.budget.arm();
         let payload = self.lua.create_table().ok().inspect(|t| {
@@ -4025,7 +4025,7 @@ impl ScriptHost {
             // No `replicated` table: `synced` has no vars, which is correct and
             // common (transform-only replication). Bind a proxy that says so on
             // the first touch rather than leaving nil for Lua to trip over —
-            // `floptle/0192`, and the docs on the proxy itself.
+            // an earlier task, and the docs on the proxy itself.
             if let Ok(proxy) = crate::net_api::build_undeclared_synced_proxy(&self.lua, &key.1) {
                 let _ = env.set("synced", proxy);
             }
@@ -4121,7 +4121,7 @@ impl ScriptHost {
     /// The editor applies each to the authority field, the sim's collider copy, the
     /// remesh queue and the shadow proxy — the same pipeline as an editor brush dab.
     /// Post the measured result of an applied op back to the scripts, to be read
-    /// by `terrain.yields()` on the next pass (floptle/0037).
+    /// by `terrain.yields()` on the next pass.
     pub fn push_terrain_yield(&self, y: crate::TerrainYield) {
         let mut q = self.terrain_yields.borrow_mut();
         // A game that never calls `terrain.yields()` must not grow a list
@@ -4160,8 +4160,7 @@ impl ScriptHost {
     /// [`floptle_input::InputSystem::resolve_frame`] /
     /// [`resolve_tick`](floptle_input::InputSystem::resolve_tick)) and the Lua
     /// `input.action(...)` family reads out of it.
-    /// This frame's cost breakdown, shared with the Lua `perf` table
-    /// (`floptle/0077`).
+    /// This frame's cost breakdown, shared with the Lua `perf` table.
     ///
     /// The driver records subsystem times into it and folds each frame with
     /// `end_frame`; the host itself records per-script times inside `run_pass`.
@@ -4185,8 +4184,8 @@ impl ScriptHost {
     /// Declare the keys the host answers itself, as `(script name, why)`.
     ///
     /// A script polling one of these gets a Console warning naming the key and
-    /// what takes it, once, the first time — instead of `false` forever
-    /// (`floptle/0084`). The editor passes its three transport controls; a
+    /// what takes it, once, the first time — instead of `false` forever.
+    /// The editor passes its three transport controls; a
     /// headless harness passes nothing, which is why the default is empty.
     ///
     /// The point is the *reachability* of the information, not the reservation:
@@ -4240,7 +4239,7 @@ impl ScriptHost {
     ///
     /// The one place the registry indirection is paid, and it is paid at USE
     /// rather than held: see the note on `Shared::envs` for why holding it
-    /// capped how many scripted nodes a scene could have (`floptle/0069`).
+    /// capped how many scripted nodes a scene could have.
     fn env_of(&self, key: &RegistryKey) -> Option<Table> {
         self.lua.registry_value::<Table>(key).ok()
     }
@@ -4280,7 +4279,6 @@ impl ScriptHost {
             // table so it cannot be confused with a state table that happens to
             // use those keys — and so every existing one-value `snapshot()`
             // keeps its exact meaning, with the second value simply nil.
-            // floptle/0045.
             let (v, cosmetic) = match f.call::<(mlua::Value, mlua::Value)>(()) {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -4441,7 +4439,7 @@ impl ScriptHost {
     /// I checked". A rollback driver engaging on the same frame as a scene
     /// switch asked [`Self::has_rollback_hooks`] before the new scene's scripts
     /// had been loaded, got `false`, and told the user their fighter would not
-    /// be rolled back — about a script that defines both hooks (floptle/0039).
+    /// be rolled back — about a script that defines both hooks.
     /// Callers that audit a node must gate on this and try again later.
     pub fn has_env(&self, eid: u32) -> bool {
         self.envs.borrow().keys().any(|(id, _)| *id == eid)
@@ -4590,7 +4588,7 @@ impl ScriptHost {
         // frame's batch was never drained. Sprite-batch draws are the same
         // contract and so are cleared in the same place: every pass of the
         // frame may draw, and the frame boundary — here — is the only thing
-        // that empties them (`floptle/0070`).
+        // that empties them.
         self.gizmos.borrow_mut().clear();
         self.sprite_draws.borrow_mut().clear();
         self.sprites_written = None;
@@ -4773,7 +4771,7 @@ impl ScriptHost {
 
     /// Is `eid` in the SNAPSHOT-driven filter — the one that gates every pass,
     /// `lateUpdate` included? A driver-owned node must never be in here: no
-    /// driver replays the late pass, so it would simply stop. floptle/0042.
+    /// driver replays the late pass, so it would simply stop.
     pub fn is_snapshot_filtered(&self, eid: u32) -> bool {
         self.script_skip.contains(&eid)
     }
@@ -4807,7 +4805,6 @@ impl ScriptHost {
     /// interpolated writeback, which would otherwise overwrite it), so a game
     /// that follows that advice broke the moment the node became a Rollback
     /// node — offline it was perfect, and it produced no error and no log line.
-    /// floptle/0042.
     pub fn extend_filters(&mut self, skip: impl IntoIterator<Item = u32> + Clone) {
         self.driver_skip.extend(skip);
     }
@@ -4864,7 +4861,7 @@ impl ScriptHost {
             // A driver owns this node's ticks, not its frames. `lateUpdate` is
             // per-frame cosmetic work that no driver replays — and must not be
             // replayed, since a rollback frame runs many ticks and would fire it
-            // once per tick. So it alone survives this filter. floptle/0042.
+            // once per tick. So it alone survives this filter.
             if pass != Pass::Late && self.driver_skip.contains(&e.index()) {
                 continue; // driver-owned: its fixedUpdate/update run from there
             }
@@ -4876,7 +4873,7 @@ impl ScriptHost {
             let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
-                    // Per-SCRIPT attribution (`floptle/0077`). One `Instant` pair
+                    // Per-SCRIPT attribution. One `Instant` pair
                     // per instance per pass would be thousands of syscalls in a
                     // crowded scene, so it is skipped entirely unless somebody is
                     // collecting — the profiler must not be a frame cost itself.
@@ -4950,7 +4947,7 @@ impl ScriptHost {
                 crate::api::apply_rich_sets(world, &ents, sets, &tilesets);
             }
         }
-        // 2D sprite batches (`floptle/0058`). IMMEDIATE mode, scoped to the
+        // 2D sprite batches. IMMEDIATE mode, scoped to the
         // FRAME: whatever the scripts drew since the frame began is the node's
         // whole set of sprites, and a batch nobody drew to all frame draws
         // nothing. That is what makes `b:draw` behave like `draw.*` — no
@@ -4958,7 +4955,7 @@ impl ScriptHost {
         // on the frame a wave dies.
         //
         // The frame, not the pass, is the unit — and that distinction was worth
-        // a silent, total blackout (`floptle/0070`). Emptying per pass meant
+        // a silent, total blackout. Emptying per pass meant
         // the fixed and late passes wiped whatever `update` drew, so a game
         // that put its renderer where every tutorial puts per-frame work saw
         // nothing at all: not a flicker, not a subset, every batch in the game.
@@ -5129,7 +5126,7 @@ impl ScriptHost {
             let param_sets: Vec<_> = self.shader_param_sets.borrow_mut().drain(..).collect();
             for (eid, part, name, v) in param_sets {
                 let Some(&ent) = scene.ents.get(&eid) else { continue };
-                // **One part of a model** (`floptle/0225`): the write lands on
+                // **One part of a model**: the write lands on
                 // that part's EXISTING override, and only on one that wears a
                 // shader. It never creates an override — an override is a whole
                 // material, so creating one for a uniform would blank the part
@@ -5196,7 +5193,7 @@ impl ScriptHost {
                     // Before the Material arm, not after: the sky pipeline reads
                     // `Matter::Skybox.shader_params`, so that is where a write
                     // has to land even on the unlikely sky node that also
-                    // carries a Material (`floptle/0118`).
+                    // carries a Material.
                     if let Some(Matter::Skybox { shader_params, .. }) = world.get_mut::<Matter>(ent)
                     {
                         shader_params.insert(name, v);
@@ -5236,7 +5233,7 @@ impl ScriptHost {
                     }
                 };
                 // One part: the same rule as a uniform — the existing override
-                // that wears a shader, and nothing is created (`floptle/0225`).
+                // that wears a shader, and nothing is created.
                 if let Some(part) = part {
                     let target = world
                         .get_mut::<floptle_core::ObjectMaterials>(ent)
@@ -5452,8 +5449,8 @@ impl ScriptHost {
         s.ui_styles.clear();
         s.ui_textures.clear();
         s.component_strings.clear();
-        // not cleared: the grids are reused when a map has not changed
-        // (`floptle/0117`). Entities that are gone, or that stopped being a
+        // not cleared: the grids are reused when a map has not changed.
+        // Entities that are gone, or that stopped being a
         // tilemap, are dropped by the retain after the loop.
         let mut live_tilemaps: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
@@ -5500,7 +5497,7 @@ impl ScriptHost {
                     if let Some(live) = &mut live {
                         live.insert(id);
                     }
-                    // `floptle/0117`: the grid used to be `data.clone()`d here,
+                    // the grid used to be `data.clone()`d here,
                     // unconditionally, twice a frame — a heap allocation and a
                     // memcpy of the whole map whether or not any script ever
                     // looked at it. A 200×200 map is 160 KB a frame of pure
@@ -5803,8 +5800,7 @@ impl ScriptHost {
                 }
                 // LuaJIT's own words are terse and name the wrong line — the
                 // upvalue ceiling in particular. Say what happened in the
-                // engine's voice, naming the script and the limit
-                // (`floptle/0086`).
+                // engine's voice, naming the script and the limit.
                 Err(err) => {
                     self.fail_load(name, crate::load_error::explain(name, &err.to_string()), generation);
                     return false;
@@ -5821,7 +5817,7 @@ impl ScriptHost {
         }
         // Publish the live environment for other scripts' handles.
         // Published as a registry key: a live `Table` per instance is what the
-        // auxiliary ref stack runs out of (`floptle/0069`).
+        // auxiliary ref stack runs out of.
         let Ok(key) = self.lua.create_registry_value(&env) else { return false };
         self.envs.borrow_mut().insert((e.index(), name.to_string()), key);
         true
@@ -5906,7 +5902,7 @@ impl ScriptHost {
     /// `pass` — per-frame (`start`/`update`), per-gameplay-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`).
     /// Report a script exporting a name a `findScript` handle answers itself —
-    /// once per `(script, key)` per session (`floptle/0085`).
+    /// once per `(script, key)` per session.
     ///
     /// **Why at load.** The handle is a proxy, so the export is reachable from
     /// inside the script and from nowhere else: every cross-script caller gets
@@ -5950,7 +5946,7 @@ impl ScriptHost {
     }
 
     /// Report a scene param the script no longer declares — once per
-    /// `(script, param)` per session (`floptle/0068`).
+    /// `(script, param)` per session.
     ///
     /// **Why this is worth a line in the Console.** A scene's `params:` list
     /// overrides a script's `defaults`. An entry naming something the script
@@ -6208,7 +6204,7 @@ impl ScriptHost {
     /// Held as a REGISTRY key, not a live `Table`: a `Table` alive in Rust
     /// occupies a slot on mlua's auxiliary ref stack, which is bounded at
     /// ~8,000, and one per script instance was a hard ceiling on how big a
-    /// scene may be (`floptle/0069`). The registry has no such bound.
+    /// scene may be. The registry has no such bound.
     fn refresh_node(
         &self,
         eid: u32,
@@ -6561,7 +6557,7 @@ impl ScriptHost {
     }
 
     /// A script failed to load. Three things have to happen, and they are not
-    /// the same thing (`floptle/0086`):
+    /// the same thing:
     ///
     /// * the message is cached on the source, so the next frame re-emits it
     ///   instead of recompiling a file that cannot compile;
@@ -6907,7 +6903,7 @@ mod host_tests {
     }
 
     /// **`node:uiRect()` is `nil` until something has laid the element out**
-    /// (`floptle/0224`) — not `0, 0, 0, 0`, which under `floptle run` (no
+    /// — not `0, 0, 0, 0`, which under `floptle run` (no
     /// surface, so nothing ever lays out) is a measurement a script cannot
     /// tell from a real one. The reference always said nil; this makes it so,
     /// and the same call answers the real rect once one is published.
@@ -7532,7 +7528,7 @@ mod host_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The counter-example that made `floptle/0192` take forty minutes, kept.
+    /// The counter-example that made an earlier task take forty minutes, kept.
     ///
     /// `door` declares `replicated` and `barrel` does not. They sat in the same
     /// generated scene, on nodes given identical `net` blocks by the same

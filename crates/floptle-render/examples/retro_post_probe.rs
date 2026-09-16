@@ -107,7 +107,7 @@ fn main() {
     let post_full = PostStack::new(&gpu, W, H);
     raster.draw_scene(&gpu, retro.color_view(), retro.depth_view(), globals, &instances, clear, None);
     // Posterize is the palette pass now, and it runs at the scene's resolution
-    // wherever the rest of the chain runs (`floptle/0127`).
+    // wherever the rest of the chain runs.
     if let Some(q) = settings.palette() {
         raster.quantize_palette(&gpu, retro.color_view(), (rw, rh), q);
     }

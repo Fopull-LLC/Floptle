@@ -1,10 +1,10 @@
-//! A spatial index over things with a position and a radius (`floptle/0076`).
+//! A spatial index over things with a position and a radius.
 //!
 //! Every system that answered *"what is near here?"* walked everything. That is
 //! the structural reason behind a recurring class of bug rather than a
 //! theoretical concern: `World::get` being a linear scan cost 60 ms/frame of pure
-//! lookups at 5,500 nodes (`floptle/0059`), `findScript` was the same shape
-//! (`floptle/0063`), and both were found by a player.
+//! lookups at 5,500 nodes, `findScript` was the same shape,
+//! and both were found by a player.
 //!
 //! # Why a hash grid, and not a BVH
 //!
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn a_nan_position_is_still_offered_rather_than_vanishing() {
         // Silently dropping an item from every query is the failure shape this
-        // engine keeps being bitten by (`floptle/0082`).
+        // engine keeps being bitten by.
         let its = [(Vec3::new(f32::NAN, 0.0, 0.0), 1.0), (Vec3::ZERO, 1.0)];
         let mut g = Grid::default();
         g.rebuild(its.iter().copied());

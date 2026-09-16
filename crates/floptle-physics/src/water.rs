@@ -1,5 +1,5 @@
 //! Water as a composable scalar field `depth(p)` — the volume half of
-//! `floptle/0038`, built the way gravity is (ADR-0014) and for the same reason:
+//! an earlier task, built the way gravity is (ADR-0014) and for the same reason:
 //! a body should ask the world one question and get one answer, whether the
 //! water it is in is a planet's ocean, a lake or a fish tank.
 //!

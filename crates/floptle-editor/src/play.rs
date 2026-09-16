@@ -126,7 +126,7 @@ impl Editor {
     }
 
     /// Build the sim's water field from the scene's WaterVolume nodes
-    /// (`floptle/0038`) — the same shape as [`Self::build_gravity_field`], and
+    /// — the same shape as [`Self::build_gravity_field`], and
     /// for the same reason: a body asks the world one question and gets one
     /// answer, whether the water is a planet's ocean or a fish tank.
     ///
@@ -312,7 +312,7 @@ impl Editor {
                     // Per-face material slots ride along, so a query can answer
                     // what it hit and not only which node — one big building
                     // with nine slots is one node, and the node's own material
-                    // says "stone" for its grass too (`floptle/0174`).
+                    // says "stone" for its grass too.
                     let (verts, indices, tri_slot, slots) =
                         crate::map_edit::map_collision_geometry(mesh, m);
                     if indices.len() >= 3 {
@@ -435,7 +435,7 @@ impl Editor {
         for warning in self.solid_tilemaps_that_cannot_collide() {
             self.console.push(floptle_script::LogLevel::Warn, warning, None);
         }
-        // Water is a static field like gravity, sampled per step (`floptle/0038`).
+        // Water is a static field like gravity, sampled per step.
         sim.world.water = Self::build_water_field(&self.world, origin);
         self.script_host.set_layers(sim.layers().clone());
         // …and the tilesets this scene's tilemaps reference, so `tm:solid` /
@@ -891,7 +891,7 @@ impl Editor {
             // `project.ron` — the file that ships to everybody. Without this, a
             // player-facing setting a script changed during a playtest would be
             // written into the project the next time anybody touched Project
-            // Settings (`floptle/0175`). Same rule the mixer already follows:
+            // Settings. Same rule the mixer already follows:
             // changes affect the running session and revert on Stop.
             self.play_project = Some(self.project.clone());
             self.play_scene_name = Some((self.scene_name.clone(), self.scene_rel.clone()));
@@ -1645,7 +1645,7 @@ mod scene_request_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `floptle/0159`: the docs promise `find("Lighting")` always resolves —
+    /// the docs promise `find("Lighting")` always resolves —
     /// "every scene has exactly one Lighting node and the loader makes it". It
     /// didn't, because `spawn_into` never gave the Lighting entity a
     /// `Transform`, and the script mirror (`sync_scene`) only mirrors entities
@@ -1697,7 +1697,7 @@ mod water_streaming_tests {
     use floptle_core::{GravityMode, Matter, Name, RigidBody, WaterKind};
     use super::{Transform};
 
-    /// `floptle/0141`: `build_water_field` used to run once, at Play start —
+    /// `build_water_field` used to run once, at Play start —
     /// exactly like `build_gravity_field`, except gravity is rebuilt every
     /// frame and water was not. A pool spawned while the game is already
     /// running (a streamed level's ordinary case) was drawn — `water_draw`

@@ -31,7 +31,7 @@ pub trait CollisionShape {
     ///
     /// `None` means "no useful bound" — an infinite plane, a terrain field, a
     /// mesh whose extent is not cheap to know. The broadphase treats those as
-    /// always-candidates (`floptle/0076`), so a shape that does not answer this
+    /// always-candidates, so a shape that does not answer this
     /// behaves exactly as it did before: the narrow phase still tests it.
     ///
     /// Returning a bound that is too small would silently drop contacts, so the
@@ -852,7 +852,7 @@ impl TriMeshCollider {
     /// standing on a mesh floor asks `distance()` of it at every sample centre,
     /// on every depenetration pass, on every tick — one shipped game was making
     /// ~1,080 of these a step and they were essentially the whole physics tick
-    /// (`floptle/0143` item 2). Two exact narrowings, neither of which can
+    /// (an earlier task item 2). Two exact narrowings, neither of which can
     /// change the answer:
     ///
     /// * Cells outside this mesh's own extent hold nothing, so they are clamped
@@ -1056,7 +1056,7 @@ mod poly_tests {
     }
 
     /// The broadphase drops anything outside this radius, so a bound that was
-    /// too small would silently lose contacts (`floptle/0076`).
+    /// too small would silently lose contacts.
     #[test]
     fn the_bound_contains_every_corner() {
         let r = ramp();
@@ -1124,7 +1124,7 @@ mod face_label_tests {
     /// **A mesh with no labels answers nothing, not a plausible name.** An
     /// imported model is one surface as far as physics is concerned, and a
     /// material name invented for it would be wrong in a way nothing could
-    /// catch — which is worse than the field being absent (`floptle/0174`).
+    /// catch — which is worse than the field being absent.
     #[test]
     fn an_unlabelled_mesh_answers_nothing() {
         let verts =

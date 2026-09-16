@@ -29,7 +29,7 @@ pub struct PadState {
     /// connect. Carried here so a script can answer "is there a controller at
     /// all", which no action-shaped API could: every one of them reports the
     /// resolved question, and "not bound" and "not present" read identically
-    /// through them. floptle/0047.
+    /// through them.
     pub name: String,
     pub buttons: HashSet<PadButton>,
     /// Indexed by [`PadAxis::index`]; sticks are −1..1, triggers 0..1.

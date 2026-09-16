@@ -192,7 +192,7 @@ impl Editor {
         let lit_2d = lit.map(|l| l.mode.name().to_string());
         let light_layers = lit.map(|l| l.layers.clone()).unwrap_or_default();
         // …including its shaping. A duplicated torch that came back with the
-        // default falloff would be a different torch (`floptle/0126`).
+        // default falloff would be a different torch.
         let light_inner = lit.map(|l| l.inner);
         let light_falloff = lit.map(|l| l.falloff);
         let light_shadows = lit.map(|l| l.shadows);

@@ -1,5 +1,5 @@
 //! The Lua `app.*` table — the settings a game offers the person playing it, and
-//! the one thing every main menu needs and could not do: **quit** (`floptle/0175`).
+//! the one thing every main menu needs and could not do: **quit**.
 //!
 //! ```lua
 //! -- a Video tab, in full
@@ -142,7 +142,7 @@ pub type SharedAppRequests = Rc<RefCell<AppRequests>>;
 /// Refused rather than clamped, the way `access.setTextScale` refuses: a
 /// settings slider hands over a number it already bounded, so one outside the
 /// range means the caller computed it wrong — and a silently clamped value is a
-/// slider that appears to stop working (`floptle/0082`).
+/// slider that appears to stop working.
 pub const RETRO_HEIGHT_MIN: u32 = 32;
 pub const RETRO_HEIGHT_MAX: u32 = 4320;
 

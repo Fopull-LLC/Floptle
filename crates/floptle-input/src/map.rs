@@ -99,7 +99,7 @@ impl Binding {
     /// "Do I already have this bound" is a question about the source. Whole-value
     /// equality answered a different question and so treated a binding the user
     /// had deliberately scoped as absent, duplicating it with an unscoped copy
-    /// that then served every local player. floptle/0044.
+    /// that then served every local player.
     pub fn same_source(&self, other: &Binding) -> bool {
         self.source == other.source && self.modifiers == other.modifiers
     }
@@ -178,7 +178,7 @@ pub enum Axis1Binding {
     Analog {
         source: Source,
         /// Restrict to one local player slot — see [`Binding::player`]. Same
-        /// hole as [`Axis2Binding::Stick`] had. floptle/0043.
+        /// hole as [`Axis2Binding::Stick`] had.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player: Option<u8>,
         #[serde(default = "default_deadzone")]
@@ -236,7 +236,6 @@ pub enum Axis2Binding {
         /// largest-magnitude-wins meant whichever stick was pushed harder drove
         /// both characters. The `Keys` arm beside it had the field all along,
         /// so a D-pad scoped correctly while the stick on the same pad did not.
-        /// floptle/0043.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player: Option<u8>,
         #[serde(default = "default_deadzone")]
@@ -458,7 +457,7 @@ impl InputMap {
     /// unscoped `Keys(WASD)` and `Key(Space)` that then moved and jumped both
     /// local players, and shipping that into two builds before anyone re-read
     /// the file. An action the project has an opinion about is an action it has
-    /// considered. floptle/0044.
+    /// considered.
     pub fn top_up_missing(&mut self, starter: &InputMap) -> Vec<String> {
         let mut added = Vec::new();
         for a in &starter.actions {
@@ -854,7 +853,7 @@ mod tests {
         assert!(plain.actions[0].bindings[0].serves(3));
     }
 
-    /// floptle/0044: a version bump must not undo a deliberate input.ron edit.
+    /// a version bump must not undo a deliberate input.ron edit.
     ///
     /// The three states whole-value equality could not tell apart: never had
     /// it, deleted it on purpose, kept it but scoped it to one player. The last

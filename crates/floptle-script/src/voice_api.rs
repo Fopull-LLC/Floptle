@@ -1,4 +1,4 @@
-//! The Lua `voice.*` API — proximity voice chat (`floptle/0180`).
+//! The Lua `voice.*` API — proximity voice chat.
 //!
 //! Follows the same queue-drain shape as `net.*`: calls push [`VoiceCmd`]s the
 //! editor drains each tick, and live state (devices, mic level, who is
@@ -41,7 +41,7 @@ use mlua::{Lua, Table, Value};
 use crate::{LogLevel, ScriptLog};
 
 /// Every key `voice.attach` / `voice.source(...)` options tables read
-/// (`floptle/0082` — a misspelled option must not silently do nothing).
+/// (an earlier task — a misspelled option must not silently do nothing).
 pub(crate) const ATTACH_KEYS: &[&str] =
     &["mode", "falloff", "minDistance", "maxDistance", "volume", "track"];
 

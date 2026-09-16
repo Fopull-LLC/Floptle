@@ -1,4 +1,4 @@
-//! What cross-script wiring costs — the measurement `floptle/0063` asks for.
+//! What cross-script wiring costs — the measurement an earlier task asks for.
 //!
 //! `find(name)` has had an index for a long time. `findScript`, `findScripts`
 //! and `findTagged` walked the whole scene and string-compared their way

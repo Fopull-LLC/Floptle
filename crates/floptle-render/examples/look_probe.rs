@@ -1,5 +1,5 @@
 //! Headless probe for the look CHAIN — grade, lens, sharpen, denoise, grain and
-//! depth of field (`floptle/0130`).
+//! depth of field.
 //!
 //! Renders one scene into the post input and then runs it through each effect on
 //! its own, ASSERTING what each one is supposed to do to the numbers. Every

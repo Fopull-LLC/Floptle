@@ -26,7 +26,7 @@
 //!
 //! * **vectors** — every node doing vector maths through its handle each frame
 //!   (`node.pos`, arithmetic, write back). The hot path the whole decision
-//!   rests on, and the one card `floptle/0176` is about.
+//!   rests on, and the one card is about.
 //! * **scalars** — the same node count doing a short piece of arithmetic on
 //!   plain numbers, the way ordinary game code does. Note that a loop this
 //!   short is **below LuaJIT's hotloop threshold (56 by default)**, so LuaJIT
@@ -46,7 +46,7 @@
 //! ## Reading the output
 //!
 //! **p95, not mean.** A collector pause is exactly the thing this migration is
-//! meant to remove, and averaging hides it — `floptle/0176` reports 2415 frames
+//! meant to remove, and averaging hides it — an earlier task reports 2415 frames
 //! of ~5100 over 8 ms, which is a tail, not a mean. The max is printed for the
 //! same reason.
 //!

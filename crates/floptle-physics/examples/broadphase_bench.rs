@@ -1,4 +1,4 @@
-//! Before/after for the collider broadphase (`floptle/0076`).
+//! Before/after for the collider broadphase.
 //!
 //! Run: `cargo run --release -p floptle-physics --example broadphase_bench`
 //!

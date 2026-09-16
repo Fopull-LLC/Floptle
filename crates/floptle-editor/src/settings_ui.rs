@@ -187,7 +187,7 @@ pub(crate) struct SettingsCtx<'a> {
 #[derive(Default)]
 pub(crate) struct SettingsOut {
     pub(crate) save_project: bool,
-    /// Set when the Accessibility section changed something (`floptle/0079`).
+    /// Set when the Accessibility section changed something.
     pub(crate) access: Option<floptle_core::access::Accessibility>,
     pub(crate) rename_layer: Option<(String, String)>,
     pub(crate) input: crate::input_ui::InputEdits,
@@ -380,7 +380,7 @@ impl<'a> SettingsCtx<'a> {
         out
     }
 
-    // --- Accessibility (`floptle/0079`) ----------------------------------
+    // --- Accessibility ----------------------------------
     /// The player-facing settings, in the editor so they can be TRIED.
     ///
     /// A game drives the same values from Lua (`access.*`); this pane exists
@@ -388,7 +388,7 @@ impl<'a> SettingsCtx<'a> {
     /// claims you have to look at to believe, and because a developer wanting to
     /// see their game through a deuteranope's eyes should not have to write a
     /// script first.
-    /// **Project settings ⏵ Networked ⏵ Game key** (`floptle/0196`).
+    /// **Project settings ⏵ Networked ⏵ Game key**.
     ///
     /// This section exists because the website tells every developer to come
     /// here. The registration flow ends "paste it into Floptle: Project
@@ -1270,8 +1270,7 @@ impl<'a> SettingsCtx<'a> {
 mod tests {
     use super::*;
 
-    /// **The menu path the website sends people to has to exist**
-    /// (`floptle/0196`).
+    /// **The menu path the website sends people to has to exist**.
     ///
     /// fopull.com ends its registration flow with "paste it into Floptle:
     /// Project settings ⏵ Networked ⏵ Game key", and before this card there was

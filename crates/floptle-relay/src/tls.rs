@@ -1,12 +1,11 @@
-//! **The certificate a managed relay presents, and how a renewal reaches it**
-//! (`floptle/0227`).
+//! **The certificate a managed relay presents, and how a renewal reaches it**.
 //!
 //! A relay reached by its region name is verified by every client: it has to
 //! present a chain a public CA issued for `us-east.relay.fopull.com`, and
 //! that chain expires. certbot renews it on the box on its own schedule —
 //! roughly every sixty days, at an hour nobody chose. A relay that read its
 //! certificate only at startup would need a restart to present the renewal,
-//! and a relay restart ends every lobby on the box (`floptle/0210`). So the
+//! and a relay restart ends every lobby on the box. So the
 //! files are WATCHED: every [`POLL_INTERVAL`] the relay stats both paths, and
 //! when either has changed it loads them again and hands the result to
 //! [`floptle_net::RelayServer::set_certificate`], which swaps the chain for

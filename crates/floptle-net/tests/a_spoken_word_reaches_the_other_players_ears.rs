@@ -1,4 +1,4 @@
-//! floptle/0180 — the whole voice path, end to end, on one machine.
+//! the whole voice path, end to end, on one machine.
 //!
 //! Every other test in this feature checks one link: the codec round-trips, the
 //! jitter buffer reorders, the server forwards to the right peers, a stream

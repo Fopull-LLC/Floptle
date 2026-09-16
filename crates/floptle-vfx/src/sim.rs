@@ -214,7 +214,7 @@ struct TrackState {
     /// Births this track asked for and could not have, because the pool was
     /// full. Counted rather than merely returned from, because dropping
     /// silently is how an effect comes out thinner than it was authored and
-    /// nothing says why (`floptle/0099`). Cleared by `reset`, like the
+    /// nothing says why. Cleared by `reset`, like the
     /// particles it is about.
     dropped: u32,
     /// Fractional-emission accumulator, one per clip (resets when the playhead enters

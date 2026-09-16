@@ -125,7 +125,7 @@ impl AudioCore {
     }
 
     /// Start a voice fed by a live stream instead of a decoded clip — a remote
-    /// player's microphone (`floptle/0180`).
+    /// player's microphone.
     ///
     /// It never finishes on its own. A clip ends when it runs out of samples;
     /// a stream running out of samples means the network is late, and a voice

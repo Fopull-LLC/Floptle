@@ -1,4 +1,4 @@
-//! One grid, two sheets (`floptle/0092`): a tilemap layer whose squares come
+//! One grid, two sheets: a tilemap layer whose squares come
 //! from more than one image draws them all, in one grid, at one set of
 //! coordinates.
 //!

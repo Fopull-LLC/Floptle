@@ -26,7 +26,7 @@ pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
 }
 
 impl Editor {
-    /// Open a prefab for editing **on its own** (`floptle/0090`): its nodes
+    /// Open a prefab for editing **on its own**: its nodes
     /// become the whole world, and saving writes back to this same file.
     ///
     /// A prefab is a reusable subtree, and the only way to change one used to be
@@ -959,7 +959,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Editing a prefab on its own, end to end (`floptle/0090`): open it, change
+    /// Editing a prefab on its own, end to end: open it, change
     /// something, save, reopen.
     ///
     /// The load-bearing assertion is that the save landed **in the same file**.
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     /// A HUD described with `ui.make`, over two Play sessions with a Stop in
-    /// between — the shape of the report in `floptle/0061`: "after playing the
+    /// between — the shape of the report in an earlier task: "after playing the
     /// game in the editor once, when I try to play again the UI does not show".
     ///
     /// Two sessions is the whole test. One session passes trivially and always

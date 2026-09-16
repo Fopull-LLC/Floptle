@@ -85,7 +85,7 @@ pub struct ServerArgs {
     pub scene: Option<String>,
     pub port: Option<u16>,
     pub relay: Option<String>,
-    /// **The lobby code to reclaim** (`floptle/0217`), from `--lobby-code` or
+    /// **The lobby code to reclaim**, from `--lobby-code` or
     /// `FLOPTLE_LOBBY_CODE`. `None` means "give me a fresh one", which is every
     /// self-hosted server and every player.
     pub lobby_code: Option<String>,
@@ -254,7 +254,7 @@ pub(crate) fn resolve_game_key(explicit: Option<String>, from_env: Option<String
 /// The environment variable a supervisor passes the game key in.
 pub(crate) const GAME_KEY_ENV: &str = "FLOPTLE_GAME_KEY";
 
-/// **Which lobby code this process should reclaim** (`floptle/0217`), given the
+/// **Which lobby code this process should reclaim**, given the
 /// command line and the environment.
 ///
 /// ⚠ **A blank value is no code, not an empty code.** The fleet agent writes
@@ -278,7 +278,7 @@ pub(crate) fn resolve_lobby_code(
 /// The environment variable a supervisor passes the lobby code in.
 pub(crate) const LOBBY_CODE_ENV: &str = "FLOPTLE_LOBBY_CODE";
 
-/// **Where a running server can actually be reached** (`floptle/0209`).
+/// **Where a running server can actually be reached**.
 ///
 /// `--port` and `--relay` are alternatives, not a pair: with a relay the server
 /// makes one outbound connection and listens on nothing, so a port given
@@ -350,7 +350,7 @@ pub fn run(args: ServerArgs) -> i32 {
         return 2;
     }
 
-    // **Say that the port is not being listened on** (`floptle/0209`). A
+    // **Say that the port is not being listened on**. A
     // caller that passed both had no way to learn one of them did nothing, and
     // an address built from it reaches nothing. Said rather than refused,
     // deliberately: a fleet box passes both today, and refusing would take a
@@ -551,7 +551,7 @@ fn signalled() -> bool {
 /// **The p95 rather than the mean is the point.** A server whose average tick
 /// is 4 ms and whose worst one in twenty is 40 ms is a server players describe
 /// as stuttering, and a mean hides that completely. The fleet agent ships this
-/// number to the control plane (`floptle/0199` §3) and it is what a developer
+/// number to the control plane (an earlier task §3) and it is what a developer
 /// looks at when a match "felt bad" — so it has to be the statistic that can
 /// actually say so.
 ///
@@ -667,8 +667,8 @@ fn status_document(
             .map(|k| format!("{:?}", key_prefix(k)))
             .unwrap_or_else(|| "null".into()),
         ed.net_lobby_code.as_deref().map(|c| format!("{c:?}")).unwrap_or_else(|| "null".into()),
-        // **Where this server is reachable, measured rather than derived**
-        // (`floptle/0209`). A control plane that builds an address out of the
+        // **Where this server is reachable, measured rather than derived**.
+        // A control plane that builds an address out of the
         // port it allocated publishes one that reaches nothing whenever the
         // server is relay-hosted, and nothing anywhere contradicts it.
         where_reachable.port.map(|p| p.to_string()).unwrap_or_else(|| "null".into()),
@@ -964,7 +964,7 @@ mod tests {
         world.get::<Replicated>(e).and_then(|r| r.owner)
     }
 
-    /// floptle/0181 — **slot #1 is not reserved for a host that does not exist.**
+    /// **slot #1 is not reserved for a host that does not exist.**
     ///
     /// A hosted session gives slot #1 to the host, because somebody is sitting
     /// at that keyboard. A dedicated server has nobody: reserving it leaves an
@@ -1091,7 +1091,7 @@ mod tests {
     /// hand-written one.
     ///
     /// `cli.json` is generated from the verb table and published to the website
-    /// as the developer-facing command reference (`floptle/0201`, where that
+    /// as the developer-facing command reference (where that
     /// page turned out to have been hand-carried and wrong). A flag added to
     /// the parser and not to the table is invisible to every developer who does
     /// not read the source — which is all of them. `--status-file` and
@@ -1166,7 +1166,7 @@ mod tests {
         }
     }
 
-    /// **A relay-hosted server is not listening on a port** (`floptle/0209`).
+    /// **A relay-hosted server is not listening on a port**.
     ///
     /// `--port` and `--relay` are alternatives. With a relay the server makes
     /// one outbound connection and binds nothing, so a port passed alongside is
@@ -1281,7 +1281,7 @@ mod server_tests {
     /// A mean cannot: a server whose ticks are 4 ms with one in ten at 40 ms is
     /// one players describe as stuttering, and its mean is a healthy-looking
     /// 7.6 ms. The fleet agent ships this number to the control plane
-    /// (`floptle/0199` §3) and it is what a developer looks at when a match
+    /// (an earlier task §3) and it is what a developer looks at when a match
     /// "felt bad", so it has to be the statistic that can actually say so.
     ///
     /// Note what p95 does not promise, because the first version of this test
@@ -1498,7 +1498,7 @@ mod server_tests {
         let rig = find(&c.world, "Survivor").unwrap_or_else(|| {
             panic!("the spawned rig never reached the client. Server said:\n{}", s.console())
         });
-        // The whole subtree, not just the root (floptle/0181).
+        // The whole subtree, not just the root.
         let camera = find(&c.world, "Camera").expect("the rig arrived without its child");
         assert_eq!(c.world.get::<Parent>(camera).map(|p| p.0), Some(rig));
         // …and it belongs to the peer it was spawned for, or their client will

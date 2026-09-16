@@ -75,7 +75,7 @@ pub(crate) struct TerrainRender {
     /// free the ones that emptied.
     pub slots: HashMap<[i32; 3], (MeshId, u8)>,
     /// When each chunk first became resident, in seconds on the editor's clock —
-    /// what [`chunk_fade`] measures the dissolve-in against (`floptle/0067`).
+    /// what [`chunk_fade`] measures the dissolve-in against.
     ///
     /// A separate map rather than a third tuple field so that re-meshing an
     /// existing chunk does not touch it: a dig re-uploads the chunk it bit, and
@@ -388,8 +388,7 @@ const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 const ON_BODY_RADII: f64 = 3.0;
 
 /// Where a chunk sits in the meshing queue: **metres from the camera**, so that
-/// chunks belonging to different terrains can be compared at all
-/// (`floptle/0074`).
+/// chunks belonging to different terrains can be compared at all.
 ///
 /// One queue is shared by every resident terrain. The key used to be chunk
 /// distance in each terrain's own local frame, so a chunk three chunks from the
@@ -413,7 +412,7 @@ pub(crate) fn chunk_priority(
     if on_body { metres } else { metres.saturating_add(OFF_BODY_PENALTY) }
 }
 
-/// Added to every chunk of a body the camera is not on (`floptle/0074`).
+/// Added to every chunk of a body the camera is not on.
 ///
 /// Metres alone gets one case wrong: standing between two worlds, a chunk under
 /// your feet and a chunk on the horizon of the world you are landing on are
@@ -610,7 +609,7 @@ impl Editor {
                 // The body's surface colour is wanted whether it is far enough to
                 // BE an impostor or close enough to be streaming — a streaming
                 // body draws the same colour as a backstop under its arriving
-                // chunks (`floptle/0074`). Sampled once, on whichever comes first.
+                // chunks. Sampled once, on whichever comes first.
                 if render.impostor_color.is_none() {
                     render.impostor_color =
                         Some(impostor_surface_color(&terrain.field, cb.body_radius as f32));
@@ -628,7 +627,7 @@ impl Editor {
                 render.impostor = false;
             }
             let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
-            // Rings sized to the body when there is one (`floptle/0067`): on a
+            // Rings sized to the body when there is one: on a
             // world you can walk around, "24 chunks away" is the far side of it.
             let rings = rings_for_body(
                 self.world
@@ -650,7 +649,7 @@ impl Editor {
                     .max((c[2] - cam_chunk[2]).abs())
             };
             // Queue position, in METRES, so chunks from different terrains can
-            // be compared at all (`floptle/0074`).
+            // be compared at all.
             //
             // One queue is shared by every resident terrain, and the sort key
             // used to be `dist_of` — chunk distance in each terrain's own local
@@ -890,7 +889,7 @@ pub(crate) fn push_terrain_instances(
             continue;
         }
         let wt = floptle_core::world_transform(world, e);
-        // STREAMING BACKSTOP (`floptle/0074`). A chunk that has been queued but
+        // STREAMING BACKSTOP. A chunk that has been queued but
         // not yet meshed draws nothing at all, so the player sees space through
         // the ground — "I can see through unloaded terrain". While a body is
         // still streaming, fill the holes with one shaded sphere at its
@@ -951,7 +950,7 @@ pub(crate) fn push_terrain_instances(
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
             // the terrain palette (bound to the raster in `set_terrain_palette`).
             mp.terrain_splat = true;
-            // Dissolve-in for a chunk that just arrived (`floptle/0067`). The
+            // Dissolve-in for a chunk that just arrived. The
             // alpha lane is free on terrain — the shader forces terrain opaque
             // because its vertex alpha is a palette slot — so this rides an
             // existing lane, which matters when the raster budget is full at
@@ -973,7 +972,7 @@ pub(crate) fn push_terrain_instances(
 const CHUNK_FADE_SECS: f32 = 0.35;
 
 /// How opaque a chunk that first became resident at `born` is at `now` — the
-/// `color.a` the shader dissolves against (`floptle/0067`).
+/// `color.a` the shader dissolves against.
 ///
 /// Clamped at both ends. A `born` in the FUTURE reads as fully opaque rather
 /// than as the start of a fade: only a clock that went backwards can produce
@@ -1457,7 +1456,7 @@ impl Editor {
         };
         // Report before the empty-touch bail: a dab that moved nothing has to
         // report zero rather than nothing, or a game cannot tell "I dug air"
-        // from "the report is still coming" (floptle/0037). Volumes are measured
+        // from "the report is still coming". Volumes are measured
         // in the field's local units, so a scaled terrain converts by scale³.
         if let Some(y) = measured
             && op.id != 0
@@ -2904,7 +2903,7 @@ mod tests {
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
 
-    /// The wait and the flag are the same question (`floptle/0157` + `0158`).
+    /// The wait and the flag are the same question (an earlier task + `0158`).
     ///
     /// `terrain.busy()` answers a game; `settle_world_streaming` waits before a
     /// shot. When the wait watched only the streaming half, a planet that was
@@ -2926,7 +2925,7 @@ mod tests {
     }
 
     /// A world with nothing to stream settles, and says so, without spending
-    /// the budget it was offered (`floptle/0157`).
+    /// the budget it was offered.
     ///
     /// `shot` calls this before it takes the picture and prints a warning about
     /// photographing impostors when it comes back false. A scene with no terrain
@@ -2952,9 +2951,9 @@ mod tests {
     }
 
     /// A chunk that just arrived dissolves in over its first moments, monotonically
-    /// (`floptle/0067`) — and a chunk with no arrival stamp is simply opaque, which
+    /// — and a chunk with no arrival stamp is simply opaque, which
     /// The reported bug, in numbers: *"I can see through unloaded terrain and it
-    /// needs to prioritize loading what's right under me"* (`floptle/0074`).
+    /// needs to prioritize loading what's right under me"*.
     ///
     /// One queue serves every terrain. Under the old key — chunk distance in
     /// each terrain's own local frame — the ground under your feet and a chunk
@@ -3071,7 +3070,7 @@ mod tests {
     /// Surface chunks of a sphere of `radius`, and how many of them the rings
     /// would queue at full detail from a camera standing on it.
     ///
-    /// The count is what `floptle/0067` asks for: on a walkable planet the whole
+    /// The count is what an earlier task asks for: on a walkable planet the whole
     /// body used to sit inside ring 0, so arriving meant surface-net meshing all
     /// of it through a 16-deep queue — the hitch, and then the pop-in as the
     /// queue drained.

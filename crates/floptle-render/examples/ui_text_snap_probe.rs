@@ -1,4 +1,4 @@
-//! **Text snapping** (`floptle/0120`) — the same label, off the grid and on it.
+//! **Text snapping** — the same label, off the grid and on it.
 //!
 //! A pixel font's art is a grid. It only *looks* like a pixel font when one of
 //! its cells is a whole number of screen pixels, and what reaches the rasterizer

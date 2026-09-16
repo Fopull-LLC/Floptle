@@ -1,5 +1,5 @@
 //! A live sample stream feeding a playing voice — what makes a remote player's
-//! microphone an ordinary sound in the world (`floptle/0180`).
+//! microphone an ordinary sound in the world.
 //!
 //! Every other sound in the engine is a [`Clip`](crate::clip::Clip): a fully
 //! decoded buffer that exists before it plays. A voice stream is the opposite —

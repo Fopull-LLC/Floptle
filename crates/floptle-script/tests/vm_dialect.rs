@@ -382,7 +382,7 @@ fn the_bit_library_answers_the_same_numbers_on_both_vms() {
 /// global and a nil local produce, so three different bugs are one message.
 ///
 /// The engine already rewrote *load* errors into its own voice
-/// (`load_error::explain`, `floptle/0086`), for exactly this reason. This
+/// (`load_error::explain`, an earlier task), for exactly this reason. This
 /// finding is what `runtime_error::explain` was built for, and
 /// `a_typo_in_a_script_names_the_typo_whichever_vm_is_running` below is the
 /// closing half: what a script's author actually reads is now identical on both

@@ -1,4 +1,4 @@
-//! Where a frame's time actually went (`floptle/0077`).
+//! Where a frame's time actually went.
 //!
 //! The engine used to keep a smoothed FPS number and nothing else. No
 //! attribution: not per script, not per subsystem, not per draw. So when a game
@@ -35,7 +35,7 @@
 //! frame cost gets turned off, and then it does not exist. But "off" must not
 //! read as "fast": [`FrameProfile::bucket`] returns `None` while disabled rather
 //! than zero, so a game asserting a budget in a smoke test cannot pass by
-//! accident. That is the `floptle/0082` shape applied to this task's own API.
+//! accident. That is the an earlier task shape applied to this task's own API.
 
 use std::collections::HashMap;
 
@@ -112,7 +112,7 @@ impl Bucket {
 
     /// Resolve a name from a script. `None` for anything unrecognised — the
     /// caller turns that into an error naming the whole set, rather than
-    /// answering zero for a typo (`floptle/0082`).
+    /// answering zero for a typo.
     pub fn from_name(name: &str) -> Option<Bucket> {
         Bucket::ALL.into_iter().find(|b| b.name() == name)
     }
@@ -173,8 +173,7 @@ pub struct Cost {
 pub struct Counts {
     /// Scene nodes walked by the draw gather.
     pub nodes: usize,
-    /// …rejected as off screen before any work was done for them
-    /// (`floptle/0075`).
+    /// …rejected as off screen before any work was done for them.
     pub culled: usize,
     /// Raster instances submitted, terrain and scatter included.
     pub instances: usize,
@@ -188,8 +187,7 @@ pub struct Counts {
     /// Live particles across every effect.
     pub particles: usize,
     /// Live one-shot particle effects — `spawnEffect` instances that have not
-    /// finished. `particles` above is what they cost; this is how many asked
-    /// (`floptle/0114`).
+    /// finished. `particles` above is what they cost; this is how many asked.
     pub effects: usize,
     /// …and how many a frame refused because the ceiling was already reached.
     /// Nonzero means the look is being cut, so it cannot be a number nobody can
@@ -198,12 +196,12 @@ pub struct Counts {
     /// Placeable lights the shader was given, of the sixteen slots it has.
     pub lights: usize,
     /// …and how many were ranked out because more than sixteen qualified. A cap
-    /// that says so is a good cap (`floptle/0116`).
+    /// that says so is a good cap.
     pub lights_dropped: usize,
     /// Audio voices mixing.
     pub voices: usize,
     /// Flat surfaces filled into the 2D lighting G-buffer — the second
-    /// rasterization a lit 2D scene pays for (`floptle/0122`).
+    /// rasterization a lit 2D scene pays for.
     ///
     /// `0` in a scene with no 2D light placed, and `0` for every surface no live
     /// light's layer mask can reach, so this reads as *what the 2D lighting is
@@ -436,7 +434,7 @@ mod tests {
     /// While off, times read as ABSENT rather than zero — so a smoke test
     /// asserting a budget cannot pass because nothing was measured.
     ///
-    /// This is the task's own API held to `floptle/0082`: the failure mode being
+    /// This is the task's own API held to an earlier task: the failure mode being
     /// designed out is a number that means "no data" and looks like "free".
     #[test]
     fn a_disabled_profile_answers_nothing_rather_than_zero() {

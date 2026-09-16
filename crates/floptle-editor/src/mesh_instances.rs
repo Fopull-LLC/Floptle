@@ -137,7 +137,7 @@ pub(crate) fn apply_node_tint(
     }
 }
 
-/// How many draw calls this frame's meshes cost (`floptle/0167`).
+/// How many draw calls this frame's meshes cost.
 ///
 /// `Counts::draws` was a literal `0` — never computed, always answering the
 /// question it exists for with a lie. `draw_scene_with` (`floptle-render`)
@@ -244,7 +244,7 @@ pub(crate) fn push_mesh_instances(
     variants: &mut anim::SkinVariants,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
-    // GPU-skinned parts land here instead of `instances` (`floptle/0080`): same
+    // GPU-skinned parts land here instead of `instances`: same
     // mesh, same material, but drawn through the `vs_skin` pipelines with this
     // draw's bone palette. Several characters of one model stay one draw call,
     // which the CPU path could not manage — it had to give each entity a private

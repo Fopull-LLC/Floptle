@@ -44,7 +44,7 @@ use mlua::{Lua, RegistryKey, Table};
 /// uniform name, vec4 lanes). The material is `None` for the node's own — the
 /// UI element, sky, post chain or `Material` component, as it always was — or
 /// `Some(part)` for one part's override under `ObjectMaterials`
-/// (`node:material("Head#2"):setShaderParam(...)`, `floptle/0225`).
+/// (`node:material("Head#2"):setShaderParam(...)`, an earlier task).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, Option<String>, String, [f32; 4])>>>;
 /// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, which
 /// material, slot name, texture ref). The ref is a project-relative image path,
@@ -67,7 +67,7 @@ type ScreenShaderToggles = Rc<RefCell<Vec<(u32, String, bool)>>>;
 type ReservedKeys = Rc<RefCell<Vec<(String, String)>>>;
 
 /// The frame profile, shared between the driver, the Lua `perf` table and the
-/// editor readout (`floptle/0077`).
+/// editor readout.
 pub type SharedProfile = Rc<RefCell<floptle_core::profile::FrameProfile>>;
 
 /// One world-space line segment a script queued via `draw.line(...)` this tick
@@ -114,7 +114,7 @@ pub struct DrawText {
     /// that makes a right-hand HUD column line up without measuring anything.
     pub align: u8,
     /// Project-relative `.ttf`/`.otf` path, or empty for the project's own UI
-    /// font (`floptle/0124`).
+    /// font.
     ///
     /// Empty used to mean the embedded Roboto and nothing else, because project
     /// fonts append to the font stack and slot 0 was never theirs. A game whose
@@ -437,7 +437,7 @@ struct Instance {
     /// A `RegistryKey` and not a live `Table` for the same reason `env` is: a
     /// Table held from Rust costs a slot on mlua's bounded auxiliary ref stack,
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
-    /// on a scene — reached as a PANIC (`floptle/0069`).
+    /// on a scene — reached as a PANIC.
     node: Option<(RegistryKey, crate::env::NodeStamp)>,
     /// Which lifecycle hooks this script's environment defines, read once when
     /// the chunk is built (and again on hot reload — a rebuild is a new
@@ -674,7 +674,7 @@ pub struct ScriptHost {
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
     /// Script kinds that failed to load — shared with the reference layer, which
     /// reads it to tell a broken script apart from a missing export. See the
-    /// `Shared` copy (`floptle/0086`).
+    /// `Shared` copy.
     broken: Rc<RefCell<std::collections::HashSet<String>>>,
     broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
     /// The two remaining once-ever diagnostic sets, held here only so that
@@ -776,12 +776,12 @@ pub struct ScriptHost {
     /// a headless harness reserves nothing.
     ///
     /// It exists so the first poll of such a key writes a Console line instead of
-    /// returning `false` forever (`floptle/0084`). Being unavailable used to look
+    /// returning `false` forever. Being unavailable used to look
     /// exactly like not being pressed, which is why a game shipped an inventory
     /// bound to Tab and heard about it from a player rather than from a test.
     reserved_keys: ReservedKeys,
-    /// Where this frame's time went, per subsystem and per script
-    /// (`floptle/0077`). Written by the driver and by [`ScriptHost::run_pass`],
+    /// Where this frame's time went, per subsystem and per script.
+    /// Written by the driver and by [`ScriptHost::run_pass`],
     /// read by the editor readout and by the Lua `perf` table — one structure, so
     /// a game's own budget assertion and the number on screen cannot disagree.
     ///
@@ -790,14 +790,13 @@ pub struct ScriptHost {
     /// be four different numbers the game could have read itself.
     profile: SharedProfile,
     /// The player's accessibility settings, shared with `access.*` in Lua and
-    /// read by the driver each frame (`floptle/0079`).
+    /// read by the driver each frame.
     access: crate::access_api::SharedAccess,
     /// Captions `caption(...)` asked for, drained by the driver and drawn by the
     /// engine so every game gets the same readable placement.
     caption_queue: crate::access_api::CaptionQueue,
     /// What the game currently is — title, engine version, and the video
-    /// settings a player can change. Pushed by the driver, read by `app.*`
-    /// (`floptle/0175`).
+    /// settings a player can change. Pushed by the driver, read by `app.*`.
     app_info: crate::app_api::SharedAppInfo,
     /// What `app.*` asked the driver to change or do this frame. Every one of
     /// them touches something only the driver owns — the swap chain, a GPU
@@ -825,7 +824,7 @@ pub struct ScriptHost {
     water_volumes: Rc<RefCell<Vec<water_api::WaterInfo>>>,
     /// `water.setFrozen(node, on)` requests, drained by the driver.
     water_freeze: Rc<RefCell<Vec<(u32, bool)>>>,
-    /// Scatter sources scripts declared (`floptle/0036`) — resolved into
+    /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,
     /// The running scene's name, fed by the driver — what `scene.current()` reads.
@@ -921,7 +920,7 @@ pub struct ScriptHost {
     /// `net.on` handlers, and the current-instance marker (docs/multiplayer.md §8).
     net: net_api::SharedNet,
     /// The `voice.*` bridge: queued voice commands + mirrored microphone and
-    /// speaker state (floptle/0180). Separate from `net` because voice lives
+    /// speaker state. Separate from `net` because voice lives
     /// with the SESSION, not the scene — a scene swap must not reset it.
     voice: voice_api::SharedVoice,
     /// Per-(entity, script) `synced` STORE tables (the raw values behind the
@@ -935,26 +934,25 @@ pub struct ScriptHost {
     synced_warned: std::collections::HashSet<(u32, String, String)>,
     /// (eid, material, knob) shader writes already reported as having nothing
     /// to land on — a part with no override, an override wearing no shader —
-    /// so a `setShaderParam` in `update` says so once, not every tick
-    /// (`floptle/0225`).
+    /// so a `setShaderParam` in `update` says so once, not every tick.
     shader_warned: std::collections::HashSet<(u32, String, String)>,
     /// `(script kind, param name)` already reported as stored-but-unread this
     /// session, so a param carried on eighteen instances of the same script is
-    /// one Console line rather than eighteen (`floptle/0068`).
+    /// one Console line rather than eighteen.
     param_warned: std::collections::HashSet<(String, String)>,
     /// Bytes of Lua heap allocated inside each script kind's hook calls while
     /// `alloc_track` is on — see [`ScriptHost::track_alloc`].
     alloc_by_kind: RefCell<HashMap<String, u64>>,
     alloc_track: std::cell::Cell<bool>,
     /// `(script kind, key)` combos already reported as shadowing a `findScript`
-    /// handle's own key (`floptle/0085`) — one line per script per session, not
+    /// handle's own key — one line per script per session, not
     /// one per instance.
     handle_key_warned: std::collections::HashSet<(String, String)>,
     /// `(script kind, generation)` whose load failure has already been put on the
     /// Console. A broken script is re-reported into `errors` every frame (the
     /// Scripting tab is a live list), but the Console line is once per version
     /// of the file — otherwise one unloadable script buries every other message
-    /// in the feed at sixty lines a second (`floptle/0086`).
+    /// in the feed at sixty lines a second.
     load_failure_reported: std::collections::HashSet<(String, u64)>,
     /// `(script kind, generation)` already warned as *approaching* LuaJIT's
     /// upvalue ceiling. Same once-per-version rule, and it clears on edit — so
@@ -972,7 +970,7 @@ pub struct ScriptHost {
     /// `fixedUpdate` and `update` run from there, so the global passes skip
     /// them — but their `lateUpdate` does not run there and is not skipped
     /// here. Separate from `script_skip` because a driver-owned node is still
-    /// locally simulated; only the scheduling moved. floptle/0042.
+    /// locally simulated; only the scheduling moved.
     driver_skip: std::collections::HashSet<u32>,
     /// Set while the rollback driver is RE-SIMULATING ticks it already ran
     /// (`docs/multiplayer.md` §4). Scripts read it as
@@ -1165,7 +1163,7 @@ pub(crate) struct SceneMirror {
     /// Entity → the script kinds attached to it (for `node:getscript`).
     scripts: HashMap<u32, Vec<String>>,
     /// script kind → every entity carrying it, in scene order — the index behind
-    /// `findScript` / `findScripts` (`floptle/0063`).
+    /// `findScript` / `findScripts`.
     ///
     /// These are the calls a gameplay codebase makes most, because they are how
     /// one script reaches another and the alternative (an Inspector wire) does
@@ -1187,8 +1185,7 @@ pub(crate) struct SceneMirror {
     /// Mesh nodes' current model path (so a script can read `node.model`).
     models: HashMap<u32, String>,
     /// Tilemap nodes' grid and what it is cut from, so a handle can answer
-    /// `tm:get` / `tm:size` / `tm:solid` without reaching into the world
-    /// (`floptle/0058`).
+    /// `tm:get` / `tm:size` / `tm:solid` without reaching into the world.
     tilemaps: HashMap<u32, TilemapMirror>,
     /// The project's loaded tilesets, keyed by their project-relative path.
     ///
@@ -1229,7 +1226,7 @@ pub(crate) struct SceneMirror {
     /// UI elements' current style name (so a script can read `node.style`).
     ui_styles: HashMap<u32, String>,
     /// UI images' current texture path (so a script can read `node.texture`,
-    /// not just write it — the asymmetry was half of floptle/0052).
+    /// not just write it — the asymmetry was half of an earlier task).
     ui_textures: HashMap<u32, String>,
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
@@ -1265,7 +1262,7 @@ pub(crate) struct SceneMirror {
     component_strings: HashMap<u32, HashMap<String, HashMap<String, String>>>,
     /// …and each material's shader knobs — uniforms and texture slots — so a
     /// part handle's `:shaderParam("glow")` reads back what the part's
-    /// override carries, the way `.color` does (`floptle/0225`).
+    /// override carries, the way `.color` does.
     shader_state: HashMap<u32, HashMap<String, ShaderState>>,
     /// Model asset path → the material slots it was imported with, LENT by the
     /// editor (`ScriptHost::set_model_slots`) the way the tilesets are: the host
@@ -1311,7 +1308,7 @@ pub enum FindScope {
 impl FindScope {
     /// Every spelling the options table accepts, and the list an error prints.
     ///
-    /// One list read by the parser and the message, per `floptle/0082` — a
+    /// One list read by the parser and the message, per an earlier task — a
     /// defaulted bad value is how `pin = "topCenter"` silently meant top-left.
     pub(crate) const ACCEPTS: &'static [&'static str] = &["enabled", "all", "disabled", "any"];
 
@@ -1479,11 +1476,10 @@ pub enum RichSet {
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
     /// `node:setPrimitive(shape [, color])`. The shape is already PARSED — the
-    /// name was checked at the call, where a misspelling can still name a line
-    /// (`floptle/0082`).
+    /// name was checked at the call, where a misspelling can still name a line.
     MatterPrimitive(floptle_core::Shape, [f64; 3]),
-    /// `node:setTextSpans{...}` — per-stretch colours along this element's text
-    /// (`floptle/0172`). An empty list clears them back to one colour.
+    /// `node:setTextSpans{...}` — per-stretch colours along this element's text.
+    /// An empty list clears them back to one colour.
     TextSpans(Vec<floptle_ui::TextSpan>),
     /// `node:setGlyphOffsets{...}` — a draw-time displacement per character.
     /// Empty clears. Applied after layout, so it moves glyphs and never
@@ -1507,7 +1503,7 @@ pub enum RichSet {
     /// sync by nothing.
     MatterSpriteBatch { size: f32 },
     /// `node:setSorting{ layer =, order = }` — where a 2D node draws in the
-    /// stack (`floptle/0109`).
+    /// stack.
     ///
     /// Sorting layers shipped in v0.37.0 with no way for a script to touch
     /// them, which makes the ordinary 2D moves impossible: a character stepping
@@ -1581,8 +1577,7 @@ pub enum RichSet {
         clear: bool,
     },
     /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
-    /// the layers a light reaches, and whether this node blocks light
-    /// (`floptle/0113`).
+    /// the layers a light reaches, and whether this node blocks light.
     ///
     /// One call rather than three because they are one feature and a node uses
     /// one half of it: a LIGHT sets `mode` and `layers`, a RECEIVER sets `mode`
@@ -1591,14 +1586,14 @@ pub enum RichSet {
         mode: Option<floptle_core::Lit2D>,
         layers: Option<Vec<String>>,
         blocks: Option<floptle_core::Cast2D>,
-        /// The shaping half (`floptle/0126`, `0125`): full brightness out to
+        /// The shaping half (`0125`): full brightness out to
         /// `inner`, the exponent of the ramp after it, and whether casters stop
         /// this light at all.
         inner: Option<f32>,
         falloff: Option<f32>,
         shadows: Option<bool>,
     },
-    /// `node:setPointLight{ color =, intensity =, range = }` (`floptle/0116`).
+    /// `node:setPointLight{ color =, intensity =, range = }`.
     ///
     /// Until this a script could write an existing light's fields but never make
     /// one, so the only way to have dynamic light was to author N of them into
@@ -1625,8 +1620,7 @@ pub enum RichSet {
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
     /// `node:setCamera{...}` — aim a camera, hand it authority, and point it at
-    /// a live `rt:<name>` texture at a chosen size and refresh rate
-    /// (`floptle/0078`).
+    /// a live `rt:<name>` texture at a chosen size and refresh rate.
     ///
     /// Every field is an `Option` of a value the engine will act on, not a
     /// `(name, value)` pair: the table is validated at the call, where a
@@ -1817,7 +1811,7 @@ struct Shared {
     /// directly until a Table alive in Rust turned out to cost a slot on mlua's
     /// AUXILIARY ref stack, which is bounded near 8,000 — so a scene of a few
     /// thousand scripted nodes exhausted it and the engine PANICKED, in the
-    /// editor, where unsaved work lives (`floptle/0069`). The registry is an
+    /// editor, where unsaved work lives. The registry is an
     /// ordinary Lua table with no such bound, and the key drops itself.
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
     /// `node.model = ...` writes (entity index → asset path), applied to `Matter::Mesh`.
@@ -1873,7 +1867,7 @@ struct Shared {
     /// Script kinds that failed to load this session. A broken script and a
     /// script with no such export both read `nil` through a handle, and the two
     /// want completely different fixes — so a read against a name in here says
-    /// which one it is, once per `(script, key)` (`floptle/0086`).
+    /// which one it is, once per `(script, key)`.
     broken: Rc<RefCell<std::collections::HashSet<String>>>,
     /// `(script kind, key)` combos already told they were reading from a broken
     /// script, so a handle polled every frame is one Console line.
@@ -2125,7 +2119,7 @@ mod tests {
     use std::io::Write;
 
     /// The read list and the write list of a Material are one list
-    /// (`floptle/0082`'s rule, applied here): a field the mirror publishes and
+    /// (that task's rule, applied here): a field the mirror publishes and
     /// the applier ignores is a value a script can read, assign, and watch do
     /// nothing.
     ///
@@ -2603,8 +2597,7 @@ mod tests {
     }
 
     /// A LIBRARY script — no `start`, no `update`, just functions other scripts
-    /// call — must have its `params` before anybody calls into it
-    /// (`floptle/0156`).
+    /// call — must have its `params` before anybody calls into it.
     ///
     /// `params` used to be seeded by the tick, so a script that never ticks
     /// never got one and the first caller into any of its functions got
@@ -2696,7 +2689,7 @@ mod tests {
         );
     }
 
-    /// `terrain.busy()` (floptle/0158) has to be true the MOMENT work is
+    /// `terrain.busy()` has to be true the MOMENT work is
     /// queued, not on the frame after.
     ///
     /// The consumer is a game that builds its world as the player travels: it
@@ -3358,7 +3351,7 @@ end
         assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0);
     }
 
-    /// floptle/0042: a driver owns a node's ticks, not its frames.
+    /// a driver owns a node's ticks, not its frames.
     ///
     /// `extend_filters` used to put the node in `script_skip`, which gates every
     /// pass — and the rollback driver replays only `fixedUpdate` and `update`.
@@ -3502,7 +3495,7 @@ end
         assert!(y.abs() < 0.1, "raycast should have set y to the ground (≈0), got {y}");
     }
 
-    /// The two-material floor a `floptle/0174` test needs: `x < 0` is "Grass",
+    /// The two-material floor a an earlier task test needs: `x < 0` is "Grass",
     /// `x > 0` is "Boards", tagged as node 7.
     fn labelled_floor(eid: u32) -> floptle_physics::AnchoredCollider {
         let verts = [
@@ -3525,7 +3518,7 @@ end
         c
     }
 
-    /// **The whole of `floptle/0174`, from a script.**
+    /// **The whole of an earlier task, from a script.**
     ///
     /// A first-person game asks "what am I standing on" to pick a footstep. It
     /// got two wrong answers. `raycast` returned no `hit.node` at all for static
@@ -3713,7 +3706,7 @@ end
     }
 
     /// A collider that counts how many times anything asked it for a surface
-    /// label. The whole of criterion 5 in `floptle/0174` is that this stays at
+    /// label. The whole of criterion 5 in an earlier task is that this stays at
     /// zero for a query nobody asks.
     struct CountsLabelAsks {
         inner: floptle_physics::TriMeshCollider,
@@ -3831,8 +3824,8 @@ end
     /// are not things a Lua call can touch — so if `app.vsync()` answered the
     /// old value until then, every control in a Video tab would snap back to its
     /// previous position for a frame after being clicked. That reads as a
-    /// control that did not work, which is the whole failure `floptle/0175` is
-    /// about (`floptle/0082`'s lesson, one layer up).
+    /// control that did not work, which is the whole failure an earlier task is
+    /// about (that task's lesson, one layer up).
     #[test]
     fn a_settings_menu_reads_back_what_it_just_set() {
         let dir = std::env::temp_dir().join("floptle_script_test_app_settings");
@@ -4359,8 +4352,7 @@ end
         assert!(said.contains("attached but not running"), "{said}");
     }
 
-    /// A cross-script `h.name(...)` calls the script's own function
-    /// (`floptle/0085`).
+    /// A cross-script `h.name(...)` calls the script's own function.
     ///
     /// This is the exact shape a player reported as "the commerce center is
     /// still just erroring": `materials.lua` exported `function name(id)`
@@ -4424,7 +4416,7 @@ end
     }
 
     /// A script exporting a name the handle does keep is reported at load, once,
-    /// naming the script and the key (`floptle/0085`).
+    /// naming the script and the key.
     #[test]
     fn exporting_a_reserved_handle_key_is_reported_at_load() {
         let dir = std::env::temp_dir().join(format!("floptle_shadow2_{}", std::process::id()));
@@ -4460,8 +4452,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A script points a camera at a render target and reads back what it got
-    /// (`floptle/0078`).
+    /// A script points a camera at a render target and reads back what it got.
     ///
     /// The camera group had seven entries and not one of them rendered
     /// anything: `target` was settable only in the Inspector, so a minimap was
@@ -4514,7 +4505,7 @@ end
     }
 
     /// Every way of getting `setCamera` wrong raises at the call, naming the
-    /// property, the value and what is accepted (`floptle/0082`).
+    /// property, the value and what is accepted.
     ///
     /// A silently-defaulted render target is invisible: the texture resolves,
     /// the picture is there, and it is simply the wrong size or rate forever.
@@ -4550,7 +4541,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The 2D layer, end to end from Lua (`floptle/0058`): build a grid, paint
+    /// The 2D layer, end to end from Lua: build a grid, paint
     /// squares, read them back, and draw sprites into a batch.
     #[test]
     fn a_script_builds_a_tilemap_and_fills_a_sprite_batch() {
@@ -4574,7 +4565,7 @@ function update(node, dt)
   cols, rows = tm:size()
 
   -- A node is not a sprite batch until it is told to be one, and taking the
-  -- handle in the very next line has to work (`floptle/0062`). A separate node
+  -- handle in the very next line has to work. A separate node
   -- because Matter is exclusive: a tilemap is not also a batch.
   local nd = find('Batch')
   nd:setSpriteBatch{ size = 1.0 }
@@ -4640,7 +4631,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A script sees its own cost, attributed by file name (`floptle/0077`).
+    /// A script sees its own cost, attributed by file name.
     ///
     /// End to end through the real host, because the value of this API is
     /// entirely in a game being able to assert its own budget — and the thing
@@ -4900,7 +4891,7 @@ end
     }
 
     /// Polling a key the host keeps says so, once, instead of reading `false`
-    /// forever (`floptle/0084`).
+    /// forever.
     ///
     /// The failure this replaces has no symptom: `input.pressed(k)` returning
     /// false is what a key nobody pressed also looks like, so there is nothing
@@ -5069,7 +5060,7 @@ end
     }
 
     /// A wrong orientation is refused where it was written, not rounded down to
-    /// something that looks almost right (`floptle/0082`).
+    /// something that looks almost right.
     #[test]
     fn a_bad_tile_orientation_is_refused_at_the_call() {
         let dir = std::env::temp_dir().join(format!("floptle_tilexf_bad_{}", std::process::id()));
@@ -5107,8 +5098,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The arena loop that shipped with its walls missing now runs to the end
-    /// (`floptle/0083`).
+    /// The arena loop that shipped with its walls missing now runs to the end.
     ///
     /// This is the real thing, not a unit test of the converter: a wall tilemap
     /// written row by row with the play area punched out of the middle, and a
@@ -5121,7 +5111,7 @@ end
     /// the editor's autocomplete has told people to write since tilemaps
     /// shipped; before this it resolved to `nil`, which then also failed to
     /// convert.
-    /// `floptle/0117`: the mirror now REUSES a tilemap's buffer instead of
+    /// the mirror now REUSES a tilemap's buffer instead of
     /// reallocating it every sync. The whole risk in that is staleness — a map
     /// that changed must still read as changed, on the very next frame — so this
     /// writes through the handle, steps frames, and reads back.
@@ -5237,8 +5227,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A sprite survives to the end of the frame whichever pass drew it
-    /// (`floptle/0070`).
+    /// A sprite survives to the end of the frame whichever pass drew it.
     ///
     /// The batches used to be emptied after every pass, so the fixed pass wiped
     /// whatever `update` drew and the late pass wiped that — leaving `lateUpdate`
@@ -5321,7 +5310,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A scene of thousands of scripted nodes runs (`floptle/0069`).
+    /// A scene of thousands of scripted nodes runs.
     ///
     /// It used to PANIC — `out of auxiliary stack space (used 7999 slots)` —
     /// because the host held a live `mlua::Table` per instance in two places,
@@ -5374,7 +5363,7 @@ end
 
     /// A scene param the script no longer declares is stored and never read —
     /// and from the outside that is indistinguishable from a script whose
-    /// numbers do nothing (`floptle/0068`). One line, once per session.
+    /// numbers do nothing. One line, once per session.
     #[test]
     fn a_scene_param_the_script_does_not_declare_says_so_once() {
         let dir = std::env::temp_dir().join(format!("floptle_0068_{}", std::process::id()));
@@ -5423,7 +5412,7 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The kind/tag index behind `findScript` (`floptle/0063`) has to answer
+    /// The kind/tag index behind `findScript` has to answer
     /// exactly what the scan answered — first in scene order — and it has to
     /// keep answering it after the scene changes. A stale index handing back a
     /// dead handle would be worse than the scan it replaced.
@@ -5512,7 +5501,7 @@ end
 
     /// `node:sprites()` on a node that is not a batch used to return a handle
     /// whose every draw was collected and then dropped by the renderer's own
-    /// filter — no error, no warning, nothing drawn, ever (`floptle/0062`).
+    /// filter — no error, no warning, nothing drawn, ever.
     #[test]
     fn asking_a_plain_node_for_a_sprite_batch_says_so() {
         let dir = std::env::temp_dir().join(format!("floptle_0062_{}", std::process::id()));
@@ -5540,7 +5529,7 @@ end
     /// `local dead = nil` and then the section in the list. That leaves a HOLE
     /// in the array, and a hole used to take the whole screen down — one absent
     /// section and nothing at all was built, with an error naming an index
-    /// rather than a section. Found in a real project (`floptle/0061`).
+    /// rather than a section. Found in a real project.
     #[test]
     fn a_section_switched_off_does_not_take_the_screen_with_it() {
         let dir = std::env::temp_dir().join(format!("floptle_uimake_nil_{}", std::process::id()));
@@ -5588,7 +5577,7 @@ end
 
     /// `ui.make` raises on a property name it does not know, and the reasoning
     /// is right: a declarative screen that silently ignores a line is worse
-    /// than one that stops. The same has to be true of a VALUE (`floptle/0072`).
+    /// than one that stops. The same has to be true of a VALUE.
     ///
     /// `pin = "topCenter"` used to answer `topLeft`, silently and forever. Four
     /// HUD elements — a floor readout, a controls hint, an interaction prompt
@@ -5734,7 +5723,7 @@ end
     }
 
     /// A script that crosses the VM's upvalue ceiling must be told what
-    /// happened (`floptle/0086`) — **and where there is no ceiling it must
+    /// happened — **and where there is no ceiling it must
     /// simply run.**
     ///
     /// On LuaJIT the raw message is `…:3669: function at line 2864 has more
@@ -5871,7 +5860,7 @@ end
     }
 
     /// A broken script and a script with no such export both read `nil` through
-    /// a handle. Only one of them is a bug in the caller (`floptle/0086`).
+    /// a handle. Only one of them is a bug in the caller.
     #[test]
     fn reading_from_a_script_that_failed_to_load_says_so() {
         let dir = std::env::temp_dir().join(format!("floptle_broken_read_{}", std::process::id()));
@@ -7305,7 +7294,7 @@ end
         assert_eq!(mat.shader_params.get("glow"), Some(&[2.5, 0.0, 0.0, 0.0]));
     }
 
-    /// **A shader knob on one part of a model, from a script** (`floptle/0225`).
+    /// **A shader knob on one part of a model, from a script**.
     ///
     /// A model's parts can each wear a `.flsl` — skin here, a face decal there —
     /// with every uniform authored in the scene, and not one of them changeable
@@ -7398,7 +7387,7 @@ end
 
     /// **The node-level call on a model with part overrides and no node
     /// Material** fans out to every part that wears a shader — and with none
-    /// to write to, says so once rather than nothing (`floptle/0225`). A part
+    /// to write to, says so once rather than nothing. A part
     /// write with no override never creates one: an override is a whole
     /// material, and a uniform must not be able to blank a part.
     #[test]
@@ -7477,7 +7466,7 @@ end
         assert!(warned.iter().any(|m| m.contains("\"Nope\"") && m.contains("no material override")), "{warned:#?}");
     }
 
-    /// `floptle/0118`: the sky's uniforms are a THIRD place, and until this they
+    /// the sky's uniforms are a THIRD place, and until this they
     /// were the only shader in the engine a script could not talk to. A
     /// procedural sky that can only be a function of `time` runs its story on a
     /// clock — the reported case was a cutscene sky whose city was revealed in
@@ -7539,11 +7528,11 @@ end
         );
     }
 
-    /// `floptle/0109` + `floptle/0113`: sorting layers and 2D lighting shipped
+    /// an earlier task + an earlier task: sorting layers and 2D lighting shipped
     /// with no script access at all, which rules out the ordinary 2D moves — a
     /// character stepping behind a counter, a torch that stops lighting the
     /// background. A misspelled enum has to name the accepted set rather than
-    /// quietly meaning `auto` (`floptle/0072`).
+    /// quietly meaning `auto`.
     #[test]
     fn a_script_drives_sorting_and_2d_lighting() {
         let dir = std::env::temp_dir().join("floptle_script_test_sort2d");
@@ -7696,7 +7685,7 @@ end
         );
     }
 
-    /// `floptle/0118`, the other half: the post chain is typed knobs rather than
+    /// an earlier task, the other half: the post chain is typed knobs rather than
     /// a shader's uniforms, so it comes through the component route. A cutscene
     /// pushing a vignette is the reported want.
     #[test]
@@ -8110,7 +8099,7 @@ end
         assert!(host.errors().is_empty(), "…and not again: {:?}", host.errors());
     }
 
-    /// field regression (floptle/0048): a node in `script_skip` never gets a
+    /// field regression: a node in `script_skip` never gets a
     /// late pass, and a client's join sequence puts every rollback fighter
     /// there before the driver exists to claim it back.
     ///
@@ -8188,7 +8177,7 @@ end
         );
     }
 
-    /// floptle/0052: `node.texture = "..."` did nothing — not an error, not a
+    /// `node.texture = "..."` did nothing — not an error, not a
     /// warning, no return value. A character-select strip assigned portraits
     /// that way for months and showed the placeholder on every slot.
     #[test]
@@ -9204,7 +9193,7 @@ end
     /// integer frame data at load, instead of letting float playback events drive
     /// gameplay (which stepped playback quantises and a prediction replay never re-fires).
     /// They read the asset mirror, so they answer in `start()` — before anything has
-    /// played a frame (floptle/0023).
+    /// played a frame.
     #[test]
     fn animator_exposes_authored_clip_events_and_duration() {
         let dir = std::env::temp_dir().join("floptle_script_test_anim_events");
@@ -9251,7 +9240,7 @@ end
     /// A bad table shape passed to a construction API is a script error in the Console,
     /// never a process abort. It used to take the whole editor down with SIGABRT
     /// ("panic in a function that cannot unwind"), losing unsaved work and telling the
-    /// author nothing about what they got wrong (floptle/0025).
+    /// author nothing about what they got wrong.
     #[test]
     fn a_bad_field_shape_is_a_script_error_not_an_abort() {
         let dir = std::env::temp_dir().join("floptle_script_test_bad_field_shape");

@@ -3,7 +3,7 @@
 //! ## Why merging is not an optimisation
 //!
 //! A 100×100 tilemap of solid ground is 10,000 squares. One box collider per
-//! square is 10,000 static colliders, and `floptle/0076` measured what that costs
+//! square is 10,000 static colliders, and an earlier task measured what that costs
 //! even *with* a broadphase: the index has to be built over them every time the
 //! sim rebuilds, and 10,000 boxes is more colliders than most whole 3D levels
 //! have. So merging is not a nicety — it is what makes tile collision usable at

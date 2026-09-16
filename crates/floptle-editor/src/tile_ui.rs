@@ -32,7 +32,7 @@
 //! AUTOTILE in it at all. That is indistinguishable from an engine that has
 //! neither, and it was reported as exactly that. A section that cannot act now
 //! says what it would do and what it is waiting for; the panel's shape does not
-//! change under you (`floptle/0093`).
+//! change under you.
 
 use egui::{Color32, RichText};
 use floptle_core::{Entity, Matter, TileXform};
@@ -71,7 +71,7 @@ pub(crate) enum TileCmd {
     NewTilesetForLayer,
     /// Point the active layer at this tileset path (empty = none).
     AttachTileset(String),
-    /// Add a sheet to the tileset being edited (`floptle/0092`).
+    /// Add a sheet to the tileset being edited.
     AddPage,
     /// Point a page at an image and a cut. Page 0 is the layer's material and
     /// is not settable here.
@@ -639,7 +639,7 @@ impl TileCtx<'_> {
         }
     }
 
-    /// The tileset's extra sheets (`floptle/0092`).
+    /// The tileset's extra sheets.
     ///
     /// A level built out of a ground sheet, a props sheet and a decoration sheet
     /// used to need three tilemap NODES, and that is not a workaround — a wall on
@@ -763,7 +763,7 @@ impl TileCtx<'_> {
         let set = self.tools.editing.clone().and_then(|p| self.store.get(&p)).cloned();
         // Which sheet of the tileset we are picking from. A tileset with pages
         // draws a row of tabs; without one there is a single implicit page and
-        // nothing extra on screen (`floptle/0092`).
+        // nothing extra on screen.
         // What the brush places, as one row you can see and change without
         // knowing the rule that used to govern it: clicking a tile that happened
         // to belong to a group armed the group, clicking one that did not
@@ -2653,7 +2653,7 @@ mod tests {
         assert_ne!(TileCmd::AddLayer, TileCmd::RetileAll);
     }
 
-    // ---- floptle/0093: the sections that used to vanish ----------------------
+    // ---- the sections that used to vanish ----------------------
 
     /// Drive the panel headlessly and return every word it drew, so "does this
     /// section exist" is a question the gate can answer.

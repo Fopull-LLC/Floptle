@@ -265,7 +265,7 @@ impl Editor {
         mirror
     }
 
-    /// Every tilemap node's grid, for `tilemap.of` (`floptle/0155`).
+    /// Every tilemap node's grid, for `tilemap.of`.
     ///
     /// **Reuses last frame's buffer when the grid has not changed.** This
     /// runs whenever `ext_mirror` does, which is gated on `World::revision`
@@ -273,7 +273,7 @@ impl Editor {
     /// scene, so "the mirror is rebuilding" does not mean "this particular
     /// map changed". Comparing against `ext_tilemap_cache` (survives the
     /// mirror being replaced) is what tells the two apart: the comparison
-    /// itself is an O(grid) scan, same as `floptle/0117`'s fix for the
+    /// itself is an O(grid) scan, same as that task's fix for the
     /// game-script mirror, but it allocates nothing, and an `Rc::clone` is
     /// all a call that finds no change costs.
     fn fill_mirror_tilemaps(&mut self, mirror: &mut SceneMirror) {
@@ -1031,7 +1031,7 @@ fn known_doc_fields() -> &'static [&'static str] {
         // linkage between nodes. A package addresses a node by the id `scene.*`
         // gave it and re-parents with `scene.setParent`; letting one write these
         // would let it point a node at a position in a list it cannot see
-        // (floptle/0046 — that moved a whole match HUD onto a line of help text).
+        // (an earlier task — that moved a whole match HUD onto a line of help text).
     ]
 }
 
@@ -1176,7 +1176,7 @@ mod tests {
         assert!(v.major > 0 || v.minor > 0, "{v}");
     }
 
-    // ---- the node document (`floptle/0142`) -------------------------------
+    // ---- the node document -------------------------------
 
     /// An editor holding one plain node, and its id as a package sees it.
     fn with_a_node(name: &str) -> (Editor, u32) {
@@ -1405,7 +1405,7 @@ mod tests {
 
     /// The scene file's own linkage is not a package's to write: a `parent`
     /// index points at a POSITION in a list, and re-pointing one silently wires
-    /// a scene to something else (floptle/0046).
+    /// a scene to something else.
     #[test]
     fn a_package_cannot_write_the_scene_files_parent_index() {
         let (mut ed, id) = with_a_node("Crate");
@@ -1420,7 +1420,7 @@ mod tests {
         assert!(err.contains("4242"), "{err}");
     }
 
-    // ---- the tilemap mirror (`floptle/0155`) --------------------------------
+    // ---- the tilemap mirror --------------------------------
 
     fn with_a_tilemap(cols: u32, rows: u32) -> (Editor, u32) {
         let mut ed = Editor::default();
@@ -1440,7 +1440,7 @@ mod tests {
         (ed, e.index())
     }
 
-    /// **The property `floptle/0117` exists to protect, on the editor's own
+    /// **The property an earlier task exists to protect, on the editor's own
     /// mirror this time.** A grid that has not changed must come back as the
     /// same allocation across a rebuild, not a fresh copy — an `Rc::clone`,
     /// not a `Vec` realloc, however big the map.

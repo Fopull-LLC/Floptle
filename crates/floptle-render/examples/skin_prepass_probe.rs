@@ -1,4 +1,4 @@
-//! Regression probe for the skinning × depth-prepass seam (`floptle/0100`).
+//! Regression probe for the skinning × depth-prepass seam.
 //!
 //! The depth prepass draws skinned parts through `skin_prepass_pipeline`, which
 //! reads the bone palette out of the globals bind group — but it used to set its

@@ -1,4 +1,4 @@
-//! Voice chat, from the microphone to the mixer (`floptle/0180`).
+//! Voice chat, from the microphone to the mixer.
 //!
 //! One struct owns the whole path on this machine: the capture device, the
 //! encoder, one jitter buffer + stream + playing voice per remote speaker, and

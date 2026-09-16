@@ -1,5 +1,5 @@
 //! The Lua `access` table and the `caption` primitive — accessibility a game can
-//! offer its players (`floptle/0079`).
+//! offer its players.
 //!
 //! Before this the engine's entire accessibility surface was input rebinding, and
 //! that exists by accident of the action-map work rather than by intent. A game
@@ -66,7 +66,7 @@ pub fn install(lua: &Lua, access: &SharedAccess, captions: &CaptionQueue) -> mlu
                 // Refused rather than clamped: a settings slider hands over a
                 // number it already bounded, so a value outside the range means
                 // the caller computed it wrong — and a silently clamped 0.1 is a
-                // slider that appears to stop working (`floptle/0082`).
+                // slider that appears to stop working.
                 let v = crate::opts::require_range(
                     "access.setTextScale",
                     "scale",

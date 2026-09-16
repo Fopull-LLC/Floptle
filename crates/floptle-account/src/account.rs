@@ -357,7 +357,7 @@ impl Account {
         // The plan is decoration — a sign-in that worked must not be reported as
         // a failure because the entitlements endpoint had a bad minute.
         //
-        // **But a bad minute is not a downgrade** (`floptle/0189`). This used to
+        // **But a bad minute is not a downgrade**. This used to
         // substitute `Entitlements::default()`, whose empty tier `from_parts`
         // writes down as "free", so an outage and a real free account produced
         // byte-identical sessions. Two things are different now: the fallback
@@ -552,7 +552,7 @@ mod tests {
     struct FakeProvider {
         polls_until_grant: Mutex<u32>,
         refresh_result: bool,
-        /// False = `/entitlements` is having a bad minute (`floptle/0189`).
+        /// False = `/entitlements` is having a bad minute.
         entitlements_ok: bool,
     }
     impl Provider for FakeProvider {
@@ -643,7 +643,7 @@ mod tests {
         false
     }
 
-    /// **A bad minute on `/entitlements` is not a downgrade** (`floptle/0189`),
+    /// **A bad minute on `/entitlements` is not a downgrade**,
     /// and where a plan is already on record, that beats guessing.
     ///
     /// Two halves, and the second is the one worth having. The first says an

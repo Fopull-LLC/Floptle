@@ -60,7 +60,7 @@ impl TileSide {
     }
 
     /// Every spelling accepted from Lua / a `.ron`, for the error message that
-    /// lists them (`floptle/0082`: an enum parser and its accepted-values list
+    /// lists them (an enum parser and its accepted-values list
     /// must be the same code).
     pub const ACCEPTS: &'static [&'static str] = &["top", "bottom", "left", "right"];
 
@@ -465,7 +465,7 @@ pub struct TileSet {
     pub sheet_cols: u32,
     pub sheet_rows: u32,
     /// The sheets after the first. `texture`/`sheet_cols`/`sheet_rows` above are
-    /// page 0; these are pages 1, 2, … in order (`floptle/0092`).
+    /// page 0; these are pages 1, 2, … in order.
     ///
     /// Kept as a tail rather than folding page 0 into the list so a tileset
     /// written before pages existed loads with no migration and means exactly
@@ -663,7 +663,7 @@ impl TileSet {
     /// Index fix-up is the whole content of this function. A group list where
     /// removing the first entry silently re-points every tile at its neighbour
     /// is the positional-id bug this codebase has already paid for twice
-    /// (`floptle/0046`, and the builder scene's button ids).
+    /// (and the builder scene's button ids).
     pub fn remove_group(&mut self, group: u16) {
         if (group as usize) < self.groups.len() {
             self.groups.remove(group as usize);
@@ -930,7 +930,7 @@ mod tests {
         g.remove_variant(4, 3);
     }
 
-    // ---- floptle/0092: more than one sheet behind one grid -------------------
+    // ---- more than one sheet behind one grid -------------------
 
     fn paged() -> TileSet {
         TileSet {

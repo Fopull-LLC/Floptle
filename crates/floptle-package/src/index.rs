@@ -144,7 +144,7 @@ pub struct Listing {
     /// listed version — a *claim*, advisory only. The consent gate that
     /// actually grants anything still reads the manifest off disk at install
     /// time; this is what lets the editor say "this will ask for network"
-    /// before that moment (`floptle/0137`).
+    /// before that moment.
     ///
     /// **Absent is not "none"**, the same rule as [`Listing::downloads`]: it
     /// means the registry did not say, not that the package asks for nothing.
@@ -474,7 +474,7 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
 /// must not read as one** — this field's only reason to exist is warning
 /// someone before they install a package, and collapsing "we could not tell
 /// what this asked for" into the safest possible answer defeats that
-/// (`floptle/0137`, found by an adversarial review re-reading this card
+/// (found by an adversarial review re-reading this card
 /// before it shipped). So a value that is present but not an array at all,
 /// or an array where every entry failed to parse (a genuinely empty array is
 /// still a clean, explicit "declares none" and is left alone), reads as
@@ -1050,7 +1050,7 @@ mod tests {
     /// is `None`. A value that is PRESENT but unreadable must not resolve to
     /// `None` too, or the one field whose entire job is warning someone before
     /// they install something reads as "nothing to see here" on exactly the
-    /// listings it could least afford to (`floptle/0137`).
+    /// listings it could least afford to.
     #[test]
     fn a_permissions_field_this_reader_cannot_understand_reads_as_declaring_everything() {
         for bad in [r#""permissions":"Network""#, r#""permissions":{}"#, r#""permissions":[1,2,3]"#] {

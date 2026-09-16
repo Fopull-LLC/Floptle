@@ -325,7 +325,7 @@ pub(crate) fn sync_sheet_grids(
 /// Inspector's filter/wrap combo used to store an absolute key that nothing ever read
 /// back — the setting persisted, the Inspector showed it, and every renderer looking the
 /// texture up by its `textures/ui/hud/Fill.png` ref missed and got the default. Pixel art
-/// came out bilinear-blurred with `Pixelated` plainly selected (floptle/0026).
+/// came out bilinear-blurred with `Pixelated` plainly selected.
 ///
 /// Keys are normalised on load and on write, so the fallback below is only for a stray
 /// absolute path arriving from the Assets side.
@@ -527,7 +527,7 @@ mod tests {
 
     /// The Inspector selects a texture by its absolute path; a scene references it by a
     /// PROJECT-RELATIVE one. Both must reach the same settings entry, or a `Pixelated`
-    /// pick shows in the Inspector and never reaches the sampler (floptle/0026).
+    /// pick shows in the Inspector and never reaches the sampler.
     #[test]
     fn texture_settings_resolve_from_either_path_form() {
         let root = Path::new("/home/dev/Fofighter");

@@ -499,7 +499,7 @@ struct EditorCmd {
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,
-    /// New accessibility settings from the ⚙ Settings tab (`floptle/0079`),
+    /// New accessibility settings from the ⚙ Settings tab,
     /// applied after the frame and pushed into the script host so a game's own
     /// options menu and this pane drive one set of values.
     access: Option<floptle_core::access::Accessibility>,
@@ -553,7 +553,7 @@ struct EditorCmd {
     fill_bounds: bool,
     /// Open this scene file (double-clicked in Assets) — prompts on unsaved changes.
     open_scene: Option<String>,
-    /// Open a `.prefab.ron` for editing on its own (`floptle/0090`). Goes through
+    /// Open a `.prefab.ron` for editing on its own. Goes through
     /// the same unsaved-changes gate as `open_scene`, because it replaces the
     /// world just as thoroughly.
     open_prefab: Option<String>,
@@ -897,7 +897,7 @@ struct EditorTabViewer<'a> {
     map_playing: bool,
     /// `(lights the shader was given, lights ranked out of the sixteen)` as of
     /// the last frame, so a light's own Inspector can say where the scene stands
-    /// against the cap instead of only naming it (`floptle/0116`).
+    /// against the cap instead of only naming it.
     light_counts: (usize, usize),
     /// The Map tool's keybinds — every hint in the UI reads its chord from
     /// here, so a rebind can never leave the labels lying.
@@ -1092,7 +1092,7 @@ struct EditorTabViewer<'a> {
     zoom: &'a mut f32,
     scene_name: &'a str,
     /// Whether `scene_name` names a PREFAB being edited on its own rather than a
-    /// scene (`floptle/0090`). The two must not look the same — a save goes
+    /// scene. The two must not look the same — a save goes
     /// somewhere different.
     editing_prefab: bool,
     ppp: f32,
@@ -1682,7 +1682,7 @@ pub fn run() {
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
         // No Console tab in a build, so warnings and errors go to stderr
-        // instead of into a Vec nobody can read (floptle/0051).
+        // instead of into a Vec nobody can read.
         console: ConsoleState { mirror_to_stderr: player_mode, ..Default::default() },
         ..Default::default()
     };
@@ -1993,7 +1993,7 @@ struct Editor {
     ext_mirror_selection: usize,
     /// The last grid built for each tilemap node, so a scene revision bump
     /// from something ELSE in the level does not cost a copy of a map that
-    /// has not itself changed (`floptle/0155`; the same fix `floptle/0117`
+    /// has not itself changed (the same fix an earlier task
     /// made for the game-script mirror). Survives a mirror rebuild — the
     /// mirror itself is rebuilt fresh every time; this is what it reuses
     /// from. Pruned in `Editor::fill_mirror_tilemaps` so a despawned map's
@@ -2034,7 +2034,7 @@ struct Editor {
     /// A scatter prototype's bounding radius at scale 1, by the same asset
     /// string — measured while baking, from the same import bounds the mesh path
     /// uses. Needed so a field can be frustum-culled per prop and not just by
-    /// distance (`floptle/0075`): a full disc used to submit everything behind
+    /// distance: a full disc used to submit everything behind
     /// you. A prototype with no measurable size is absent here, which reads as
     /// "never cull it".
     scatter_proto_radius: HashMap<String, f32>,
@@ -2191,7 +2191,7 @@ struct Editor {
     /// gets the full `dt`; `StyleRuntime::begin_frame` is what keeps an element
     /// from spending it more than once.
     ui_style_dt: f32,
-    /// The player's accessibility settings (`floptle/0079`): UI text scale,
+    /// The player's accessibility settings: UI text scale,
     /// colour-vision filter, reduced motion, captions. Driven from Lua by a
     /// game's options menu and from the editor's ⚙ Settings, and honoured
     /// wherever the engine owns the behaviour.
@@ -2266,7 +2266,7 @@ struct Editor {
     /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =
     /// in-field-but-not-drawn). This map is the per-terrain GPU slot set.
     terrain_render: HashMap<Entity, crate::terrain_edit::TerrainRender>,
-    /// Resolved scatter chunks (`floptle/0036`), so props are dropped onto the
+    /// Resolved scatter chunks, so props are dropped onto the
     /// real ground once per chunk instead of once per prop per frame.
     scatter_cache: crate::scatter_draw::ScatterCache,
     /// Chunks whose voxels changed since the last remesh, per terrain — the regional
@@ -2545,7 +2545,7 @@ struct Editor {
     /// 🎓 Learn tab state (see `learn.rs`).
     #[cfg(feature = "editor-ui")]
     learn: learn::LearnState,
-    /// Uploaded tilemap geometry, keyed by node (`floptle/0058`). Rebuilt only
+    /// Uploaded tilemap geometry, keyed by node. Rebuilt only
     /// when a grid or its sheet actually changes — see `sprite2d.rs`.
     tilemaps: HashMap<Entity, sprite2d::TileGpu>,
     /// The asset selected in the browser (shown in the Inspector); `None` = a node.
@@ -2560,7 +2560,7 @@ struct Editor {
     #[cfg(feature = "editor-ui")]
     scene_rect: Option<egui::Rect>,
     scene_name: String,
-    /// The prefab being edited on its own, if any (`floptle/0090`).
+    /// The prefab being edited on its own, if any.
     ///
     /// A prefab is a reusable subtree, and reusable things get edited in
     /// isolation — so double-clicking one loads it into the world by itself and
@@ -2736,7 +2736,7 @@ struct Editor {
     /// camera's own size and refresh rate.
     render_targets: std::collections::HashMap<String, crate::render_targets::RenderTarget>,
     /// When each render target last redrew (the elapsed clock), which is what
-    /// turns a camera's `target_hz` into skipped frames (`floptle/0078`).
+    /// turns a camera's `target_hz` into skipped frames.
     render_target_last: std::collections::HashMap<String, f32>,
     /// Target names already warned about (over the limit, or claimed twice), so
     /// a scene-authoring mistake is reported once and not every frame.
@@ -2786,13 +2786,13 @@ struct Editor {
     /// Structural, so it is answered once per session rather than per tick.
     net_rollback_orphans_checked: bool,
     /// Nodes already reported for "a snapshot got past the ingest guard for a
-    /// driver-owned node" (floptle/0048). Once per node per session: it is a
+    /// driver-owned node". Once per node per session: it is a
     /// structural disagreement, and repeating it every frame would bury the
     /// Console under the same line.
     net_driven_drop_reported: std::collections::HashSet<u32>,
     /// The rollback input delay the game chose (`net.host{ inputDelay = n }` or
     /// `net.setInputDelay(n)`), in ticks. `None` = derive it from the worst
-    /// peer's measured RTT at match start (floptle/0049).
+    /// peer's measured RTT at match start.
     ///
     /// Two ticks was a hard-coded constant, which is right only for peers in
     /// the same building. Past 33 ms one-way the driver mispredicts on
@@ -2806,19 +2806,19 @@ struct Editor {
     /// Held here rather than in [`floptle_net::InterestConfig`] because it is a
     /// name, and that config is `Copy` and lives on the wire side of the fence;
     /// resolving a name to a layer bit needs the project's table, which is the
-    /// editor's. floptle/0182.
+    /// editor's.
     net_occlusion_layer: Option<String>,
     /// Voice chat: the microphone, the encoder, and one stream per remote
-    /// speaker (floptle/0180). Lives with the SESSION rather than the scene —
+    /// speaker. Lives with the SESSION rather than the scene —
     /// a server switching maps must not cut a conversation off mid-sentence.
     #[cfg(feature = "devices")]
     voice: voice::VoiceChat,
-    /// A pending "test voice from a WAV" file pick (floptle/0180). Async,
+    /// A pending "test voice from a WAV" file pick. Async,
     /// through `native_dialog`, because rfd's BLOCKING picker kills the editor
-    /// on Linux (floptle/0151) — no picker in this editor reaches rfd directly.
+    /// on Linux — no picker in this editor reaches rfd directly.
     #[cfg(feature = "editor-ui")]
     voice_test_pick: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
-    /// Values already reported by the replay audit (floptle/0050), once per
+    /// Values already reported by the replay audit, once per
     /// session. A script that reads an un-restored value reads it every
     /// correction, and the same line sixty times a second is a diagnostic
     /// nobody reads.
@@ -2835,7 +2835,7 @@ struct Editor {
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,
     /// **The lobby code this server should reclaim rather than be given a new
-    /// one** (`floptle/0217`). Set by `floptle serve --lobby-code` or
+    /// one**. Set by `floptle serve --lobby-code` or
     /// `FLOPTLE_LOBBY_CODE`; `None` for every player-hosted session, which is
     /// every session in the editor.
     ///
@@ -2850,11 +2850,11 @@ struct Editor {
     /// Distinct from `net_relay_addr`, which is the 🌐 panel's text buffer. It
     /// exists so the engine can tell "no code because this is not a relay host"
     /// from "no code because the relay went away" — the same `None`, and very
-    /// different situations (`floptle/0210`).
+    /// different situations.
     net_relay_hosting: Option<String>,
 
     /// The last thing a managed relay said to this host about the session —
-    /// today, that the account is at its player ceiling (`floptle/0194`).
+    /// today, that the account is at its player ceiling.
     ///
     /// Kept rather than only printed, because the people it concerns are the
     /// friends who cannot get in, and they are looking at the game's own lobby
@@ -2876,14 +2876,14 @@ struct Editor {
     /// The retro target's dimensions as last applied, so any change to them —
     /// Project Settings, a window resize, or a script's `app.setRetroHeight` —
     /// is noticed by one comparison rather than by whichever watcher happened to
-    /// be looking (`floptle/0175`).
+    /// be looking.
     retro_applied: (u32, u32),
     /// The project settings as they were when Play started, restored on Stop.
     ///
     /// `app.setVsync` and the retro knobs write the live `ProjectConfigDoc`, and
     /// that same doc is what `save_project` writes to `project.ron` — so a
     /// player-facing setting changed during a playtest would otherwise be
-    /// written into the file that ships (`floptle/0175`). `None` outside Play.
+    /// written into the file that ships. `None` outside Play.
     play_project: Option<floptle_scene::ProjectConfigDoc>,
     /// File ⏵ Export Game… dialog state: visibility, target folder, the game
     /// title to stamp, the build-target index (`EXPORT_TARGETS`), and the
@@ -2910,7 +2910,7 @@ struct Editor {
     #[cfg(feature = "editor-ui")]
     export_job: Option<export::ExportJob>,
     /// Desynced ticks whose per-value breakdowns have not all arrived yet —
-    /// the reports cross the wire after the desync itself. floptle/0045.
+    /// the reports cross the wire after the desync itself.
     net_desync_pending: Vec<u64>,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
@@ -3193,13 +3193,13 @@ struct Editor {
     /// see `tick_nav_autobake`.
     nav_watch_rev: u64,
     /// Seconds since the last time `tick_nav_autobake` actually sampled the
-    /// level (`floptle/0142`). The hash is throttled to this, not to
+    /// level. The hash is throttled to this, not to
     /// `World::revision()` deltas — a streamed level moves the revision on
     /// nearly every frame, which left the old revision-only gate barely
     /// throttling anything during exactly the period it most needed to.
     nav_watch_elapsed: f32,
     /// The stamp of the level shape that most recently gathered no geometry
-    /// to bake (`floptle/0142`). An empty gather is a real, storable result —
+    /// to bake. An empty gather is a real, storable result —
     /// without recording it, `tick_nav_autobake` retried the (main-thread,
     /// O(scene)) gather forever on any level whose ground genuinely has not
     /// arrived yet, logging "nothing to bake" every settle cycle.
@@ -3320,23 +3320,22 @@ struct Editor {
     audio: audio::AudioSystem,
     /// `(lights handed to the shader, lights ranked out of the sixteen)`, from
     /// this frame's light split — recorded where the split already happens and
-    /// read a few hundred lines later where the frame's counts are assembled
-    /// (`floptle/0116`).
+    /// read a few hundred lines later where the frame's counts are assembled.
     light_counts: (usize, usize),
     /// How many Lighting nodes the last warning was about, so a scene with two
-    /// of them says so once rather than sixty times a second (`floptle/0123`).
+    /// of them says so once rather than sixty times a second.
     ///
     /// The loader spawns exactly one and an additive load deliberately brings no
     /// second, so more than one means a script or a hand-edited scene made it —
     /// and then "the" ambient a script writes and "the" ambient the renderer
     /// reads are whichever the ECS yielded first, which is precisely the
-    /// order-dependence `floptle/0116` just finished taking out of the light
+    /// order-dependence an earlier task just finished taking out of the light
     /// list. Nothing is guessed on the game's behalf; it is told.
     lighting_nodes_warned: usize,
     /// How many point lights the last warning was about, so a scene past the
     /// sixteen-light cap says so once per count rather than every frame — the
     /// same latch as `lighting_nodes_warned` just above, for the cap
-    /// `floptle/0116`/`floptle/0168` are both about. Reset to `0` once the
+    /// an earlier task/an earlier task are both about. Reset to `0` once the
     /// scene drops back under the cap, so going over it again re-warns.
     lights_dropped_warned: usize,
     /// The `frame_no` the light-cap check last ran for. `render_world_into`
@@ -3351,7 +3350,7 @@ struct Editor {
     lights_dropped_checked_frame: u64,
     /// Which multiple `fifo_pacing_multiple` last warned about in the Console,
     /// so a session pinned at "every 3rd refresh" says so once rather than
-    /// every 0.4s the title bar refreshes (`floptle/0169`). `0` = not warned;
+    /// every 0.4s the title bar refreshes. `0` = not warned;
     /// resets when the condition clears, so it re-warns if it comes back.
     fifo_pacing_warned: u32,
     /// Mixer tab UI state (selected track/effect, meters).
@@ -3390,7 +3389,7 @@ struct Editor {
     /// fps is dragged toward the fast frames, and the more bimodal the frame
     /// times the harder it is flattered. On a real capture of frames arriving in
     /// bursts of 0.08 ms separated by 16 ms blocks — 144 fps of true throughput —
-    /// that formula read **4312 fps** (`floptle/0160`). It is the number that
+    /// that formula read **4312 fps**. It is the number that
     /// told somebody their choppy scene was fine.
     fps: f32,
     fps_timer: f32,
@@ -3421,7 +3420,7 @@ struct Editor {
     /// output than the one `current_monitor()` names, or a present mode that
     /// isn't pacing to vblank. It used to do that in total silence, so a
     /// load-bearing anti-jitter path could be switched off for a whole session
-    /// with nothing to notice (`floptle/0160`). The ⏱ panel reads this.
+    /// with nothing to notice. The ⏱ panel reads this.
     dt_snap_rate: f32,
     /// Smoothed milliseconds spent BLOCKED waiting for a display image, kept
     /// apart from the frame's own cost so the title can report the two
@@ -3430,13 +3429,12 @@ struct Editor {
     /// number to go on there is no way to tell those apart.
     present_wait_ms: f32,
     /// Is the ⏱ frame-cost panel open? Opening it starts collecting and closing
-    /// it stops, so the profiler costs nothing when nobody is looking
-    /// (`floptle/0077`).
+    /// it stops, so the profiler costs nothing when nobody is looking.
     show_perf_panel: bool,
     /// True once a script called `perf.enable(true)`, so closing the panel does
     /// not switch collection off underneath a game's own budget check.
     perf_enabled_by_script: bool,
-    /// What the last gather actually submitted (`floptle/0075`).
+    /// What the last gather actually submitted.
     ///
     /// A frame rate on its own says a scene is slow and nothing about why, which
     /// is how four separate "the engine is slow" tickets turned out to be four

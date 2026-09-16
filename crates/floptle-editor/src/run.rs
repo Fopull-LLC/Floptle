@@ -44,7 +44,7 @@
 //! draws them. `draws`, `instances`, `lights`, `nodes` and the rest of the
 //! render-gather counts stay `0`, for the same reason nothing above draws:
 //! there is no gather to have counted them. That is a real "not measured
-//! here", not the bug `floptle/0167` was — a project asserting a script or
+//! here", not the bug an earlier task was — a project asserting a script or
 //! physics budget in CI gets a real answer from `run`; one asserting on draw
 //! calls or light counts wants `floptle shot` or `--play` instead.
 //!
@@ -113,7 +113,7 @@ impl AllocWindow {
 ///
 /// Shared with `shot --after`, so the two verbs step the world at one rate and a
 /// picture taken after thirty seconds is thirty seconds of the same simulation
-/// `run` would have reported (`floptle/0170`).
+/// `run` would have reported.
 pub(crate) const DT: f32 = 1.0 / 60.0;
 
 /// How long to run for.
@@ -136,14 +136,14 @@ impl Span {
 /// What the steps cost, in real milliseconds.
 ///
 /// Built from every sample rather than kept as a running mean, because the
-/// percentiles are the point: `floptle/0176` describes 2415 frames out of ~5100
+/// percentiles are the point: an earlier task describes 2415 frames out of ~5100
 /// over 8 ms, which a mean of the same run reports as comfortable.
 ///
 /// ## Why a paused step is not a sample
 ///
 /// A step is not a frame. A session held at the start of Play while the terrain
 /// worker builds the ground steps happily with `dt = 0` — that is the same
-/// stepped-but-not-simulated gap `floptle/0157` was, and `summary_line` already
+/// stepped-but-not-simulated gap an earlier task was, and `summary_line` already
 /// says it out loud. Those steps are cheap and they are not gameplay, so
 /// counting them here would answer "what does a frame of this game cost" with a
 /// distribution a third of which is the loading screen.
@@ -226,7 +226,7 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 /// GUI or by two machines: a client's mirror, targeted RPCs reaching the peer
 /// they named and only that peer, late joiners receiving current `synced`
 /// values, and — the one that matters most — interest management, whose whole
-/// promise is about what a client is not sent (`floptle/0193`).
+/// promise is about what a client is not sent.
 ///
 /// These are owned by the run LOOP rather than by the Editor, deliberately: the
 /// Editor holds exactly one ghost and one Lua VM, and N of either is a design
@@ -314,7 +314,7 @@ fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
                 "connected": g.session.is_connected(),
                 // The count a relevancy test reads. `net.setRelevant(node, peer,
                 // false)` is verified by this number going DOWN for that peer
-                // and not for the others — which is `floptle/0182`'s whole
+                // and not for the others — which is that task's whole
                 // promise, and was taken on trust in every project until now.
                 // Nodes actually being sent state, not ids bound locally.
                 "receiving": g.receiving(),
@@ -355,7 +355,7 @@ pub(crate) struct Options {
     /// loopback hub, so it is the only way to test the wire itself. It also
     /// gets the ghosts' missing half for free — the run's own Lua is the
     /// client's, so `net.isServer()` answers false and the project's own
-    /// scripts do the asserting (`floptle/0193`).
+    /// scripts do the asserting.
     pub(crate) join: Option<String>,
 }
 
@@ -448,7 +448,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // one until the ground exists — steps happily with `dt = 0`. Reporting
     // `steps × DT` therefore published a span the run had not simulated, and it
     // was the confident kind of wrong: 3600 steps, "60.00s of simulated time",
-    // and a world where `time` never left zero (`floptle/0157`). `play_t` is the
+    // and a world where `time` never left zero. `play_t` is the
     // clock the scripts themselves read, so it cannot disagree with them.
     let t0 = ed.play_t;
     // Allocated up front, before the first step, so the loop never grows a Vec
@@ -539,7 +539,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // "nothing raised".
         ed.drain_script_logs();
         // Fold this step into the profiler's history, the way `Editor::render`
-        // folds one windowed frame (`floptle/0167`). Without this, `perf.ms`
+        // folds one windowed frame. Without this, `perf.ms`
         // and friends read every bucket as "no frame has completed yet" for
         // the whole run — enabled, and silently wrong in the same shape the
         // whole `perf` API exists to refuse: a value that reads as zero and
@@ -750,7 +750,7 @@ fn report(
             "requested": asked,
             // MEASURED off the session clock, not `steps × DT`: a paused
             // session steps without advancing, and this field is what a caller
-            // reads to know whether anything happened (`floptle/0157`).
+            // reads to know whether anything happened.
             "seconds": simulated,
             // What the loop stepped. The two differ exactly when the session
             // was paused for some of the run, and a caller comparing them can
@@ -767,8 +767,7 @@ fn report(
         if !ghosts.is_empty() {
             doc["clients"] = serde_json::Value::Array(ghost_report(ghosts));
         }
-        // **What the session actually put on the wire, by message kind**
-        // (`floptle/0218`).
+        // **What the session actually put on the wire, by message kind**.
         //
         // ⚠ Absent on a run with no session rather than an empty list: "this
         // game sends nothing" and "nothing was measured" are opposite facts,
@@ -793,8 +792,7 @@ fn report(
         // Present only under `--timing`, and absent rather than zeroed when it
         // was not asked for: a reader who finds `p95_ms: 0` in a document has
         // been told a frame took no time, which is the "reads as zero, means
-        // never measured" shape the whole `perf` API exists to refuse
-        // (`floptle/0167`).
+        // never measured" shape the whole `perf` API exists to refuse.
         if let Some(c) = clock {
             let sorted = c.sorted();
             doc["timing"] = serde_json::json!({
@@ -1107,7 +1105,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// `floptle/0193`: `run` could host a real session and nothing could JOIN
+    /// `run` could host a real session and nothing could JOIN
     /// it, so everything that is only true across the wire was untestable
     /// except by a person clicking in a GUI or by two machines.
     ///
@@ -1184,10 +1182,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **The acceptance test `floptle/0193` was written to make possible**, and
+    /// **The acceptance test an earlier task was written to make possible**, and
     /// the one that says the number above measures what it claims to.
     ///
-    /// `net.setRelevant(node, peer, false)` is `floptle/0182`'s whole promise —
+    /// `net.setRelevant(node, peer, false)` is that task's whole promise —
     /// the cheat-resistance of a hidden-role game is *defined* by what a client
     /// is not sent — and until there was a way to be a client, every project
     /// relying on it took it on trust.
@@ -1272,7 +1270,7 @@ mod tests {
         assert_eq!(Span::Seconds(0.0).steps(), 1, "a span nobody can measure is still a step");
     }
 
-    /// **The summary reports time that was SIMULATED** (`floptle/0157`).
+    /// **The summary reports time that was SIMULATED**.
     ///
     /// A run whose session is paused — which is what the Play-start terrain hold
     /// makes it until the ground exists — steps its whole span with `dt = 0`.
@@ -1327,7 +1325,7 @@ mod tests {
 
     /// **p95 is not the mean, and that is the whole reason it is reported.**
     ///
-    /// The distribution here is the shape `floptle/0176` describes: mostly
+    /// The distribution here is the shape an earlier task describes: mostly
     /// cheap, with a tail. A mean reads as comfortable; p95 does not, and a VM
     /// comparison that averaged its frames would call a collector pause a pass.
     #[test]
@@ -1360,7 +1358,7 @@ mod tests {
         assert!(line.contains("mean 1.93 ms"), "{line}");
     }
 
-    /// **A step the clock did not move is not a frame** (`floptle/0157` again,
+    /// **A step the clock did not move is not a frame** (an earlier task again,
     /// one layer down).
     ///
     /// The Play-start terrain hold steps with `dt = 0`. Those steps are cheap,

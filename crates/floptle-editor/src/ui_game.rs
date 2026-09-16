@@ -354,7 +354,7 @@ impl Editor {
     /// Pre-register every font any UI text references (before the immutable
     /// renderer borrow the measure callback needs).
     pub(crate) fn ensure_ui_fonts(&mut self) {
-        // The project's own font first (`floptle/0124`) — it is what an empty
+        // The project's own font first — it is what an empty
         // font name resolves to, so it has to be registered before anything
         // measures with one, which is most things.
         let project_font = self.project.ui_font.clone();
@@ -431,7 +431,7 @@ impl Editor {
         // used to drop every style in the project — thirty styles inert because
         // of one line — which reads as "the restyle did nothing" rather than as
         // a parse error. Keep the last sheet that did load, and say so, the way
-        // the input map already does (floptle/0051).
+        // the input map already does.
         if styles_failed && !self.ui_styles.styles.is_empty() {
             self.console.push(
                 floptle_script::LogLevel::Warn,
@@ -537,7 +537,7 @@ impl Editor {
     /// frame's `dt` is safe to hand to all of them (see `Editor::ui_style_dt`).
     fn style_layer(&mut self, roots: &mut [floptle_ui::Node]) {
         // The player's text scale, applied before the solver measures anything —
-        // which is what makes it reflow instead of clip (`floptle/0079`). It runs
+        // which is what makes it reflow instead of clip. It runs
         // whether or not the project has styles, because a game with no style
         // sheet still has text somebody may need bigger.
         floptle_ui::scale_text(roots, self.access.text_scale);
@@ -551,7 +551,7 @@ impl Editor {
         };
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
         let dt = self.ui_style_dt;
-        // Reduced motion snaps every transition to its target (`floptle/0079`) —
+        // Reduced motion snaps every transition to its target —
         // a hover still changes, it just does not slide, because a 40 ms slide is
         // still a slide.
         self.ui_style_rt.reduced_motion = self.access.reduced_motion;
@@ -670,7 +670,7 @@ impl Editor {
             .script_texts
             .iter()
             .map(|t| {
-                // The font the script named, or the project's (`floptle/0124`)
+                // The font the script named, or the project's
                 // — measured with the very same one it is drawn in, or a
                 // centred run would be centred against Roboto's widths and land
                 // somewhere else entirely.
@@ -724,7 +724,7 @@ impl Editor {
             }
             out.push((dl, 1.0));
         }
-        // Captions (`floptle/0079`), drawn by the engine so every game gets the
+        // Captions, drawn by the engine so every game gets the
         // same readable placement: bottom-centre, on a dark plate, oldest first,
         // and scaled by the same text scale as the rest of the UI. A game that
         // hand-rolls this gets it subtly wrong — too high, too small, or behind
@@ -776,8 +776,8 @@ impl Editor {
     /// texture, which is what `backdrop()` UI shaders read (a swapchain that
     /// was not offered the flag — a browser canvas — cannot, and gets black).
     ///
-    /// One function, three callers: the docked Game view, and `floptle shot`
-    /// (`floptle/0224`). Before it was shared, `shot` ran the world passes,
+    /// One function, three callers: the docked Game view, and `floptle shot`.
+    /// Before it was shared, `shot` ran the world passes,
     /// post and the retro upscale and stopped — so a project whose scenes are
     /// screens (a main menu, a character creator, a dialogue box) had no
     /// headless way to be looked at, and `run` reported "nothing raised" for

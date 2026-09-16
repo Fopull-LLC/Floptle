@@ -61,8 +61,7 @@ const GATHERS: [(&str, &str); 12] = [
     ("water_draw", "water volumes — seas and pools"),
     // Not geometry, but the same failure: the palette quantize has to run in
     // the same place relative to the 2D light composite on both paths, or a
-    // Game view posterizes its lighting while the Scene view does not
-    // (`floptle/0127`).
+    // Game view posterizes its lighting while the Scene view does not.
     ("quantize_palette", "the palette quantize, before the 2D light"),
     // Also not geometry: where the baked GI volume is. The probe texture is
     // shared, but the four uniform lanes that locate it are camera-relative, so
@@ -100,8 +99,7 @@ const GATHERS: [(&str, &str); 12] = [
     // while a Scene-view session of the very same scene read it correctly —
     // the number was never this camera's, it was whichever gather had run
     // last. Draws, lights, nodes, chunks, particles: none of it reached
-    // `perf.counts()` from the one path that draws every other view
-    // (`floptle/0167`).
+    // `perf.counts()` from the one path that draws every other view.
     ("set_counts", "the render counts a game reads via perf.counts()"),
 ];
 

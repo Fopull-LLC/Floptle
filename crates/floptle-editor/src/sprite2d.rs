@@ -1,4 +1,4 @@
-//! The 2D layer: tilemap meshes and sprite batches (`floptle/0058`).
+//! The 2D layer: tilemap meshes and sprite batches.
 //!
 //! Two node kinds that exist so a 2D game does not have to build a renderer out
 //! of scene nodes:
@@ -50,7 +50,7 @@ pub(crate) struct TilePageGpu {
 /// the coordinates are still computed once, by the same expression, in the same
 /// builder. What a split costs is one draw call per sheet the layer actually
 /// uses, which is bounded by how many sheets a level has and not by how many
-/// tiles (`floptle/0092`).
+/// tiles.
 pub(crate) struct TileGpu {
     pub(crate) pages: Vec<TilePageGpu>,
     sig: u64,
@@ -390,7 +390,7 @@ pub(crate) fn tilemap_draws(
 /// — 1.4 units, not 1 — so `size` is divided by that rather than multiplied
 /// straight onto the mesh. It used to be multiplied straight on, which made
 /// `size = 1` draw a 1.4-unit sprite and the default the misleading case
-/// (`floptle/0070`): a game that moved its bullets onto a batch saw them all
+///: a game that moved its bullets onto a batch saw them all
 /// come out 40% too big, which reads as somebody's tuning change rather than a
 /// unit mismatch.
 pub(crate) fn sprite_draws(
@@ -752,7 +752,7 @@ mod tests {
         out.remove(0)
     }
 
-    /// `floptle/0070`: the doc comment says `size` is the sprite's edge in world
+    /// the doc comment says `size` is the sprite's edge in world
     /// units. It used to be multiplied onto a 1.4-unit quad, so it was 1.4x that.
     #[test]
     fn size_is_the_edge_in_world_units() {
@@ -793,7 +793,7 @@ mod tests {
         assert!((centre.x - 10.0).abs() < 1e-4, "and it is where the node is, got {}", centre.x);
     }
 
-    // ---- floptle/0092: one grid, several sheets ----------------------------
+    // ---- one grid, several sheets ----------------------------
 
     use floptle_core::{tile_cell_of, tile_pack, EMPTY_TILE};
 

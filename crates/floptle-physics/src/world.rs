@@ -8,7 +8,7 @@ use crate::compound::{Compound, CompoundContact};
 use crate::gravity::{GravityField, GravitySource};
 use crate::shapes::CollisionShape;
 
-/// Sleeping (`floptle/0143`). Below this speed and grounded, consecutively,
+/// Sleeping. Below this speed and grounded, consecutively,
 /// for [`SLEEP_SETTLE_TIME`] and a body stops integrating.
 ///
 /// 0.05 m/s: slow enough that nothing that reads as "moving" ever crosses it
@@ -63,8 +63,8 @@ impl AnchoredCollider {
         Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, offset: Vec3::ZERO }
     }
 
-    /// The collider's bounding sphere in the SIM frame, if its shape has one
-    /// (`floptle/0076`). `None` = no useful bound, so the broadphase always
+    /// The collider's bounding sphere in the SIM frame, if its shape has one.
+    /// `None` = no useful bound, so the broadphase always
     /// offers it and the narrow phase decides, exactly as before.
     pub fn bounds(&self) -> Option<(Vec3, f32)> {
         self.shape.bounds().map(|(c, r)| (c + self.offset, r))
@@ -116,8 +116,8 @@ thread_local! {
 /// a `f64` world point. Near the origin (the default), the two frames coincide.
 pub struct PhysicsWorld {
     pub gravity: GravityField,
-    /// The scene's bodies of water (`floptle/0038`). Rebuilt from the scene's
-    /// WaterVolume nodes every frame, exactly like `gravity` (`floptle/0141`) —
+    /// The scene's bodies of water. Rebuilt from the scene's
+    /// WaterVolume nodes every frame, exactly like `gravity` —
     /// **static only *within* one step**, which is what keeps
     /// `Sim::step_body_tick` bit-for-bit exact. That is a claim about the field
     /// not moving *while a tick is running*, not about being built once per
@@ -145,8 +145,7 @@ pub struct PhysicsWorld {
     /// `(body index, kinematic entity, point, normal)` — cleared each step,
     /// consumed by the sim's touch-event diff.
     pub kin_contacts: Vec<(usize, u32, Vec3, Vec3)>,
-    /// Broadphase over the colliders, rebuilt at the top of every `step`
-    /// (`floptle/0076`).
+    /// Broadphase over the colliders, rebuilt at the top of every `step`.
     ///
     /// Rebuilt rather than cached-and-invalidated on purpose: `colliders` is a
     /// public Vec that the sim rewrites wholesale, terrain edits mutate in place,
@@ -177,13 +176,13 @@ pub struct PhysicsWorld {
     pub compound_contacts: Vec<CompoundContact>,
     /// What each SLEEPING body (by index, parallel to `bodies`) is resting
     /// on: `(collider index, contact point, normal)` per touching collider,
-    /// cached the moment it fell asleep — see `Self::report_resting_contacts`
-    /// (`floptle/0143`). A separate parallel Vec rather than a field on
+    /// cached the moment it fell asleep — see `Self::report_resting_contacts`.
+    /// A separate parallel Vec rather than a field on
     /// `Body` because `Body` is `Copy` throughout this crate and a `Vec`
     /// field would end that. Empty for every awake body.
     resting: Vec<Vec<(usize, Vec3, Vec3)>>,
     /// Seconds since the last periodic re-check of every sleeping body's
-    /// support (`floptle/0143`). `Self::set_colliders` already catches a
+    /// support. `Self::set_colliders` already catches a
     /// collider list replacement (a streamed chunk unloading); this is the
     /// safety net for geometry that changes in place instead — terrain
     /// sculpting mutates a `ChunkField` a collider already points at, a map
@@ -238,7 +237,7 @@ pub struct RayHit {
     /// queries carried it through as [`ShapeHit::eid`], so `spherecast` named
     /// the node it hit and `raycast` answered nothing for the entire level —
     /// two calls the scripting docs describe as returning the same fields, one
-    /// of which silently did not (`floptle/0174`). The collider is in hand one
+    /// of which silently did not. The collider is in hand one
     /// line before the hit is built; nothing about this was unavailable.
     pub eid: Option<u32>,
 }
@@ -679,8 +678,7 @@ impl PhysicsWorld {
     /// Advance the simulation by `dt` seconds. Call on a FIXED timestep (e.g. 1/120 s
     /// via an accumulator) for stability, not the variable render delta. Field-indexed
     /// throughout so the per-body collider/gravity/contact accesses stay borrow-clean.
-    /// Rebuild the collider broadphase from the current collider set
-    /// (`floptle/0076`).
+    /// Rebuild the collider broadphase from the current collider set.
     pub(crate) fn reindex_colliders(&mut self) {
         // A collider with no bound (a plane, a terrain field) is handed in with
         // an infinite radius, which the grid files as oversized and therefore
@@ -721,7 +719,7 @@ impl PhysicsWorld {
 
     /// Replace the static collider set — a scene reload, or a chunk streaming
     /// in or out — and wake any sleeping body whose ground this may have
-    /// pulled out from under it (`floptle/0143`).
+    /// pulled out from under it.
     ///
     /// A chunk unloading its colliders out from under a sleeping mug must not
     /// leave the mug floating in stale-rest state forever, so this errs
@@ -736,7 +734,7 @@ impl PhysicsWorld {
         // actually (un)loaded this frame. Without this length check, every
         // sleeping body paid a full reindex + broadphase query every single
         // frame the game ran, not only when the list was actually replaced —
-        // defeating the cost this card exists to remove (`floptle/0143`,
+        // defeating the cost this card exists to remove (an earlier task,
         // found by an adversarial review re-reading this card before it
         // shipped). A length mismatch is a cheap, conservative signal for "the
         // list was replaced" — it can miss a same-length swap, but
@@ -754,8 +752,7 @@ impl PhysicsWorld {
     }
 
     /// Re-derive every sleeping body's `resting` cache against the current
-    /// collider set, waking any body that finds nothing there any more
-    /// (`floptle/0143`).
+    /// collider set, waking any body that finds nothing there any more.
     ///
     /// Errs toward waking: a body with nothing at all nearby wakes, however
     /// far off it was resting versus merely near something — a false wake
@@ -778,7 +775,7 @@ impl PhysicsWorld {
     /// re-derives a driven body's resting cache itself, every asleep tick,
     /// for exactly that reason — touching it here too would be redundant at
     /// best and, if a caller ever grew a reason not to reindex-then-query
-    /// identically in both, a reintroduced desync at worst (`floptle/0143`).
+    /// identically in both, a reintroduced desync at worst.
     fn revalidate_sleeping_bodies(&mut self) {
         if !self.bodies.iter().any(|b| b.asleep && !b.driven) {
             return; // the common case: nobody (non-driven) is asleep
@@ -816,8 +813,8 @@ impl PhysicsWorld {
         }
         // Safety net for geometry that changed in PLACE under a sleeping
         // body — terrain sculpting, a map edit — which `set_colliders`
-        // cannot see because nothing replaced the collider list
-        // (`floptle/0143`). Only sleeping bodies are checked, at most once
+        // cannot see because nothing replaced the collider list.
+        // Only sleeping bodies are checked, at most once
         // per `SLEEP_REVALIDATE_INTERVAL`.
         self.resting_check_elapsed += dt;
         if self.resting_check_elapsed >= SLEEP_REVALIDATE_INTERVAL {
@@ -1347,7 +1344,7 @@ impl PhysicsWorld {
             return;
         }
         if self.bodies[bi].asleep {
-            // SLEEPING (`floptle/0143`): skip gravity, depenetration and
+            // SLEEPING: skip gravity, depenetration and
             // ground detection against however many static colliders the
             // level has — the expensive part, and the part that cannot
             // change under a body whose ground has not itself changed.
@@ -1390,7 +1387,7 @@ impl PhysicsWorld {
                     // covered by `step`'s once-per-real-frame index reuse),
                     // so this adds one bounded broadphase query on top of a
                     // cost already being paid — cheap because driven bodies
-                    // are few, not because this query is free (`floptle/0143`,
+                    // are few, not because this query is free (an earlier task,
                     // the desync an adversarial review found).
                     let fresh = self.find_resting_contacts(bi);
                     if fresh.is_empty() {
@@ -1518,7 +1515,7 @@ impl PhysicsWorld {
             // don't. Accumulated here and spent once below.
             let mut impact_dv = 0.0f32;
             for _ in 0..passes {
-                // Broadphase (`floptle/0076`): ask the index which colliders can
+                // Broadphase: ask the index which colliders can
                 // possibly reach this body, instead of walking all of them. The
                 // query sphere covers every sample centre plus the body radius,
                 // and a collider outside it cannot produce `radius - d > 0` — so
@@ -1716,7 +1713,7 @@ impl PhysicsWorld {
                 }
             }
 
-            // SLEEPING, part two: settle detection (`floptle/0143`). Grounded
+            // SLEEPING, part two: settle detection. Grounded
             // and below `SLEEP_LINEAR_SPEED`, consecutively, for
             // `SLEEP_SETTLE_TIME` — a pure function of this body's own state
             // this step, nothing else's, so a resimulation that replays only
@@ -1768,7 +1765,7 @@ impl PhysicsWorld {
     /// grounded/wall classification the ordinary path uses, so a sleeping
     /// body's `grounded`/`ground_normal`/`wall_normal` and
     /// `PhysicsWorld::contacts` read exactly as they would the moment before
-    /// it fell asleep, every step, until something wakes it (`floptle/0143`).
+    /// it fell asleep, every step, until something wakes it.
     ///
     /// **No query.** Just replays `Body::resting`, cached the moment this
     /// body fell asleep (or last refreshed by `Self::set_colliders`) — the
@@ -1823,7 +1820,7 @@ impl PhysicsWorld {
                 // "clear" side of zero must still read as resting, or a body
                 // that settled exactly onto a surface finds nothing here and
                 // wakes up floorless the instant `report_resting_contacts`
-                // asks (`floptle/0143`).
+                // asks.
                 let pen = radius - self.colliders[ci].distance(c);
                 #[allow(clippy::neg_cmp_op_on_partial_ord)]
                 if !(pen > -0.01) {
@@ -1867,7 +1864,7 @@ mod step_body_tests {
         assert_eq!(solo.bodies[1].pos, Vec3::new(5.0, 3.0, 0.0));
     }
 
-    /// `floptle/0143`, the rollback-safety half: a body that falls asleep
+    /// an earlier task, the rollback-safety half: a body that falls asleep
     /// during a full-`step()` run must fall asleep on the exact same tick
     /// when replayed solo (`step_body`, the path a rollback resimulation
     /// uses) — the same contract `single_body_step_matches_full_step` pins
@@ -1910,7 +1907,7 @@ mod step_body_tests {
     }
 
     /// **A body standing on a mesh floor costs about what a body standing on a
-    /// box floor costs.** `floptle/0143` item 2: after 0.84.0's broadphase work,
+    /// box floor costs.** an earlier task item 2: after 0.84.0's broadphase work,
     /// a handful of awake bodies against a level's mesh colliders was still
     /// ~1.4 ms a step, and the term had never been named. It is
     /// `TriMeshCollider::nearest_tri`: the query searches a fixed ±2-cell block
@@ -2307,7 +2304,7 @@ mod shape_query_tests {
         assert_eq!(hit.eid, Some(1));
     }
 
-    /// The broadphase must not change the answer (`floptle/0076`).
+    /// The broadphase must not change the answer.
     ///
     /// This is the only property that makes an index safe to drop under a solver:
     /// a candidate list that misses a collider is a body falling through the
@@ -2424,7 +2421,7 @@ mod ray_identity_tests {
     /// collider away — so `raycast` answered no node for the whole of static
     /// geometry while `spherecast`, documented as returning the same fields,
     /// answered one. Nothing about this was unavailable; it was dropped one line
-    /// before the hit was built (`floptle/0174`).
+    /// before the hit was built.
     #[test]
     fn a_ray_reports_the_node_whose_geometry_it_hit() {
         let cols = vec![tagged(
@@ -2450,7 +2447,7 @@ mod ray_identity_tests {
         assert_eq!(h.eid, None);
     }
 
-    /// The two halves of `floptle/0174` meeting: a ray hits a labelled map
+    /// The two halves of an earlier task meeting: a ray hits a labelled map
     /// mesh, names the node, and the collider it named can then be asked what
     /// the surface at that point is made of.
     ///

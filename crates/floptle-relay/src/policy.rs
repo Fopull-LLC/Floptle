@@ -95,7 +95,7 @@ pub struct CloudPolicy {
     cursor: Option<String>,
     last_pull_ok: Option<Instant>,
     pull_in_flight: bool,
-    /// **When a failed pull may be tried again** (`floptle/0223`). `None` when
+    /// **When a failed pull may be tried again**. `None` when
     /// the last pull succeeded, and the healthy cadence applies. A failure
     /// used to leave `last_pull_ok` old and the loop re-pulling the instant
     /// the previous attempt returned — fifteen a second for nine hours, each
@@ -119,25 +119,25 @@ pub struct CloudPolicy {
     /// means, so the meter lives here.
     of_lobby: HashMap<String, String>,
     live: HashMap<String, u32>,
-    /// Lobbies whose host is a dedicated server rather than a player
-    /// (`floptle/0211`). Occupancy is clients **plus the host**, which is right
+    /// Lobbies whose host is a dedicated server rather than a player.
+    /// Occupancy is clients **plus the host**, which is right
     /// for a listen host and an off-by-one for a box nobody is sitting at: an
     /// idle dedicated server read as one concurrent player on its developer's
     /// page and held one of the account's ceiling for as long as it ran.
     dedicated: std::collections::HashSet<String>,
-    /// **Codes the control plane owns**, replaced whole on every full snapshot
-    /// (`floptle/0217`). Never merged — see [`crate::control::KeySnapshot`].
+    /// **Codes the control plane owns**, replaced whole on every full snapshot.
+    /// Never merged — see [`crate::control::KeySnapshot`].
     reserved: HashMap<String, crate::control::Reservation>,
     /// Wakes already asked for, so a lobby full of friends all typing the same
     /// code at once produces one POST rather than one each. Cleared when the
     /// code turns up as a live lobby.
     waking: HashSet<String>,
     /// Payload received for a lobby that does not exist, per code, since the
-    /// last usage flush (`floptle/0222`).
+    /// last usage flush.
     orphaned: HashMap<String, u64>,
     last_usage: Instant,
-    /// **The forwarding loop's own period, sampled every tick**
-    /// (`floptle/0215`). `tick()` runs at the top of every `step()` and the
+    /// **The forwarding loop's own period, sampled every tick**.
+    /// `tick()` runs at the top of every `step()` and the
     /// binary steps in a tight loop, so the gap between consecutive ticks is
     /// the loop period — no plumbing through the relay required. It stretches
     /// under load before the kernel starts dropping datagrams, which makes it
@@ -167,7 +167,7 @@ pub struct CloudPolicy {
     /// and reporting them here would tell a developer they are outgrowing a
     /// plan when somebody mistyped six characters.
     refused: HashMap<String, u32>,
-    /// **Where each live lobby's host is**, by code (`floptle/0228`). Reported
+    /// **Where each live lobby's host is**, by code. Reported
     /// per key as `hosts`, which partitions the sample's `lobbies` by
     /// address — so "is my key being used by someone who is not me" has an
     /// answer, and "three lobbies from one address" is a number the control
@@ -187,7 +187,7 @@ pub struct CloudPolicy {
     /// interface counters, which is the only independent check there is.
     bytes_total: (u64, u64),
     /// Keys currently at their ceiling, so the host is told once per episode
-    /// rather than once per refused join (`floptle/0194`). A busy game at cap
+    /// rather than once per refused join. A busy game at cap
     /// refuses constantly, and a line per refusal is a flood that gets muted —
     /// taking the one message that matters with it.
     at_cap: HashSet<String>,
@@ -210,7 +210,7 @@ pub struct CloudPolicy {
 
 impl CloudPolicy {
     /// Does this lobby's host occupy a seat? One for a listen host, none for a
-    /// dedicated server (`floptle/0211`).
+    /// dedicated server.
     ///
     /// **One definition on purpose.** The number is read twice — once for the
     /// ceiling a join is refused at, once for the occupancy a region reports —
@@ -328,8 +328,7 @@ impl CloudPolicy {
         JoinAdmission::Starting { detail: WAKE_ESTIMATE.into() }
     }
 
-    /// **What this relay says about itself**, alongside what it carried
-    /// (`floptle/0215`).
+    /// **What this relay says about itself**, alongside what it carried.
     ///
     /// Drains the interval counters, so it must be called exactly once per
     /// flush. Everything the box could not measure stays `None` and is left off
@@ -343,7 +342,7 @@ impl CloudPolicy {
         b.limit_drops = Some(self.limit_drops);
 
         // Occupancy: lobbies the relay is holding, and the players in them
-        // counted the one way `host_seat` defines (`floptle/0211`) — a
+        // counted the one way `host_seat` defines — a
         // dedicated server is a box nobody is sitting at and is not a player.
         b.lobbies = self.of_lobby.len() as u32;
         b.peers = self
@@ -445,7 +444,7 @@ impl CloudPolicy {
                 Done::Pulled(Err(e)) => {
                     self.pull_in_flight = false;
                     self.denied = matches!(e, ControlError::Denied(_));
-                    // **Back off** (`floptle/0223`): the next attempt waits,
+                    // **Back off**: the next attempt waits,
                     // doubling up to the healthy cadence. Not failing closed —
                     // the served snapshot stands throughout — just not
                     // hammering an edge that is already answering 530.
@@ -523,13 +522,13 @@ impl CloudPolicy {
             if row.account_over_limit {
                 // A host refused at host time is the same event as a join
                 // refused at the ceiling, so it gets the same sentence rather
-                // than a generic "refused" (`floptle/0194`). This one goes to
+                // than a generic "refused". This one goes to
                 // the developer, so it carries the number and the portal.
                 return HostAdmission::Refuse {
                     reason: host_at_cap_notice(row.ccu_limit, &row.tier, &row.game),
                 };
             }
-            // **A build the control plane has marked** (`floptle/0228`): one
+            // **A build the control plane has marked**: one
             // shipped copy of the key being abused is revoked by its build id,
             // and every other build keeps hosting. Named as what it is — the
             // developer did this at the portal, and the sentence should send
@@ -649,7 +648,7 @@ impl RelayPolicy for CloudPolicy {
     }
 
     fn admit_join(&mut self, code: &str) -> JoinAdmission {
-        // **A code with no lobby may still be somebody's** (`floptle/0217`).
+        // **A code with no lobby may still be somebody's**.
         // This runs before the relay's own "no lobby" refusal, which is the
         // whole point: that refusal means "never", and a sleeping server is
         // "not yet".
@@ -667,8 +666,8 @@ impl RelayPolicy for CloudPolicy {
         if here >= limit {
             *self.refused.entry(key.clone()).or_insert(0) += 1;
 
-            // **The host is told once per episode, not once per refusal**
-            // (`floptle/0194`). A busy game at its ceiling refuses constantly,
+            // **The host is told once per episode, not once per refusal**.
+            // A busy game at its ceiling refuses constantly,
             // and a line per refusal is a flood that gets muted — taking the
             // one message that matters with it.
             if self.at_cap.insert(key.clone()) {
@@ -719,7 +718,7 @@ impl RelayPolicy for CloudPolicy {
         // before this, and a count cannot say which lobby died or what killed
         // it — which is why a host dropping three times inside one real match
         // was found by differencing two byte counters rather than by reading
-        // the journal (`floptle/0222`).
+        // the journal.
         self.say(format!("lobby {code}: host connection lost — holding the lobby for its return"));
     }
 
@@ -845,7 +844,7 @@ impl RelayPolicy for CloudPolicy {
                 // A listen host is playing and counts; a dedicated server is a
                 // box nobody is sitting at, and counting it showed "1 in this
                 // game right now" on an empty server and spent one of the
-                // account's ceiling for as long as it ran (`floptle/0211`).
+                // account's ceiling for as long as it ran.
                 e.0 += self.live.get(code).copied().unwrap_or(0) + self.host_seat(code);
                 e.1 += 1;
             }
@@ -870,7 +869,7 @@ impl RelayPolicy for CloudPolicy {
             let mut refused = std::mem::take(&mut self.refused);
             let mut orphaned = std::mem::take(&mut self.orphaned);
             // **Posted even when it is empty** — this is the relay's heartbeat
-            // as well as its meter (`floptle/0191`). A region's health is
+            // as well as its meter. A region's health is
             // derived from how long ago its box token was last seen, and a
             // relay that only reported when it had lobbies went silent exactly
             // when it was idle: a quiet region and a dead one looked identical,
@@ -927,7 +926,7 @@ impl RelayPolicy for CloudPolicy {
                     }
                 })
                 .collect();
-            // **The operator's own check on the number** (`floptle/0195`).
+            // **The operator's own check on the number**.
             // Everything above is reported to a control plane nobody on this
             // box can see; this line is the figure a person standing at the
             // machine can hold against `ip -s link` and decide whether to
@@ -950,7 +949,7 @@ impl RelayPolicy for CloudPolicy {
     }
 }
 
-/// **What the joiner sees when a game is at its ceiling** (`floptle/0194`).
+/// **What the joiner sees when a game is at its ceiling**.
 ///
 /// The person reading this is a friend of the developer holding a lobby code.
 /// They are not the customer, they cannot upgrade anything, and a sentence
@@ -959,7 +958,7 @@ impl RelayPolicy for CloudPolicy {
 /// actionable thing: someone will leave.
 pub const FULL_RIGHT_NOW: &str = "This game is full right now. Try again in a minute.";
 
-/// **What the host is told, once per at-cap episode** (`floptle/0194`).
+/// **What the host is told, once per at-cap episode**.
 ///
 /// The developer's mental model of a refused friend is "my netcode is broken".
 /// Left alone that is a churn event; named, it is the best news they have had
@@ -1014,7 +1013,7 @@ fn p95(v: &mut [f32]) -> Option<f32> {
     Some(v[i])
 }
 
-/// **What a joiner is told while a server wakes** (`floptle/0217`).
+/// **What a joiner is told while a server wakes**.
 ///
 /// A sentence a game can print, not a status noun — a noun makes every
 /// developer invent the wording and most will not. W measures each deployment's
@@ -1177,8 +1176,8 @@ mod tests {
         p
     }
 
-    /// **A key's lobbies are counted, and a marked build is refused**
-    /// (`floptle/0228`). One shipped build being abused is revoked by its id
+    /// **A key's lobbies are counted, and a marked build is refused**.
+    /// One shipped build being abused is revoked by its id
     /// and every other build keeps hosting; a key at its lobby ceiling is
     /// refused the next lobby with the number named, and a closed lobby makes
     /// room again.
@@ -1273,8 +1272,7 @@ mod tests {
         (p, fake)
     }
 
-    /// ⚠ **A join for a SLEEPING server is held, never refused**
-    /// (`floptle/0217`).
+    /// ⚠ **A join for a SLEEPING server is held, never refused**.
     ///
     /// `Refuse` means *this will never succeed* — that is its whole purpose.
     /// A player holding six characters their friend wrote down would be told
@@ -1396,8 +1394,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **The relay reports its own load, and the numbers are real**
-    /// (`floptle/0215`).
+    /// ⚠ **The relay reports its own load, and the numbers are real**.
     ///
     /// This box is where a signup surge lands first — every free-tier player in
     /// a region goes through it, long before anyone rents a dedicated server —
@@ -1467,7 +1464,7 @@ mod tests {
         assert_eq!(p95(&mut [1.0, 2.0]), Some(2.0));
     }
 
-    /// **An idle dedicated server is not a player** (`floptle/0211`).
+    /// **An idle dedicated server is not a player**.
     ///
     /// Occupancy is clients plus the host, which is right for a listen host —
     /// that person is playing — and an off-by-one for a box nobody is sitting
@@ -1499,12 +1496,11 @@ mod tests {
         assert_eq!(flush_usage(&mut p, &fake)[0].ccu, 2, "two players are two players");
     }
 
-    /// **A dedicated server does not spend one of the account's seats**
-    /// (`floptle/0211`).
+    /// **A dedicated server does not spend one of the account's seats**.
     ///
     /// The same off-by-one, on the side that a player actually feels: at a
     /// ceiling of N, a dedicated server was seating N−1 people and turning the
-    /// Nth away — which is the exact moment `floptle/0194` is trying to turn
+    /// Nth away — which is the exact moment an earlier task is trying to turn
     /// into good news, spoiled by arriving one player early.
     #[test]
     fn a_dedicated_server_does_not_spend_a_seat_at_the_ceiling() {
@@ -1533,8 +1529,7 @@ mod tests {
         );
     }
 
-    /// **A region cannot be priced from players and lobbies alone**
-    /// (`floptle/0195`).
+    /// **A region cannot be priced from players and lobbies alone**.
     ///
     /// Egress is what a region is billed for, and until now a usage sample
     /// carried occupancy and nothing about traffic — so the one number that
@@ -1567,7 +1562,7 @@ mod tests {
     }
 
     /// ⚠ **A sample says which addresses a key's lobbies are hosted from, and
-    /// the breakdown sums to the lobby count** (`floptle/0228`). This is the
+    /// the breakdown sums to the lobby count**. This is the
     /// field 0228's first step — count and show, refuse nothing — cannot
     /// start without. A host that comes back from a different address after
     /// a blip is counted where it is now.
@@ -1663,7 +1658,7 @@ mod tests {
             panic!("the 21st player must be refused");
         };
 
-        // **This sentence turned around in `floptle/0194`, and the negative is
+        // **This sentence turned around in an earlier task, and the negative is
         // the point.** It used to name the game, the number, the plan and the
         // price page. The person reading it is a friend of the developer
         // holding a lobby code: they are not the customer, they cannot upgrade
@@ -1708,7 +1703,7 @@ mod tests {
         );
 
         // Six refusals were still COUNTED, which is what the control plane
-        // meters (`floptle/0195`).
+        // meters.
         assert_eq!(p.refused.get(KEY).copied(), Some(6));
     }
 
@@ -1717,7 +1712,7 @@ mod tests {
     /// The website's ceiling copy gives a Studio account a person to talk to
     /// rather than an upgrade button, because there is nothing above it to
     /// sell — and the console line describing the same event should not say
-    /// "raise the ceiling" to somebody who cannot (`floptle/0194`, W's note).
+    /// "raise the ceiling" to somebody who cannot (W's note).
     #[test]
     fn a_studio_host_is_offered_a_conversation_and_not_an_upgrade() {
         let free = host_at_cap_notice(20, "free", "forgery");
@@ -1775,7 +1770,7 @@ mod tests {
         };
         // A host refused at host time is the same event as a join refused at
         // the ceiling, so it says the same thing rather than a generic
-        // "refused" (`floptle/0194`) — and this one is the developer, so it
+        // "refused" — and this one is the developer, so it
         // carries the number, the reassurance and the portal.
         assert!(reason.contains("20 players are in your games"), "names the number: {reason}");
         assert!(reason.contains("nobody playing was disconnected"), "{reason}");
@@ -1828,7 +1823,7 @@ mod tests {
     }
 
     /// **A failing pull backs off and is logged on a schedule, and recovery
-    /// says how long it was** (`floptle/0223`). The live relay retried about
+    /// says how long it was**. The live relay retried about
     /// fifteen times a second through a nine-hour edge outage and logged every
     /// one, until its own lines evicted its journal — the primary evidence for
     /// every incident on that box. Serving the stale snapshot was right; the
@@ -2163,7 +2158,7 @@ mod tests {
         assert_eq!(posts[0][0].lobbies, 1);
     }
 
-    /// **An idle relay still checks in** (`floptle/0191`).
+    /// **An idle relay still checks in**.
     ///
     /// A region's health is derived from how long ago its box token was last
     /// seen. The usage post used to be skipped when there was nothing to

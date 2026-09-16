@@ -16,7 +16,7 @@ use floptle_script::{NetCmd, NetRoleState, NetState};
 use crate::{anim, Editor};
 
 /// Line of sight against the level, for interest management
-/// (`net.host{ interestOcclusion = "Level" }`, floptle/0182).
+/// (`net.host{ interestOcclusion = "Level" }`, an earlier task).
 ///
 /// The ray stops a hair short of the target: a node standing on the floor, or
 /// with a collider of its own, would otherwise be blocked by the very surface
@@ -146,7 +146,7 @@ impl Editor {
     /// ghost-client sessions, and dispatch received RPCs/events into scripts.
     pub(crate) fn net_tick(&mut self, tick: u64) {
         self.voice_tick();
-        // **What the relay had to say to the developer** (`floptle/0194`).
+        // **What the relay had to say to the developer**.
         // A managed relay runs on somebody else's machine, so "your game
         // filled up, here is where to raise the ceiling" reaches the operator's
         // journal there and nobody here unless it is carried back. Drained
@@ -157,7 +157,7 @@ impl Editor {
         // nobody was disconnected, and a game filling up is the best news a
         // developer gets all week. A warning icon would say the opposite of
         // what the sentence says.
-        // **The lobby code is the relay's fact, not ours** (`floptle/0210`).
+        // **The lobby code is the relay's fact, not ours**.
         // It used to be latched at host time and believed forever — so when a
         // relay restarted, every server kept advertising six characters that
         // refused everybody who typed them, on the developer's page and to any
@@ -222,7 +222,7 @@ impl Editor {
                     ..
                 } => {
                     // Recorded before the session comes up: `net_rollback_host_setup`
-                    // runs inside the host call and reads it (floptle/0049).
+                    // runs inside the host call and reads it.
                     self.net_input_delay = input_delay;
                     match (relay, port) {
                         // `relay = "cloud"` is not an address, it is an ask:
@@ -231,7 +231,7 @@ impl Editor {
                         // Console carries the reason when it cannot be.
                         (Some(addr), _) if addr.trim_start().starts_with("cloud") => {
                             // **A missing game key is answered here, before a
-                            // packet leaves** (`floptle/0196`). A managed relay
+                            // packet leaves**. A managed relay
                             // refuses a keyless host with good words, but only
                             // if it can be reached — so on a plane, behind a
                             // firewall, or in a headless harness the developer
@@ -782,7 +782,7 @@ impl Editor {
                 // A host is not joining anything — but a RELAY host can stop
                 // being reachable while it carries on simulating perfectly, and
                 // a lobby screen that reads "joined" through a relay outage is
-                // lying to the person staring at it (`floptle/0210`).
+                // lying to the person staring at it.
                 join_state: match (&self.net_relay_hosting, &self.net_lobby_code) {
                     (Some(_), None) => "reconnecting",
                     _ => "joined",
@@ -827,7 +827,7 @@ impl Editor {
             return;
         }
         let hub = floptle_net::MemoryHub::new();
-        // **Impairment reaches the loopback harness too** (`floptle/0193`).
+        // **Impairment reaches the loopback harness too**.
         // `net_impair_wrap` was applied at the two real tails — QUIC and the
         // relay — so `FLOPTLE_NET_IMPAIR` did nothing at all to an in-process
         // session. That was invisible while the harness was only reachable from
@@ -895,7 +895,7 @@ pub(crate) struct ClientSidePlan {
     /// Entities whose ticks the rollback driver owns. Kept out of `skip`: that
     /// set gates every pass including `lateUpdate`, which no driver replays,
     /// so folding them in here silently killed their cosmetic pass in net play
-    /// only. floptle/0042.
+    /// only.
     pub dskip: std::collections::HashSet<u32>,
     /// Bodies to deactivate: snapshots own their motion from here.
     pub park: Vec<u32>,
@@ -931,8 +931,7 @@ pub(crate) fn plan_client_side(
         // A node the DRIVER owns is locally simulated — only the scheduling of
         // its ticks moved. So it goes in `dskip`, not `skip`: `skip` gates
         // every pass including `lateUpdate`, which no driver replays, and a
-        // fighter writing its model yaw there silently stopped in net play
-        // (floptle/0042).
+        // fighter writing its model yaw there silently stopped in net play.
         //
         // Its body is not parked either: `step_body` early-returns on an
         // inactive body, so parking would leave the fighter inert on every
@@ -1104,7 +1103,7 @@ impl Editor {
         }
     }
 
-    /// One tick of voice chat (`floptle/0180`): apply the game's `voice.*`
+    /// One tick of voice chat: apply the game's `voice.*`
     /// calls, ship what the microphone heard, hand arriving frames to the right
     /// speaker, keep every voice attached to its node, and mirror the result
     /// back to Lua.
@@ -1246,7 +1245,7 @@ impl Editor {
         self.voice = voice;
     }
 
-    /// This machine's account claim, for the join handshake (floptle/0183).
+    /// This machine's account claim, for the join handshake.
     ///
     /// `None` when nobody is signed in, which is a normal state: a LAN or
     /// friends game works exactly as it always has, and the server decides for
@@ -1278,7 +1277,7 @@ impl Editor {
     }
 
     /// Each connected peer's account identity, mirrored into Lua for
-    /// `net.identity(peer)` (floptle/0183).
+    /// `net.identity(peer)`.
     fn mirror_identities(
         s: &floptle_net::NetSession,
     ) -> HashMap<u64, floptle_script::PeerIdentity> {
@@ -1608,7 +1607,7 @@ impl Editor {
         // connection somebody started and did not finish, and is not a key.
         let cloud = self.project.cloud.clone().filter(|c| c.is_connected());
         let hosted = match (&cloud, self.net_reclaim_code.as_deref()) {
-            // **Reclaim** (`floptle/0217`): a managed server brings the code it
+            // **Reclaim**: a managed server brings the code it
             // already had. The relay honours it only when its snapshot reserves
             // that code for this key, so asking costs nothing when we are wrong
             // — a fresh code comes back exactly as before.
@@ -1636,7 +1635,7 @@ impl Editor {
             }
         };
         // **Say what kind of host this is, or the relay counts the box as a
-        // player** (`floptle/0211`). A relay's occupancy is a lobby's clients
+        // player**. A relay's occupancy is a lobby's clients
         // plus its host, which is right for a listen host and wrong for a
         // machine nobody is sitting at — it showed "1 in this game right now"
         // on an empty server and held one of the account's ceiling for as long
@@ -1833,7 +1832,7 @@ impl Editor {
         let mut client =
             NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
         // `net.join(addr, {timeout = …})` — only ever bounds a WAKING server
-        // (`floptle/0217`); an ordinary join is answered in a round trip.
+        //; an ordinary join is answered in a round trip.
         if let Some(t) = self.net_join_timeout.take() {
             client.set_join_timeout(std::time::Duration::from_secs_f32(t));
         }
@@ -2389,7 +2388,7 @@ impl Editor {
                         pos: floptle_core::math::DVec3::from_array(state.pos),
                         vel: floptle_core::math::Vec3::from_array(state.vel),
                         grounded: state.grounded,
-                        // The wire state carries no sleep info (`floptle/0143`)
+                        // The wire state carries no sleep info
                         // — a corrected body starts awake and re-settles on
                         // its own through the replay below, exactly as a
                         // genuinely-at-rest body would within a few ticks.
@@ -3075,7 +3074,7 @@ mod tests {
             plan.dskip.contains(&es[1].index()) && plan.dskip.contains(&es[2].index()),
             "the driver's fighters run their TICKS under it, not under the global pass"
         );
-        // floptle/0042: not in `skip`. That set gates every pass including
+        // not in `skip`. That set gates every pass including
         // `lateUpdate`, which no driver replays — so a fighter that wrote its
         // model yaw there silently stopped, in net play only, with no error.
         assert!(
@@ -3171,7 +3170,7 @@ impl Editor {
 
 impl Editor {
     /// Does this project carry a Floptle Cloud game key, and if not, why that
-    /// matters and what to do (`floptle/0196`).
+    /// matters and what to do.
     ///
     /// **Answered locally, on purpose.** A managed relay refuses a keyless host
     /// with a good sentence, but a developer only reads it if they can reach
@@ -3446,8 +3445,7 @@ mod cloud_project_tests {
         assert!(connected("fk_live_REAL").unwrap().is_connected());
     }
 
-    /// **A project with no game key is told so before a packet leaves**
-    /// (`floptle/0196`).
+    /// **A project with no game key is told so before a packet leaves**.
     ///
     /// A managed relay refuses a keyless host with a good sentence — and only
     /// if it can be reached. On a plane, behind a firewall, or in a headless
@@ -3531,8 +3529,7 @@ mod cloud_project_tests {
         assert!(back.cloud.is_none());
     }
 
-    /// **A rollback match starts at tick 0 now, not tick 0 plus a debt**
-    /// (`floptle/0206`).
+    /// **A rollback match starts at tick 0 now, not tick 0 plus a debt**.
     ///
     /// The fixed-step clock banks real time and spends it as ticks. A joiner
     /// arrives here at the end of a scene load — `Scene` and `RollbackStart`

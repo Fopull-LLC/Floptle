@@ -29,7 +29,7 @@ pub(crate) fn primitive_mesh(shape: Shape) -> MeshData {
 /// Inspector. It stops being harmless the moment something quotes a size in
 /// world units and builds it out of one of these: a sprite batch's `size` is
 /// documented as the edge length, so it has to divide this back out
-/// (`floptle/0070`, where every bullet in a game came out 40% too big and read
+/// (where every bullet in a game came out 40% too big and read
 /// as a tuning change). Anything else measuring against these meshes should
 /// name this constant rather than paste the number.
 pub(crate) const PRIMITIVE_HALF: f32 = 0.7;

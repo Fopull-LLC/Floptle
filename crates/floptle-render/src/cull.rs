@@ -1,4 +1,4 @@
-//! Frustum culling: what is on screen, and how big a thing is (`floptle/0075`).
+//! Frustum culling: what is on screen, and how big a thing is.
 //!
 //! Until this existed, culling lived in exactly one place — terrain chunks — and
 //! every other node in the scene became an instance every frame whether or not it

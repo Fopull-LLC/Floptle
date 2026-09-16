@@ -1628,7 +1628,7 @@ mod helper_tests {
         assert_eq!(sink.borrow()[1].source.as_ref().map(|(n, _)| n.as_str()), Some("elsewhere"));
     }
 
-    /// **The property card `floptle/0176` actually asked for: bytes per
+    /// **The property card actually asked for: bytes per
     /// operation, per mode, in the ordinary suite.**
     ///
     /// Pinning the PROPERTY rather than the implementation is the point — the

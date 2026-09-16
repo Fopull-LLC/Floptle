@@ -218,7 +218,7 @@ impl<'a> EditorTabViewer<'a> {
         // own says so, in its own colour and with its own glyph: the editing
         // surface is identical, and a save goes somewhere completely different,
         // so the one place that names what you are editing has to be unambiguous
-        // about which it is (`floptle/0090`).
+        // about which it is.
         ui.horizontal(|ui| {
             if self.editing_prefab {
                 ui.colored_label(

@@ -410,7 +410,7 @@ pub struct Ui {
     /// Asset path → index into `fonts` (None = failed to parse, use fallback).
     font_ids: HashMap<String, Option<usize>>,
     /// What an empty font name resolves to — the project's font when it names
-    /// one, else 0 (`floptle/0124`). Project fonts append to the stack, so
+    /// one, else 0. Project fonts append to the stack, so
     /// without this every unnamed string is the embedded Roboto forever.
     default_font: usize,
     /// Every glyph currently resident in the atlas, with the frame it was last
@@ -1204,7 +1204,7 @@ impl Ui {
     }
 
     /// Point the empty font name at the **project's** font instead of the
-    /// embedded Roboto (`floptle/0124`).
+    /// embedded Roboto.
     ///
     /// Project fonts *append* to the stack, so slot 0 could never be the
     /// project's — which meant every string that did not name a font by hand
@@ -1610,7 +1610,7 @@ impl Ui {
                 t.size
             };
             // Rasterize on the layer's own grid when it asked for one
-            // (`floptle/0120`): a pixel font's cells only look like pixels when
+            //: a pixel font's cells only look like pixels when
             // a cell is a whole number of screen pixels, and `size * scale` is
             // almost never that because the scale is the window's, not the
             // author's.
@@ -1625,7 +1625,7 @@ impl Ui {
             #[allow(clippy::type_complexity)]
             let (lines, widths, glyph_src): (Vec<String>, Vec<f32>, Vec<Vec<Option<usize>>>) = {
                 // Measured at the size the glyphs will actually be rasterized
-                // at when the layer snaps (`floptle/0120`) — a run measured at
+                // at when the layer snaps — a run measured at
                 // `size * scale` and drawn at a snapped `px` would wrap in
                 // places the glyphs do not, and ellipsize a line that fits.
                 // Off, it is `size * scale` to the last bit, so no existing
@@ -1648,7 +1648,7 @@ impl Ui {
                 // map derived afterwards would be looking for source characters
                 // that are no longer on the line — and, past a truncated line,
                 // would find nothing at all for the rest of the run. Trimmed
-                // alongside below instead (`floptle/0172`).
+                // alongside below instead.
                 let mut glyph_src = floptle_ui::text::source_indices(&t.text, &lines);
                 // One line's worth of it, after `ellipsize` has eaten some of
                 // the end: keep the indices that survived and mark the appended
@@ -2130,7 +2130,7 @@ fn write_notdef(queue: &wgpu::Queue, atlas: &wgpu::Texture) {
     );
 }
 
-/// Which font a name resolves to (`floptle/0124`).
+/// Which font a name resolves to.
 ///
 /// A free function so it can be tested without a GPU, and because the rule is
 /// worth stating in one place: **empty means the project's font**, and anything
@@ -2147,7 +2147,7 @@ fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str
 mod tests {
     use super::*;
 
-    /// `floptle/0172`: a text run carried one colour for the whole string, so
+    /// a text run carried one colour for the whole string, so
     /// a game could not put a proper noun in the speaker's colour or tint the
     /// key inside the sentence telling you to press it. The only workaround was
     /// to split the line into sibling elements laid out by hand, which re-wraps
@@ -2274,7 +2274,7 @@ mod tests {
         assert!((b[1] - (a[1] - 5.0)).abs() < 1e-3, "by the amount it was pushed: {a:?} {b:?}");
     }
 
-    /// `floptle/0124`: an unnamed font is the project's, not the embedded one.
+    /// an unnamed font is the project's, not the embedded one.
     ///
     /// Project fonts append to the stack, so slot 0 could never be theirs — and
     /// `draw.text` had no font argument at all, so a game whose UI is a pixel

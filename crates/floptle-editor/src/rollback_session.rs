@@ -20,7 +20,7 @@ use floptle_net::{NetInput, PeerId, SERVER};
 /// late; it is not allowed to be why the game stutters.
 const REFEREE_CATCHUP_TICKS: u64 = 8;
 
-/// How many ticks the replay audit re-simulates (floptle/0050). Four, matching
+/// How many ticks the replay audit re-simulates. Four, matching
 /// the offline harness that found the Fofighter instance: deep enough that a
 /// value cached across hooks has been read again, shallow enough that the extra
 /// simulation is a rounding error on the frame.
@@ -43,7 +43,7 @@ use crate::Editor;
 /// A free function, like [`crate::net::plan_client_side`] and for the same
 /// reason: the sequence that produces this state spans a scene switch, a
 /// client-side setup and a rollback start, and it cannot be driven through an
-/// `Editor` in a test. floptle/0040 is what that costs.
+/// `Editor` in a test. an earlier task is what that costs.
 pub(crate) fn orphaned_rollback_nodes(
     reps: &[(floptle_core::Entity, bool)],
     driven: &std::collections::HashSet<u32>,
@@ -63,7 +63,7 @@ pub(crate) fn orphaned_rollback_nodes(
 /// somebody run your *passes*" — and the answer differs, because the driver
 /// replays `fixedUpdate` and `update` and nothing replays `lateUpdate`. A node
 /// in the all-passes filter therefore loses its late pass with no error and no
-/// log line, offline behaviour perfect, net play silently wrong. floptle/0042.
+/// log line, offline behaviour perfect, net play silently wrong.
 pub(crate) fn late_starved_rollback_nodes(
     reps: &[(floptle_core::Entity, bool)],
     driven: &std::collections::HashSet<u32>,
@@ -79,8 +79,7 @@ pub(crate) fn late_starved_rollback_nodes(
 impl Editor {
     /// The live driver's node ids — the set that belongs in the DRIVER filter
     /// for as long as it is running those nodes' ticks itself. Not the snapshot
-    /// filter: that one gates `lateUpdate` too, which no driver replays
-    /// (floptle/0042).
+    /// filter: that one gates `lateUpdate` too, which no driver replays.
     ///
     /// Empty when no driver is running, which is what makes it safe to union
     /// into every other filter computation unconditionally. The session's
@@ -120,8 +119,7 @@ impl Editor {
         // ms — with that whole load banked and unspent. Left alone, those ticks
         // are spent immediately after the restart, as a burst, and the joiner's
         // tick 0 is really the host's tick 6, 7 or 8. The bank is clamped at
-        // eight ticks, which is exactly the six-to-eight skew measured
-        // (`floptle/0206`).
+        // eight ticks, which is exactly the six-to-eight skew measured.
         //
         // Nothing downstream ever compares the two clocks: `should_stall` only
         // stops a peer running past the CONFIRMED frontier, and a peer six
@@ -143,7 +141,7 @@ impl Editor {
         // eids are still in the script filters is a node nothing runs: not the
         // driver (gone) and not the global passes (skipping it). Its scripts
         // then sit un-ticked for the life of the match, silently, which is
-        // exactly what a joiner and a local bot match both did (floptle/0039).
+        // exactly what a joiner and a local bot match both did.
         // Re-added below only once the driver is actually installed.
         self.script_host.shrink_filters(d.eids());
         let Some(sim) = self.sim.as_mut() else {
@@ -182,7 +180,7 @@ impl Editor {
         // The driver runs these nodes' ticks itself, in its own order — so they
         // leave the global `fixedUpdate` and `update` passes. Their `lateUpdate`
         // stays on the global pass: no driver replays it, and a rollback frame
-        // runs many ticks, so replaying it would fire it N times (floptle/0042).
+        // runs many ticks, so replaying it would fire it N times.
         // `run_*_for` bypasses every filter, which is the same arrangement the
         // host already uses for remote-owned Predicted nodes. added to the
         // driver filter, never assigned over the session's own: on a client the
@@ -196,12 +194,12 @@ impl Editor {
         // which no driver replays, and nothing else ever removes them. The
         // fight then runs normally (the driver bypasses filters) while the
         // cosmetic pass is silently dead on the client only — which is why
-        // floptle/0042 looked fixed from the host and was reported three times.
+        // an earlier task looked fixed from the host and was reported three times.
         self.script_host.shrink_filters(d.eids());
         self.script_host.extend_filters(d.eids());
         // And tell the SESSION which nodes the driver owns, so its snapshot
-        // guards stop depending on a flag a scene message can clear
-        // (floptle/0048). Refreshed every frame as well; done here too so the
+        // guards stop depending on a flag a scene message can clear.
+        // Refreshed every frame as well; done here too so the
         // opening frame of a match is already right.
         self.net_publish_driven(&d.eids());
         // A new match: both once-per-session diagnostics arm again.
@@ -228,7 +226,7 @@ impl Editor {
         );
     }
 
-    /// Should the replay audit run this tick? (floptle/0050)
+    /// Should the replay audit run this tick?
     ///
     /// **On in the editor, off in a shipped build**, and forced either way by
     /// `FLOPTLE_ROLLBACK_AUDIT=1` / `=0`. It costs an extra
@@ -287,7 +285,7 @@ impl Editor {
         }
     }
 
-    /// The input delay this match will run at (floptle/0049).
+    /// The input delay this match will run at.
     ///
     /// The game's choice if it made one, otherwise derived from the link. Two
     /// ticks — 33 ms — was the constant, and it is right only for peers in the
@@ -336,7 +334,7 @@ impl Editor {
     /// that leaves the flag off while the driver is on turns off every guard
     /// that stops a snapshot pose landing on a locally-simulated fighter — and
     /// the symptom is a fighter facing the wrong way with a green checksum,
-    /// because rotation is deliberately not hashed (floptle/0048).
+    /// because rotation is deliberately not hashed.
     ///
     /// This set comes from the driver, so it cannot disagree with the driver.
     pub(crate) fn net_publish_driven(&mut self, eids: &std::collections::HashSet<u32>) {
@@ -351,7 +349,7 @@ impl Editor {
     /// The refusal is correct. Reaching this code at all is not: it means the
     /// ingest guard let a sample through, which means the two answers to "is
     /// this node locally driven" disagreed at the moment it arrived. This is
-    /// the detector floptle/0048 asked for, and it fires on the machine that
+    /// the detector an earlier task asked for, and it fires on the machine that
     /// has the problem, while it has it.
     pub(crate) fn net_report_driven_drops(&mut self) {
         let mut drops: Vec<(u32, u64)> = Vec::new();
@@ -503,7 +501,7 @@ impl Editor {
         // against the field. A cheat changes one machine; a referee fault
         // changes only the referee, so everybody disagreeing with it and
         // nobody disagreeing with each other means it is wrong. The match keeps
-        // going and this says why (floptle/0041).
+        // going and this says why.
         let outliers =
             self.net_server.as_mut().map(|s| s.take_referee_outliers()).unwrap_or_default();
         for tick in outliers {
@@ -681,7 +679,7 @@ impl Editor {
         // Re-publish who the driver owns. Once per tick rather than once per
         // match, because the driver rebinds when nodes spawn or despawn and
         // because a session-side flag can be cleared underneath us at any
-        // moment (floptle/0048). It is a set compare in the common case.
+        // moment. It is a set compare in the common case.
         let driven = self.rollback_filter_eids();
         self.net_publish_driven(&driven);
         self.net_report_driven_drops();
@@ -744,7 +742,7 @@ impl Editor {
         // return, deliberately. An exit that skips the restore DROPS the driver
         // — and a dropped driver leaves its fighters in the script filters with
         // nothing running them, for the rest of the match, with no error. That
-        // is floptle/0040: the fighters ticked exactly once, then the driver
+        // is an earlier task: the fighters ticked exactly once, then the driver
         // fell out of the editor at the end of its own first tick. If you need
         // to bail below, set a flag and bail after the restore.
         let step = self.game_tick.step;
@@ -761,7 +759,7 @@ impl Editor {
         // stop re-sending a tick — and a session where nobody reports one keeps
         // every unconfirmed tick forever, because the host has no way to know.
         // It is also half the answer to "which side is starved", which used to
-        // cost a replay-file autopsy (floptle/0039).
+        // cost a replay-file autopsy.
         let confirmed = d.net.confirmed();
         if let Some(s) = self.net_server.as_mut() {
             s.set_rollback_confirmed(confirmed);
@@ -788,7 +786,7 @@ impl Editor {
         for f in d.faults.drain(..) {
             self.console.push(floptle_script::LogLevel::Warn, f, None);
         }
-        // 5. The replay audit (floptle/0050): re-simulate the last few ticks
+        // 5. The replay audit: re-simulate the last few ticks
         //    from the ring with provably identical inputs and check the world
         //    comes out the same. Anything that doesn't is a value the
         //    simulation reads and `snapshot()` does not carry.
@@ -823,7 +821,7 @@ impl Editor {
     /// simply never ticks. Its scripts' state stays at whatever the loader left
     /// it, cross-script calls into it read `nil` forever, and nothing anywhere
     /// says why. That is a match that looks frozen with a clean console — the
-    /// state floptle/0039 was reported in.
+    /// state an earlier task was reported in.
     ///
     /// Checked once per session rather than per tick: the condition is
     /// structural, so repeating it sixty times a second would only bury it.
@@ -949,7 +947,7 @@ impl Editor {
     /// Silent while the match is healthy — a line per second in a working
     /// session is noise, and noise is what gets a diagnostic ignored. But a
     /// frozen match must never again be silent on both screens at once
-    /// (floptle/0039): the whole failure was two machines showing the same
+    ///: the whole failure was two machines showing the same
     /// frozen frame with nothing anywhere saying which one had stopped
     /// receiving.
     fn net_rollback_report_flow(&mut self) {
@@ -1102,7 +1100,7 @@ pub(crate) struct RollbackStats {
     /// Per peer: `(peer, their reported frontier, applied ticks we are still
     /// holding for them)`. Empty on a client, which only knows about itself.
     ///
-    /// This is the readout floptle/0039 cost a replay-file autopsy for want of.
+    /// This is the readout an earlier task cost a replay-file autopsy for want of.
     /// A peer whose frontier has stopped moving while its backlog grows is the
     /// starved one, and it says so on the host's screen the moment it happens.
     pub peers: Vec<(floptle_net::PeerId, u64, usize)>,
@@ -1159,7 +1157,7 @@ mod tests {
     use super::{late_starved_rollback_nodes, orphaned_rollback_nodes};
     use std::collections::HashSet;
 
-    /// field regression (floptle/0042): the pass-level sibling of the orphan
+    /// field regression: the pass-level sibling of the orphan
     /// check. A node the driver owns is not an orphan — somebody runs its ticks
     /// — so the orphan check is blind to it. But if it is also in the snapshot
     /// filter, its `lateUpdate` runs nowhere: the driver replays `fixedUpdate`
@@ -1208,7 +1206,7 @@ mod tests {
         );
     }
 
-    /// field regression (floptle/0049): a delay derived from the link, not a
+    /// field regression: a delay derived from the link, not a
     /// constant. The constant was 2 — right for a LAN, and wrong for anyone
     /// playing across a country, which is most matches.
     #[test]
@@ -1225,7 +1223,7 @@ mod tests {
         const { assert!(floptle_net::MAX_DELAY >= floptle_net::DEFAULT_INPUT_DELAY) };
     }
 
-    /// field regression (floptle/0040): the client's join sequence must never
+    /// field regression: the client's join sequence must never
     /// leave a `Rollback` node filtered with no driver holding it.
     ///
     /// The sequence spans three steps that each own part of the answer, and the
@@ -1299,7 +1297,7 @@ mod tests {
     /// without a live `Editor`, and the cost of missing it is not a crash but
     /// silence: the fighters keep their place in the script filters, nothing
     /// runs them, and the match freezes with a clean console. That is exactly
-    /// how floptle/0040 shipped — a `return` was not added, a re-`take()` was,
+    /// how an earlier task shipped — a `return` was not added, a re-`take()` was,
     /// and the single restore that used to follow it went away in the edit.
     #[test]
     fn the_rollback_tick_always_puts_its_driver_back() {
@@ -1327,7 +1325,7 @@ mod tests {
             !after[..restore].contains("return"),
             "there is a `return` between taking the driver and putting it back — that path \
              drops it, and a dropped driver leaves its fighters filtered with nothing running \
-             them for the rest of the match, silently (floptle/0040)"
+             them for the rest of the match, silently"
         );
     }
 

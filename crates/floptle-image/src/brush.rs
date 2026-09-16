@@ -117,7 +117,7 @@ impl Brush {
     /// This exists so the editor's cursor telegraph can be drawn from what the
     /// brush will *actually* stamp rather than re-derived from `radius`. Derived
     /// twice, the two disagreed: a one-pixel pencil drew a small circle floating
-    /// between texels while a single square texel landed (`floptle/0094`). One
+    /// between texels while a single square texel landed. One
     /// function, one answer, and a new brush shape cannot ship with a preview
     /// that does not know about it.
     ///
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(g.get(1, 1)[3], 255);
     }
 
-    // ---- floptle/0094: the telegraph and the stamp must agree ----------------
+    // ---- the telegraph and the stamp must agree ----------------
 
     /// The preview's contour is drawn at coverage >= 0.5, so every texel it
     /// claims must actually change — and nothing outside the footprint may.

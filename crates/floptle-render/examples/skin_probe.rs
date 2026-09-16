@@ -1,4 +1,4 @@
-//! Headless probe for GPU skinning (`floptle/0080`).
+//! Headless probe for GPU skinning.
 //!
 //! A skinning bug is invisible in a timing number and obvious in a picture: one
 //! joint's weight landing on the wrong vertex still runs at exactly the frame

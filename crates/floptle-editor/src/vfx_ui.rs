@@ -51,8 +51,8 @@ pub(crate) struct VfxUiState {
     /// Bumped on every edit; the preview recompiles when it trails behind.
     doc_rev: u64,
     preview_rev: u64,
-    /// What the effect COSTS, re-measured whenever the doc changes
-    /// (`floptle/0099`). Cached against `doc_rev` because profiling
+    /// What the effect COSTS, re-measured whenever the doc changes.
+    /// Cached against `doc_rev` because profiling
     /// re-simulates the whole effect and an edit-per-frame would feel it.
     pub profile: crate::vfx::VfxProfile,
     profile_rev: u64,
@@ -101,8 +101,7 @@ pub(crate) struct VfxUiState {
     /// at a different scale after each edit and a point you dragged upward
     /// sprang back toward the middle. It is fitted once and then only GROWS —
     /// never shrinking, so a key can never be edited off the strip, and never
-    /// re-fitting on its own, so a change is legible against a stable axis
-    /// (`floptle/0098`).
+    /// re-fitting on its own, so a change is legible against a stable axis.
     pub lane_settled: std::collections::HashMap<(usize, LaneRef), (f32, f32)>,
 }
 
@@ -210,8 +209,7 @@ const ROW_SCALE_MAX: f32 = 4.0;
 /// Nothing anywhere reported this. `Track::max_alive` and `CompiledTrack::
 /// capacity` both existed and neither reached a person, so raising a rate past
 /// the pool silently gave you fewer particles than you asked for — the engine's
-/// most-filed failure shape, in the tab where over-asking is easiest
-/// (`floptle/0099`).
+/// most-filed failure shape, in the tab where over-asking is easiest.
 fn cost_readout(ui: &mut egui::Ui, st: &VfxUiState) {
     let p = &st.profile;
     let cap: u32 = p.capacity.iter().copied().sum();
@@ -252,7 +250,7 @@ fn cost_readout(ui: &mut egui::Ui, st: &VfxUiState) {
 }
 
 /// The alive-particle count over the effect's own time, as a filled shape under
-/// the ruler (`floptle/0099`).
+/// the ruler.
 ///
 /// Scaled to the profile's own peak rather than to any capacity, because the
 /// question it answers is "what shape is my emission" — a burst spike, a swell,
@@ -1489,7 +1487,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
         // What the effect does over time, under its ruler. The timeline's axis
         // is already time and the one quantity that varies along it is how many
         // particles exist — so a change to a rate or a lane reads as a change to
-        // the EFFECT here, not only as a change to a curve (`floptle/0099`).
+        // the EFFECT here, not only as a change to a curve.
         draw_density(
             &painter,
             Rect::from_min_size(
@@ -1665,8 +1663,7 @@ fn curve_lane_ui(
             // automation lane that is x1 — its neutral sits a quarter of the way
             // up a 0..4 strip, so "am I boosting or cutting" was a judgement
             // about pixel height. For a life curve it is 0, which used not to be
-            // drawn at all until the curve had already gone negative
-            // (`floptle/0098`).
+            // drawn at all until the curve had already gone negative.
             let multiplier = lane_fixed_range(track, lref).is_some();
             let neutral = if multiplier { 1.0 } else { 0.0 };
             let weak = ui.visuals().weak_text_color();

@@ -96,7 +96,7 @@ fn nav_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// `tilemap` — a 2D level's grid, read-only (`floptle/0155`).
+/// `tilemap` — a 2D level's grid, read-only.
 ///
 /// The reading half of the tilemap surface a game script already has
 /// (`node:tilemap()`), for the same reason `nav` is "the reading half of the
@@ -1441,7 +1441,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
         let shared = shared.clone();
         t.set("roots", lua.create_function(move |_, ()| Ok(shared.scene.borrow().roots.clone()))?)?;
     }
-    // The scene's gravity — `floptle/0173`. A 2D level's analysis is mostly a
+    // The scene's gravity. A 2D level's analysis is mostly a
     // question about jumping, and every one of those is gravity times a jump
     // impulse; nothing under `scene.*`, `ed.*` or `nav.*` could answer it, so
     // the 2D extractor sent the engine default and marked it a guess.

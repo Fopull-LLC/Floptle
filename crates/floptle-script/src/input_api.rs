@@ -16,7 +16,7 @@ use mlua::{Lua, Table, Value};
 
 use floptle_input::{BindFilter, ConsumeMode, Context, Domain, InputSystem};
 
-/// Every key an `input.pushContext` options table reads (`floptle/0082`).
+/// Every key an `input.pushContext` options table reads.
 pub(crate) const CONTEXT_KEYS: &[&str] = &["priority", "consume", "enabled"];
 
 /// Shared handle to the host's input system. The driver resolves into it each
@@ -254,7 +254,7 @@ pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
     // enumerated into a slot the map doesn't bind", "the window hasn't got
     // focus" and "something downstream ate it" all reach the developer as the
     // same sentence — "controllers don't work" — which is not actionable, and
-    // costs a build-ship-ask-wait round trip per guess. floptle/0047.
+    // costs a build-ship-ask-wait round trip per guess.
     let s = sys.clone();
     let _ = t.set(
         "pads",
@@ -377,7 +377,7 @@ mod tests {
         assert!(!lua.load(r#"return input.action("Kick")"#).eval::<bool>().unwrap());
     }
 
-    /// floptle/0047: a script can tell "no controller here" from "controller
+    /// a script can tell "no controller here" from "controller
     /// here, bindings wrong" — the distinction the action API cannot express,
     /// and the one that turns "controllers don't work" into something
     /// actionable without another build-ship-ask round trip.

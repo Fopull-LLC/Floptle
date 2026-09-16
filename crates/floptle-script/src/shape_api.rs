@@ -37,7 +37,7 @@ pub(crate) struct QueryShared {
 }
 
 /// Every key a query options table reads (`raycast`, `overlapSphere`,
-/// `spherecast`, …). Anything else is refused (`floptle/0082`).
+/// `spherecast`, …). Anything else is refused.
 pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers"];
 
 /// Parse the shared options table into (bodies to skip, layer mask).
@@ -64,7 +64,7 @@ fn query_opts(
             } else {
                 // An options table, not a node handle. A misspelled `ignor`
                 // would have meant "ignore nothing", so the ray hits the caller
-                // and every query returns itself (`floptle/0082`).
+                // and every query returns itself.
                 crate::opts::check_keys(t, QUERY_KEYS, who)?;
                 if let Ok(ig) = t.get::<Table>("ignore")
                     && let Ok(eid) = ig.raw_get::<u32>("__id")
@@ -112,7 +112,7 @@ const HIT_MT: &str = "floptle_hit_mt";
 /// rather than failing, is the silent-failure pattern this codebase keeps
 /// paying for. A line-of-sight ray that never touches `hit.material` pays
 /// nothing here, and a footstep check that does pays one closest-point search,
-/// which is the cost split `floptle/0174` asked for.
+/// which is the cost split an earlier task asked for.
 ///
 /// Registered once per host, not per hit: `overlapSphere` can return dozens of
 /// hits in a frame and building a closure for each would cost more than the
@@ -163,8 +163,8 @@ pub(crate) fn install_hit_meta(lua: &Lua, shared: &QueryShared) {
 /// **One builder, because the asymmetry it exists to prevent already
 /// happened.** `raycast` used to assemble its own copy of these fields and set
 /// `node` only for body hulls, so it answered `nil` for the entire level while
-/// `spherecast` — whose comment promised the same fields — named the node
-/// (`floptle/0174`). Two hit tables built in two places is how that survives
+/// `spherecast` — whose comment promised the same fields — named the node.
+/// Two hit tables built in two places is how that survives
 /// being fixed once.
 pub(crate) fn hit_table(
     lua: &Lua,

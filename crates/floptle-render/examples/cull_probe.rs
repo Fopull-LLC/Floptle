@@ -1,4 +1,4 @@
-//! Does frustum culling change the picture? (`floptle/0075`)
+//! Does frustum culling change the picture?
 //!
 //! Run: `cargo run -p floptle-render --release --example cull_probe`
 //! (add a path to write the two images: `… --example cull_probe -- cull`)

@@ -1272,7 +1272,7 @@ mod tests {
         }
     }
 
-    /// field regression (floptle/0039 Symptom A): a live relay match froze on
+    /// field regression (an earlier task Symptom A): a live relay match froze on
     /// round one, the joiner stalled at warmup+depth having never received a
     /// host input, and every layer test passed.
     ///
@@ -1338,7 +1338,7 @@ mod tests {
         );
     }
 
-    /// field regression (floptle/0041): a referee that disagrees with EVERYONE
+    /// field regression: a referee that disagrees with EVERYONE
     /// is the one that is wrong, and must not take the match down with it.
     ///
     /// The referee is the sole judge when one is running — deliberately, because

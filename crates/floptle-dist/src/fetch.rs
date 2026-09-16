@@ -135,8 +135,8 @@ pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
 /// **This exists so a developer never has to type a `tar` line.** Shipping a
 /// dedicated server used to be "export, then run this command off our website,
 /// then upload" — and the middle step is the one that assumes a shell, gets
-/// `-C` wrong, and produced both of the hand-rolled bundles that exist
-/// (`floptle/0197`). The archive is written with the directory's CONTENTS at
+/// `-C` wrong, and produced both of the hand-rolled bundles that exist.
+/// The archive is written with the directory's CONTENTS at
 /// the top level, which is the shape the fleet agent unpacks and the control
 /// plane's index walk reads.
 #[cfg(not(target_arch = "wasm32"))]

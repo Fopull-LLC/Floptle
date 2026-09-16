@@ -970,8 +970,8 @@ impl crate::Editor {
     ///
     /// Keyed off the scene's real relative path, not its stem — two scenes
     /// called `main.ron` in different folders are two scenes, and keying on the
-    /// stem is how the terrain store once had them overwrite each other
-    /// (`floptle/0111`). The node's `id` follows, so a scene can hold more than
+    /// stem is how the terrain store once had them overwrite each other.
+    /// The node's `id` follows, so a scene can hold more than
     /// one navmesh without them fighting over a file.
     pub(crate) fn nav_path(&self, id: u32) -> std::path::PathBuf {
         let mut p = self.scene_path();
@@ -1149,7 +1149,7 @@ impl crate::Editor {
             return;
         }
         // **The hash is throttled to `NAV_WATCH_INTERVAL` of real time, not to
-        // `World::revision()` deltas (`floptle/0142`).** The revision-gated
+        // `World::revision()` deltas.** The revision-gated
         // version looked right and was measured wrong: a streamed level moves
         // the revision on nearly every frame — a streamer spawning ~40 pieces a
         // frame is 40 bumps a frame — so "skip the O(scene) hash while the
@@ -1236,7 +1236,7 @@ impl crate::Editor {
         // A fully streamed level has nothing to hand-bake — there is no
         // edit-time geometry to press the Bake button on — so a first splice
         // with nothing to splice into used to refuse outright, which locked
-        // such a level out of ever getting a navmesh at all (`floptle/0142`).
+        // such a level out of ever getting a navmesh at all.
         // Bootstrap an empty host from the Nav Mesh node's own settings,
         // anchored at the node, and let the ordinary splice path below fill
         // it in exactly as it would fill in any other region.
@@ -1383,7 +1383,7 @@ impl crate::Editor {
         );
         if g.tris.is_empty() {
             // A stamp that has already been reported empty stays quiet on a
-            // background retry (`floptle/0142`) — a level whose ground has
+            // background retry — a level whose ground has
             // not streamed in yet would otherwise log this every settle
             // cycle forever, at "nothing to bake … (x1624)" in one observed
             // session. An explicit `Asked` bake (the user pressed the
@@ -2410,7 +2410,7 @@ mod tests {
         );
     }
 
-    // ---- streamed-level autobake (`floptle/0142`) ---------------------------
+    // ---- streamed-level autobake ---------------------------
 
     fn nav_mesh_matter(auto_rebake: bool) -> Matter {
         let mut m = Matter::default_nav_mesh(1);

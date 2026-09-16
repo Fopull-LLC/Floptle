@@ -495,7 +495,7 @@ impl NavMesh {
     }
 
     /// A mesh with no geometry at all, made from `settings` alone — for a
-    /// level whose first bake never happened (`floptle/0142`).
+    /// level whose first bake never happened.
     ///
     /// A fully streamed level has no edit-time geometry to hand-bake, so the
     /// only route to ever having a mesh is splicing regions in as they
@@ -820,8 +820,7 @@ impl NavMesh {
     /// grew with the window because every call re-gathered, re-sorted and
     /// re-measured every polygon the window touched: a game reported 0.014 ms at
     /// r=8 rising to 0.71 ms at r=80, so a 37 m window at ~0.28 ms a draw made a
-    /// dozen draws 4 ms in one frame, and the project had to cache around it
-    /// (`floptle/0177`).
+    /// dozen draws 4 ms in one frame, and the project had to cache around it.
     ///
     /// A squad wanders around the same place, so the gather is the part worth
     /// keeping. Held across calls, each draw is a binary search over the
@@ -1392,7 +1391,7 @@ mod tests {
         assert_eq!(there.right, back.left);
     }
 
-    /// `floptle/0177`: the held sampler and the one-shot draw must not drift.
+    /// the held sampler and the one-shot draw must not drift.
     ///
     /// They share a gather and a pick precisely so that they cannot, and this is
     /// what says so. A second implementation of the weighting would be the

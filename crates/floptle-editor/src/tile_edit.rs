@@ -191,7 +191,7 @@ pub(crate) struct TileTools {
     pub(crate) xform: TileXform,
     /// The palette's rubber-band selection, as `(px, py, w, h)` in sheet cells.
     pub(crate) palette: Option<(u32, u32, u32, u32)>,
-    /// Which SHEET of the tileset the palette is showing (`floptle/0092`).
+    /// Which SHEET of the tileset the palette is showing.
     ///
     /// 0 is the layer's own material sheet — which is every project that has
     /// never added a page, so this defaulting to 0 is the whole of the backward

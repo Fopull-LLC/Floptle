@@ -358,7 +358,7 @@ pub fn plane(half: f32) -> MeshData {
 }
 
 /// A grid of spritesheet cells as one mesh, centred on the origin in the XY
-/// plane, facing +Z (`floptle/0058`).
+/// plane, facing +Z.
 ///
 /// `data` is row-major from the TOP-LEFT, `cols * rows` long; a cell of
 /// [`floptle_core::EMPTY_TILE`] (or any index past the end of the sheet's

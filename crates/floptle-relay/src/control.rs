@@ -53,7 +53,7 @@ pub struct KeyRow {
     #[serde(default)]
     pub account_over_limit: bool,
     /// How many lobbies this key may hold open on this relay at once, when the
-    /// control plane sets one (`floptle/0228`). Absent means the player cap is
+    /// control plane sets one. Absent means the player cap is
     /// the only ceiling. A leaked key can fill a plan's players with empty
     /// lobbies from a handful of addresses; this is the number that stops it.
     #[serde(default)]
@@ -149,8 +149,7 @@ pub struct KeySnapshot {
     /// page.
     #[serde(default)]
     pub removed: Vec<String>,
-    /// **Lobby codes the control plane has promised to somebody**
-    /// (`floptle/0217`).
+    /// **Lobby codes the control plane has promised to somebody**.
     ///
     /// ⚠ **Always complete, never a delta** — the same rule as
     /// `over_limit_accounts` and for a sharper reason: a relay that came back
@@ -264,11 +263,11 @@ impl ReservedState {
 }
 /// One key's traffic and occupancy over a reporting interval.
 ///
-/// **Additive by design** (`floptle/0195`): the three fields below arrived after
+/// **Additive by design**: the three fields below arrived after
 /// the control plane already accepted the first two. They are extra keys on a
 /// JSON object a control plane that ignores them keeps parsing, which is the §8
 /// rule and why this is not a schema bump.
-/// One address a key's lobbies are hosted from, and how many (`floptle/0228`).
+/// One address a key's lobbies are hosted from, and how many.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostAddress {
     pub address: std::net::IpAddr,
@@ -298,7 +297,7 @@ pub struct UsageSample {
     /// none. A page that reads the two the same way tells a developer nobody
     /// was turned away when the truth is that nobody knows.
     pub refused_joins: u32,
-    /// **Payload that arrived for a lobby that did not exist** (`floptle/0222`).
+    /// **Payload that arrived for a lobby that did not exist**.
     ///
     /// ⚠ These bytes used to be visible only as `bytes_in` exceeding
     /// `bytes_out` — and that is literally how a host being torn down three
@@ -306,7 +305,7 @@ pub struct UsageSample {
     /// had matched to the byte in every other bucket ever recorded. Anything
     /// above zero means somebody is sending into a lobby that is gone.
     pub orphan_bytes: u64,
-    /// **Where this key's live lobbies are hosted from** (`floptle/0228`):
+    /// **Where this key's live lobbies are hosted from**:
     /// one entry per address, `lobbies` summing to the sample's `lobbies`.
     /// The developer's question is "is my key being used by someone who is
     /// not me", and the control plane's first move on it is to count and
@@ -329,7 +328,7 @@ fn usage_row(s: &UsageSample) -> serde_json::Value {
         "orphan_bytes": s.orphan_bytes,
         // Addresses as strings — v4 and v6 both — and always present, so an
         // empty list means "hosted from nowhere the relay could name" and a
-        // missing key means a relay too old to say (`floptle/0228`).
+        // missing key means a relay too old to say.
         "hosts": s.hosts.iter().map(|h| serde_json::json!({
             "address": h.address.to_string(),
             "lobbies": h.lobbies,
@@ -340,7 +339,7 @@ fn usage_row(s: &UsageSample) -> serde_json::Value {
 /// The `box` object, built by hand so the omission rule is visible in one place.
 ///
 /// ⚠ **A measurement that was not taken is left out of the object**, never sent
-/// as `0`. This is the fleet agent's rule and its shape (`floptle/0215`), so one
+/// as `0`. This is the fleet agent's rule and its shape, so one
 /// code path on the control plane reads both — but the reason is sharper here:
 /// `rx_drops: 0` from a relay that is keeping up is the best news it has, and
 /// `rx_drops: 0` from a relay that could not read `/proc/net/udp` is a relay
@@ -348,7 +347,7 @@ fn usage_row(s: &UsageSample) -> serde_json::Value {
 fn box_json(b: &RelayBox) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     o.insert("host".into(), b.host.clone().into());
-    // **This binary's version**, compiled in (`floptle/0232`): the control
+    // **This binary's version**, compiled in: the control
     // plane could not see a relay's version at all, so nothing — the lobby
     // code reclaim, the certificate fallback — could be gated on what the
     // relay on a box actually is. Never read from a file or a unit.
@@ -385,7 +384,7 @@ fn box_json(b: &RelayBox) -> serde_json::Value {
 mod box_tests {
     use super::*;
 
-    /// ⚠ **The `box` object omits what it could not measure** (`floptle/0215`).
+    /// ⚠ **The `box` object omits what it could not measure**.
     ///
     /// Same rule and same field names as the fleet agent, so the control plane
     /// reads both with one code path. The reason bites harder here: `rx_drops:
@@ -411,7 +410,7 @@ mod box_tests {
         assert!(!S::Unknown.wakes_on_join());
     }
 
-    /// **A key's row says where its lobbies are hosted from** (`floptle/0228`):
+    /// **A key's row says where its lobbies are hosted from**:
     /// the developer's question is "is somebody who is not me using my key",
     /// and the control plane cannot count what the relay does not send.
     #[test]
@@ -472,7 +471,7 @@ mod box_tests {
         });
         assert_eq!(v["host"], "us-east-relay-1");
         // The relay's own version rides every report, and it is the crate's —
-        // not a constant somebody has to remember to bump (`floptle/0232`).
+        // not a constant somebody has to remember to bump.
         assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
         assert!(
             v["version"].as_str().unwrap().split('.').count() == 3,
@@ -516,8 +515,8 @@ pub trait ControlPlane: Send + Sync {
     fn pull_keys(&self, cursor: Option<&str>) -> Result<KeySnapshot, ControlError>;
     /// The cold path: ask about one key the snapshot has never carried.
     fn authorize(&self, key: &str) -> Result<KeyRow, ControlError>;
-    /// **Ask the control plane to wake the deployment behind `code`**
-    /// (`floptle/0217`). Idempotent and fire-and-forget.
+    /// **Ask the control plane to wake the deployment behind `code`**.
+    /// Idempotent and fire-and-forget.
     ///
     /// The answer matters even though the relay cannot act on most of it: only
     /// `Stopped` changes what the joiner is told, and it is the one case where

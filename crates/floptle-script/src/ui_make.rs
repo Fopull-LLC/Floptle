@@ -276,8 +276,8 @@ fn parse_node(
                 "ui.make{trail}: no UI property called `{key}`{hint}"
             )));
         }
-        // …and the same treatment for a value the property does not take
-        // (`floptle/0072`). `pin = "topCenter"` used to answer `topLeft`,
+        // …and the same treatment for a value the property does not take.
+        // `pin = "topCenter"` used to answer `topLeft`,
         // silently and forever — four HUD elements stacked into one corner, a
         // report that read as a layout bug, and an afternoon spent nowhere near
         // the spelling that caused it.

@@ -722,8 +722,7 @@ fn anchor(s: &str) -> Option<Anchor> {
         // `topCenter` and `bottomCenter` are what people write, because the
         // other seven anchors are `topLeft`, `bottomRight` and friends — the
         // two that take a bare direction are the two you have to look up. They
-        // were the four HUD elements that all landed in one corner
-        // (`floptle/0072`).
+        // were the four HUD elements that all landed in one corner.
         "top" | "topCenter" | "topCentre" => Anchor::Top,
         "topRight" => Anchor::TopRight,
         "left" | "leftCenter" | "leftCentre" => Anchor::Left,
@@ -745,7 +744,7 @@ fn anchor(s: &str) -> Option<Anchor> {
 /// doesn't know is the same bug wearing different clothes. `pin = "topCenter"`
 /// answered `TopLeft`, silently, forever, and four HUD elements stacked into one
 /// corner over the panel that legitimately lived there. It read as a layout bug
-/// and pointed nowhere near the spelling that caused it (`floptle/0072`).
+/// and pointed nowhere near the spelling that caused it.
 ///
 /// Spelling variants are accepted but not listed: `centre` for `center` is not
 /// a different answer, and an error message that lists both teaches neither.
@@ -1034,7 +1033,7 @@ mod tests {
     /// forever. Four HUD elements stacked into one corner on top of the panel
     /// that legitimately lived there, and the report was "the HUD is clipping
     /// over things" — a perfect description that points nowhere near a spelling
-    /// mistake (`floptle/0072`).
+    /// mistake.
     #[test]
     fn an_unknown_pin_is_refused_rather_than_answered_with_the_top_left_corner() {
         let mut spec = ElementSpec {
@@ -1129,7 +1128,7 @@ mod tests {
         assert_eq!(r.0, [8.0, 8.0, 0.0, 0.0]);
     }
 
-    /// `floptle/0124`: `ui.make` can name a font — reported as though it could
+    /// `ui.make` can name a font — reported as though it could
     /// not, and worth a test rather than a correction, because a property is
     /// only useful if it survives the rebuild a reconcile puts a node through.
     #[test]

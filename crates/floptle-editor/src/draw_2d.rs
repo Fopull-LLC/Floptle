@@ -26,8 +26,7 @@ use crate::shading::material_params;
 /// 2D path *this frame*, however its flag reads: the mask already decided it
 /// contributes nothing, and honouring that here rather than in `fs_light` is the
 /// difference between filtering a `u64` and instancing, uploading and
-/// rasterizing the whole flat scene a second time to throw it away
-/// (`floptle/0122`).
+/// rasterizing the whole flat scene a second time to throw it away.
 pub(crate) fn lit_2d_rank(
     world: &floptle_core::World,
     project: &floptle_scene::ProjectConfigDoc,
@@ -84,7 +83,7 @@ pub(crate) fn primitive_draw(
     Some((mesh, instance_of_mat(model, &mp)))
 }
 
-/// WATER (`floptle/0038`). The instance a `Matter::WaterVolume` draws: a
+/// WATER. The instance a `Matter::WaterVolume` draws: a
 /// translucent, specular surface sized to the volume the SOLVER uses, so what
 /// you see is what floats you — the sea and the buoyancy can't drift apart,
 /// which is exactly what happened while the ocean was a hand-placed sphere the
@@ -100,7 +99,7 @@ pub(crate) fn primitive_draw(
 ///
 /// `None` for any other matter, and for a shape that is not registered.
 ///
-/// `material` is the node's own `Material` component, if any (`floptle/0144`).
+/// `material` is the node's own `Material` component, if any.
 /// **Absent → drawn exactly as before this card**: the hand-tuned defaults
 /// below, untouched. Present → those defaults are the FALLBACK and the
 /// material's own `specular`/`specular_strength`/`shininess` win outright, the
@@ -221,7 +220,7 @@ pub(crate) fn lit_2d_ranks(
         .collect()
 }
 
-/// Whether this flat surface blocks 2D light (`floptle/0125`).
+/// Whether this flat surface blocks 2D light.
 ///
 /// The three-valued answer the Inspector has been showing since the control
 /// existed, asked here for real. Under `auto` **a tilemap casts exactly where it
@@ -238,7 +237,7 @@ pub(crate) fn casts_2d(world: &floptle_core::World, e: Entity) -> bool {
 
 /// Takes the 2D half of a split that has already happened rather than asking for
 /// one: both gathers need this before the draw loop (to know what a light can
-/// reach — `floptle/0122`) and again at the pass, and each was walking the
+/// reach) and again at the pass, and each was walking the
 /// scene's lights a second time to build the same value twice.
 pub(crate) fn light2d_uniform(
     world: &floptle_core::World,
@@ -398,7 +397,7 @@ mod lit_2d_tests {
         e
     }
 
-    /// `floptle/0122`: a flat surface no live light can reach is not gathered at
+    /// a flat surface no live light can reach is not gathered at
     /// all. The mask already said it contributes nothing — honouring that in
     /// `fs_light` instead means instancing, uploading and rasterizing the whole
     /// flat scene a second time to throw it away.
@@ -451,7 +450,7 @@ mod lit_2d_tests {
     }
 }
 
-/// `floptle/0144`: `water_draw` used to build its `MaterialParams` from
+/// `water_draw` used to build its `MaterialParams` from
 /// scratch and never look at the node's own `Material` — no shader, no
 /// `retro: (exempt: true)`, no way to style it at all. These pin the overlay
 /// rule: absent Material → today's exact numbers; present → its surface

@@ -111,7 +111,7 @@ pub(crate) enum MeshSource {
 /// Read a model file's triangles.
 pub(crate) fn read_asset(project_root: &std::path::Path, rel: &str) -> Result<Geometry, String> {
     let path = crate::project::resolve_asset_path(project_root, rel);
-    // The memoised geometry-only import from `floptle/0140`: no textures are
+    // The memoised geometry-only import from an earlier task: no textures are
     // decoded, and a second read of the same file is a hash lookup.
     let model = floptle_assets::gltf_import::geometry(&path)
         .map_err(|e| format!("{rel}: {e}"))?;

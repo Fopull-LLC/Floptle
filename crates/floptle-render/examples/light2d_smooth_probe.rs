@@ -1,4 +1,4 @@
-//! **A 2D light is not part of the palette** (`floptle/0127`).
+//! **A 2D light is not part of the palette**.
 //!
 //! A posterized project quantizes its *palette*: the set of values its art is
 //! allowed to be. A light is not one of those values — it is a multiplier on

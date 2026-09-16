@@ -76,7 +76,7 @@ pub trait Transport: Send {
     fn poll(&mut self) -> Vec<Incoming>;
     fn stats(&self, peer: PeerId) -> LinkStats;
 
-    /// Close a peer's link from this end (a kick — `floptle/0183`).
+    /// Close a peer's link from this end (a kick).
     ///
     /// Defaulted to nothing, because it is genuinely optional: the session
     /// removes the peer from its own roster either way, so a transport that
@@ -118,7 +118,7 @@ pub trait Transport: Send {
     /// at registration, and a relay restart destroys every lobby it knew. A
     /// host that kept publishing the code it was told at startup advertised
     /// six characters that refuse everybody who types them, on a page, to a
-    /// shipped build, indefinitely (`floptle/0210`).
+    /// shipped build, indefinitely.
     fn lobby_code(&self) -> Option<String> {
         None
     }

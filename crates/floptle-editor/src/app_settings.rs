@@ -1,5 +1,5 @@
 //! Driving the Lua `app.*` table: what the game currently is, and what a script
-//! asked to change about it (`floptle/0175`).
+//! asked to change about it.
 //!
 //! ## What `app.quit()` does depends on where the game is running
 //!

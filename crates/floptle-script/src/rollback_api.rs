@@ -63,7 +63,7 @@ pub struct ScriptState {
     /// required to agree between glibc and Windows' UCRT. One ULP a tick, and a
     /// match that both players could see was identical voided itself every few
     /// seconds. The alarm was working perfectly and firing on something neither
-    /// simulation could feel. floptle/0045.
+    /// simulation could feel.
     pub cosmetic: Vec<(String, NetValue)>,
 }
 

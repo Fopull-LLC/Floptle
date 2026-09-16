@@ -1,5 +1,4 @@
-//! `scatter.*` — declare thousands of props instead of building them
-//! (`floptle/0036`).
+//! `scatter.*` — declare thousands of props instead of building them.
 //!
 //! The division of labour is the point. A game's generator keeps deciding
 //! **what grows where** — it rolls the species, reads the climate, picks the
@@ -37,7 +36,7 @@ fn dvec3(t: &Table, key: &str) -> Option<glam::DVec3> {
 /// defaulted, stored — and read by nothing, for two releases. A game that asked
 /// for solid props got no error, no warning and props it walked straight
 /// through, and the only reason that could happen is that an unknown key was
-/// silently dropped (`floptle/0066`). A typo'd `perchunk` had exactly the same
+/// silently dropped. A typo'd `perchunk` had exactly the same
 /// failure: the default, forever, with nothing to see.
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
@@ -45,7 +44,7 @@ pub(crate) const CREATE_KEYS: &[&str] = &[
 ];
 
 /// Chunks resident at once, above which a source is reported rather than left
-/// to be discovered as "the engine is slow" (`floptle/0071`).
+/// to be discovered as "the engine is slow".
 ///
 /// Not a limit — a game may genuinely want a big field, and refusing one would
 /// be the engine deciding a game's look. This is the number at which the reason
@@ -187,7 +186,7 @@ pub(crate) fn install_scatter_api(
                 fade: num(&opts, "fade", 8.0) as f32,
                 density,
                 removed: Default::default(),
-                // The node this region rides (`floptle/0073`). Without it a
+                // The node this region rides. Without it a
                 // region is pinned to the world, and every prop on a planet
                 // that orbits is left behind by its own planet within seconds.
                 anchor: opts
@@ -198,7 +197,7 @@ pub(crate) fn install_scatter_api(
                 frame: Default::default(),
             };
             // Say what this costs, here, while the two numbers that decided it
-            // are still on screen (`floptle/0071`). The alternative is what
+            // are still on screen. The alternative is what
             // happened: a day of "the engine is slow", and a clamp written in
             // Lua from reading engine source.
             let cost = floptle_core::scatter::cost(&src);
@@ -224,7 +223,7 @@ pub(crate) fn install_scatter_api(
     }
 
     // scatter.cost(id) → { chunks, props, far, chunkSize } — what this source
-    // asks for every frame, before it is asked for (`floptle/0071`).
+    // asks for every frame, before it is asked for.
     //
     // The knobs read as a look. `lod`'s outermost distance is really the budget:
     // it sets how many chunks stay resident, as a sweep whose side grows with
@@ -351,7 +350,7 @@ pub(crate) fn install_scatter_api(
             let vols = s.borrow();
             let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(out) };
             // The caller asks in world space; the region lives in its anchor's
-            // frame (`floptle/0073`). Convert once, query locally, and hand back
+            // frame. Convert once, query locally, and hand back
             // world positions — a game should never have to know the difference.
             let pl = src.frame.to_local(p);
             let mut found: Vec<(f64, floptle_core::scatter::Instance)> = Vec::new();
@@ -409,7 +408,7 @@ mod tests {
     }
 
     /// A field whose cost is not obvious says so at DECLARE TIME, while the two
-    /// numbers that decided it are still on screen (`floptle/0071`).
+    /// numbers that decided it are still on screen.
     ///
     /// The configuration below is the one that shipped and froze a game. Its
     /// knobs read as a look; nothing in the API, the docs or the Console said

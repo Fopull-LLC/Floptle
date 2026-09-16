@@ -544,8 +544,7 @@ pub(crate) const NEVER_SHIPS: &[&str] = &[
     "py", "pyc", "pyo",
 ];
 
-/// **What a DEDICATED server never reads**, on top of [`NEVER_SHIPS`]
-/// (`floptle/0197`).
+/// **What a DEDICATED server never reads**, on top of [`NEVER_SHIPS`].
 ///
 /// A server bundle is the same project with everything nobody can see or hear
 /// taken out of it. There is no window, no GPU, no audio device and no player
@@ -658,7 +657,7 @@ fn copy_tree_with(
             // bits, and a `0600` file — an accident of the developer's umask —
             // reached a fleet box as a server that ran without its input
             // bindings and four of its scripts, half-working, with nothing to
-            // say so (`floptle/0200`). The agent normalises on unpack too; this
+            // say so. The agent normalises on unpack too; this
             // is for the developer who tars the folder by hand.
             #[cfg(unix)]
             {
@@ -1014,7 +1013,7 @@ pub(crate) fn export_game_with(
     Ok((msg, out_c))
 }
 
-/// **A dedicated-server bundle** (`floptle/0197`): the project a fleet box runs,
+/// **A dedicated-server bundle**: the project a fleet box runs,
 /// and nothing else.
 ///
 /// ## Why there is no binary in it
@@ -1077,7 +1076,7 @@ pub(crate) fn export_server(
     let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
     check_server_engine(&engine)?;
 
-    // **An archive if that is what was asked for** (`floptle/0197`). A bundle
+    // **An archive if that is what was asked for**. A bundle
     // is UPLOADED, so a directory is never the finished article — every
     // developer then ran a `tar` line copied off the website, which is the step
     // that assumes a shell, gets `-C` wrong, and is why both bundles that exist
@@ -1140,7 +1139,7 @@ pub(crate) fn export_server(
         .strip_prefix(&proj)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| want.clone());
-    // **When it was made, and what the developer called it** (`floptle/0233`).
+    // **When it was made, and what the developer called it**.
     // The control plane knows when the bytes arrived; it cannot know when the
     // build was exported, and a Tuesday bundle uploaded on Friday reads as
     // Friday's work — which is how somebody deploys a build they thought they
@@ -1244,8 +1243,8 @@ const FIRST_SERVER_ENGINE: (u64, u64, u64) = (0, 85, 0);
 /// linux-aarch64` for whatever version the manifest names. That artifact is
 /// published for stable releases from 0.85.0 on, and for nothing else — so a
 /// bundle exported from a beta build pins a file that exists nowhere, and the
-/// only answer the box can give is a 404 forty seconds after Deploy
-/// (`floptle/0200`). The upload endpoint refuses such a bundle too; refusing
+/// only answer the box can give is a 404 forty seconds after Deploy.
+/// The upload endpoint refuses such a bundle too; refusing
 /// here, before anything is written, puts the sentence in front of the person
 /// who can act on it.
 #[cfg(feature = "editor-ui")]
@@ -1998,8 +1997,8 @@ mod tests {
         assert!(floptle_vfs::is_file(out2.join("README.md")), "a stranger's file");
     }
 
-    /// **The manifest says when the bundle was made and what it is called**
-    /// (`floptle/0233`). The control plane knows when the bytes arrived and
+    /// **The manifest says when the bundle was made and what it is called**.
+    /// The control plane knows when the bytes arrived and
     /// cannot know when the build was exported — a Tuesday bundle uploaded on
     /// Friday reads as Friday's work, which is how somebody deploys a build
     /// they thought they had replaced. The label is optional and absent when
@@ -2063,8 +2062,8 @@ mod tests {
     /// `floptle-server-<version>-linux-aarch64` for the version the manifest
     /// names, and that is published for stable releases from 0.85.0 only. So
     /// a bundle exported from a beta pins a file that exists nowhere, and the
-    /// only answer the box could give was a 404 forty seconds after Deploy
-    /// (`floptle/0200`). The sentence names the artifact, so the developer
+    /// only answer the box could give was a 404 forty seconds after Deploy.
+    /// The sentence names the artifact, so the developer
     /// can see for themselves that it is not there.
     #[test]
     fn a_bundle_pinning_an_engine_no_box_can_fetch_is_refused_before_anything_is_written() {
@@ -2105,7 +2104,7 @@ mod tests {
     /// `std::fs::copy` carries the mode bits, so a `0600` scene — an
     /// accident of the developer's umask — reached a fleet box as a file the
     /// server's user could not open. The server did not fail; it ran without
-    /// that file, and nothing said so (`floptle/0200`, live on `us-east-1`).
+    /// that file, and nothing said so (live on `us-east-1`).
     #[cfg(unix)]
     #[test]
     fn a_file_the_developer_alone_could_read_ships_readable() {
@@ -2132,7 +2131,7 @@ mod tests {
         assert_eq!(mode("scripts/tool.sh"), 0o755, "an exec bit that was set is kept");
     }
 
-    /// **Asking for an archive gets an archive** (`floptle/0197`).
+    /// **Asking for an archive gets an archive**.
     ///
     /// A server bundle is uploaded, so a folder is never the finished article.
     /// Every developer therefore ran a `tar` line copied off the website — the

@@ -108,7 +108,7 @@ impl ShadowSim {
     /// while both players stood on a stage under gravity. Both peers therefore
     /// disagreed with the authoritative simulation, and since the referee is the
     /// sole judge when one is running, both were told they had desynced at the
-    /// first checksum (floptle/0041).
+    /// first checksum.
     ///
     /// It survived the test suite because the test fixture builds its live sim
     /// the same zero-gravity way, so shadow and "live" agreed by being equally
@@ -136,7 +136,7 @@ impl ShadowSim {
         // running a frame of gameplay nobody else ran. Unfiltered, every
         // fighter script got a full `start` + `update` at t = 0 here and
         // nowhere else, so any script with state in `update` made the referee
-        // disagree with every honest peer by construction (floptle/0039). A
+        // disagree with every honest peer by construction. A
         // referee that is wrong on purpose is worse than no referee: its whole
         // job is to be the one simulation nobody can argue with.
         let fighters: std::collections::HashSet<u32> = world
@@ -346,7 +346,7 @@ end\n";
     /// made every document it produced empty — so every shadow bound zero
     /// nodes, `fingerprint` returned `""`, and every test in this module
     /// compared one empty string to another and passed. Two real referee faults
-    /// shipped through that hole (floptle/0039's build pass and 0041's
+    /// shipped through that hole (that task's build pass and 0041's
     /// physics). [`ring_is_not_hollow`] is what stops it recurring.
     fn ring(gravity: bool) -> floptle_scene::SceneDoc {
         use floptle_core::Matter;
@@ -438,7 +438,7 @@ end\n";
         out
     }
 
-    /// field regression (floptle/0041): the referee must agree with a live
+    /// field regression: the referee must agree with a live
     /// driver, and it only does if it is running the same physics.
     ///
     /// `ShadowSim::build`'s default `Sim` had no gravity, no static colliders

@@ -14,7 +14,7 @@ use mlua::{Lua, RegistryKey, Table, Value};
 use crate::{LogLevel, ScriptLog};
 
 
-/// Every key each `net.*` options table reads (`floptle/0082`).
+/// Every key each `net.*` options table reads.
 ///
 /// A misspelled networking option is the worst possible silent default: it takes
 /// effect on the server, so the symptom is a session that behaves differently
@@ -62,12 +62,12 @@ pub enum NetCmd {
         /// A radius bounds a leak; it does not remove one. This is the part a
         /// hidden-role or competitive game cannot write for itself, because
         /// anything a client has already been sent is something a modified
-        /// client can look at. floptle/0182.
+        /// client can look at.
         interest_occlusion: Option<String>,
         /// `requireIdentity = true` — refuse anyone who presents no account
         /// claim, with a reason their UI can show. Anonymous play is the
         /// default: a LAN or friends game with nobody signed in has to keep
-        /// working exactly as it does. floptle/0183.
+        /// working exactly as it does.
         require_identity: bool,
         /// `allow = { ids }` — if non-empty, only these accounts may join.
         allow: Vec<String>,
@@ -94,8 +94,8 @@ pub enum NetCmd {
     Join {
         addr: String,
         /// `net.join(addr, {timeout = seconds})` — how long to wait on a server
-        /// that is **waking up** before calling the join refused
-        /// (`floptle/0217`). `None` uses the engine default of 90 s.
+        /// that is **waking up** before calling the join refused.
+        /// `None` uses the engine default of 90 s.
         ///
         /// It bounds only the wake: an ordinary join is answered in a relay
         /// round trip and never reaches it.
@@ -163,8 +163,7 @@ pub struct RollbackInfo {
 #[derive(Clone, Debug)]
 pub struct NetState {
     pub role: NetRoleState,
-    /// **What the relay last told the host about this session**, or `None`
-    /// (`floptle/0194`).
+    /// **What the relay last told the host about this session**, or `None`.
     ///
     /// Today that is one message: the account is at its player ceiling, joins
     /// are being turned away, and nobody playing was disconnected. It is here
@@ -177,8 +176,8 @@ pub struct NetState {
     pub notice: Option<String>,
     pub peers: Vec<u64>,
     pub rtt_ms: f32,
-    /// Server: who each connected peer is, for `net.identity(peer)`
-    /// (floptle/0183). Mirrored in like every other session fact rather than
+    /// Server: who each connected peer is, for `net.identity(peer)`.
+    /// Mirrored in like every other session fact rather than
     /// queried, because a script reads it inside a tick and the session is
     /// behind a borrow by then.
     ///
@@ -193,7 +192,7 @@ pub struct NetState {
     /// A relay host uses it too, for the one state it can be in that is not
     /// simply "hosting": `"reconnecting"` while its relay is unreachable, so a
     /// lobby screen can say the code is not usable rather than showing one that
-    /// refuses everybody (`floptle/0210`).
+    /// refuses everybody.
     ///
     /// Needed because joining does not block: `role` reads `Client` from the
     /// frame `net.join` was called, whether or not that lobby exists.
@@ -783,8 +782,7 @@ pub(crate) fn install_net_api(
             })?,
         )?;
     }
-    // net.traffic() — what this peer has sent, broken down by message kind
-    // (`floptle/0218`).
+    // net.traffic() — what this peer has sent, broken down by message kind.
     //
     // ⚠ A real match measured 487 bytes per frame per player. A rollback
     // fighter should be sending inputs — a handful of bytes — so either state
@@ -1007,7 +1005,7 @@ pub(crate) fn install_net_api(
                 // Keys first, ROLE second: a client calling this is a no-op by
                 // design, and finding out a year later that the options table
                 // was also misspelled the whole time is the failure this task is
-                // about (`floptle/0082`).
+                // about.
                 if let Some(o) = &opts {
                     crate::opts::check_keys(o, SPAWN_KEYS, "net.spawn")?;
                 }
@@ -1191,7 +1189,7 @@ pub(crate) fn build_synced_proxy(
 /// `net.role()` answers `"server"`, and the sibling script in the same
 /// generated scene replicates happily. The missing half lives in a different
 /// file from the one that looks wrong, so the error sends you into the netcode.
-/// It cost about forty minutes of a Forgery session (`floptle/0192`), most of
+/// It cost about forty minutes of a Forgery session, most of
 /// it spent disproving good hypotheses the message was equally compatible with.
 ///
 /// So the value is a table that raises the *engine's* message on the first

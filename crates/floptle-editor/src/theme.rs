@@ -41,7 +41,7 @@ pub(crate) mod signal {
 }
 
 /// The type scale, and the one panel treatment, that the package browser is
-/// built from (`floptle/0135`).
+/// built from.
 ///
 /// **Four steps and no more** — title, section, body, fine — with weight and
 /// colour doing everything else. The browser had `heading`, `strong`, `small`
@@ -588,7 +588,7 @@ mod look_tests {
     ///
     /// A source scan rather than a review, for the same reason the glyph
     /// coverage test is one: the ad-hoc `strong` that creeps back in is always
-    /// the one nobody remembered to look at. `floptle/0135`.
+    /// the one nobody remembered to look at.
     #[test]
     fn the_package_browser_makes_no_type_decisions_of_its_own() {
         let src = std::fs::read_to_string(concat!(

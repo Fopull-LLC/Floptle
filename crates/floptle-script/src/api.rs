@@ -238,7 +238,7 @@ pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
 /// So the call returns a table that raises the engine's own message on the
 /// first touch, naming the call, the field and the form that works. Read and
 /// write say the same thing, because a read comes back nil and is the quieter
-/// half. Same mechanism as the `synced` diagnostic (`floptle/0192`).
+/// half. Same mechanism as the `synced` diagnostic.
 pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result<Table> {
     let proxy = lua.create_table()?;
     let mt = lua.create_table()?;
@@ -721,7 +721,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
-    // The Lighting node (`floptle/0123`). `ambient2d*` is the one that had no
+    // The Lighting node. `ambient2d*` is the one that had no
     // route at all and is the reason this arm exists: it is **the whole light a
     // flat scene has** until a torch is placed, so turning it down is how a 2D
     // game gets a dark room — and until now that was a decision you made once in
@@ -841,7 +841,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), material_fields(m, m.cell));
         }
     }
-    // The post chain (`floptle/0118`). A mandatory scene node, so a script that
+    // The post chain. A mandatory scene node, so a script that
     // wants to dim the bloom for a cutscene finds it with `find` and writes
     // here. `ao` is deliberately absent: it picks HOW occlusion is computed, and
     // switching that mid-scene is a look change nobody asked a number for.
@@ -1143,7 +1143,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // 0 = Screen overlay, 1 = World-space panel.
                 ("worldSpace".to_string(), if l.is_world() { 1.0 } else { 0.0 }),
                 // Whole screen pixels every rasterized text size rounds to,
-                // for a pixel font whose art is a grid (`floptle/0120`). 0 = off.
+                // for a pixel font whose art is a grid. 0 = off.
                 ("textSnap".to_string(), l.text_snap as f64),
             ]),
         );
@@ -1413,7 +1413,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "orthoHeight" => *ortho_height = Matter::clamp_ortho_height(val as f32),
                     "active" => *active = val != 0.0,
                     // The live-mirror spelling of the same three fields
-                    // `node:setCamera{...}` sets (`floptle/0078`), so a game can
+                    // `node:setCamera{...}` sets, so a game can
                     // drop a target's rate while it is behind a wall.
                     "width" => {
                         let (w, _) = Matter::clamp_target_size(val.max(0.0) as u32, *target_h);
@@ -1485,7 +1485,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "z" => l.z = val as i32,
                     "designHeight" => l.design_height = (val as f32).max(1.0),
                     // A settings screen that offers a pixel-perfect mode writes
-                    // this; 0 turns it off (`floptle/0120`).
+                    // this; 0 turns it off.
                     "textSnap" => l.text_snap = (val as f32).clamp(0.0, 64.0),
                     "worldSpace" => {
                         l.space = if val != 0.0 {
@@ -1656,8 +1656,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 }
             }
         }
-        // The post chain, so a cutscene can push a vignette or dim the bloom
-        // (`floptle/0118`). Unlike the sky these are typed knobs rather than a
+        // The post chain, so a cutscene can push a vignette or dim the bloom.
+        // Unlike the sky these are typed knobs rather than a
         // shader's uniforms, so they come through the component route.
         "PostProcess" => {
             if let Some(Matter::PostProcess {
@@ -1705,7 +1705,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // 0 clip / 1 Reinhard / 2 ACES / 3 AgX.
                     "tonemap" => *tonemap = val.clamp(0.0, 3.0) as u32,
                     "posterizeDither" => *posterize_dither = val != 0.0,
-                    // `floptle/0126`: step BRIGHTNESS and keep the colour,
+                    // step BRIGHTNESS and keep the colour,
                     // so a warm light does not band into hues nobody chose.
                     "posterizeChroma" => *posterize_chroma = val != 0.0,
                     // Depth of field. Every one clamped where it has a range and
@@ -1762,7 +1762,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 }
             }
         }
-        // The Lighting node (`floptle/0123`). Clamped where a value has a range
+        // The Lighting node. Clamped where a value has a range
         // and left alone where it does not: a colour channel above 1 is a
         // legitimate over-bright, and `ambient2d*` above 1 is how you blow a
         // flat scene out on purpose.
@@ -2113,7 +2113,7 @@ pub(crate) fn apply_rich_sets(
                     world.remove::<floptle_core::TerrainGen>(e);
                 }
             },
-            // `node:setCamera{...}` (`floptle/0078`). Values were checked at the
+            // `node:setCamera{...}`. Values were checked at the
             // call, so everything present here is something to write.
             RichSet::MatterCamera {
                 fov_y,
@@ -2226,7 +2226,7 @@ pub(crate) fn apply_rich_sets(
                     },
                 );
             }
-            // 2D (`floptle/0058`). The sheet is the node's Material, so a
+            // 2D. The sheet is the node's Material, so a
             // tilemap only ever carries its grid.
             RichSet::MatterTilemap { cols, rows, tile, mut data, tileset } => {
                 let want = (cols as usize) * (rows as usize);
@@ -2245,13 +2245,13 @@ pub(crate) fn apply_rich_sets(
                 });
                 world.insert(e, Matter::Tilemap { cols, rows, tile, data, tileset });
             }
-            // The counterpart setter (`floptle/0062`). Like a tilemap, a batch
+            // The counterpart setter. Like a tilemap, a batch
             // takes its sheet from the node's ordinary Material — so this
             // carries only the quad's edge length.
             RichSet::MatterSpriteBatch { size } => {
                 world.insert(e, Matter::SpriteBatch { size: size.max(1e-4) });
             }
-            // `floptle/0109`. Absent = the default layer at order 0, which is
+            // an earlier task. Absent = the default layer at order 0, which is
             // also how the component is stored: a node back at the default
             // carries no Sorting at all, so its scene mentions none.
             RichSet::MatterSorting { layer, order, mode } => {
@@ -2406,7 +2406,7 @@ pub(crate) fn apply_rich_sets(
                 c.shake(amount, seconds);
                 world.insert(e, c);
             }
-            // `floptle/0113`. Same rule: `auto` with no layer list IS the
+            // an earlier task. Same rule: `auto` with no layer list IS the
             // default, so a node put back to it stops carrying the component and
             // its scene stops mentioning 2D lighting.
             RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows } => {
@@ -2443,7 +2443,7 @@ pub(crate) fn apply_rich_sets(
                     }
                 }
             }
-            // `floptle/0116`. Omitted fields keep what the node had, so this is
+            // an earlier task. Omitted fields keep what the node had, so this is
             // both "make a light" and "retune this one"; a node that was not a
             // light yet starts from the same defaults the editor's Add gives.
             RichSet::MatterPointLight { color, intensity, range } => {
@@ -2548,8 +2548,7 @@ pub(crate) fn apply_rich_sets(
     }
 }
 
-/// One tilemap cell as Lua spells it, in the widest form a caller might try
-/// (`floptle/0083`).
+/// One tilemap cell as Lua spells it, in the widest form a caller might try.
 ///
 /// **Anything negative is the empty square.** That is the convention in Tiled,
 /// Godot's TileMap, LDtk and every hand-rolled tilemap, so `-1` is the first
@@ -2608,8 +2607,8 @@ fn describe_cell_range() -> String {
 ///
 /// A handle is a proxy onto another script's environment, and these three names
 /// belong to the proxy rather than to the script behind it — so a script that
-/// exports one of them can reach its own copy and nobody else can
-/// (`floptle/0085`). They are reported at load, because the collision is
+/// exports one of them can reach its own copy and nobody else can.
+/// They are reported at load, because the collision is
 /// decidable then and undecidable by anyone reading a call site.
 ///
 /// `name` is deliberately NOT here: it asks the script first, and falls back to
@@ -2622,12 +2621,12 @@ pub const HANDLE_KEYS: &[(&str, &str)] = &[
 ];
 
 /// Every key `node:setCamera{...}` reads. Anything else is refused, naming the
-/// nearest real one (`floptle/0078`, `floptle/0082`).
+/// nearest real one.
 pub(crate) const CAMERA_KEYS: &[&str] = &[
     "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
 ];
 
-/// Every key `node:setMaterial{...}` reads (`floptle/0082`).
+/// Every key `node:setMaterial{...}` reads.
 ///
 /// These lists are the ONE place each construction call's surface is written
 /// down: the check reads them and `apply_rich_sets` acts on exactly these names,
@@ -2641,16 +2640,16 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "ditherAlpha", "retroExempt",
 ];
 
-/// Every key `node:setCelestial{...}` reads (`floptle/0082`).
+/// Every key `node:setCelestial{...}` reads.
 pub(crate) const CELESTIAL_KEYS: &[&str] = &[
     "mu", "bodyRadius", "soi", "parent", "a", "e", "i", "lan", "argPe", "m0", "atmoColor",
     "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius",
 ];
 
-/// Every key `node:setTilemap{...}` reads (`floptle/0082`).
+/// Every key `node:setTilemap{...}` reads.
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 
-/// Every key `node:setSorting{...}` reads (`floptle/0082`).
+/// Every key `node:setSorting{...}` reads.
 pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order", "mode"];
 
 /// Every key `node:setParallax{...}` reads.
@@ -2673,14 +2672,14 @@ pub(crate) const CAMERA_2D_KEYS: &[&str] = &[
 pub(crate) const SPRITE_KEYS: &[&str] =
     &["ppu", "size", "cell", "flipX", "flipY", "pivotX", "pivotY"];
 
-/// Every key `node:setLighting2D{...}` reads (`floptle/0082`).
+/// Every key `node:setLighting2D{...}` reads.
 pub(crate) const LIGHTING_2D_KEYS: &[&str] =
     &["mode", "layers", "blocks", "inner", "falloff", "shadows"];
 
-/// Every key `node:setPointLight{...}` reads (`floptle/0082`).
+/// Every key `node:setPointLight{...}` reads.
 pub(crate) const POINT_LIGHT_KEYS: &[&str] = &["color", "intensity", "range"];
 
-/// Every key `node:setSpriteBatch{...}` reads (`floptle/0082`).
+/// Every key `node:setSpriteBatch{...}` reads.
 pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
 
 /// Every key a tile-orientation table (`{ rot =, flipX =, flipY = }`) reads.
@@ -2689,7 +2688,7 @@ pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
 /// what somebody will write. It composes to `flipX` plus a half-turn — the eight
 /// orientations are the square's symmetries and a vertical mirror is one of them,
 /// just not an independent one. Refusing it would be pedantry; silently ignoring
-/// it would be `floptle/0082` all over again. See `floptle_core::TileXform`.
+/// it would be an earlier task all over again. See `floptle_core::TileXform`.
 pub(crate) const TILE_XFORM_KEYS: &[&str] = &["rot", "flipX", "flipY"];
 
 /// Every key `tm:resize{...}` reads.
@@ -2766,7 +2765,7 @@ fn new_tilemap_handle(
     t.raw_set("__id", e)?;
     // `tm.EMPTY`, beside the methods that take it. The global `EMPTY_TILE` is
     // the same number; this spelling is here because a handle is where somebody
-    // holding one will look (`floptle/0083`).
+    // holding one will look.
     t.raw_set("EMPTY", floptle_core::EMPTY_TILE)?;
 
     // tm:set(x, y, cell [, {rot=, flipX=, flipY=}]) — 0-based from the TOP-LEFT.
@@ -3331,7 +3330,7 @@ pub fn mirror_component_strings(
 
 /// Every material's shader knobs on this node — the node's own `Material` and
 /// each per-part override — for read-back through a handle's `:shaderParam` /
-/// `:shaderTexture` (`floptle/0225`). Only materials that carry any, so a
+/// `:shaderTexture`. Only materials that carry any, so a
 /// scene with no `.flsl` on anything mirrors nothing here.
 pub fn mirror_shader_state(world: &World, e: Entity) -> HashMap<String, crate::ShaderState> {
     let mut out = HashMap::new();
@@ -4138,7 +4137,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // texture, creating the image slot if the element has none, so
                 // a bare element can become a sprite. Raises on a non-string
                 // rather than dropping it: this write did NOTHING for months and
-                // nobody could tell, which is the whole of floptle/0052.
+                // nobody could tell, which is the whole of.
                 "texture" => {
                     let Value::String(s) = &val else {
                         return Err(mlua::Error::RuntimeError(
@@ -4203,7 +4202,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // writes) and records assignments; the writes are flushed to the ECS after `run`.
     {
         let comp_mt = lua.create_table()?;
-        // **A material handle's shader knobs** (`floptle/0225`): the four
+        // **A material handle's shader knobs**: the four
         // methods below mirror `node:setShaderParam` / `setShaderTexture`, but
         // address the material the HANDLE names — the node's own for
         // `node:material()`, one part's override for `node:material("Head#2")`.
@@ -4441,8 +4440,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // A string is a path or a label: a UI image's texture, a
                 // Material's texture, a text element's string. This used to
                 // raise "must be a number, a boolean or a color", which was the
-                // one path that failed LOUDLY and it pointed nowhere useful
-                // (floptle/0052).
+                // one path that failed LOUDLY and it pointed nowhere useful.
                 if let Value::String(s) = &val {
                     strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
                     return Ok(());
@@ -4647,7 +4645,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // extension, so a file in a folder is "forgery/playermovement" while every
     // surface a person reads — the tab, the Inspector row, the Console prefix —
     // says `playermovement`. Matching the stored kind exactly meant asking by the
-    // name on screen returned `nil` and said nothing (`floptle/0201`); the lookup
+    // name on screen returned `nil` and said nothing; the lookup
     // takes either spelling now, and a genuine miss names what the node does
     // carry. See [`crate::match_kind`].
     {
@@ -4970,7 +4968,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     //
     // **`nil` when it has no screen-space rect this frame** — not a UI
     // element, not laid out yet, or no surface to lay out against at all,
-    // which is every frame of `floptle run` (`floptle/0224`). It answered
+    // which is every frame of `floptle run`. It answered
     // `0, 0, 0, 0` for all three, and under `run` that is a measurement a
     // script cannot tell from a real one: a four-button menu "verified"
     // headless was verified against zeros. The reference always said nil,
@@ -5033,7 +5031,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
         /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
         /// and named in this function's own error message while being the one shape it
-        /// refused (floptle/0025).
+        /// refused.
         fn triple_of(v: &Value) -> Option<[f64; 3]> {
             if let Some(p) = crate::math_api::vec3_of(v) {
                 return Some([p.x, p.y, p.z]);
@@ -5141,7 +5139,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let q = q.clone();
-        // ---- 2D: node:setTilemap{...} and node:tilemap() (`floptle/0058`) ----
+        // ---- 2D: node:setTilemap{...} and node:tilemap() ----
         {
             let q = q.clone();
             methods.set(
@@ -5165,7 +5163,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             let mut v = Vec::with_capacity(list.raw_len());
                             for i in 1..=list.raw_len() {
                                 // Lua is 1-based; a nil hole — and, since
-                                // `floptle/0083`, any negative — is an empty tile.
+                                // an earlier task, any negative — is an empty tile.
                                 v.push(tile_cell(&list.raw_get::<Value>(i)?)?);
                             }
                             v
@@ -5221,7 +5219,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         {
             let q = q.clone();
             // node:setSorting{ layer = "Terrain", order = 3 } — where this 2D
-            // node draws in the stack (`floptle/0109`). Sorting layers shipped
+            // node draws in the stack. Sorting layers shipped
             // with no script access at all, which rules out a character walking
             // behind a counter.
             methods.set(
@@ -5395,8 +5393,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let q = q.clone();
-            // node:setLighting2D{ mode = "2d", layers = {"Terrain"}, blocks = "on" }
-            // (`floptle/0113`). A torch that flickers is a script writing an
+            // node:setLighting2D{ mode = "2d", layers = {"Terrain"}, blocks = "on" }.
+            // A torch that flickers is a script writing an
             // intensity; a torch that stops lighting the background is a script
             // writing this.
             methods.set(
@@ -5406,7 +5404,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     crate::opts::check_keys(&t, LIGHTING_2D_KEYS, "node:setLighting2D")?;
                     // Both enums answer through their own parsers, so a typo
                     // names the accepted set instead of silently meaning `auto`
-                    // — the exact bug `floptle/0072` was filed for.
+                    // — the exact bug an earlier task was filed for.
                     let mode = match t.get::<Option<String>>("mode")? {
                         None => None,
                         Some(s) => Some(floptle_core::Lit2D::parse(&s).ok_or_else(|| {
@@ -5453,8 +5451,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             let q = q.clone();
             // node:setPointLight{ color = {r,g,b}, intensity =, range = }
             //
-            // The one Matter kind a script could edit but never create
-            // (`floptle/0116`). Every field is optional and keeps what the node
+            // The one Matter kind a script could edit but never create.
+            // Every field is optional and keeps what the node
             // had, so the same call makes a light and retunes one.
             methods.set(
                 "setPointLight",
@@ -5490,7 +5488,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             // node:setTextSpans{ {len =, color =}, … } — colour stretches of
-            // this element's text (`floptle/0172`).
+            // this element's text.
             //
             // A run carried ONE colour for the whole string, so a keyword tinted
             // to match the key it names, or a proper noun in the speaker's
@@ -5557,7 +5555,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             // node:setGlyphOffsets{ vec2(…), … } — displace characters at draw
-            // time (`floptle/0172`).
+            // time.
             //
             // The half spans cannot do. Glyph positions are computed inside the
             // renderer and never surfaced, so a game could not move one letter
@@ -5589,14 +5587,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             // node:setCamera{ fovY =, active =, target =, width =, height =,
-            // hz =, cullMask = } — the whole camera surface a game needs
-            // (`floptle/0078`). With a `target` the camera renders into a live
+            // hz =, cullMask = } — the whole camera surface a game needs.
+            // With a `target` the camera renders into a live
             // texture any material or UI image wears as `rt:<name>`: minimaps,
             // mirrors, security monitors, scopes, split-screen.
             //
             // Every value is checked HERE, at the call. `hz = "10"` and
             // `width = 0` raise with the property, the value and the range —
-            // not three frames later as a black rectangle (`floptle/0082`).
+            // not three frames later as a black rectangle.
             let q = q.clone();
             methods.set(
                 "setCamera",
@@ -5720,7 +5718,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     // Refuse a node that is not a batch, rather than handing
                     // back a handle whose every `draw` is collected and then
                     // dropped by the renderer's own filter. That silence cost a
-                    // real project an afternoon (`floptle/0062`): the calls all
+                    // real project an afternoon: the calls all
                     // returned, nothing was ever drawn, and there was no line
                     // anywhere to say why.
                     let is_batch = scene.borrow().sprite_batches.contains(&e)
@@ -5768,8 +5766,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     };
                     // Checked HERE, through the parser the write itself uses: a
                     // misspelled shape used to become a CUBE, silently — a
-                    // different object standing exactly where you put it
-                    // (`floptle/0082`).
+                    // different object standing exactly where you put it.
                     let shape = crate::opts::parse_enum(
                         "node:setPrimitive",
                         "shape",
@@ -6606,13 +6603,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             let e: u32 = this.raw_get("__id")?;
             let name: String = this.raw_get("__script")?;
             // Resolved from the registry rather than held as a live table —
-            // see `Shared::envs` (`floptle/0069`).
+            // see `Shared::envs`.
             let env =
                 envs.borrow().get(&(e, name.clone())).and_then(|k| lua.registry_value::<Table>(k).ok());
             match key.as_str() {
                 "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
                 "kind" => return Ok(Value::String(lua.create_string(&name)?)),
-                // `name` asks the SCRIPT first (`floptle/0085`). The handle used
+                // `name` asks the SCRIPT first. The handle used
                 // to answer it itself, so a script exporting `function name(id)`
                 // — the obvious name for "turn an id into a display name" —
                 // could call it from inside itself and from nowhere else: every
@@ -6644,7 +6641,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // script that has no such export, and a script that FAILED TO
                 // LOAD and therefore has no exports at all. The second wants a
                 // completely different fix and used to be indistinguishable
-                // from the first at every call site (`floptle/0086`), so say
+                // from the first at every call site, so say
                 // which it is — once per `(script, key)`, because a handle
                 // polled in `update` would otherwise say it sixty times a
                 // second.
@@ -6706,8 +6703,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     //     findAll("Enemy", { includeDisabled = true })   -- sugar for scope="all"
     //
     // A wrong KEY and a wrong VALUE both raise, listing what is accepted. A
-    // defaulted typo is how `pin = "topCenter"` silently meant top-left
-    // (`floptle/0072`), and an options table nobody can see the effect of is
+    // defaulted typo is how `pin = "topCenter"` silently meant top-left,
+    // and an options table nobody can see the effect of is
     // exactly the shape that goes unnoticed for a month.
     fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
         let t = match opts {
@@ -6802,7 +6799,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // EMPTY_TILE: the cell value that leaves a square empty. The editor's own
     // autocomplete has told people to pass this since tilemaps shipped, and for
     // that whole time it was a Rust constant Lua could not name — so following
-    // the documentation produced `nil` (`floptle/0083`). Negative cells mean the
+    // the documentation produced `nil`. Negative cells mean the
     // same thing now; this exists so the documented spelling resolves.
     lua.globals().set("EMPTY_TILE", floptle_core::EMPTY_TILE)?;
     // noderef(): mark a `defaults` entry as a node-reference param — the Inspector
@@ -6887,7 +6884,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     return Ok(Value::Nil);
                 }
             };
-            // O(1) against the kind index (`floptle/0063`). Still the FIRST in
+            // O(1) against the kind index. Still the FIRST in
             // scene order, because the index is built in scene order — call
             // sites depend on which one they get. The scope filter runs over the
             // index rather than replacing it, so the ordering guarantee holds.
@@ -6970,7 +6967,7 @@ mod tests {
     use super::*;
     use floptle_core::Material;
 
-    /// `floptle/0123`: the 2D base light is a value a script can read, write,
+    /// the 2D base light is a value a script can read, write,
     /// and — the half that is easy to leave out — read back *first* so it can
     /// restore what it dimmed.
     ///
@@ -7039,8 +7036,7 @@ mod tests {
         assert_eq!(world.get::<floptle_core::Light>(e).unwrap().shadow_quantize, 0);
     }
 
-    /// `-1` means empty, and so does every other negative, and so does `nil`
-    /// (`floptle/0083`).
+    /// `-1` means empty, and so does every other negative, and so does `nil`.
     ///
     /// The bug this pins was not that the engine lacked an empty value — it was
     /// that the only one it had was a Rust constant Lua could not name, so the

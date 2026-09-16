@@ -22,8 +22,7 @@ pub(crate) struct AudioBridges {
     pub next_handle: Rc<RefCell<u32>>,
 }
 
-/// Every key an `audio.play` options table reads. Anything else is refused
-/// (`floptle/0082`).
+/// Every key an `audio.play` options table reads. Anything else is refused.
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
     "endBehavior", "loop",
@@ -61,7 +60,7 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     }
     // Each of these calls the same parser the engine acts on, and offers that
     // parser's own ACCEPTS list — so the message cannot describe a behaviour the
-    // code does not have (`floptle/0072`'s shape).
+    // code does not have (that task's shape).
     if let Ok(s) = t.raw_get::<String>("mode") {
         p.mode = parse_enum(CALL, "mode", &s, SpatialMode::ACCEPTS, SpatialMode::parse)?;
     }

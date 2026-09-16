@@ -94,11 +94,11 @@ pub struct PostSettings {
     pub posterize_dither: bool,
     /// Quantize brightness and keep the chroma, rather than each channel on its
     /// own — so a warm tint steps in brightness instead of stepping through hues
-    /// nobody chose (`floptle/0126`). Off = the per-channel look.
+    /// nobody chose. Off = the per-channel look.
     pub posterize_chroma: bool,
     /// Colour-vision filter: 0 = off, 1 = protanopia, 2 = deuteranopia,
     /// 3 = tritanopia (`floptle_core::access::ColorFilter::lane`). Runs in the
-    /// terminal pass, before the scene's own looks (`floptle/0079`).
+    /// terminal pass, before the scene's own looks.
     pub color_filter: u32,
     /// How strongly the filter applies, 0..1.
     pub color_filter_strength: f32,
@@ -106,7 +106,7 @@ pub struct PostSettings {
     /// what a colourblind player sees.
     pub simulate_deficiency: bool,
 
-    // ---- the look chain (`floptle/0130`) ---------------------------------
+    // ---- the look chain ---------------------------------
     //
     // Each block below is one pass, and each is SKIPPED when its settings are
     // the identity — see the `*_on()` predicates. A project that uses none of
@@ -1153,7 +1153,7 @@ impl PostStack {
         let ssao_on = s.ssao && ssao.is_some();
         let filter_on = s.color_filter_on();
         // Posterize is deliberately absent: it ran before the 2D light composite,
-        // upstream of everything here (`floptle/0127`). A scene whose only post
+        // upstream of everything here. A scene whose only post
         // setting is posterize therefore takes the passthrough below — the frame
         // it hands us is already quantized.
         let grade_on = s.grade_on();
@@ -1538,7 +1538,7 @@ impl PostStack {
             0.0,
         ];
         // The colour-vision filter rides the bloom lanes, which this pass
-        // does not use (`floptle/0079`).
+        // does not use.
         let a = [
             if s.simulate_deficiency { 1.0 } else { 0.0 },
             0.0,

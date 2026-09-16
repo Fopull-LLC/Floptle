@@ -255,7 +255,7 @@ impl RollbackDriver {
     /// then and every answer is "no": no `snapshot()`, no `restore()`, no
     /// `synced` — because there is nothing to ask. The old code asked then, and
     /// told people their fighter would not be rolled back while pointing at a
-    /// script that defines both hooks (floptle/0039). A warning that is wrong
+    /// script that defines both hooks. A warning that is wrong
     /// at exactly the moment someone is debugging is worse than no warning.
     ///
     /// So: returns `false` while any node is still un-built, and the caller
@@ -374,7 +374,7 @@ impl RollbackDriver {
     /// the game unable to tell a player whether their connection or their build
     /// was at fault, and finding the real cause (one Lua number smoothed with
     /// `math.exp`, which is not required to agree across libm implementations)
-    /// took a day of reading engine source. floptle/0045.
+    /// took a day of reading engine source.
     ///
     /// Costs nothing in a healthy session: it is only ever built once a
     /// mismatch has already been declared fatal.
@@ -603,7 +603,7 @@ impl RollbackDriver {
     }
 
     /// Re-simulate the last few ticks from the ring and check they come out the
-    /// same (floptle/0050).
+    /// same.
     ///
     /// ## What this catches, and why nothing else can
     ///
@@ -1031,7 +1031,7 @@ end\n";
     /// with the same shape: a value the simulation reads that the snapshot does
     /// not carry. Nobody stores one deliberately — this one is a `local`
     /// refreshed every hook, which is itself the recommended fix for a
-    /// different bug (floptle/0027).
+    /// different bug.
     const LEAKY: &str = "\
 me = nil\n\
 leaked = 0\n\
@@ -1291,7 +1291,7 @@ end\n";
         assert!(b.faults.is_empty(), "faults: {:?}", b.faults);
     }
 
-    /// field regression (floptle/0050): a script that reads a value its
+    /// field regression: a script that reads a value its
     /// `snapshot()` does not carry must be caught here, by the machine that has
     /// it, while it has it.
     ///
@@ -1918,8 +1918,7 @@ end\n";
         // first: nothing has loaded the scripts yet, which is the state a driver
         // engaging on a scene switch finds the world in. The audit must DECLINE
         // to answer rather than answer "no hooks" — the old code answered, and
-        // told people a fighter defining both hooks would not be rolled back
-        // (floptle/0039).
+        // told people a fighter defining both hooks would not be rolled back.
         assert!(
             !d.audit(&world, &host),
             "the audit must defer while the node's script environments do not exist"
@@ -1945,7 +1944,7 @@ end\n";
         assert!(d.faults.is_empty(), "the audit must not re-report: {:?}", d.faults);
     }
 
-    /// field regression (floptle/0039 Symptom B): a restart that binds nothing
+    /// field regression (an earlier task Symptom B): a restart that binds nothing
     /// must not leave the previous driver's nodes in the script filters.
     ///
     /// `net_rollback_start` takes the running driver, rebinds it, and abandons
@@ -2007,7 +2006,7 @@ end\n";
     }
 
     /// The desync an adversarial review found before this batch shipped
-    /// (`floptle/0143`): a driven body's ground vanishing must wake it
+    ///: a driven body's ground vanishing must wake it
     /// through the same sequence a resimulated tick actually runs —
     /// `reclaim_world`'s per-tick collider swap, then that tick's
     /// `step_body_tick` — not only through `render_frame.rs`'s

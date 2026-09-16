@@ -1,5 +1,4 @@
-//! Scatter: thousands of props from a seed instead of thousands of nodes
-//! (`floptle/0036`).
+//! Scatter: thousands of props from a seed instead of thousands of nodes.
 //!
 //! A game that wants a forest has, until now, had exactly one construction API:
 //! `createNode` + `setPrimitive` + `setMaterial`. A plant is 4–14 nodes, so a
@@ -74,8 +73,8 @@ pub struct Band {
 
 // There is no collision proxy here, and the absence is deliberate. One used to
 // be parsed, defaulted, stored — and read by nothing at all, so a game that
-// asked for solid props got no error and props it walked through
-// (`floptle/0066`). Scattered instances are drawn, queried (`scatter.near`) and
+// asked for solid props got no error and props it walked through.
+// Scattered instances are drawn, queried (`scatter.near`) and
 // removed; they are not in the physics world. When that changes it will be a
 // feature with a test, not a field.
 
@@ -125,7 +124,7 @@ impl Density {
     }
 }
 
-/// Where a source's region currently sits in the world (`floptle/0073`).
+/// Where a source's region currently sits in the world.
 ///
 /// **Placement is expressed in this frame, not in world space.** That is the
 /// whole trick: a body that orbits at 99 units/s carries its props with it, and
@@ -220,7 +219,7 @@ pub struct ScatterSource {
     pub density: Option<Density>,
     /// Instances the game has removed (harvested, dug out from under).
     pub removed: HashSet<InstanceId>,
-    /// The node this source rides, by name (`floptle/0073`). Its `region` is
+    /// The node this source rides, by name. Its `region` is
     /// then expressed relative to that node rather than to the world, so a
     /// planet that orbits carries its props instead of sliding out from under
     /// them. `None` pins the region to the world, as it always was.
@@ -244,7 +243,7 @@ impl ScatterSource {
 }
 
 /// What a source's configuration costs every frame, countable before a game
-/// ships it (`floptle/0071`).
+/// ships it.
 ///
 /// The knobs read as a look — how far props are drawn, how big a chunk is, how
 /// many per chunk — and one of them is secretly the whole budget. A field
@@ -480,8 +479,7 @@ pub fn chunk_center(src: &ScatterSource, key: ChunkKey) -> DVec3 {
 }
 
 /// Which chunk the eye is standing in. The key set changes when this changes —
-/// which is when the sweep is worth redoing, and not once a frame
-/// (`floptle/0071`).
+/// which is when the sweep is worth redoing, and not once a frame.
 pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
     match src.region {
         Region::Ground { center, .. } => {
@@ -573,7 +571,7 @@ pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey>
             // On a body SMALLER than the view distance that is nearly all of
             // the sweep: 700 m of `lod` on a 107 m planet swept 4,489 keys for
             // 174 distinct chunks, and piled three quarters of its props on the
-            // seam in a wall (`floptle/0071`). Residency saturates at the body.
+            // seam in a wall. Residency saturates at the body.
             //
             // The ground path has always clamped to its region this way; the
             // sphere path never did, and the difference was invisible until a
@@ -654,8 +652,7 @@ mod tests {
     }
 
     /// Density: where the map says nothing grows, nothing is GENERATED — not
-    /// hidden at draw time, or the reason to scatter at all is gone
-    /// (`floptle/0064`).
+    /// hidden at draw time, or the reason to scatter at all is gone.
     #[test]
     fn density_zero_grows_nothing_and_density_one_is_untouched() {
         let mut s = ground(64);
@@ -800,7 +797,7 @@ mod tests {
     }
 
     /// The knobs read as a look and one of them is the whole budget. `cost`
-    /// says so in numbers, before a game ships it (`floptle/0071`).
+    /// says so in numbers, before a game ships it.
     ///
     /// The two configurations here are the ones that actually happened: what
     /// shipped, and what it became once someone worked out what `lod` was
@@ -843,7 +840,7 @@ mod tests {
     /// On a body SMALLER than the view distance, residency saturates at the
     /// body. It used to keep growing: 700 m of `lod` on a 107 m planet swept
     /// 4,489 keys that resolved to 174 distinct chunks, and piled three
-    /// quarters of its props on a cube-face seam (`floptle/0071`).
+    /// quarters of its props on a cube-face seam.
     #[test]
     fn a_planet_smaller_than_the_view_distance_does_not_keep_costing_more() {
         let planet = |far: f32| ScatterSource {

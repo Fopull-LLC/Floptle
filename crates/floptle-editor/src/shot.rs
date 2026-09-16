@@ -87,8 +87,7 @@ fn find_camera(
 /// — the clock the SCRIPTS read, not `steps × DT`, because a step is not a
 /// promise that anything moved: a session held at the Play-start terrain hold
 /// steps happily with `dt = 0`, and reporting the span that was asked for is
-/// how `run` once published sixty seconds of simulation it had not done
-/// (`floptle/0157`).
+/// how `run` once published sixty seconds of simulation it had not done.
 ///
 /// It deliberately does **not** stop afterwards. `toggle_play` restores the
 /// scene to how it was authored, which would undo the entire point: the picture
@@ -162,7 +161,7 @@ pub(crate) struct Args<'a> {
     /// RUNTIME is the only one worth photographing: the solar project's scene
     /// file holds a generator, a camera and some UI, so every shot of it was a
     /// bare sphere under a black sky — a true picture of the file and a picture
-    /// of nothing anybody plays (`floptle/0170`).
+    /// of nothing anybody plays.
     pub(crate) after: Option<f32>,
     /// `--seed`: pin the game's randomness, so a project that generates its
     /// world produces the same picture twice.
@@ -170,7 +169,7 @@ pub(crate) struct Args<'a> {
     /// `--no-ui`: the world alone, with no UI layer over it — for a lighting
     /// comparison or a GI preview, where a HUD would be in the way. The
     /// default draws every enabled layer, because a scene whose whole point is
-    /// a screen is otherwise photographed as its backdrop (`floptle/0224`).
+    /// a screen is otherwise photographed as its backdrop.
     pub(crate) no_ui: bool,
     /// `--frames N`: after the first picture, keep playing and draw N−1 more,
     /// one fixed step apart, as `<out stem>-0001.png` … A single frame cannot
@@ -274,7 +273,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // therefore not be looked at at all. That matters more than a missing
     // convenience: this project's own working rule is to verify anything visual
     // by rendering a PNG and looking at it, and a runtime-generated game could
-    // not follow it (`floptle/0170`).
+    // not follow it.
     //
     // The same fixed `DT` `run` steps by, off the wall clock, so two runs of one
     // project produce the same picture. `pump_world_streaming` is in the loop
@@ -356,7 +355,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // every draw. This verb has no such frame, so without them a level's every
     // `MapMesh` node points at a mesh registry entry that was never built: the
     // walls, floor and ceiling are silently absent and the shot is the props and
-    // the character floating over flat grey (`floptle/0166`).
+    // the character floating over flat grey.
     ed.sync_map_meshes();
     ed.sync_map_paint();
     // **The sky, too.** A Skybox node's `.flsl` is compiled — and its texture
@@ -492,8 +491,8 @@ pub(crate) fn run(args: Args) -> i32 {
 /// picture to quietly stop being the editor's.
 ///
 /// `ui` draws the game's UI as the Game view does: world canvases into the
-/// scene before post, every screen-space layer over the finished picture
-/// (`floptle/0224`). `false` is the world alone — `shot --no-ui`, and `vfx`,
+/// scene before post, every screen-space layer over the finished picture.
+/// `false` is the world alone — `shot --no-ui`, and `vfx`,
 /// which photographs an effect and has no screen to show.
 ///
 /// `None` means no device — this machine has no adapter floptle can render on.
@@ -817,7 +816,7 @@ mod tests {
         );
     }
 
-    /// `floptle/0170`: `run` had the played world and wrote no picture; `shot`
+    /// `run` had the played world and wrote no picture; `shot`
     /// wrote a picture and had no played world. This is the join.
     ///
     /// The fixture is the case that made the card: a project whose scene file
@@ -947,7 +946,7 @@ mod tests {
         assert!(parse_size(&format!("64x{}", max + 1)).is_err());
     }
 
-    /// **The failure `floptle/0166` was about.** A scene holding nothing but a
+    /// **The failure an earlier task was about.** A scene holding nothing but a
     /// `MapMesh` box and a camera renders, unfixed, as a perfectly flat clear
     /// color: nothing else in the frame varies it, so "not one uniform color"
     /// is exactly the pixel-coverage floor the card asked for — any pixel that
@@ -1136,7 +1135,7 @@ mod tests {
             differs > 16,
             "the frame is {differs} pixels different from its own corner out of {} — a scene \
              with nothing in it but a MapMesh box and a camera photographed as an empty room \
-             (floptle/0166)",
+            ",
             pixels.len() / 4
         );
     }

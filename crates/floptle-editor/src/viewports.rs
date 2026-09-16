@@ -374,7 +374,7 @@ impl Editor {
     /// Runs in edit mode too, so a cockpit screen shows its feed while you
     /// place it.
     ///
-    /// Each target carries its own size and refresh rate (`floptle/0078`), and
+    /// Each target carries its own size and refresh rate, and
     /// the two things this cannot serve — more targets than
     /// [`Matter::TARGET_LIMIT`], and two cameras claiming one name — are
     /// reported once each rather than dropped quietly. See
@@ -624,7 +624,7 @@ impl Editor {
         let (mut post_settings, _) = post_process_uniforms(&self.world);
         // The Game panel gets the player's colour-vision filter too — the whole
         // point of it being a player setting is that it applies wherever the game
-        // is shown (`floptle/0079`).
+        // is shown.
         post_settings.color_filter = self.access.color_filter.lane();
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;

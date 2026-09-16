@@ -265,7 +265,7 @@ shader gauge {
         assert_eq!(parse(&printed).unwrap().stage, Some(Stage::Ui));
     }
 
-    /// `floptle/0119`: the inverse trig, so a shader can read an angle and not
+    /// the inverse trig, so a shader can read an angle and not
     /// only produce one. Without `atan2` nothing could work in polar coordinates
     /// — no radial wipe, no cooldown dial, no swirl, no skyline laid out around
     /// a horizon — and the reported workaround was a diamond angle whose spacing

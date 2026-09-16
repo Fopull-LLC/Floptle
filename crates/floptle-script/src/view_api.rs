@@ -26,8 +26,7 @@ pub struct ViewInfo {
     pub vp_w: f32,
     pub vp_h: f32,
     /// The camera's vertical field of view, radians — what turns "how many
-    /// pixels tall is the view" into "how many pixels is a metre"
-    /// (`floptle/0058`).
+    /// pixels tall is the view" into "how many pixels is a metre".
     pub fov_y: f32,
     /// An ORTHOGRAPHIC camera's view height in world units; `0` for a
     /// perspective one.
@@ -82,7 +81,7 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
         }
     }
 
-    // camera.pixelsPerUnit([distance]) -> px (`floptle/0058`).
+    // camera.pixelsPerUnit([distance]) -> px.
     //
     // Every 2D project was deriving this itself out of the FOV and the camera's
     // Z — one project's copy reads `240 / (2 * 9.33 * tan 30°)` — and then

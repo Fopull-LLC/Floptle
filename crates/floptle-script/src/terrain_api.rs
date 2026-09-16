@@ -29,7 +29,7 @@ pub struct TerrainOp {
     /// Ties this op to the yield report it produces when it lands. Ops are
     /// QUEUED and applied after the script pass, so a dig cannot return what it
     /// removed — the edit has not happened yet. It returns this instead, and the
-    /// measured report arrives through `terrain.yields()` (floptle/0037).
+    /// measured report arrives through `terrain.yields()`.
     pub id: u64,
 }
 
@@ -385,8 +385,8 @@ pub(crate) fn install_terrain_api(
                 return Ok(());
             }
             q.push((id, fill));
-            // **Busy from this instant**, not from the next publish
-            // (`floptle/0158`). The consumer is a game that queues a world and
+            // **Busy from this instant**, not from the next publish.
+            // The consumer is a game that queues a world and
             // then asks whether it may queue the next one — a caller told "idle"
             // about work it just asked for queues it twice, and the second one
             // goes in behind the ground a player is standing on. The editor's
@@ -407,7 +407,7 @@ pub(crate) fn install_terrain_api(
     // terrain.yields() → the reports for edits that have LANDED since the last
     // call, drained. An op is queued and applied after the script pass, so the
     // report for a dab arrives on the following frame; the id `dig` returned
-    // ties the two together (floptle/0037).
+    // ties the two together.
     {
         let ys = yields.clone();
         if let Ok(f) = lua.create_function(move |lua, ()| {
@@ -542,7 +542,7 @@ pub(crate) fn install_terrain_api(
 /// [`floptle_field::procgen::PlanetFill`] — one parser for both the immediate
 /// generation queue and the on-node genspec (G2), so their vocabularies can
 /// never drift apart. Every field optional; camelCase keys.
-/// Every key a planet-generation options table reads (`floptle/0082`). The seven
+/// Every key a planet-generation options table reads. The seven
 /// paint layers all take `{ slot =, color = }`; `pockets`, `seam` and `iceCaps`
 /// have their own inner keys, checked separately below.
 pub(crate) const PLANET_KEYS: &[&str] = &[

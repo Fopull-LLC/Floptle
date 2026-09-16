@@ -158,8 +158,7 @@ was missing is the untracked path that refuses to start instead.
                 }
                 // Printed and exit 0, rather than refused as an unknown flag
                 // or — as the July binary did — parsed as a PORT NUMBER, which
-                // is how the two builds were told apart on the box
-                // (`floptle/0191`).
+                // is how the two builds were told apart on the box.
                 "--help" | "-h" => {
                     print!("{}", Self::HELP);
                     std::process::exit(0);
@@ -225,7 +224,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // The inbox, as granted — not as asked (`floptle/0234`). The kernel clamps
+    // The inbox, as granted — not as asked. The kernel clamps
     // the ask to `net.core.rmem_max` without a word, and the only symptom of
     // the default-sized buffer was players' retransmit latency at ~100 CCU on
     // a link under 1% used. This is the one place that can say it was clamped.
@@ -343,7 +342,7 @@ mod arg_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// **The help table cannot fall behind the parser** (`floptle/0191`).
+    /// **The help table cannot fall behind the parser**.
     ///
     /// A flag table that is out of date is worse than none, because it is
     /// believed — and this one is what an operator reads to tell a managed
@@ -482,7 +481,7 @@ mod arg_tests {
         assert!(Args::parse(&args(&["--letter", "EU"])).is_err());
     }
 
-    /// **Half a certificate is refused, like half a token** (`floptle/0227`).
+    /// **Half a certificate is refused, like half a token**.
     /// A relay given `--tls-cert` alone would come up self-signed, and the
     /// first sign would be every client at the region name falling back.
     #[test]

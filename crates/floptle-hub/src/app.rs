@@ -414,7 +414,7 @@ impl HubApp {
                 }
             };
             // The plan is secondary: a failed fetch shows "unknown" (not a wrong "free") and is
-            // reconciled on the next refresh. `floptle/0189` made that the rule everywhere
+            // reconciled on the next refresh. an earlier task made that the rule everywhere
             // rather than this one call site's good instinct.
             let ent = provider
                 .entitlements(&tokens.access_token)
@@ -588,8 +588,8 @@ impl HubApp {
                 }
             } else if let Some(session) = &self.session {
                 ui.label(format!("Signed in as {}", session.display_name()));
-                // **A plan we could not read is not a plan we are on**
-                // (`floptle/0189`). Rendering the free tier as fact after a bad
+                // **A plan we could not read is not a plan we are on**.
+                // Rendering the free tier as fact after a bad
                 // minute on `/entitlements` is how an outage reaches support as
                 // "my limits silently dropped" — and from a paying developer,
                 // as a billing complaint. Nothing is blocked either way; the
@@ -603,7 +603,7 @@ impl HubApp {
                             "fopull.com did not answer when this session asked what you are entitled to, so the free tier's limits are what you will see until it does. This is not a change to your account. It re-checks on the next sign-in or refresh.",
                         );
                 }
-                // **Where a registered game is managed** (`floptle/0196`).
+                // **Where a registered game is managed**.
                 // A developer signs in here and then has nowhere to go: the
                 // game key, the player numbers and the plan all live on the
                 // website, and nothing in the tools said where. One link, in

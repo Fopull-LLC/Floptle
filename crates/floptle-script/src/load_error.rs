@@ -14,8 +14,7 @@
 //! function, not the reference that tipped it over), does not say that a limit
 //! exists, and never mentions the word that would let anyone search for it.
 //!
-//! So every load error goes through [`explain`] on its way to the Console
-//! (`floptle/0086`).
+//! So every load error goes through [`explain`] on its way to the Console.
 
 /// LuaJIT's hard ceiling, as its own error message states it.
 ///

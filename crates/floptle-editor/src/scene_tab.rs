@@ -197,7 +197,7 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // PLAY banner (`floptle/0110`). Persistent, not a toast: the whole
+        // PLAY banner. Persistent, not a toast: the whole
         // failure is that a Play-time edit looks like it worked — the gizmo
         // moves, the Inspector shows the new number — and Stop throws it away
         // with nothing ever said. `push_history` no-ops while playing, so the

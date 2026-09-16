@@ -159,7 +159,7 @@ fn a_wander_point_costs_what_its_window_costs(yard: &Yardstick) {
 /// **A draw from a held sampler is priced by nothing at all.**
 ///
 /// The guard above pins the half that was already true — the same window costs
-/// the same on four times the level. This pins the half `floptle/0177` is
+/// the same on four times the level. This pins the half an earlier task is
 /// about: cost against the WINDOW. `nav.random` gathers, sorts, dedupes and
 /// measures every polygon its window touches on every single call, so a 40 m
 /// window really did cost twenty times an 8 m one, and a dozen agents redrawing

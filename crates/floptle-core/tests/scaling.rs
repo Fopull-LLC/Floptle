@@ -254,7 +254,7 @@ fn sweeping_the_resident_chunks_is_linear_in_how_many_there_are() {
     assert_linearish("chunks_near", ratio);
 }
 
-/// The spatial index (`floptle/0076`): N sphere queries over N items must stay
+/// The spatial index: N sphere queries over N items must stay
 /// roughly linear in N, where the honest scan they replace is quadratic.
 ///
 /// This is the guard the card asked for, and it is the measurement that decided

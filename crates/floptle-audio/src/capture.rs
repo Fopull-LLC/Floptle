@@ -1,4 +1,4 @@
-//! The microphone (`floptle/0180`).
+//! The microphone.
 //!
 //! A cpal INPUT stream, resampled and downmixed to the one shape the rest of
 //! the voice path speaks: 48 kHz mono, handed out in 20 ms frames.
