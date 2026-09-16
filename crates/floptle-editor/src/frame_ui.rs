@@ -215,27 +215,9 @@ impl Editor {
             });
         }
         // The entry-scene picker's options (only scanned while the window is up).
-        let fullscreen_tab = &mut self.fullscreen_tab;
-        let world = &mut self.world;
-        let maps = &self.maps;
-        let map_sel = &self.map_sel;
         let map_mode = self.map_mode;
-        let map_slot_name = &mut self.map_slot_name;
-        let map_viz = &self.map_viz;
-        let tile_viz = &self.tile_viz;
-        let map_opts = &mut self.map_opts;
-        let map_size_buf = &mut self.map_size_buf;
-        let map_spec_buf = &mut self.map_spec_buf;
         let map_arm = self.map_arm;
         let map_knife_on = self.map_knife_on;
-        let map_orient = &mut self.map_orient;
-        let map_xform = &mut self.map_xform;
-        let map_select_hidden = &mut self.map_select_hidden;
-        let map_bevel = &mut self.map_bevel;
-        let map_hud_open = &mut self.map_hud_open;
-        let map_keys = &mut self.map_keys;
-        let map_rebind = &mut self.map_rebind;
-        let map_rebind_err = &mut self.map_rebind_err;
         let map_tool_on = self.tool == Tool::MapEdit;
         let map_playing = self.playing;
         // Copied, not borrowed: it is read by panels that also hold &mut borrows
@@ -245,34 +227,14 @@ impl Editor {
         // Copied out before the mutable borrow below: the panels read the lock,
         // and ask for the flip through `cmd`.
         let selection_locked = self.selection_locked;
-        let selection = &mut self.selection;
-        let bone_selection = &mut self.bone_selection;
-        let pivot_edit = &mut self.pivot_edit;
-        let collapsed = &mut self.collapsed;
-        let hier_fold_pending = &mut self.hier_fold_pending;
-        let hier_search = &mut self.hier_search;
-        let hier_scope = &mut self.hier_scope;
         // Labels only — the parked documents themselves stay on the Editor, so
         // the tab strip can name them without the panel being able to reach into
         // another document's undo stack.
         let image_parked: Vec<String> =
             self.image_stash.iter().map(|s| s.tab_label()).collect();
-        let console = &mut self.console;
-        let preview_zoom = &mut self.preview_zoom;
-        let preview_spin = &mut self.preview_spin;
-        let preview_spinning = &mut self.preview_spinning;
-        let preview_material = &mut self.preview_material;
-        let map_asset_preview = &mut self.map_asset_preview;
-        let project = &mut self.project;
-        let layer_new = &mut self.layer_new;
-        let show_project_mgr = &mut self.show_project_mgr;
-        let project_path_buf = &mut self.project_path_buf;
-        let grid = &mut self.grid;
-        let show_grid_settings = &mut self.show_grid_settings;
         // ⏱ The frame-timing panel's open flag and the last frame it collected,
         // both taken out here for the same reason everything else on this line is
         // — the UI below runs while `self` is split apart.
-        let show_gpu_timing = &mut self.gpu_timing_open;
         // Read from the borrowed timer rather than back out of `self`: the frame
         // took it mutably at the destructure. `poll` has already run this frame,
         // so these are the newest results that have actually landed.
@@ -282,7 +244,7 @@ impl Editor {
         self.gpu_timing_frames = self.gpu_timing_frames.wrapping_add(1);
         let gpu_timing_supported = gpu_timer.is_some();
         if !gpu_spans.is_empty()
-            && *show_gpu_timing
+            && self.gpu_timing_open
             && std::env::var("FLOPTLE_GPU_TIMING").is_ok()
             && self.gpu_timing_frames.is_multiple_of(120)
         {
@@ -291,18 +253,6 @@ impl Editor {
                 floptle_say::say!("  {:>7.3} ms  {}", sp.ms, sp.label);
             }
         }
-        let show_terrain_collider = &mut self.show_terrain_collider;
-        let show_navmesh = &mut self.show_navmesh;
-        let nav_cells = &mut self.nav_cells;
-        let show_mesh_colliders = &mut self.show_mesh_colliders;
-        let rename_target = &mut self.rename_target;
-        let new_scene_buf = &mut self.new_scene_buf;
-        let new_asset_prompt = &mut self.new_asset_prompt;
-        let show_quit_confirm = &mut self.show_quit_confirm;
-        let image_close_confirm = &mut self.image_close_confirm;
-        let delete_confirm = &mut self.delete_confirm;
-        let layer_children_confirm = &mut self.layer_children_confirm;
-        let toast = &mut self.toast;
         // Dirty tilesets ride the scene's flag here. They are not scene state —
         // they are their own files — but every gate that asks "is there unsaved
         // work" wants one answer, and a tileset's collision shapes and autotile
@@ -315,14 +265,6 @@ impl Editor {
         // …and one that has never been written has no filename to save under,
         // so "Save & Quit" cannot silently do it: it has to ask first.
         let image_unnamed = image_dirty_now && self.image.path.is_none();
-        let new_terrain_cfg = &mut self.new_terrain_cfg;
-        let pending_open_scene = &mut self.pending_open_scene;
-        let vertex_brush = &mut self.vertex_brush;
-        let terrain_brush = &mut self.terrain_brush;
-        let terrain_voxel = &mut self.terrain_voxel;
-        let terrain_textures = &mut self.terrain_textures;
-        let terrain_glow = &mut self.terrain_glow_mask;
-        let terrain_tex_scale = &mut self.terrain_tex_scale;
         let terrain_present = !self.terrains.is_empty();
         // Terrain 2.0 stats: volumes, resident data chunks, resident bytes — the
         // honest sparse numbers (the dense field's O(n³) voxel count is gone).
@@ -331,25 +273,15 @@ impl Editor {
             let bytes: usize = self.terrains.values().map(|t| t.field.memory_bytes()).sum();
             (self.terrains.len(), chunks, bytes)
         });
-        let save_flash = &mut self.save_flash;
         // What the save-status chip names on hover: the real file being edited.
         let save_status_file = if self.scene_rel.is_empty() {
             format!("scenes/{}.ron", self.scene_name)
         } else {
             self.scene_rel.clone()
         };
-        let external_editor = &mut self.external_editor;
-        let prefer_external = &mut self.prefer_external_editor;
-        let show_preferences = &mut self.show_preferences;
-        let play_tint_enabled = &mut self.play_tint_enabled;
-        let play_tint = &mut self.play_tint;
         // Current theme selections (changes are routed through `cmd`, then saved + applied).
         let engine_theme = self.engine_theme;
         let code_theme = self.code_theme;
-        let asset_tree = &self.asset_tree;
-        let texture_settings = &self.texture_settings;
-        let assets_grid = &mut self.assets_grid;
-        let assets_grid_dir = &mut self.assets_grid_dir;
         let project_root = self.project_root.as_path();
         let playing = self.playing;
         // Who owns the pointer this frame, for the Game-view hint. Read as plain
@@ -359,25 +291,17 @@ impl Editor {
         let cursor_held_by_editor = self.cursor_freed && self.script_mouse_lock;
         let paused = self.paused;
         let game_tick_no = self.game_tick_no;
-        let has_active_camera = floptle_core::active_camera(world).is_some();
+        let has_active_camera = floptle_core::active_camera(&self.world).is_some();
         // The selected camera's POV preview texture (only when a camera is selected).
-        let cam_preview = selection
+        let cam_preview = self.selection
             .last()
             .copied()
-            .filter(|&e| matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })))
+            .filter(|&e| matches!(self.world.get::<Matter>(e), Some(Matter::Camera { .. })))
             .and(self.cam_preview.as_ref().map(|p| p.tex_id));
         let particles_active = crate::dock::tab_is_front(dock_state, EditorTab::Particles);
         let game_tex = self.game_vp.as_ref().map(|p| p.tex_id);
-        let game_rect = &mut self.game_rect;
-        let materials = &self.materials;
-        let mat_name_buf = &mut self.mat_name_buf;
-        let component_clip = &self.component_clip;
-        let add_component_filter = &mut self.add_component_filter;
-        let layer_names = project.build_layers().names;
-        let sorting_names = project.sorting_order();
-        let tag_edit = &mut self.tag_edit;
-        let hier_scrolled = &mut self.hier_scrolled;
-        let show_material_editor = &mut self.show_material_editor;
+        let layer_names = self.project.build_layers().names;
+        let sorting_names = self.project.sorting_order();
         // The package extensions and their window. `ext_host` is handed to the
         // dock (its Scene overlays draw in the viewport), and used again after
         // for the floating panels — sequentially, so one `&mut` covers both.
@@ -385,72 +309,26 @@ impl Editor {
         // mutably for the tab viewer — the 📦 Packages tab draws from inside
         // that viewer and cannot hold a second borrow of the host itself.
         let pkg_load = crate::packages_ui::PkgLoad::of(&self.ext);
-        let ext_host = &mut self.ext;
-        let ext_painted = self.ext_painted.as_slice();
-        let packages_state = &mut self.packages_ui;
         let ext_project_root = self.project_root.clone();
-        let ext_account = self.account.as_ref();
         // Built before the closure: `ext_menu_tree` reads the whole editor, and
         // inside the UI pass only disjoint field borrows exist.
-        let ext_menus = crate::ext_wire::menu_tree(ext_host);
+        let ext_menus = crate::ext_wire::menu_tree(&self.ext);
         let ext_focus_window = self.ext_focus_window.take();
-        let ext_message = &mut self.ext_message;
         // What the packages' menu and panels decided this frame, applied after
         // the UI pass — running a Lua callback while the host is drawing would
         // be re-entering it.
         let mut ext_menu_click: Option<usize> = None;
         let mut ext_shortcut_click: Option<usize> = None;
         let mut pkg_action = crate::packages_ui::PackagesAction::default();
-        let ide = &mut self.ide;
-        let learn = &mut self.learn;
-        let script_errors = self.script_errors.as_slice();
-        let ide_diag = self.ide_diag.as_ref();
-        let selected_asset = &mut self.selected_asset;
-        let asset_selection = &mut self.asset_selection;
-        let aspect_mode = &mut self.aspect_mode;
-        let viewport_zoom = &mut self.viewport_zoom;
-        let scene_rect = &mut self.scene_rect;
         let scene_name = self.scene_name.clone();
-        let gizmo = self.gizmo.as_ref();
-        let terrain_viz = self.terrain_viz.as_ref();
-        let paint_viz = self.paint_viz.as_ref();
-        let camera_gizmos = self.camera_gizmos.as_slice();
-        let light_gizmos = self.light_gizmos.as_slice();
-        let volume_gizmos = self.volume_gizmos.as_slice();
-        let rig_gizmos = self.rig_gizmos.as_slice();
-        let gi_probe_dots = self.gi_probe_dots.as_slice();
-        let body_gizmos = self.body_gizmos.as_slice();
-        let contact_gizmos = self.contact_gizmos.as_slice();
-        let script_gizmo_lines = self.script_gizmo_lines.as_slice();
-        let game_gizmo_lines = self.game_gizmo_lines.as_slice();
         // The gizmo menu's checkbox writes this directly; remember it so the change can
         // be persisted after the dock UI runs.
         let game_gizmos_before = self.game_gizmos;
-        let game_gizmos = &mut self.game_gizmos;
-        let terrain_wire = self.terrain_wire_gizmo.as_slice();
-        let nav_wire = self.nav_gizmo.as_slice();
-        let mesh_wire = self.mesh_wire_gizmo.as_slice();
-        let particle_gizmo = self.particle_gizmo.as_slice();
-        let show_gizmos = &mut self.show_gizmos;
-        let panels = &mut self.panels;
-        let panels_saved = &mut self.panels_saved;
         let mut view_lock = self.camera.lock;
         let mut view_ortho = self.camera.ortho;
-        let gizmo_filter = &mut self.gizmo_filter;
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
-        let anim_sys = &mut self.anim;
-        let vfx_sys = &mut self.vfx;
-        let vfx_ui_state = &mut self.vfx_ui;
-        let audio_sys = &mut self.audio;
-        let mixer_ui_state = &mut self.mixer_ui;
-        let anim_ui_state = &mut self.anim_ui;
-        let shader_graph_state = &mut self.shader_graph;
-        let image_state = &mut self.image;
-        let ui_design = &mut self.ui_design;
-        let shader_preview_state = &mut self.shader_preview;
-        let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
         let net_hosting = self.net_server.is_some();
         let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
@@ -474,7 +352,7 @@ impl Editor {
         let net_predicted_name = self
             .net_predictor
             .as_ref()
-            .and_then(|(e, _)| world.get::<Name>(*e).map(|n| n.0.clone()));
+            .and_then(|(e, _)| self.world.get::<Name>(*e).map(|n| n.0.clone()));
         let net_pred_stats = self
             .net_predictor
             .as_ref()
@@ -541,10 +419,6 @@ impl Editor {
             // even if the box moves. Self-hosters just type their own.
             self.net_relay_addr = "relay.fopull.com:7788".into();
         }
-        let net_host_port = &mut self.net_host_port;
-        let net_join_addr = &mut self.net_join_addr;
-        let net_relay_addr = &mut self.net_relay_addr;
-        let net_join_code = &mut self.net_join_code;
         let net_lobby_code = self.net_lobby_code.clone();
         // A snapshot of the profile, taken before the UI closure so the readout
         // never holds the `RefCell` across a frame that also writes it.
@@ -558,8 +432,6 @@ impl Editor {
             present_wait_ms: self.present_wait_ms,
             cost_ms: (self.frame_ms - self.present_wait_ms).max(0.0),
         };
-        let show_net_panel = &mut self.show_net_panel;
-        let show_perf_panel = &mut self.show_perf_panel;
         // Applied after the UI closure, because turning collection on or off
         // needs the profile and the closure has the fields split.
         let mut perf_toggle: Option<bool> = None;
@@ -569,10 +441,7 @@ impl Editor {
         let player_mode = self.player_mode;
         let play_t = self.play_t;
         let ui_overlay_snapshot = self.ui_overlay.clone();
-        let ref_kinds = &self.ref_kinds;
-        let script_meta = &mut self.script_meta;
         let ui_canvas_snapshot = self.ui_canvas.clone();
-        let show_export = &mut self.show_export;
         // Relative export folders resolve against the project's parent (shown
         // live in the dialog) — never the process CWD, which depends on how
         // the editor was launched.
@@ -581,19 +450,12 @@ impl Editor {
         if self.export_dir.trim().is_empty() {
             self.export_dir = "builds".into();
         }
-        let export_dir = &mut self.export_dir;
-        let export_title = &mut self.export_title;
-        let export_target = &mut self.export_target;
         let export_building = self.export_job.is_some();
-        let export_status = &self.export_status;
         let export_done = self.export_done.clone();
         let autosave_prompt = self.autosave_prompt.clone();
         let crash_prompt = self.crash_prompt.clone();
         let project_trust = self.project_trust.clone();
         let scene_name_now = self.scene_name.clone();
-        let net_latency_ticks = &mut self.net_latency_ticks;
-        let net_loss = &mut self.net_loss;
-        let net_ghosts = &mut self.net_ghosts;
         // ⚙ Settings tab inputs. Only gathered when the tab is actually open,
         // so a closed Settings tab costs nothing per frame.
         let settings_open = dock_state.find_tab(&crate::dock::EditorTab::Settings).is_some();
@@ -615,11 +477,6 @@ impl Editor {
                 (floptle_input::InputMap::default(), None)
             }
         };
-        let settings_section = &mut self.settings_section;
-        let settings_search = &mut self.settings_search;
-        let input_scan = &self.input_scan;
-        let input_new_action = &mut self.input_new_action;
-        let input_test_state = &self.input_test_state;
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
@@ -644,7 +501,7 @@ impl Editor {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
                         if ui.button("New / Open Project…").clicked() {
-                            *show_project_mgr = true;
+                            self.show_project_mgr = true;
                             ui.close();
                         }
                         if ui.button("Close Project").clicked() {
@@ -678,7 +535,7 @@ impl Editor {
                             )
                             .clicked()
                         {
-                            *show_export = true;
+                            self.show_export = true;
                             ui.close();
                         }
                         ui.separator();
@@ -704,33 +561,33 @@ impl Editor {
                             ui.close();
                         }
                         if ui.button("Preferences…").clicked() {
-                            *show_preferences = true;
+                            self.show_preferences = true;
                             ui.close();
                         }
                     });
                     // The same catalog as the Hierarchy's ✚ New menu — one source of truth.
                     ui.menu_button("Add", |ui| node_new_menu(ui, &mut cmd, None));
                     ui.menu_button("View", |ui| {
-                        ui.checkbox(&mut grid.show, "Grid");
-                        ui.checkbox(&mut grid.snap, "Snap to grid");
+                        ui.checkbox(&mut self.grid.show, "Grid");
+                        ui.checkbox(&mut self.grid.snap, "Snap to grid");
                         if ui.button("Grid Settings…").clicked() {
-                            *show_grid_settings = true;
+                            self.show_grid_settings = true;
                             ui.close();
                         }
                         ui.separator();
-                        ui.checkbox(&mut *show_terrain_collider, "Terrain collider wireframe")
+                        ui.checkbox(&mut self.show_terrain_collider, "Terrain collider wireframe")
                             .on_hover_text("show the terrain's collision surface (what the player walks on)");
-                        ui.checkbox(&mut *show_mesh_colliders, "Collider wireframes (mesh + shapes)")
+                        ui.checkbox(&mut self.show_mesh_colliders, "Collider wireframes (mesh + shapes)")
                             .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
-                        ui.checkbox(&mut *show_navmesh, "Navmesh")
+                        ui.checkbox(&mut self.show_navmesh, "Navmesh")
                             .on_hover_text(
                                 "show where characters can walk as one filled surface, a colour \
                                  per connected area, with the joins between elevations drawn \
                                  where a character can actually take them (the Nav Mesh node \
                                  always shows its own when selected)",
                             );
-                        ui.add_enabled_ui(*show_navmesh, |ui| {
-                            ui.checkbox(&mut *nav_cells, "    ⊞ …and the rectangles it was cut into")
+                        ui.add_enabled_ui(self.show_navmesh, |ui| {
+                            ui.checkbox(&mut self.nav_cells, "    ⊞ …and the rectangles it was cut into")
                                 .on_hover_text(
                                     "the bake's working: every convex rectangle the walkable \
                                      surface was divided into. Useful for judging cell size; \
@@ -743,7 +600,7 @@ impl Editor {
                     // window itself) — one consistent behavior.
                     ui.menu_button("Window", |ui| {
                         if ui.button("◑ Material Editor").clicked() {
-                            *show_material_editor = true;
+                            self.show_material_editor = true;
                             ui.close();
                         }
                         if ui.button("◎ Animation Controller").on_hover_text("the state-graph editor: states, transitions, fades, layers").clicked() {
@@ -755,7 +612,7 @@ impl Editor {
                             ui.close();
                         }
                         if ui
-                            .checkbox(&mut *show_gpu_timing, "⏱ Frame timing")
+                            .checkbox(&mut self.gpu_timing_open, "⏱ Frame timing")
                             .on_hover_text(
                                 "where the frame's time actually goes, measured on the GPU pass \
                                  by pass. Nothing is measured while this is shut, so leaving it \
@@ -926,14 +783,14 @@ impl Editor {
                         .on_hover_text("Multiplayer — host & join locally, latency/loss sliders (docs/multiplayer.md)")
                         .clicked()
                     {
-                        *show_net_panel = !*show_net_panel;
+                        self.show_net_panel = !self.show_net_panel;
                     }
                     // ⏱ Frame cost (`floptle/0077`). Opening it turns collection
                     // on; closing it turns collection off, so the profiler costs
                     // nothing when nobody is looking at it — which is the only
                     // way one stays switched on.
                     if ui
-                        .button(if *show_perf_panel { "⏱ profiling" } else { "⏱" })
+                        .button(if self.show_perf_panel { "⏱ profiling" } else { "⏱" })
                         .on_hover_text(
                             "Frame cost — where the time goes, per subsystem and per \
                              script. Readable from Lua too (perf.*), so a game can \
@@ -941,8 +798,8 @@ impl Editor {
                         )
                         .clicked()
                     {
-                        *show_perf_panel = !*show_perf_panel;
-                        perf_toggle = Some(*show_perf_panel);
+                        self.show_perf_panel = !self.show_perf_panel;
+                        perf_toggle = Some(self.show_perf_panel);
                     }
                     // The view is now chosen by the Scene / Game dock tabs (the editor
                     // free-fly view vs the active-camera gameplay view), not a toggle here.
@@ -954,7 +811,7 @@ impl Editor {
                     // save completes. Right-aligned so nothing else ever moves.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let dt = ui.input(|i| i.stable_dt).min(0.1);
-                        *save_flash = (*save_flash - dt).max(0.0);
+                        self.save_flash = (self.save_flash - dt).max(0.0);
                         let quiet = ui.visuals().weak_text_color();
                         // The two signal colours, from the one place they live
                         // (`theme::signal`) — an unsaved change is a warn and a
@@ -969,7 +826,7 @@ impl Editor {
                         } else {
                             // Glow bright right after a save, settle to quiet
                             // (t = 0 is the resting state — one branch, one wording).
-                            let t = (*save_flash / Editor::SAVE_FLASH_SECS).clamp(0.0, 1.0);
+                            let t = (self.save_flash / Editor::SAVE_FLASH_SECS).clamp(0.0, 1.0);
                             (
                                 "✔ saved",
                                 quiet.lerp_to_gamma(crate::theme::signal::GOOD, t),
@@ -1004,7 +861,7 @@ impl Editor {
             }
 
             // ---- ⏱ frame cost (`floptle/0077`) ----
-            if *show_perf_panel {
+            if self.show_perf_panel {
                 let mut open = true;
                 egui::Window::new("⏱ Frame cost")
                     .open(&mut open)
@@ -1013,13 +870,13 @@ impl Editor {
                         perf_readout(ui, &perf_snapshot);
                     });
                 if !open {
-                    *show_perf_panel = false;
+                    self.show_perf_panel = false;
                     perf_toggle = Some(false);
                 }
             }
 
             // ---- 🌐 multiplayer harness (Host & Join locally) ----
-            if *show_net_panel {
+            if self.show_net_panel {
                 let mut open = true;
                 egui::Window::new("🌐 Multiplayer")
                     .open(&mut open)
@@ -1467,7 +1324,7 @@ impl Editor {
                                     ui.horizontal(|ui| {
                                         ui.label("relay");
                                         ui.add(
-                                            egui::TextEdit::singleline(net_relay_addr)
+                                            egui::TextEdit::singleline(&mut self.net_relay_addr)
                                                 .desired_width(150.0)
                                                 .hint_text("relay host:port"),
                                         );
@@ -1478,20 +1335,20 @@ impl Editor {
                                             .on_hover_text("registers a lobby on the relay above and shows a five-letter CODE for friends. Nobody port-forwards; run `floptle-relay` anywhere both machines can reach.")
                                             .clicked()
                                         {
-                                            cmd.net_host_relay = Some(net_relay_addr.clone());
+                                            cmd.net_host_relay = Some(self.net_relay_addr.clone());
                                         }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("code");
                                         let r = ui.add(
-                                            egui::TextEdit::singleline(net_join_code)
+                                            egui::TextEdit::singleline(&mut self.net_join_code)
                                                 .desired_width(70.0)
                                                 .hint_text("ABCDE"),
                                         );
                                         if r.changed() {
-                                            *net_join_code = net_join_code.to_uppercase();
+                                            self.net_join_code = self.net_join_code.to_uppercase();
                                         }
-                                        let ok = !net_join_code.trim().is_empty();
+                                        let ok = !self.net_join_code.trim().is_empty();
                                         if ui
                                             .add_enabled(ok, egui::Button::new("⏵ Join by code"))
                                             .on_hover_text("joins the lobby with this code, through the relay above")
@@ -1499,8 +1356,8 @@ impl Editor {
                                         {
                                             cmd.net_join_quic = Some(format!(
                                                 "relay://{}/{}",
-                                                net_relay_addr.trim(),
-                                                net_join_code.trim()
+                                                self.net_relay_addr.trim(),
+                                                self.net_join_code.trim()
                                             ));
                                         }
                                     });
@@ -1509,22 +1366,22 @@ impl Editor {
                                     ui.horizontal(|ui| {
                                         ui.label("port");
                                         ui.add(
-                                            egui::TextEdit::singleline(net_host_port)
+                                            egui::TextEdit::singleline(&mut self.net_host_port)
                                                 .desired_width(60.0),
                                         );
                                         if ui.button("⏵ Host on LAN").clicked() {
                                             cmd.net_host_quic =
-                                                Some(net_host_port.trim().parse().unwrap_or(7777));
+                                                Some(self.net_host_port.trim().parse().unwrap_or(7777));
                                         }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.add(
-                                            egui::TextEdit::singleline(net_join_addr)
+                                            egui::TextEdit::singleline(&mut self.net_join_addr)
                                                 .desired_width(170.0)
                                                 .hint_text("quic://ip:port"),
                                         );
                                         if ui.button("⏵ Join").clicked() {
-                                            cmd.net_join_quic = Some(net_join_addr.clone());
+                                            cmd.net_join_quic = Some(self.net_join_addr.clone());
                                         }
                                     });
                                     ui.small(
@@ -1568,20 +1425,20 @@ impl Editor {
                                 ui.small("latency and loss are whatever the network gives you — the sliders only shape the simulated harness");
                             } else {
                                 ui.label("simulated link");
-                                let mut lat = *net_latency_ticks as i32;
+                                let mut lat = self.net_latency_ticks as i32;
                                 if ui
                                     .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
                                     .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
                                     .changed()
                                 {
-                                    *net_latency_ticks = lat as u64;
+                                    self.net_latency_ticks = lat as u64;
                                 }
                                 ui.add(
-                                    egui::Slider::new(net_loss, 0.0..=0.9)
+                                    egui::Slider::new(&mut self.net_loss, 0.0..=0.9)
                                         .text("packet loss")
                                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                                 );
-                                ui.checkbox(net_ghosts, "show client ghosts (cyan)")
+                                ui.checkbox(&mut self.net_ghosts, "show client ghosts (cyan)")
                                     .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
                             }
                             ui.separator();
@@ -1591,7 +1448,7 @@ impl Editor {
                         }
                     });
                 if !open {
-                    *show_net_panel = false;
+                    self.show_net_panel = false;
                 }
             }
 
@@ -1668,167 +1525,167 @@ impl Editor {
             // would otherwise stay pinned to the old viewport region — letting clicks,
             // context-menus and model-drops fall through onto whatever panel now
             // occupies that space. `scene_ui` re-arms it only on frames it draws.
-            *scene_rect = None;
+            self.scene_rect = None;
             let mut viewer = EditorTabViewer {
-                world,
-                selection,
+                world: &mut self.world,
+                selection: &mut self.selection,
                 selection_locked,
-                maps,
-                map_sel,
+                maps: &self.maps,
+                map_sel: &self.map_sel,
                 map_mode,
-                map_slot_name,
-                map_viz,
-                tile_viz,
-                map_opts,
+                map_slot_name: &mut self.map_slot_name,
+                map_viz: &self.map_viz,
+                tile_viz: &self.tile_viz,
+                map_opts: &mut self.map_opts,
                 tiles: &mut self.tiles,
                 tile_tools: &mut self.tile_tools,
-                map_size_buf,
-                map_spec_buf,
+                map_size_buf: &mut self.map_size_buf,
+                map_spec_buf: &mut self.map_spec_buf,
                 map_arm,
                 map_knife_on,
-                map_orient,
-                map_xform,
-                map_select_hidden,
-                map_bevel,
+                map_orient: &mut self.map_orient,
+                map_xform: &mut self.map_xform,
+                map_select_hidden: &mut self.map_select_hidden,
+                map_bevel: &mut self.map_bevel,
                 map_tool_on,
                 map_playing,
                 light_counts: self.light_counts,
-                map_hud_open,
-                map_keys,
-                map_rebind,
-                map_rebind_err,
+                map_hud_open: &mut self.map_hud_open,
+                map_keys: &mut self.map_keys,
+                map_rebind: &mut self.map_rebind,
+                map_rebind_err: &mut self.map_rebind_err,
                 gizmo_tool,
                 ui_overlay: &ui_overlay_snapshot,
                 ui_canvas: &ui_canvas_snapshot,
-                ref_kinds,
-                script_meta,
-                bone_selection,
-                pivot_edit,
-                fullscreen_tab,
+                ref_kinds: &self.ref_kinds,
+                script_meta: &mut self.script_meta,
+                bone_selection: &mut self.bone_selection,
+                pivot_edit: &mut self.pivot_edit,
+                fullscreen_tab: &mut self.fullscreen_tab,
                 focused_tab,
-                hier_search,
-                hier_scope,
-                collapsed,
-                hier_fold_pending,
+                hier_search: &mut self.hier_search,
+                hier_scope: &mut self.hier_scope,
+                collapsed: &mut self.collapsed,
+                hier_fold_pending: &mut self.hier_fold_pending,
                 bone_names: &bone_names,
-                console,
+                console: &mut self.console,
                 preview: preview_view.clone(),
-                preview_zoom,
-                preview_spin,
-                preview_spinning,
-                preview_material,
-                map_asset_preview,
+                preview_zoom: &mut self.preview_zoom,
+                preview_spin: &mut self.preview_spin,
+                preview_spinning: &mut self.preview_spinning,
+                preview_material: &mut self.preview_material,
+                map_asset_preview: &mut self.map_asset_preview,
                 entity_names: &entity_names,
                 gi: gi_status,
                 nav: nav_status.clone(),
-                materials,
-                mat_name_buf,
+                materials: &self.materials,
+                mat_name_buf: &mut self.mat_name_buf,
                 flsl_cache: &self.flsl_cache,
                 ui_flsl_cache: &self.ui_flsl_cache,
                 post_flsl_cache: &self.post_flsl_cache,
                 ui_styles: &self.ui_styles,
                 ui_tokens: &self.ui_tokens,
-                ui_design,
+                ui_design: &mut self.ui_design,
                 sdf_cache: &self.sdf_cache,
                 sky_uniforms: self.sky_shader.as_ref().map_or(&[], |(_, _, u)| u.as_slice()),
-                component_clip,
-                add_component_filter,
+                component_clip: &self.component_clip,
+                add_component_filter: &mut self.add_component_filter,
                 layer_names: &layer_names,
                 sorting_names: &sorting_names,
-                tag_edit,
-                hier_scrolled,
-                show_material_editor,
-                asset_tree,
-                texture_settings,
+                tag_edit: &mut self.tag_edit,
+                hier_scrolled: &mut self.hier_scrolled,
+                show_material_editor: &mut self.show_material_editor,
+                asset_tree: &self.asset_tree,
+                texture_settings: &self.texture_settings,
                 cam_preview,
                 has_active_camera,
-                vertex_brush,
-                terrain_brush,
-                terrain_voxel,
-                terrain_textures,
-                terrain_glow,
-                terrain_tex_scale,
+                vertex_brush: &mut self.vertex_brush,
+                terrain_brush: &mut self.terrain_brush,
+                terrain_voxel: &mut self.terrain_voxel,
+                terrain_textures: &mut self.terrain_textures,
+                terrain_glow: &mut self.terrain_glow_mask,
+                terrain_tex_scale: &mut self.terrain_tex_scale,
                 terrain_present,
                 terrain_stats,
-                assets_grid,
-                assets_grid_dir,
+                assets_grid: &mut self.assets_grid,
+                assets_grid_dir: &mut self.assets_grid_dir,
                 project_root,
-                selected_asset,
-                asset_selection,
-                ide,
-                learn,
-                script_errors,
-                ide_diag,
-                gizmo,
-                terrain_viz,
-                paint_viz,
-                camera_gizmos,
-                light_gizmos,
-                volume_gizmos,
-                rig_gizmos,
-                gi_probe_dots,
-                body_gizmos,
-                contact_gizmos,
-                script_gizmo_lines,
-                ext: ext_host,
-                ext_painted,
-                game_gizmo_lines,
-                game_gizmos,
-                terrain_wire,
-                nav_wire,
-                mesh_wire,
-                particle_gizmo,
-                show_gizmos,
-                panels,
+                selected_asset: &mut self.selected_asset,
+                asset_selection: &mut self.asset_selection,
+                ide: &mut self.ide,
+                learn: &mut self.learn,
+                script_errors: self.script_errors.as_slice(),
+                ide_diag: self.ide_diag.as_ref(),
+                gizmo: self.gizmo.as_ref(),
+                terrain_viz: self.terrain_viz.as_ref(),
+                paint_viz: self.paint_viz.as_ref(),
+                camera_gizmos: self.camera_gizmos.as_slice(),
+                light_gizmos: self.light_gizmos.as_slice(),
+                volume_gizmos: self.volume_gizmos.as_slice(),
+                rig_gizmos: self.rig_gizmos.as_slice(),
+                gi_probe_dots: self.gi_probe_dots.as_slice(),
+                body_gizmos: self.body_gizmos.as_slice(),
+                contact_gizmos: self.contact_gizmos.as_slice(),
+                script_gizmo_lines: self.script_gizmo_lines.as_slice(),
+                ext: &mut self.ext,
+                ext_painted: self.ext_painted.as_slice(),
+                game_gizmo_lines: self.game_gizmo_lines.as_slice(),
+                game_gizmos: &mut self.game_gizmos,
+                terrain_wire: self.terrain_wire_gizmo.as_slice(),
+                nav_wire: self.nav_gizmo.as_slice(),
+                mesh_wire: self.mesh_wire_gizmo.as_slice(),
+                particle_gizmo: self.particle_gizmo.as_slice(),
+                show_gizmos: &mut self.show_gizmos,
+                panels: &mut self.panels,
                 view_lock: &mut view_lock,
                 view_ortho: &mut view_ortho,
-                gizmo_filter,
+                gizmo_filter: &mut self.gizmo_filter,
                 grabbed,
                 tool,
-                scene_rect: &mut *scene_rect,
-                game_rect,
+                scene_rect: &mut self.scene_rect,
+                game_rect: &mut self.game_rect,
                 game_offscreen,
                 game_tex,
-                aspect: aspect_mode,
-                zoom: viewport_zoom,
+                aspect: &mut self.aspect_mode,
+                zoom: &mut self.viewport_zoom,
                 scene_name: &scene_name,
                 editing_prefab: self.editing_prefab.is_some(),
                 ppp,
                 code_theme,
-                anim: anim_sys,
-                vfx: vfx_sys,
-                vfx_ui: vfx_ui_state,
-                audio: audio_sys,
-                mixer_ui: mixer_ui_state,
-                project,
+                anim: &mut self.anim,
+                vfx: &mut self.vfx,
+                vfx_ui: &mut self.vfx_ui,
+                audio: &mut self.audio,
+                mixer_ui: &mut self.mixer_ui,
+                project: &mut self.project,
                 particles_active,
-                anim_ui: anim_ui_state,
-                shader_graph: shader_graph_state,
-                image: image_state,
+                anim_ui: &mut self.anim_ui,
+                shader_graph: &mut self.shader_graph,
+                image: &mut self.image,
                 image_parked: &image_parked,
-                shader_preview: shader_preview_state,
-                mesh_registry,
+                shader_preview: &mut self.shader_preview,
+                mesh_registry: &self.mesh_registry,
                 pointer_down,
                 playing,
                 player_mode,
                 settings: crate::settings_ui::SettingsCtx {
                     scene_files: &settings_scene_files,
-                    layer_new,
-                    section: settings_section,
-                    search: settings_search,
+                    layer_new: &mut self.layer_new,
+                    section: &mut self.settings_section,
+                    search: &mut self.settings_search,
                     input_map: &settings_input_map,
                     input_pending: settings_input_pending.as_ref(),
-                    input_scan,
-                    input_test: input_test_state,
+                    input_scan: &self.input_scan,
+                    input_test: &self.input_test_state,
                     pad_names: &settings_pad_names,
-                    input_new_action,
+                    input_new_action: &mut self.input_new_action,
                     access,
                 },
-                packages: packages_state,
+                packages: &mut self.packages_ui,
                 packages_ctx: crate::packages_ui::PkgCtx {
                     project_root: &ext_project_root,
                     load: &pkg_load,
-                    account: ext_account,
+                    account: self.account.as_ref(),
                 },
                 packages_action: &mut pkg_action,
                 cmd: &mut cmd,
@@ -1896,9 +1753,9 @@ impl Editor {
             // drag is a change per frame and that would be a file write per
             // frame of it.
             let panels_now = *viewer.panels;
-            if panels_now != *panels_saved {
+            if panels_now != self.panels_saved {
                 crate::prefs::save_viewport_panels(&panels_now);
-                *panels_saved = panels_now;
+                self.panels_saved = panels_now;
             }
             // The Scene view's plane lock, chosen in the viewport toolbar.
             // `set_lock` snaps the camera square without moving it.
@@ -1914,12 +1771,12 @@ impl Editor {
             // package cannot take a docked slot away from the editor's own
             // panels. Drawn after the dock, so a panel is over the viewport it
             // is about.
-            for i in 0..ext_host.windows.len() {
-                if !ext_host.windows[i].open {
+            for i in 0..self.ext.windows.len() {
+                if !self.ext.windows[i].open {
                     continue;
                 }
-                let title = ext_host.windows[i].title.clone();
-                let id = ext_host.windows[i].id;
+                let title = self.ext.windows[i].title.clone();
+                let id = self.ext.windows[i].id;
                 let mut open = true;
                 let win = egui::Window::new(&title)
                     .id(egui::Id::new(("ext_window", id)))
@@ -1936,9 +1793,9 @@ impl Editor {
                         egui::Id::new(("ext_window", id)),
                     ));
                 }
-                win.show(ui, |ui| ext_host.draw_window(i, ui));
+                win.show(ui, |ui| self.ext.draw_window(i, ui));
                 if !open {
-                    ext_host.set_window_open(i, false);
+                    self.ext.set_window_open(i, false);
                 }
             }
 
@@ -1946,7 +1803,7 @@ impl Editor {
             // `EditorTab::Packages`. Nothing to draw here.
 
             // ---- what a package's `ed.message` asked to say ----
-            if let Some((title, body)) = ext_message.clone() {
+            if let Some((title, body)) = self.ext_message.clone() {
                 let mut open = true;
                 let mut dismissed = false;
                 egui::Window::new(&title)
@@ -1959,17 +1816,17 @@ impl Editor {
                         dismissed = ui.button("OK").clicked();
                     });
                 if !open || dismissed {
-                    *ext_message = None;
+                    self.ext_message = None;
                 }
             }
 
             // ---- a package's keyboard shortcut ----
             // Read here rather than in the editor's own key handling so an
             // extension cannot fire while a text field has the keyboard.
-            if !ext_host.shortcuts.is_empty() && !ui.ctx().egui_wants_keyboard_input() {
+            if !self.ext.shortcuts.is_empty() && !ui.ctx().egui_wants_keyboard_input() {
                 let pressed = crate::ext_wire::pressed_shortcut(ui.ctx());
                 if let Some(p) = pressed {
-                    ext_shortcut_click = ext_host.shortcuts.iter().position(|s| s.keys == p);
+                    ext_shortcut_click = self.ext.shortcuts.iter().position(|s| s.keys == p);
                 }
             }
 
@@ -1980,7 +1837,7 @@ impl Editor {
                 && ui.input(|i| i.pointer.any_released())
             {
                 let pos = ui.input(|i| i.pointer.interact_pos());
-                let over_scene = matches!((pos, *scene_rect), (Some(p), Some(r)) if r.contains(p));
+                let over_scene = matches!((pos, self.scene_rect), (Some(p), Some(r)) if r.contains(p));
                 if over_scene
                     && let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
                         cmd.drop_asset = Some(p.path.clone());
@@ -1988,7 +1845,7 @@ impl Editor {
             }
 
             // ---- Export Game… (File menu): binary + assets + manifest ----
-            if *show_export {
+            if self.show_export {
                 let mut open = true;
                 egui::Window::new("📦 Export Game")
                     .open(&mut open)
@@ -2003,16 +1860,16 @@ impl Editor {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label("Title");
-                            ui.text_edit_singleline(export_title);
+                            ui.text_edit_singleline(&mut self.export_title);
                         });
                         ui.horizontal(|ui| {
                             ui.label("Folder");
-                            ui.text_edit_singleline(export_dir)
+                            ui.text_edit_singleline(&mut self.export_dir)
                                 .on_hover_text("the build lands here (created if missing)");
                         });
                         // Exactly where that lands — no guessing at relative paths.
                         let resolved = {
-                            let t = export_dir.trim();
+                            let t = self.export_dir.trim();
                             let p = std::path::Path::new(t);
                             if p.is_absolute() { p.to_path_buf() } else { export_base.join(p) }
                         };
@@ -2020,10 +1877,10 @@ impl Editor {
                         ui.horizontal(|ui| {
                             ui.label("Target");
                             egui::ComboBox::from_id_salt("export_target")
-                                .selected_text(EXPORT_TARGETS[*export_target].label)
+                                .selected_text(EXPORT_TARGETS[self.export_target].label)
                                 .show_ui(ui, |ui| {
                                     for (i, t) in EXPORT_TARGETS.iter().enumerate() {
-                                        ui.selectable_value(export_target, i, t.label);
+                                        ui.selectable_value(&mut self.export_target, i, t.label);
                                     }
                                 });
                         });
@@ -2035,16 +1892,16 @@ impl Editor {
                         );
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let can = !export_building && !export_dir.trim().is_empty();
+                            let can = !export_building && !self.export_dir.trim().is_empty();
                             if ui.add_enabled(can, egui::Button::new("📦 Export")).clicked() {
                                 cmd.export_game =
-                                    Some((export_dir.trim().to_string(), *export_target));
+                                    Some((self.export_dir.trim().to_string(), self.export_target));
                             }
                             if export_building {
                                 ui.spinner();
                             }
                         });
-                        if let Some(status) = export_status {
+                        if let Some(status) = &self.export_status {
                             ui.add_space(4.0);
                             ui.label(status.as_str());
                         }
@@ -2055,7 +1912,7 @@ impl Editor {
                         }
                     });
                 if !open {
-                    *show_export = false;
+                    self.show_export = false;
                 }
             }
 
@@ -2130,7 +1987,7 @@ impl Editor {
 
             // ---- preferences window (user-wide editor settings) ----
             egui::Window::new("Preferences")
-                .open(show_preferences)
+                .open(&mut self.show_preferences)
                 .resizable(false)
                 .default_width(320.0)
                 .show(ui.ctx(), |ui| {
@@ -2138,50 +1995,50 @@ impl Editor {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.add(
-                            egui::TextEdit::singleline(external_editor)
+                            egui::TextEdit::singleline(&mut self.external_editor)
                                 .desired_width(150.0)
                                 .hint_text("code"),
                         );
                         if ui.button("Save").clicked() {
-                            cmd.set_external_editor = Some(external_editor.clone());
+                            cmd.set_external_editor = Some(self.external_editor.clone());
                         }
                     });
                     ui.small("Binary name or path (e.g. code, codium, subl). VSCode-family editors open the project folder and jump to the file. Saved as a user preference.");
                     if ui
-                        .checkbox(prefer_external, "Open scripts in my external editor")
+                        .checkbox(&mut self.prefer_external_editor, "Open scripts in my external editor")
                         .on_hover_text("When on, double-clicking a script (or its Edit button, or a console line) opens it here instead of the in-engine IDE.")
                         .changed()
                     {
-                        cmd.set_prefer_external = Some(*prefer_external);
+                        cmd.set_prefer_external = Some(self.prefer_external_editor);
                     }
 
                     ui.add_space(12.0);
                     ui.label("Play-mode tint");
                     ui.separator();
                     let mut tint_changed = ui
-                        .checkbox(play_tint_enabled, "Tint the editor while playing")
+                        .checkbox(&mut self.play_tint_enabled, "Tint the editor while playing")
                         .on_hover_text("Tints the editor chrome while in play mode so you never mistake it for edit mode (and lose edits on Stop).")
                         .changed();
-                    ui.add_enabled_ui(*play_tint_enabled, |ui| {
+                    ui.add_enabled_ui(self.play_tint_enabled, |ui| {
                         // The stored value is an additive RGB offset, so editing it as a color
                         // reads naturally: black = no tint, brighter = a stronger nudge.
                         let mut col =
-                            egui::Color32::from_rgb(play_tint[0], play_tint[1], play_tint[2]);
+                            egui::Color32::from_rgb(self.play_tint[0], self.play_tint[1], self.play_tint[2]);
                         ui.horizontal(|ui| {
                             ui.label("tint amount");
                             if ui.color_edit_button_srgba(&mut col).changed() {
-                                *play_tint = [col.r(), col.g(), col.b()];
+                                self.play_tint = [col.r(), col.g(), col.b()];
                                 tint_changed = true;
                             }
                         });
                         ui.small("Color added to the editor background while playing (black = no tint).");
                         if ui.button("Reset to default").clicked() {
-                            *play_tint = DEFAULT_PLAY_TINT;
+                            self.play_tint = DEFAULT_PLAY_TINT;
                             tint_changed = true;
                         }
                     });
                     if tint_changed {
-                        cmd.set_play_tint = Some((*play_tint_enabled, *play_tint));
+                        cmd.set_play_tint = Some((self.play_tint_enabled, self.play_tint));
                     }
 
                     ui.add_space(12.0);
@@ -2228,7 +2085,7 @@ impl Editor {
             // spent asking — those differ by orders of magnitude and it is
             // routinely the second one that looks fine.
             egui::Window::new("⏱ Frame timing")
-                .open(show_gpu_timing)
+                .open(&mut self.gpu_timing_open)
                 .resizable(false)
                 .default_width(300.0)
                 .show(ui.ctx(), |ui| {
@@ -2281,30 +2138,30 @@ impl Editor {
 
             // ---- grid settings window ----
             egui::Window::new("Grid Settings")
-                .open(show_grid_settings)
+                .open(&mut self.show_grid_settings)
                 .resizable(false)
                 .default_width(240.0)
                 .show(ui.ctx(), |ui| {
                     let mut changed = false;
-                    changed |= ui.checkbox(&mut grid.show, "show grid").changed();
-                    changed |= ui.checkbox(&mut grid.snap, "snap objects to grid").changed();
-                    changed |= ui.add(egui::Slider::new(&mut grid.size, 0.1..=10.0).text("cell size")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut grid.extent, 4..=120).text("extent (cells)")).changed();
+                    changed |= ui.checkbox(&mut self.grid.show, "show grid").changed();
+                    changed |= ui.checkbox(&mut self.grid.snap, "snap objects to grid").changed();
+                    changed |= ui.add(egui::Slider::new(&mut self.grid.size, 0.1..=10.0).text("cell size")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut self.grid.extent, 4..=120).text("extent (cells)")).changed();
                     changed |= ui
                         .add(
-                            egui::Slider::new(&mut grid.y_offset, 0.0..=50.0)
+                            egui::Slider::new(&mut self.grid.y_offset, 0.0..=50.0)
                                 .text("drop below camera")
                                 .suffix(" m"),
                         )
                         .on_hover_text("How far below the camera the grid floor sits. Your value is saved between sessions.")
                         .changed();
-                    changed |= ui.add(egui::Slider::new(&mut grid.alpha, 0.0..=1.0).text("opacity")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut self.grid.alpha, 0.0..=1.0).text("opacity")).changed();
                     ui.horizontal(|ui| {
                         ui.label("color");
-                        changed |= ui.color_edit_button_rgb(&mut grid.color).changed();
+                        changed |= ui.color_edit_button_rgb(&mut self.grid.color).changed();
                     });
                     if ui.small_button("Reset to defaults").clicked() {
-                        *grid = GridConfig::default();
+                        self.grid = GridConfig::default();
                         changed = true;
                     }
                     // Persist the grid settings whenever a control changes (so they don't
@@ -2330,7 +2187,7 @@ impl Editor {
                             // be open. Same `MapOp`s the panel emits, so there is one
                             // implementation and no stale subset.
                             if tool == Tool::MapEdit {
-                                let sel = map_sel.as_ref();
+                                let sel = self.map_sel.as_ref();
                                 let nv = sel.map_or(0, |s| s.verts.len());
                                 let ne = sel.map_or(0, |s| s.edges.len());
                                 let nf = sel.map_or(0, |s| s.faces.len());
@@ -2445,7 +2302,7 @@ impl Editor {
 
             // ---- new / open project window (rfd unavailable ⏵ a text path) ----
             egui::Window::new("Project")
-                .open(show_project_mgr)
+                .open(&mut self.show_project_mgr)
                 .resizable(false)
                 .default_width(420.0)
                 .show(ui.ctx(), |ui| {
@@ -2453,13 +2310,13 @@ impl Editor {
                     ui.horizontal(|ui| {
                         ui.label("path");
                         ui.add(
-                            egui::TextEdit::singleline(project_path_buf)
+                            egui::TextEdit::singleline(&mut self.project_path_buf)
                                 .desired_width(290.0)
                                 .hint_text("/path/to/project"),
                         );
                     });
                     ui.horizontal(|ui| {
-                        let p = project_path_buf.trim().to_string();
+                        let p = self.project_path_buf.trim().to_string();
                         if ui.add_enabled(!p.is_empty(), egui::Button::new("Open")).clicked() {
                             cmd.project_action = Some(ProjectAction::Open(p.clone()));
                         }
@@ -2472,7 +2329,7 @@ impl Editor {
                 });
 
             // ---- rename modal (for the asset browser) ----
-            if let Some((path, buf)) = rename_target.as_mut() {
+            if let Some((path, buf)) = self.rename_target.as_mut() {
                 let mut open = true;
                 let mut close = false;
                 // The fixed suffix = everything after the first dot, so compound
@@ -2522,12 +2379,12 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *rename_target = None;
+                    self.rename_target = None;
                 }
             }
 
             // ---- new scene modal ----
-            if let Some(buf) = new_scene_buf.as_mut() {
+            if let Some(buf) = self.new_scene_buf.as_mut() {
                 let mut open = true;
                 let mut close = false;
                 egui::Window::new("New scene")
@@ -2554,7 +2411,7 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *new_scene_buf = None;
+                    self.new_scene_buf = None;
                 }
             }
 
@@ -2564,7 +2421,7 @@ impl Editor {
             // rule is the same everywhere: you name it, then it exists. The
             // words come from the kind; the mechanics (Enter to accept, Escape
             // or ✖ to cancel, empty is refused) do not vary.
-            if let Some((kind, buf)) = new_asset_prompt.as_mut() {
+            if let Some((kind, buf)) = self.new_asset_prompt.as_mut() {
                 let (title, prompt, hint) = kind.words();
                 let kind = *kind;
                 let mut open = true;
@@ -2600,12 +2457,12 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *new_asset_prompt = None;
+                    self.new_asset_prompt = None;
                 }
             }
 
             // ---- quit with unsaved changes ----
-            if *show_quit_confirm {
+            if self.show_quit_confirm {
                 let mut open = true;
                 let mut close = false;
                 egui::Window::new("Unsaved changes")
@@ -2652,7 +2509,7 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *show_quit_confirm = false;
+                    self.show_quit_confirm = false;
                 }
             }
 
@@ -2664,7 +2521,7 @@ impl Editor {
             // was sometimes not available and the close simply never happened.
             // Discard is the arm that was missing, and it is the arm that turns
             // "I'm stuck editing this image" back into an ordinary decision.
-            if let Some(which) = *image_close_confirm {
+            if let Some(which) = self.image_close_confirm {
                 let mut decided = None;
                 let mut open = true;
                 egui::Window::new("Close this image?")
@@ -2702,25 +2559,25 @@ impl Editor {
                     decided = Some(0);
                 }
                 match decided {
-                    Some(0) => *image_close_confirm = None,
-                    Some(1) => *image_close_confirm = Some(which), // saved below, then closed
+                    Some(0) => self.image_close_confirm = None,
+                    Some(1) => self.image_close_confirm = Some(which), // saved below, then closed
                     Some(2) => {
-                        *image_close_confirm = None;
+                        self.image_close_confirm = None;
                         cmd.image_discard = Some(which);
                     }
                     _ => {}
                 }
                 if decided == Some(1) {
-                    *image_close_confirm = None;
+                    self.image_close_confirm = None;
                     cmd.image_save_then_close = true;
                 }
             }
 
             // ---- transient toast (save confirmation etc.) — top-center, fades out ----
-            if let Some((msg, secs)) = toast.as_mut() {
+            if let Some((msg, secs)) = self.toast.as_mut() {
                 *secs -= ui.input(|i| i.stable_dt).min(0.1);
                 if *secs <= 0.0 {
-                    *toast = None;
+                    self.toast = None;
                 } else {
                     let a = (*secs).clamp(0.0, 1.0); // fade over the last second
                     egui::Area::new(egui::Id::new("save-toast"))
@@ -2741,7 +2598,7 @@ impl Editor {
             }
 
             // ---- delete asset confirmation (deletion is irreversible) ----
-            if let Some(paths) = delete_confirm.clone() {
+            if let Some(paths) = self.delete_confirm.clone() {
                 let mut open = true;
                 let mut close = false;
                 let name = |p: &String| {
@@ -2788,7 +2645,7 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *delete_confirm = None;
+                    self.delete_confirm = None;
                 }
             }
 
@@ -2798,7 +2655,7 @@ impl Editor {
             // default. Both answers are offered as buttons that say what they
             // will do, with the counts in them — "Yes/No" on a dialog nobody
             // reads carefully is how the wrong one gets clicked every time.
-            if let Some(pending) = layer_children_confirm.clone() {
+            if let Some(pending) = self.layer_children_confirm.clone() {
                 let mut open = true;
                 let mut close = false;
                 let n_targets = pending.targets.len();
@@ -2861,7 +2718,7 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *layer_children_confirm = None;
+                    self.layer_children_confirm = None;
                 }
             }
 
@@ -2870,7 +2727,7 @@ impl Editor {
             // rock-grey patch or a massive grass field) instead of always starting as
             // the same small default slab you'd otherwise have to sculpt/fill out by
             // hand — see NewTerrainCfg.
-            if let Some(cfg) = new_terrain_cfg.as_mut() {
+            if let Some(cfg) = self.new_terrain_cfg.as_mut() {
                 let mut open = true;
                 let mut close = false;
                 egui::Window::new("New terrain")
@@ -2904,11 +2761,11 @@ impl Editor {
                         let (chunks, mb) = crate::terrain_ui::new_terrain_preview(
                             cfg.size_xz,
                             cfg.thickness,
-                            *terrain_voxel,
+                            self.terrain_voxel,
                         );
                         ui.small(format!(
                             "→ voxel {:.2} units · ~{chunks} chunks · ~{mb:.1} MB (sparse — grows as you sculpt)",
-                            *terrain_voxel,
+                            self.terrain_voxel,
                         ));
                         ui.horizontal(|ui| {
                             ui.label("color");
@@ -2916,7 +2773,7 @@ impl Editor {
                         });
                         ui.label("texture (optional — paints the whole slab)");
                         let mut tex_list = Vec::new();
-                        collect_texture_paths(asset_tree, &mut tex_list);
+                        collect_texture_paths(&self.asset_tree, &mut tex_list);
                         let cur_label = if cfg.texture.is_empty() {
                             "(none — flat color)".to_string()
                         } else {
@@ -2956,12 +2813,12 @@ impl Editor {
                         });
                     });
                 if !open || close {
-                    *new_terrain_cfg = None;
+                    self.new_terrain_cfg = None;
                 }
             }
 
             // ---- open-scene unsaved-changes confirm ----
-            if let Some(path) = pending_open_scene.clone() {
+            if let Some(path) = self.pending_open_scene.clone() {
                 let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 // One gate, both directions: a prefab replaces the world exactly
                 // as thoroughly as a scene does, so it comes through here too and
@@ -2981,19 +2838,19 @@ impl Editor {
                         ui.horizontal(|ui| {
                             if ui.button("Save & open").clicked() {
                                 cmd.do_open_scene = Some((path.clone(), true));
-                                *pending_open_scene = None;
+                                self.pending_open_scene = None;
                             }
                             if ui.button("Discard & open").clicked() {
                                 cmd.do_open_scene = Some((path.clone(), false));
-                                *pending_open_scene = None;
+                                self.pending_open_scene = None;
                             }
                             if ui.button("Cancel").clicked() {
-                                *pending_open_scene = None;
+                                self.pending_open_scene = None;
                             }
                         });
                     });
                 if !keep {
-                    *pending_open_scene = None;
+                    self.pending_open_scene = None;
                 }
             }
 
@@ -3014,7 +2871,7 @@ impl Editor {
             if playing
                 && !player_mode
                 && (cursor_held_by_game || cursor_held_by_editor)
-                && let Some(r) = *game_rect
+                && let Some(r) = self.game_rect
             {
                 let (msg, fg) = if cursor_held_by_editor {
                     ("Click the game to give the mouse back", egui::Color32::from_rgb(150, 210, 255))
