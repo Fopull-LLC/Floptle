@@ -20,6 +20,7 @@ use floptle_render::{
     PostStack, Projection, Raster, RenderCamera, SsaoFrame, TexId,
 };
 use glam::{DVec3, Quat};
+use floptle_render::probe::{readback_bytes as read_back};
 
 const W: u32 = 480;
 const H: u32 = 270;
@@ -356,58 +357,6 @@ fn main() {
     assert_eq!(plain, again, "the default settings must be a stable identity");
 
     println!("\nall look-chain assertions passed — sheets in {dir}/look_*.png");
-}
-
-fn read_back(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
-    let bpp = 4u32;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded = (W * bpp).div_ceil(align) * align;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc =
-        gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit(Some(enc.finish()));
-    let slice = buf.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let data = slice.get_mapped_range();
-    let mut out = Vec::with_capacity((W * H * 4) as usize);
-    for y in 0..H {
-        let row = (y * padded) as usize;
-        out.extend_from_slice(&data[row..row + (W * bpp) as usize]);
-    }
-    drop(data);
-    buf.unmap();
-    // The swapchain format may be Bgra — normalise so the measurements above
-    // are talking about the channels they name.
-    if matches!(gpu.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb)
-    {
-        for px in out.as_chunks_mut::<4>().0 {
-            px.swap(0, 2);
-        }
-    }
-    out
 }
 
 fn save_png(px: &[u8], w: u32, h: u32, path: &str) {

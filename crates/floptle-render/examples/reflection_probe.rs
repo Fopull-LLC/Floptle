@@ -27,6 +27,7 @@ use floptle_render::{
     RaymarchGlobals, Raymarch, RenderCamera, SurfaceExtras, TexId,
 };
 use glam::{DVec3, Mat4, Quat, Vec3};
+use floptle_render::probe::{readback_bytes as read_back};
 
 const S: u32 = 192;
 
@@ -238,49 +239,6 @@ fn shot(
 struct Shot {
     rgb: [f32; 3],
     spread: f32,
-}
-
-fn read_back(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
-    let unpadded = S * 4;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded = unpadded.div_ceil(align) * align;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * S) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(S),
-            },
-        },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit([encoder.finish()]);
-    let slice = buf.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let data = slice.get_mapped_range();
-    let mut pixels = Vec::with_capacity((S * S * 4) as usize);
-    for row in 0..S {
-        let start = (row * padded) as usize;
-        pixels.extend_from_slice(&data[start..start + unpadded as usize]);
-    }
-    pixels
 }
 
 fn save_png(pixels: &[u8], path: &str) {

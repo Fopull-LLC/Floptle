@@ -17,6 +17,7 @@ use floptle_render::{
     TexId, TexSampling, TextureData,
 };
 use glam::{DVec3, Mat4, Quat, Vec3};
+use floptle_render::probe::{readback};
 
 const S: u32 = 320;
 const COLS: u32 = 8;
@@ -161,58 +162,6 @@ fn flat_sheet(
         &TextureData { pixels, width: n, height: n },
         TexSampling::default(),
     )
-}
-
-fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
-    let bpp = 4u32;
-    let padded = (S * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * S) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(S),
-            },
-        },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let view = buf.slice(..).get_mapped_range();
-    let bgra = matches!(
-        gpu.surface_format(),
-        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-    );
-    let mut o = Vec::with_capacity((S * S) as usize);
-    for y in 0..S {
-        let row = (y * padded) as usize;
-        for x in 0..S {
-            let i = row + (x * bpp) as usize;
-            let p = [view[i], view[i + 1], view[i + 2], view[i + 3]];
-            o.push(if bgra { [p[2], p[1], p[0], p[3]] } else { p });
-        }
-    }
-    drop(view);
-    buf.unmap();
-    o
 }
 
 fn save_png(px: &[[u8; 4]], path: &str) {

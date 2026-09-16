@@ -24,6 +24,7 @@ use floptle_render::{
     Raster, RenderCamera, SkinDraw, TexId, Vertex,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
+use floptle_render::probe::{readback, save_png};
 
 const S: u32 = 320;
 /// Segments up the bar; each ring is weighted between two joints, so a bend
@@ -277,112 +278,4 @@ fn main() {
 
     save_png(&gpu, &gpu_tex, &out);
     println!("wrote {out} — a smoothly curling tapered bar, deformed in the vertex shader");
-}
-
-fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
-    let bpp = 4u32;
-    let padded = (S * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * S) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(S),
-            },
-        },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit(Some(encoder.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let view = buf.slice(..).get_mapped_range();
-    let mut px = Vec::with_capacity((S * S) as usize);
-    for y in 0..S {
-        let row = (y * padded) as usize;
-        for x in 0..S {
-            let i = row + (x * bpp) as usize;
-            px.push([view[i], view[i + 1], view[i + 2], view[i + 3]]);
-        }
-    }
-    drop(view);
-    buf.unmap();
-    px
-}
-
-fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {
-    let bpp = 4u32;
-    let unpadded = S * bpp;
-    let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("png"),
-        size: (padded * S) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("png") });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(S),
-            },
-        },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit([encoder.finish()]);
-    let slice = buf.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let data = slice.get_mapped_range();
-    let bgra = matches!(
-        gpu.surface_format(),
-        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-    );
-    let mut pixels = Vec::with_capacity((S * S * 4) as usize);
-    for row in 0..S {
-        let start = (row * padded) as usize;
-        for x in 0..S {
-            let i = start + (x * bpp) as usize;
-            if bgra {
-                pixels.extend_from_slice(&[data[i + 2], data[i + 1], data[i], data[i + 3]]);
-            } else {
-                pixels.extend_from_slice(&data[i..i + 4]);
-            }
-        }
-    }
-    drop(data);
-    buf.unmap();
-    let file = std::fs::File::create(path).expect("create png");
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), S, S);
-    enc.set_color(png::ColorType::Rgba);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&pixels).unwrap();
 }

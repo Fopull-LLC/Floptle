@@ -31,6 +31,7 @@ use floptle_render::{
     RaymarchGlobals, Raymarch, RenderCamera, SurfaceExtras, TexId,
 };
 use glam::{DVec3, Mat4, Quat, Vec3};
+use floptle_render::probe::{readback_bytes as read_back};
 
 const S: u32 = 192;
 /// Where the fog starts and where it is total. The surfaces sit at the far end.
@@ -373,46 +374,6 @@ fn changed(a: &[u8], b: &[u8]) -> usize {
 /// shader was handed would be comparing two different quantities.
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
-fn read_back(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
-    let row = (S * 4).div_ceil(256) * 256;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (row * S) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = gpu.device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(row),
-                rows_per_image: Some(S),
-            },
-        },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit([enc.finish()]);
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let data = buf.slice(..).get_mapped_range();
-    let mut out = Vec::with_capacity((S * S * 4) as usize);
-    for y in 0..S {
-        let start = (y * row) as usize;
-        out.extend_from_slice(&data[start..start + (S * 4) as usize]);
-    }
-    drop(data);
-    buf.unmap();
-    out
 }
 
 fn save(px: &[u8], path: &str) {

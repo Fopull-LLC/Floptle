@@ -24,6 +24,7 @@ use floptle_render::{
     RenderCamera, TexId, TexSampling, TextureData,
 };
 use glam::{Mat4, Quat, Vec3};
+use floptle_render::probe::{readback};
 
 const W: u32 = 640;
 const H: u32 = 200;
@@ -202,51 +203,6 @@ fn main() {
         "cells {bad:?} drew the wrong frame — the sheet's UV window is off (see {out})"
     );
     println!("spritesheet cells OK; wrote {out}");
-}
-
-fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
-    let bpp = 4u32;
-    let padded = (W * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let view = buf.slice(..).get_mapped_range();
-    let mut out = Vec::with_capacity((W * H) as usize);
-    for y in 0..H {
-        let row = (y * padded) as usize;
-        for x in 0..W {
-            let i = row + (x * bpp) as usize;
-            out.push([view[i], view[i + 1], view[i + 2], view[i + 3]]);
-        }
-    }
-    out
 }
 
 fn save_png(px: &[[u8; 4]], path: &str) {

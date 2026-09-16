@@ -36,6 +36,7 @@ pub mod outline;
 pub mod palette;
 pub mod particles;
 pub mod post;
+pub mod probe;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;

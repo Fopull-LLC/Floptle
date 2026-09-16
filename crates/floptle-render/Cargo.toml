@@ -38,6 +38,7 @@ pollster = { workspace = true }
 log = { workspace = true }
 # Game-UI text: tiny pure-Rust TTF rasterizer feeding the ui pass's glyph atlas.
 fontdue = "0.9"
+png = "0.18"
 
 [dev-dependencies]
 # The GLSL backend, for the test that holds every shader against OpenGL's rules.
@@ -47,7 +48,6 @@ fontdue = "0.9"
 naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
 
 # Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
-png = "0.18"
 # examples/shader_probe.rs compiles .flsl through the production path.
 floptle-shader = { path = "../floptle-shader" }
 # examples/ui_demo_probe.rs renders a real .ron scene's UI layer, so the demo

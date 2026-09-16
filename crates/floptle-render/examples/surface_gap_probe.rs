@@ -36,6 +36,7 @@ use floptle_render::{
     MaterialParams, MeshId, Projection, Raster, RenderCamera, TexId,
 };
 use glam::{DVec3, Quat, Vec3};
+use floptle_render::probe::{readback_bytes as read_back};
 
 const W: u32 = 256;
 const H: u32 = 256;
@@ -226,50 +227,6 @@ fn min_of(lum: &[f32]) -> f32 {
 
 fn max_of(lum: &[f32]) -> f32 {
     lum.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-}
-
-fn read_back(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
-    let bpp = 4u32;
-    let unpadded = W * bpp;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded = unpadded.div_ceil(align) * align;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded * H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit([encoder.finish()]);
-    let slice = buf.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let data = slice.get_mapped_range();
-    let mut pixels = Vec::with_capacity((W * H * 4) as usize);
-    for row in 0..H {
-        let start = (row * padded) as usize;
-        pixels.extend_from_slice(&data[start..start + unpadded as usize]);
-    }
-    pixels
 }
 
 fn save_png(pixels: &[u8], path: &str) {
