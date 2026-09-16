@@ -192,6 +192,8 @@ mod prefs;
 mod project;
 mod draw_2d;
 mod frame_commands;
+#[cfg(feature = "editor-ui")]
+mod gather;
 mod mesh_instances;
 mod offscreen;
 mod perf_readout;

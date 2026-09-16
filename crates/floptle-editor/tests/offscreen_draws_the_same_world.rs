@@ -39,8 +39,9 @@
 //! If this fails after a refactor that genuinely moved the gather somewhere
 //! better, move the check with it — don't delete it.
 
-/// The main gather: `Editor::render`, the Scene view's path.
-const SRC: &str = include_str!("../src/render_frame.rs");
+/// The main gather: `Editor::gather_frame` and the draw in `Editor::render`,
+/// the Scene view's path.
+const SRC: &str = concat!(include_str!("../src/gather.rs"), include_str!("../src/render_frame.rs"));
 /// The offscreen gather: `Editor::render_world_into`, every other view's path.
 const OFFSCREEN_SRC: &str = include_str!("../src/offscreen.rs");
 
