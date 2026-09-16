@@ -1531,6 +1531,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             dur,
             shown,
             px,
+            st.snap_fps,
         );
         // What the effect does over time, under its ruler. The timeline's axis
         // is already time and the one quantity that varies along it is how many

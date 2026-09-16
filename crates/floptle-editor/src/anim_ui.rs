@@ -8,7 +8,7 @@
 //! borrowed into `EditorTabViewer`); asset mutations edit a working copy and
 //! save on pointer-release (drags coalesce into one disk write).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2 as EVec2};
@@ -70,6 +70,8 @@ pub struct AnimUiState {
     /// Only rows whose node name contains this are shown. Empty = every row.
     /// A sixty-bone rig is animated a limb at a time.
     pub row_filter: String,
+    /// Width of the row-name column, in points; dragged at its edge.
+    pub label_w: f32,
     /// Last frame's ScrollArea offset (the anchor for cursor-centred zoom).
     pub scroll_off: egui::Vec2,
     /// A scroll offset to force next frame (cursor-anchored zoom / Fit).
@@ -84,6 +86,11 @@ pub struct AnimUiState {
     /// In-flight key drag: (channel, original time, previewed time). The doc
     /// is only retimed on release, so egui ids stay stable through the drag.
     pub key_drag: Option<(usize, f32, f32)>,
+    /// Node rows opened into their position / rotation / scale lanes, by node name.
+    pub expanded_nodes: HashSet<String>,
+    /// In-flight drag of a key on one transform lane: (channel, lane, original
+    /// time, previewed time).
+    pub lane_key_drag: Option<(usize, Lane, f32, f32)>,
     /// Selected property key `(channel, track, key index)` — its value is edited
     /// inline above the dopesheet (a texture picker for image lanes, else a number).
     pub sel_prop: Option<(usize, usize, usize)>,
@@ -213,6 +220,7 @@ impl Default for AnimUiState {
             zoom: 120.0,
             row_scale: 1.0,
             row_filter: String::new(),
+            label_w: ANIM_LABEL_W,
             scroll_off: egui::Vec2::ZERO,
             scroll_target: None,
             fit_pending: false,
@@ -220,6 +228,8 @@ impl Default for AnimUiState {
             sel_event: None,
             tab_visible: false,
             key_drag: None,
+            expanded_nodes: HashSet::new(),
+            lane_key_drag: None,
             sel_prop: None,
             prop_key_drag: None,
             record_restore: Vec::new(),
@@ -1588,6 +1598,7 @@ impl EditorTabViewer<'_> {
                     "double-click a lane = key pose there",
                     "right-click a lane = insert key here",
                     "right-click a key = its interpolation (smooth, ease, hold)",
+                    "⏵ on a node row = its position / rotation / scale lanes",
                     "⏺ Key all bones · ◎ Key all tracks (toolbar)",
                     "— Navigation —",
                     "Space = play/pause · Home/End = clip ends",
@@ -1848,7 +1859,7 @@ impl EditorTabViewer<'_> {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-        draw_ruler(&painter, rect, dur, self.anim_ui.playhead, rect.width() / dur.max(0.01));
+        draw_ruler(&painter, rect, dur, self.anim_ui.playhead, rect.width() / dur.max(0.01), self.anim_ui.snap_fps);
         if (resp.dragged() || resp.clicked())
             && let Some(p) = resp.interact_pointer_pos() {
                 let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * dur;
@@ -1893,7 +1904,10 @@ fn key_size(lane_h: f32) -> f32 {
 fn key_hit(lane_h: f32) -> egui::Vec2 {
     egui::vec2(12.0, lane_h.clamp(8.0, 12.0))
 }
+/// The row-name column's starting width and its range.
 const ANIM_LABEL_W: f32 = 130.0;
+const ANIM_LABEL_MIN: f32 = 40.0;
+const ANIM_LABEL_MAX: f32 = 480.0;
 /// Property-lane key + label colours — a teal, distinct from the amber transform
 /// keys, so a node's property lanes read apart from its transform lane.
 const PROP_KEY_COLOR: Color32 = Color32::from_rgb(120, 210, 175);
@@ -1955,7 +1969,7 @@ fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32, mode: Option<Anim
 /// (it mutates disjoint `st` fields), so `dur` is passed in.
 fn handle_anim_wheel(ui: &egui::Ui, st: &mut AnimUiState, dur: f32) {
     let region = ui.available_rect_before_wrap();
-    let body_w = (region.width() - ANIM_LABEL_W - 16.0).max(50.0);
+    let body_w = (region.width() - st.label_w - 16.0).max(50.0);
     if st.fit_pending {
         st.zoom = (body_w / dur).clamp(ANIM_ZOOM_MIN, ANIM_ZOOM_MAX);
         st.scroll_target = Some(egui::Vec2::ZERO);
@@ -1977,9 +1991,9 @@ fn handle_anim_wheel(ui: &egui::Ui, st: &mut AnimUiState, dur: f32) {
         let px = st.zoom;
         let off = st.scroll_off;
         let vrel = p.x - region.left();
-        let time = ((vrel + off.x - ANIM_LABEL_W) / px).max(0.0);
+        let time = ((vrel + off.x - st.label_w) / px).max(0.0);
         let new_px = (px * z).clamp(ANIM_ZOOM_MIN, ANIM_ZOOM_MAX);
-        let new_off_x = (ANIM_LABEL_W + time * new_px - vrel).max(0.0);
+        let new_off_x = (st.label_w + time * new_px - vrel).max(0.0);
         st.zoom = new_px;
         st.scroll_target = Some(egui::vec2(new_off_x, off.y));
     }
@@ -2493,7 +2507,7 @@ impl EditorTabViewer<'_> {
         let mut pending_select: Option<TrackSelect> = None;
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let px = st.zoom;
-        let label_w = ANIM_LABEL_W;
+        let label_w = st.label_w;
         let lane_h = ANIM_ROW_BASE * st.row_scale;
         let ruler_h = 22.0;
         let event_h = 20.0;
@@ -2754,7 +2768,14 @@ impl EditorTabViewer<'_> {
             .channels
             .iter()
             .filter(|c| row_shown(&c.node))
-            .map(|c| 1 + c.properties.len())
+            .map(|c| {
+                let opened = if st.expanded_nodes.contains(&c.node) {
+                    Lane::ALL.iter().filter(|&&l| lane_of(c, l).is_some()).count()
+                } else {
+                    0
+                };
+                1 + opened + c.properties.len()
+            })
             .sum();
         let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
         let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
@@ -2796,6 +2817,25 @@ impl EditorTabViewer<'_> {
             let marquee = st.marquee.map(|(a, b)| Rect::from_two_pos(a, b));
             let painter = ui.painter_at(full);
             let tl_left = full.left() + label_w;
+            // The edge of the name column drags to resize it, so a rig with long
+            // bone names gets the room it needs and a packed sheet gives it back.
+            let handle = Rect::from_min_size(Pos2::new(tl_left - 3.0, full.top()), egui::vec2(6.0, full.height()));
+            let hresp = ui.interact(handle, ui.id().with("anim-label-edge"), Sense::drag());
+            if hresp.hovered() || hresp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if hresp.dragged() {
+                st.label_w = (st.label_w + hresp.drag_delta().x).clamp(ANIM_LABEL_MIN, ANIM_LABEL_MAX);
+            }
+            painter.line_segment(
+                [Pos2::new(tl_left - 0.5, full.top()), Pos2::new(tl_left - 0.5, full.bottom())],
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            );
+            // Row names stay inside their column whatever their length.
+            let label_painter = painter.with_clip_rect(Rect::from_min_max(
+                full.left_top(),
+                Pos2::new(tl_left - 2.0, full.bottom()),
+            ));
             let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
             let time_to_x = |t: f32| view.time_to_x(t);
             let x_to_time = |x: f32| view.x_to_time(x);
@@ -2883,6 +2923,11 @@ impl EditorTabViewer<'_> {
             //   · single-click empty lane = deselect
             let rows_top = full.top() + ruler_h + event_h;
             let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
+            // Edits to ONE transform lane, from an opened node row.
+            let mut lane_retime: Option<(usize, Lane, f32, f32)> = None;
+            let mut lane_delete: Option<(usize, Lane, f32)> = None;
+            let mut lane_mode: Option<(usize, Lane, f32, Option<AnimInterpDoc>)> = None;
+            let mut toggle_expand: Option<String> = None;
             let mut group_retime: Option<f32> = None; // shift ALL selected keys by this delta
             let mut delete_key: Option<(usize, f32)> = None;
             // Is the in-flight key drag moving a whole multi-selection together? (The
@@ -2951,9 +2996,29 @@ impl EditorTabViewer<'_> {
                 let chan_name = doc.channels[ci].node.clone();
                 let label =
                     if chan_name.is_empty() { "(this node)" } else { chan_name.as_str() };
+                // ⏵/⏷ at the left of a node with transform lanes opens it into them.
+                let has_lanes = Lane::ALL.iter().any(|&l| lane_of(&doc.channels[ci], l).is_some());
+                let expanded = has_lanes && st.expanded_nodes.contains(&chan_name);
+                let toggle_w = if has_lanes { 14.0 } else { 0.0 };
+                if has_lanes {
+                    let trect = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(toggle_w, lane_h));
+                    let tresp = ui.interact(trect, ui.id().with(("chan-expand", ci)), Sense::click());
+                    if tresp.clicked() {
+                        toggle_expand = Some(chan_name.clone());
+                    }
+                    if let Some(font) = row_font(lane_h) {
+                        label_painter.text(
+                            Pos2::new(full.left() + 2.0, cy),
+                            Align2::LEFT_CENTER,
+                            if expanded { "⏷" } else { "⏵" },
+                            font,
+                            if tresp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() },
+                        );
+                    }
+                }
                 // Label: right-click menu for the node's lane.
                 let label_rect =
-                    Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(label_w, lane_h));
+                    Rect::from_min_size(Pos2::new(full.left() + toggle_w, y), egui::vec2(label_w - toggle_w, lane_h));
                 let lresp =
                     ui.interact(label_rect, ui.id().with(("chan-label", ci)), Sense::click());
                 {
@@ -3041,8 +3106,8 @@ impl EditorTabViewer<'_> {
                     }
                 }
                 if let Some(font) = row_font(lane_h) {
-                    painter.text(
-                        Pos2::new(full.left() + 4.0, cy),
+                    label_painter.text(
+                        Pos2::new(full.left() + 4.0 + toggle_w, cy),
                         Align2::LEFT_CENTER,
                         label,
                         font,
@@ -3211,6 +3276,75 @@ impl EditorTabViewer<'_> {
                         });
                     });
                 }
+                // --- an opened node: one row per transform lane, each key editable
+                // on its own — retime, delete, interpolation — without touching the
+                // other two lanes at that time.
+                if expanded {
+                    for lane in Lane::ALL {
+                        let Some(l) = lane_of(&doc.channels[ci], lane) else { continue };
+                        let y = rows_top + row_i as f32 * lane_h;
+                        stripe(&painter, row_i, y, ui);
+                        row_i += 1;
+                        let cy = y + lane_h * 0.5;
+                        if let Some(font) = row_font(lane_h) {
+                            label_painter.text(
+                                Pos2::new(full.left() + 18.0 + toggle_w, cy),
+                                Align2::LEFT_CENTER,
+                                lane.label(),
+                                font,
+                                lane.color().gamma_multiply(0.85),
+                            );
+                        }
+                        let (times, modes, step): (Vec<f32>, Vec<AnimKeyModeDoc>, bool) =
+                            (l.times().to_vec(), l.modes().to_vec(), l.step());
+                        for (ki, &t) in times.iter().enumerate() {
+                            let dragging_this = st
+                                .lane_key_drag
+                                .is_some_and(|(dci, dl, ot, _)| dci == ci && dl == lane && same_key_time(ot, t));
+                            let draw_t = if dragging_this { st.lane_key_drag.unwrap().3 } else { t };
+                            let c = Pos2::new(time_to_x(draw_t), cy);
+                            let id = ui.id().with(("anim-lane-key", ci, lane as u8, ki));
+                            let resp = ui.interact(
+                                Rect::from_center_size(c, key_hit(lane_h)),
+                                id,
+                                Sense::click_and_drag(),
+                            );
+                            let col = if resp.hovered() || dragging_this { ACCENT } else { lane.color() };
+                            key_diamond(&painter, c, col, key_mode_at(&modes, t), key_size(lane_h));
+                            if resp.drag_started() {
+                                st.lane_key_drag = Some((ci, lane, t, t));
+                            }
+                            if resp.dragged()
+                                && let Some(p) = resp.interact_pointer_pos()
+                                && let Some(kd) = st.lane_key_drag.as_mut()
+                                && kd.0 == ci
+                                && kd.1 == lane
+                                && same_key_time(kd.2, t)
+                            {
+                                kd.3 = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                            }
+                            if resp.drag_stopped()
+                                && let Some((dci, dl, ot, nt)) = st.lane_key_drag.take()
+                                && dci == ci
+                                && dl == lane
+                                && same_key_time(ot, t)
+                                && !same_key_time(nt, ot)
+                            {
+                                lane_retime = Some((ci, lane, ot, nt));
+                            }
+                            resp.context_menu(|ui| {
+                                if ui.button("🗑 Delete key").clicked() {
+                                    lane_delete = Some((ci, lane, t));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                interp_menu(ui, key_mode_at(&modes, t), step, &mut |mode| {
+                                    lane_mode = Some((ci, lane, t, mode));
+                                });
+                            });
+                        }
+                    }
+                }
                 // --- property lanes, indented under the node ---
                 for ti in 0..doc.channels[ci].properties.len() {
                     let y = rows_top + row_i as f32 * lane_h;
@@ -3261,7 +3395,7 @@ impl EditorTabViewer<'_> {
                         }
                     });
                     if let Some(font) = row_font(lane_h) {
-                        painter.text(
+                        label_painter.text(
                             Pos2::new(full.left() + 10.0, cy),
                             Align2::LEFT_CENTER,
                             format!("   {comp}.{field}"),
@@ -3384,6 +3518,28 @@ impl EditorTabViewer<'_> {
             if let Some((ci, old, new)) = retime {
                 retime_channel(&mut doc.channels[ci], old, new);
                 st.clip_dirty = true;
+            }
+            if let Some((ci, lane, old, new)) = lane_retime
+                && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
+            {
+                l.retime(old, new.max(0.0));
+                st.clip_dirty = true;
+            }
+            if let Some((ci, lane, t)) = lane_delete {
+                delete_lane_key(&mut doc.channels[ci], lane, t);
+                drop_empty_channel(doc, ci);
+                st.clip_dirty = true;
+            }
+            if let Some((ci, lane, t, mode)) = lane_mode
+                && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
+            {
+                set_key_mode(l.modes_mut(), t, mode);
+                st.clip_dirty = true;
+            }
+            if let Some(name) = toggle_expand
+                && !st.expanded_nodes.remove(&name)
+            {
+                st.expanded_nodes.insert(name);
             }
             // Group move: shift every selected key by the same delta. Process in a
             // collision-safe order (rightmost first when moving right) so a key never
@@ -3794,7 +3950,7 @@ impl EditorTabViewer<'_> {
                 );
             }
             // ruler ticks over the top strip
-            draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px);
+            draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px, st.snap_fps);
         });
         // Remember the offset so next frame's cursor-anchored zoom has an anchor.
         st.scroll_off = out.state.offset;
@@ -4244,43 +4400,124 @@ fn delete_property_key(doc: &mut AnimClipDoc, ci: usize, ti: usize, t: f32) {
 
 /// Move every lane key at `old` to `new` (keeping lanes sorted). A key already
 /// sitting at `new` is replaced (merge), never doubled.
+/// One of a node's three transform lanes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Lane {
+    Translation,
+    Rotation,
+    Scale,
+}
+
+impl Lane {
+    pub(crate) const ALL: [Lane; 3] = [Lane::Translation, Lane::Rotation, Lane::Scale];
+
+    fn label(self) -> &'static str {
+        match self {
+            Lane::Translation => "position",
+            Lane::Rotation => "rotation",
+            Lane::Scale => "scale",
+        }
+    }
+
+    fn color(self) -> Color32 {
+        match self {
+            Lane::Translation => Color32::from_rgb(235, 130, 110),
+            Lane::Rotation => Color32::from_rgb(130, 205, 130),
+            Lane::Scale => Color32::from_rgb(120, 165, 240),
+        }
+    }
+}
+
+/// The edits every keyed lane supports, so a position lane and a rotation
+/// lane are handled by one piece of code.
+trait KeyedLane {
+    fn times(&self) -> &[f32];
+    fn modes(&self) -> &[AnimKeyModeDoc];
+    fn modes_mut(&mut self) -> &mut Vec<AnimKeyModeDoc>;
+    fn step(&self) -> bool;
+    /// Move the key at `old` to `new`, merging onto a key already there.
+    fn retime(&mut self, old: f32, new: f32);
+    /// Delete the key at `t`; true when the lane is empty afterwards.
+    fn delete(&mut self, t: f32) -> bool;
+}
+
+macro_rules! keyed_lane {
+    ($ty:ty) => {
+        impl KeyedLane for $ty {
+            fn times(&self) -> &[f32] {
+                &self.times
+            }
+            fn modes(&self) -> &[AnimKeyModeDoc] {
+                &self.modes
+            }
+            fn modes_mut(&mut self) -> &mut Vec<AnimKeyModeDoc> {
+                &mut self.modes
+            }
+            fn step(&self) -> bool {
+                self.step
+            }
+            fn retime(&mut self, old: f32, new: f32) {
+                if let Some(i) = self.times.iter().position(|&t| same_key_time(t, old)) {
+                    let v = self.values.remove(i);
+                    self.times.remove(i);
+                    move_key_mode(&mut self.modes, old, new);
+                    if let Some(j) = self.times.iter().position(|&t| same_key_time(t, new)) {
+                        self.values[j] = v; // merge onto the existing key
+                        return;
+                    }
+                    let at = self.times.partition_point(|&t| t < new);
+                    self.times.insert(at, new);
+                    self.values.insert(at, v);
+                }
+            }
+            fn delete(&mut self, t: f32) -> bool {
+                if let Some(i) = self.times.iter().position(|&x| same_key_time(x, t)) {
+                    self.times.remove(i);
+                    self.values.remove(i);
+                    set_key_mode(&mut self.modes, t, None);
+                }
+                self.times.is_empty()
+            }
+        }
+    };
+}
+keyed_lane!(AnimTrackDoc3);
+keyed_lane!(AnimTrackDoc4);
+
+/// A channel's lane, if it has one.
+fn lane_of(ch: &floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&dyn KeyedLane> {
+    match lane {
+        Lane::Translation => ch.translation.as_ref().map(|l| l as &dyn KeyedLane),
+        Lane::Rotation => ch.rotation.as_ref().map(|l| l as &dyn KeyedLane),
+        Lane::Scale => ch.scale.as_ref().map(|l| l as &dyn KeyedLane),
+    }
+}
+
+fn lane_of_mut(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&mut dyn KeyedLane> {
+    match lane {
+        Lane::Translation => ch.translation.as_mut().map(|l| l as &mut dyn KeyedLane),
+        Lane::Rotation => ch.rotation.as_mut().map(|l| l as &mut dyn KeyedLane),
+        Lane::Scale => ch.scale.as_mut().map(|l| l as &mut dyn KeyedLane),
+    }
+}
+
+/// Delete one lane's key at `t`, dropping the lane when it empties.
+fn delete_lane_key(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane, t: f32) {
+    let empty = lane_of_mut(ch, lane).is_some_and(|l| l.delete(t));
+    if empty {
+        match lane {
+            Lane::Translation => ch.translation = None,
+            Lane::Rotation => ch.rotation = None,
+            Lane::Scale => ch.scale = None,
+        }
+    }
+}
+
 fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
-    fn retime3(l: &mut AnimTrackDoc3, old: f32, new: f32) {
-        if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
-            let v = l.values.remove(i);
-            l.times.remove(i);
-            move_key_mode(&mut l.modes, old, new);
-            if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
-                l.values[j] = v; // merge onto the existing key
-                return;
-            }
-            let at = l.times.partition_point(|&t| t < new);
-            l.times.insert(at, new);
-            l.values.insert(at, v);
+    for lane in Lane::ALL {
+        if let Some(l) = lane_of_mut(ch, lane) {
+            l.retime(old, new);
         }
-    }
-    fn retime4(l: &mut AnimTrackDoc4, old: f32, new: f32) {
-        if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
-            let v = l.values.remove(i);
-            l.times.remove(i);
-            move_key_mode(&mut l.modes, old, new);
-            if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
-                l.values[j] = v;
-                return;
-            }
-            let at = l.times.partition_point(|&t| t < new);
-            l.times.insert(at, new);
-            l.values.insert(at, v);
-        }
-    }
-    if let Some(l) = ch.translation.as_mut() {
-        retime3(l, old, new);
-    }
-    if let Some(l) = ch.rotation.as_mut() {
-        retime4(l, old, new);
-    }
-    if let Some(l) = ch.scale.as_mut() {
-        retime3(l, old, new);
     }
 }
 
@@ -4369,30 +4606,8 @@ fn set_channel_key_mode(ch: &mut floptle_scene::AnimChannelDoc, t: f32, mode: Op
 
 /// Delete every lane key at `t`; drops emptied lanes.
 fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
-    fn del3(l: &mut AnimTrackDoc3, t: f32) -> bool {
-        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
-            l.times.remove(i);
-            l.values.remove(i);
-            set_key_mode(&mut l.modes, t, None);
-        }
-        l.times.is_empty()
-    }
-    fn del4(l: &mut AnimTrackDoc4, t: f32) -> bool {
-        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
-            l.times.remove(i);
-            l.values.remove(i);
-            set_key_mode(&mut l.modes, t, None);
-        }
-        l.times.is_empty()
-    }
-    if ch.translation.as_mut().is_some_and(|l| del3(l, t)) {
-        ch.translation = None;
-    }
-    if ch.rotation.as_mut().is_some_and(|l| del4(l, t)) {
-        ch.rotation = None;
-    }
-    if ch.scale.as_mut().is_some_and(|l| del3(l, t)) {
-        ch.scale = None;
+    for lane in Lane::ALL {
+        delete_lane_key(ch, lane, t);
     }
 }
 

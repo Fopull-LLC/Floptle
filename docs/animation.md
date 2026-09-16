@@ -83,10 +83,14 @@ Select a node that has a controller (or a rigged model) and open **Window →
   spawning VFX.
 - **Key rows**: one row per animated node; diamonds are keys (the union of the
   T/R/S lanes). Drag to retime, right-click to delete. `snap` quantizes to a
-  frame grid (8/12/24/30/60 fps).
+  frame grid (8/12/24/30/60 fps), and with a grid set the ruler counts in
+  frames. **⏵ on a node row** opens it into its *position*, *rotation* and
+  *scale* lanes, where a key is dragged, deleted or given an interpolation on
+  that lane alone.
 - **Fit the sheet to the rig**: the row height is yours — Alt+wheel over the
   sheet or type it in the toolbar (4–80 px); packed rows keep their keys
-  clickable and name themselves on hover. **🔍 rows** shows only the rows whose
+  clickable and name themselves on hover. The name column resizes by dragging
+  its edge. **🔍 rows** shows only the rows whose
   name matches, so a sixty-bone rig is animated a limb at a time (Ctrl+A then
   selects what is shown).
 - **Interpolation is per key**: right-click a key → *Interpolation* to choose

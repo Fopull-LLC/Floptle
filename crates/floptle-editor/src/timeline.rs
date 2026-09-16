@@ -61,14 +61,91 @@ pub(crate) fn nice_step(raw: f32) -> f32 {
 /// Ruler ticks + labels + end marker + playhead over `rect`. The tick step adapts to
 /// the zoom (targeting ~70 px between labels) so the ruler reads at any scale — from
 /// a 600 s effect zoomed out to sub-frame keying zoomed in.
+///
+/// With a frame rate (`fps > 0`, the snap grid) the ruler counts in frames: the
+/// ticks sit on frame boundaries, labelled by frame number, with whole seconds
+/// named as such — the way an animator reads time.
 pub(crate) fn draw_ruler(
     painter: &egui::Painter,
     rect: Rect,
     dur: f32,
     playhead: f32,
     px_per_s: f32,
+    fps: f32,
 ) {
     let weak = Color32::from_gray(140);
+    if fps > 0.0 {
+        draw_frame_ruler(painter, rect, dur, px_per_s, fps, weak);
+    } else {
+        draw_second_ruler(painter, rect, dur, px_per_s, weak);
+    }
+    // End-of-clip marker + playhead.
+    let xe = rect.left() + dur * px_per_s;
+    painter.line_segment(
+        [Pos2::new(xe, rect.top()), Pos2::new(xe, rect.bottom())],
+        Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
+    );
+    let xp = rect.left() + playhead * px_per_s;
+    painter.line_segment(
+        [Pos2::new(xp, rect.top()), Pos2::new(xp, rect.bottom())],
+        Stroke::new(1.5, PLAYHEAD),
+    );
+}
+
+/// The frame-counted ruler: a label every `step` frames (1, 2, 5, 10, 20, 50…
+/// frames, whichever puts labels about 70 px apart), a minor tick per frame when
+/// frames are wide enough to tell apart, and every whole second labelled in
+/// seconds so the two scales read together.
+fn draw_frame_ruler(painter: &egui::Painter, rect: Rect, dur: f32, px_per_s: f32, fps: f32, weak: Color32) {
+    let px_per_frame = px_per_s / fps;
+    let step = frame_step(fps, px_per_frame);
+    let frames = (dur * fps).floor() as i64;
+    for f in (0..=frames).step_by(step as usize) {
+        let t = f as f32 / fps;
+        let x = rect.left() + t * px_per_s;
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 8.0)],
+            Stroke::new(1.0, weak),
+        );
+        let whole_second = f % (fps.round() as i64).max(1) == 0;
+        let label = if whole_second { format!("{}s", (t.round()) as i64) } else { format!("{f}") };
+        painter.text(
+            Pos2::new(x + 3.0, rect.top() + 4.0),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(9.0),
+            if whole_second { weak.gamma_multiply(1.3) } else { weak },
+        );
+    }
+    if px_per_frame >= 6.0 {
+        for f in 0..=frames {
+            if f % step == 0 {
+                continue;
+            }
+            let x = rect.left() + f as f32 / fps * px_per_s;
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 4.0)],
+                Stroke::new(0.5, weak.gamma_multiply(0.6)),
+            );
+        }
+    }
+}
+
+/// Frames between labels: a divisor of the frame rate, or a whole number of
+/// seconds, whichever first puts labels about 70 px apart — so the labelled
+/// frames always line up with the seconds.
+fn frame_step(fps: f32, px_per_frame: f32) -> i64 {
+    let fps_i = (fps.round() as i64).max(1);
+    let divisors = (1..=fps_i).filter(|d| fps_i % d == 0);
+    let seconds = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000].into_iter().map(|s| s * fps_i);
+    divisors
+        .chain(seconds)
+        .find(|&s| s as f32 * px_per_frame >= 70.0)
+        .unwrap_or(1000 * fps_i)
+}
+
+/// The seconds ruler, for a timeline with no frame grid.
+fn draw_second_ruler(painter: &egui::Painter, rect: Rect, dur: f32, px_per_s: f32, weak: Color32) {
     let step = nice_step(70.0 / px_per_s.max(1e-3));
     // How many decimals the labels need at this step (0 for ≥1 s, more when finer).
     let decimals = if step >= 1.0 {
@@ -111,17 +188,6 @@ pub(crate) fn draw_ruler(
             }
         }
     }
-    // End-of-clip marker + playhead.
-    let xe = rect.left() + dur * px_per_s;
-    painter.line_segment(
-        [Pos2::new(xe, rect.top()), Pos2::new(xe, rect.bottom())],
-        Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
-    );
-    let xp = rect.left() + playhead * px_per_s;
-    painter.line_segment(
-        [Pos2::new(xp, rect.top()), Pos2::new(xp, rect.bottom())],
-        Stroke::new(1.5, PLAYHEAD),
-    );
 }
 
 #[cfg(test)]
@@ -143,6 +209,20 @@ mod tests {
     fn snap_quantizes_only_when_fps_positive() {
         assert_eq!(snap_time(0.126, 24.0), 3.0 / 24.0);
         assert_eq!(snap_time(0.126, 0.0), 0.126);
+    }
+
+    #[test]
+    fn frame_labels_land_on_whole_seconds() {
+        // At 24 fps every step divides 24 or is whole seconds, so a second is
+        // always a labelled tick.
+        for px in [1.0, 3.0, 8.0, 20.0, 40.0, 80.0] {
+            let s = frame_step(24.0, px);
+            assert!(24 % s == 0 || s % 24 == 0, "step {s} at {px} px/frame skips the seconds");
+            assert!(s as f32 * px >= 70.0 || s == 1, "step {s} at {px} px/frame crowds the labels");
+        }
+        assert_eq!(frame_step(24.0, 80.0), 1);
+        assert_eq!(frame_step(24.0, 8.0), 12);
+        assert_eq!(frame_step(30.0, 0.5), 5 * 30);
     }
 
     #[test]
