@@ -1,28 +1,23 @@
 //! # floptle-core
 //!
-//! The foundation every other crate builds on. Deliberately tiny and
-//! data-oriented. See `docs/subsystems/scene-and-nodes.md`.
+//! The foundation every other crate builds on: the ECS, the node and
+//! component types, transforms, time and the world's reference frames.
+//! Deliberately small and data-oriented. See `docs/subsystems/scene-and-nodes.md`.
 //!
-//! Planned modules (added as each lands — kept stubbed during planning):
-//! - `math`    : thin re-exports / helpers over `glam`.
-//! - `ecs`     : archetype ECS — the data-oriented runtime under everything.
-//! - `scene`   : the Node + Component *authoring facade* over the ECS.
-//! - `transform`: high-precision (`f64`/`DVec3`) world transform + a derived
-//!   camera-relative `f32` render transform — large-world-safe by
-//!   default (ADR-0015).
-//! - `origin`  : floating origin — keeps the active sim near `(0,0,0)` and rebases
-//!   the world around the player so distance never jitters.
-//! - `frames`  : hierarchical reference frames (galaxy→system→body→local).
-//! - `event`   : engine + input + dialogue event bus.
-//! - `time`    : frame clock, fixed timestep, timers; per-entity `LocalTime` +
-//!   the time-rate field `r(p)` for slow/freeze/dilation (ADR-0017).
-//! - `pool`    : automatic object pooling (see ADR-0008, the "take/return" API).
-//! - `serde_ron`: scene/prefab (de)serialization helpers (RON).
+//! - `ecs`      — archetype ECS, the runtime under everything.
+//! - `matter`   — what a node is: primitives, models, cameras, lights, tilemaps,
+//!   sprites, probes, and the physics body.
+//! - `material` — materials and tints.
+//! - `transform`, `origin`, `frames` — `f64` world transforms, the floating
+//!   origin, and hierarchical reference frames (galaxy → system → body → local),
+//!   large-world-safe by default (ADR-0015).
+//! - `time`     — the frame clock, fixed timestep and timers (ADR-0017).
+//! - `layers`, `tile`, `camera2d`, `scatter`, `spatial`, `noise`, `net`,
+//!   `profile`, `access`, `event`, `script` — the smaller building blocks named
+//!   after what they hold.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-// Phase 1 modules (the foundation the frame loop hangs on). `scene`, `pool`,
-// and `serde_ron` arrive in their roadmap phases; these are live.
 pub mod access;
 pub mod camera2d;
 pub mod ecs;

@@ -143,52 +143,25 @@ impl Retro {
     }
 }
 
-/// **A multiplier over whatever this node already draws.**
+/// A multiplier over whatever this node already draws.
 ///
-/// The counterpart of a [`Material`], which REPLACES: "this model is made of
-/// gold" and "this model, but red" are different things to say, and a component
-/// that does one cannot do the other. A Material on a model supersedes the
-/// materials it was imported with — every part draws with that one. A Tint
-/// leaves all of that exactly as it is and multiplies over the result, so a
-/// model keeps its own textures, its parts keep their own colours, and the
-/// whole thing goes red.
+/// A [`Material`] replaces: every part of a model draws with it. A Tint leaves
+/// the model's own materials and textures alone and multiplies over the result —
+/// the tool for a hit flash, a team colour, a selection highlight, a placement
+/// ghost, a fade-out. White at full alpha is the identity; a Tint put back to
+/// the identity is dropped rather than stored.
 ///
-/// What it is for is the ordinary run of things a game does to a model it did
-/// not otherwise change: a hit flash, a team colour, a highlighted selection, a
-/// building ghosted while it is being placed, a body fading out.
+/// A multiply can only take light away, so a team colour on a mid-toned model
+/// would read as grey. A Tint therefore also carries the two knobs that add
+/// light, and neither replaces anything:
 ///
-/// White at full alpha is the identity, so a fresh one changes nothing — and a
-/// Tint that has been put back to the identity is dropped rather than stored,
-/// which keeps it out of scenes that do not use it.
+///   * [`rim`](Self::rim) — an additive fresnel edge in its own colour, visible
+///     on dark and bright costumes alike.
+///   * [`ambient`](Self::ambient) — a multiplier on this node's ambient term.
 ///
-/// ## Why it is not only a multiply
-///
-/// A multiply can only take light AWAY, and that is the whole reason this
-/// component kept losing to [`Material`] for the job it was written for. Give a
-/// character a team colour on a mid-toned, ambient-lit model and a "crimson"
-/// arrives as a slightly warm grey: the eye reads lightness long before hue, so
-/// the one thing the tint exists to say — which player is this — is the thing
-/// it says worst. The way out was always a Material, which says it perfectly
-/// and costs the model every texture it was imported with.
-///
-/// So a Tint also carries the two knobs that add light rather than removing it,
-/// and neither of them replaces anything:
-///
-///   * [`rim`](Self::rim) — an additive fresnel edge in its own colour. It adds,
-///     so it reads on a dark costume and a bright one, against any stage, and
-///     from across a room where the body fill is half in shadow.
-///   * [`ambient`](Self::ambient) — a multiplier on this node's ambient term, so
-///     a character can sit brighter than the room it is standing in without
-///     being handed a new material to do it.
-///
-/// **The rim lane is singular.** One instance carries one rim colour and one
-/// strength, so a Tint's rim SUPERSEDES a Material's rather than blending with
-/// it — two rims of different colours are not a thing the lane can hold. That is
-/// the one place this component replaces instead of modifying, and it is stated
-/// here because a rule nobody can predict is worse than either answer. In
-/// practice nothing collides: an imported glTF has no rim at all (the engine's
-/// rim is not a glTF concept), so the only way to meet this is to author both on
-/// purpose.
+/// The rim lane is singular: a Tint's rim supersedes a Material's rather than
+/// blending with it. Imported glTF carries no rim, so this only arises when
+/// both are authored on purpose.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tint {
     /// Multiplied into the surface's colour, after everything else has decided

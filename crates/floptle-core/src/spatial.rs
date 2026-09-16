@@ -1,40 +1,18 @@
 //! A spatial index over things with a position and a radius.
 //!
-//! Every system that answered *"what is near here?"* walked everything. That is
-//! the structural reason behind a recurring class of bug rather than a
-//! theoretical concern: `World::get` being a linear scan cost 60 ms/frame of pure
-//! lookups at 5,500 nodes, `findScript` was the same shape,
-//! and both were found by a player.
+//! A hash grid rebuilt every frame, not a BVH: the items are physics bodies
+//! that move, so a tree would be refit every frame anyway, and the
+//! floating-origin rebase (ADR-0015) moves every item at once — a grid built
+//! from this frame's positions in the frame that queries it cannot go stale.
+//! [`Grid::rebuild`] reuses its buffers, so a build is O(n) with no allocation
+//! once warm.
 //!
-//! # Why a hash grid, and not a BVH
+//! Items whose radius spans more than [`Grid::OVERSIZED_CELLS`] cells (planet
+//! colliders) go into one always-returned list instead of filling the map.
 //!
-//! The card asked to measure before committing to a shape, so:
-//!
-//! * **The things being indexed move.** These are physics bodies, queried by
-//!   gameplay every frame. A BVH would need a refit per frame, and a refit over
-//!   moving leaves costs more than rebuilding a grid — which is one pass, no
-//!   comparisons, no tree.
-//! * **The floating-origin rebase moves every item at once** (ADR-0015). A
-//!   structure with cached bounds would have to be told; a grid rebuilt from this
-//!   frame's positions, in the same frame the query uses, cannot go stale. That
-//!   is not a small property — it is the difference between "survives the rebase"
-//!   and "survives the rebase until someone forgets".
-//! * **Build cost is the budget.** A grid build is O(n) with no allocation once
-//!   the buffers are warm, because [`Grid::rebuild`] reuses them.
-//!
-//! # The oversized-item trap
-//!
-//! This engine has planet-sized colliders. An item whose radius spans thousands
-//! of cells would, inserted honestly, fill the map and make every query slower
-//! than the scan it replaced. So items bigger than [`Grid::OVERSIZED_CELLS`]
-//! cells go into one always-returned list. That keeps the answer CORRECT (they
-//! are still candidates for every query) while keeping the grid the size of the
-//! things a grid is good for.
-//!
-//! Queries return **candidates**, not hits: the caller still does its own exact
-//! test. That is what makes this safe to drop under an existing query — the
-//! narrow phase is unchanged, so the answer cannot change, only the number of
-//! things it is asked about.
+//! Queries return candidates, not hits: the caller keeps its own exact test, so
+//! dropping the grid under an existing query changes how many things are
+//! tested, never the answer.
 
 use std::collections::HashMap;
 

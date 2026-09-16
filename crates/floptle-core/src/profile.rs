@@ -1,41 +1,17 @@
-//! Where a frame's time actually went.
+//! Where a frame's time went.
 //!
-//! The engine used to keep a smoothed FPS number and nothing else. No
-//! attribution: not per script, not per subsystem, not per draw. So when a game
-//! got slow, the author's only available move was to file an engine ticket — and
-//! that is not hypothetical, it is what happened four times:
+//! A fixed set of named buckets a game author already has words for, plus
+//! per-script attribution. Not a profiler: no sampling, no flamegraph, no call
+//! stacks — the question is "which of my scripts is doing this", not "what is
+//! the hot function".
 //!
-//! | filed as | actually was |
-//! |---|---|
-//! | `0059` "a crowded scene is unplayable" | component lookup was a linear scan |
-//! | `0063` "cross-script wiring is slow" | `findScript` was a linear scan |
-//! | `0071` "currently unplayable" | a scatter field asked for 117,000 props |
-//! | `0074` "I can see through unloaded terrain" | mesh priority ignored world distance |
+//! Every bucket keeps two numbers, a rolling mean and the worst of the last N
+//! frames, because the spike is what anybody is chasing and a mean hides it: a
+//! 40 ms hitch once a second adds under a millisecond to a 60-frame average.
 //!
-//! Every one of those cost a round trip through the engine to discover a number
-//! the game could have read itself. Three of the four were diagnosable from a
-//! count alone.
-//!
-//! # Deliberately not a profiler
-//!
-//! No sampling, no flamegraph, no call stacks. A fixed set of named buckets a
-//! game author already has words for, plus per-script attribution — because the
-//! question is never "what is the hot function", it is "which of MY scripts is
-//! doing this".
-//!
-//! # Two numbers per bucket, never one
-//!
-//! A rolling mean and the worst of the last N frames. The spike is the thing
-//! anybody is ever chasing, and a mean hides it: a 40 ms hitch once a second
-//! adds under a millisecond to a 60-frame average.
-//!
-//! # Off means off, and says so
-//!
-//! Collection costs nothing when nothing is looking — a profiler that is itself a
-//! frame cost gets turned off, and then it does not exist. But "off" must not
-//! read as "fast": [`FrameProfile::bucket`] returns `None` while disabled rather
-//! than zero, so a game asserting a budget in a smoke test cannot pass by
-//! accident. That is the an earlier task shape applied to this task's own API.
+//! Collection costs nothing while nothing is looking, and "off" does not read
+//! as "fast": [`FrameProfile::bucket`] returns `None` while disabled rather than
+//! zero, so a budget assertion in a smoke test cannot pass by accident.
 
 use std::collections::HashMap;
 

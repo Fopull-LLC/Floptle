@@ -1,34 +1,15 @@
 //! Scatter: thousands of props from a seed instead of thousands of nodes.
 //!
-//! A game that wants a forest has, until now, had exactly one construction API:
-//! `createNode` + `setPrimitive` + `setMaterial`. A plant is 4–14 nodes, so a
-//! "forest" is a moving bubble of ninety plants, none of which you can walk
-//! into, because a script cannot give a node it created a collider. Both of
-//! those are engine problems wearing a game's clothes.
+//! The game decides what grows where — species, climate, palette, yields — and
+//! hands the engine a prototype and a rule. The engine decides where each
+//! instance is and draws them all.
 //!
-//! ## The shape of the answer
-//!
-//! The game keeps deciding **what grows where** — species, climate, palette,
-//! yields — and hands the engine a prototype and a rule. The engine decides
-//! **where each instance is** and draws them all. That split is deliberate: the
-//! alternative (the engine growing its own plant generator) is both worse and
-//! less general, and the card says so.
-//!
-//! ## Determinism is the whole design
-//!
-//! Every instance is derived from `hash(seed, chunk, index)` and nothing else —
-//! no accumulated state, no iteration order, no floating-point history. Three
-//! things fall out of that, and all three are requirements rather than
-//! conveniences:
-//!
-//! * **Walk away and back and the same trees stand in the same places.** A
-//!   chunk is recomputed, not remembered.
-//! * **A multiplayer session never replicates scenery.** Same seed, same
-//!   chunk, same instances, on every machine.
-//! * **A removal set is small.** "Every plant you ever cut" is unstorable; the
-//!   ids of the ones you cut are a handful of `u64`s, and an id is stable
-//!   because the placement that produced it is.
-
+//! Every instance is derived from `hash(seed, chunk, index)` and nothing else:
+//! no accumulated state, no iteration order, no floating-point history. So a
+//! chunk is recomputed rather than remembered and the same trees stand in the
+//! same places; a multiplayer session never replicates scenery; and a removal
+//! set is a handful of `u64` ids, each stable because the placement that
+//! produced it is.
 use std::collections::HashSet;
 
 use crate::math::{DQuat, DVec3, Quat, Vec3};
@@ -501,26 +482,18 @@ pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
 /// Every chunk key whose chunk could contain something within `range` of `eye`,
 /// **nearest first**.
 ///
-/// Deliberately generous: a chunk is included if its CENTRE is within
+/// Generous on purpose: a chunk is included if its centre is within
 /// `range + chunk`, so a prop near a chunk's far corner is never culled by the
-/// chunk it happens to live in. Missing props at a chunk seam is the classic
-/// scatter bug and it only shows up as you walk.
+/// chunk it lives in.
 ///
-/// The order is load-bearing, not tidiness. A draw budget cuts the tail of this
-/// list, and the tail has to be the far side of the world rather than whichever
-/// chunks a nested loop happened to reach last — a budget that drops props at
-/// your feet and keeps the ones at the horizon is worse than no budget. The
-/// same order is what makes streaming spend its first frames on what you can
-/// actually see.
+/// The order is part of the contract. A draw budget cuts the tail of this
+/// list, so the tail has to be the far side of the world, and streaming spends
+/// its first frames on what is visible. The square sweep is cut to a disc: a
+/// corner of the square is √2 range away and can hold nothing visible.
 ///
-/// The square sweep is also cut to a disc here: a corner of the swept square is
-/// √2 range away and can hold nothing visible, and on the bad configuration
-/// that is a fifth of the chunks walked every frame for nothing.
-///
-/// **The answer depends on the eye's CHUNK, not on the eye.** Both the cull and
-/// the order measure from the centre of the chunk the eye stands in, so walking
-/// across a chunk cannot change the list — which is what makes it cacheable
-/// until you cross a boundary, and the slack below is sized for it.
+/// The answer depends on the eye's chunk, not on the eye: both the cull and the
+/// order measure from the centre of the chunk the eye stands in, so the list is
+/// cacheable until the eye crosses a chunk boundary.
 pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey> {
     let mut keys: Vec<(f64, ChunkKey)> = Vec::new();
     let reach = range + src.chunk;

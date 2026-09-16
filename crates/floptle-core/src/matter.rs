@@ -130,31 +130,18 @@ pub fn sorting_offset(rank: u32, order: i32) -> f32 {
 }
 
 /// How many distinct depths a sorting layer can hold — the number of nodes one
-/// layer can Y-sort before neighbours in the sort start to tie.
+/// layer can Y-sort before neighbours start to tie.
 ///
 /// A budget for the whole layer, spent on the nodes actually in it rather than
-/// divided between the orders in advance. Dividing first would give each order
-/// one or two depths and make Y-sorting useless; ranking the layer as a whole
-/// gives the ordinary case — one or two orders and a crowd of characters —
-/// nearly all of it.
+/// divided between the orders in advance, so the ordinary case — one or two
+/// orders and a crowd of characters — gets nearly all of it.
 ///
-/// **Measured, not derived.** `sort_precision_probe` sweeps overlapping opaque
-/// quads under the orthographic camera the engine actually builds (depth
-/// `±ORTHO_DEPTH`, `Depth32Float`) and reports the smallest Z difference that
-/// puts the nearer one in front *drawn both ways round*. One `SORT_ORDER_STEP`
-/// separates; half a step does not.
-///
-/// **So the floor is one order step, and the honest capacity is 64.** A layer is
-/// 64 order steps wide; [`rank_offset`] spreads `n` nodes across 63 of them, so
-/// the gap between neighbours is `63 / (n - 1)` steps and reaches the floor at
-/// `n = 64`. The first number written here was 128, taken from the optimistic
-/// end of the measurement ("between a half step and a whole one") — which is the
-/// wrong end to take, because being wrong about it means ties, silently, in the
-/// crowd the feature exists for.
-///
-/// Deriving this from the depth format instead would have given 1/5 of the
-/// answer: the arithmetic says the play plane sits where an `f32` depth has
-/// about a thousandth of a unit of resolution, and the measurement says a
+/// Measured, not derived: `sort_precision_probe` sweeps overlapping opaque
+/// quads under the engine's orthographic camera (depth `±ORTHO_DEPTH`,
+/// `Depth32Float`) and finds the smallest Z difference that sorts correctly
+/// drawn both ways round. One `SORT_ORDER_STEP` separates; half a step does
+/// not. A layer is 64 order steps wide and [`rank_offset`] spreads `n` nodes
+/// across 63 of them, so the gap reaches the floor at `n = 64`.
 /// quarter of that. Believe the measurement.
 pub const SORT_Y_BANDS: usize = 64;
 
@@ -183,29 +170,20 @@ pub fn rank_offset(i: usize, n: usize) -> f32 {
     t * (SORT_LAYER_STEP - SORT_ORDER_STEP)
 }
 
-/// **How much of the camera's movement this node is exempt from.**
+/// How much of the camera's movement this node is exempt from.
 ///
-/// A parallax layer moves *less* than the world does, and reads as further away
-/// for it. `1` moves with the world (no parallax at all, and the default), `0`
-/// is pinned to the camera as if infinitely distant, `0.3` is a distant range of
-/// hills. Per axis, because a side-scroller usually wants horizontal parallax
-/// and no vertical drift at all.
+/// A parallax layer moves less than the world does and reads as further away.
+/// `1` moves with the world (the default), `0` is pinned to the camera as if
+/// infinitely distant, `0.3` is a distant range of hills. Per axis, because a
+/// side-scroller usually wants horizontal parallax and no vertical drift.
 ///
-/// **Why this exists rather than "just use Z".** Under a perspective camera a
-/// layer further back is drawn smaller, and that *is* parallax — which is what
-/// this engine's docs used to recommend. But a 2D game wants an orthographic
-/// camera, because that is what makes pixels-per-unit constant, and under
-/// orthographic projection distance does nothing at all. So the two things a
-/// flat game wants most — crisp pixels and a moving background — could not be
-/// had together. This is a scroll factor rather than a distance, so it works
-/// under either projection and costs the game nothing.
+/// A scroll factor rather than a distance, so it works under an orthographic
+/// camera — where distance does nothing — as well as a perspective one.
 ///
-/// Like a sorting layer, it is applied to the **drawn** transform only: the node
+/// Like a sorting layer, it applies to the drawn transform only: the node
 /// stays where it was authored, a collider on it does not drift, and a script
-/// reads back the position it set.
-///
-/// The anchor is the world origin — a node sits exactly where it was authored
-/// when the camera is at `0`. That has to be *some* fixed point, and the origin
+/// reads back the position it set. The anchor is the world origin: a node sits
+/// exactly where it was authored when the camera is at `0`.
 /// is the one every other part of a flat scene is already built around.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Parallax {
@@ -300,24 +278,18 @@ pub struct Lit2DFacts {
 
 /// Whether `Auto` means 2D for a node, and the one-line reason.
 ///
-/// The reason is returned, not just the verdict, because the whole design rests
-/// on trusting this: an inference you cannot see is one you cannot trust, and
-/// the Inspector prints exactly this string beside `Auto`.
+/// The reason is returned with the verdict because the Inspector prints it
+/// beside `Auto`; an inference you cannot see is one you cannot trust.
 ///
-/// The two rules, and why they are the two:
+/// * A light is 2D when the active camera is orthographic. A 3D scene has no
+///   orthographic active camera, so its lights cannot flip by accident; an
+///   orthographic shot that wants 3D lighting says so once.
+/// * A receiver is 2D when it is a tilemap or a sprite batch. A mesh in a 2D
+///   scene stays 3D-lit unless told otherwise, so mixing the two is deliberate.
 ///
-/// * **A light is 2D when the active camera is orthographic.** A 3D scene does
-///   not have an orthographic active camera, so this cannot flip a 3D scene's
-///   lights by accident — which is the failure that matters. A technical or
-///   isometric shot that *is* orthographic and wants 3D lighting says so once.
-/// * **A receiver is 2D when it is a tilemap or a sprite batch.** Those kinds
-///   exist for flat games. A mesh in a 2D scene stays 3D-lit unless it is told
-///   otherwise, which is what makes mixing the two deliberate rather than
-///   something you discover.
-///
-/// Deliberately not part of it: how near the node is to the camera plane, and
-/// whether the project has named sorting layers. Both are true of scenes that
-/// want nothing to do with 2D lighting, and an inference that is *usually*
+/// Distance to the camera plane and the presence of sorting layers are
+/// deliberately not part of it: both are true of scenes that want nothing to
+/// do with 2D lighting.
 /// right is worse than none — it fails in the scenes least able to explain it.
 pub fn infers_2d(facts: Lit2DFacts) -> (bool, &'static str) {
     if facts.emits {
@@ -789,25 +761,18 @@ pub struct RigidBody {
     pub lock_pos: [bool; 3],
     /// Freeze the entity's rotation about each axis (keeps a body upright during play).
     pub lock_rot: [bool; 3],
-    /// **2D**: keep this body in the XY plane. One switch instead of four.
+    /// 2D: keep this body in the XY plane. One switch instead of four.
     ///
-    /// It freezes Z translation and rotation about X and Y, which is exactly and
-    /// only what "this is a 2D object" means to a solver — the body keeps its
-    /// authored depth, can never drift out of the layer, and can still spin the
-    /// one way a 2D object spins. Gravity, collision and every query are
-    /// unchanged; a 2D body collides with the same world a 3D one does, which is
-    /// what makes a tilemap's colliders work for it without a second physics
-    /// engine.
+    /// Freezes Z translation and rotation about X and Y — the body keeps its
+    /// authored depth, cannot drift out of the layer, and can still spin the one
+    /// way a 2D object spins. Gravity, collision and every query are unchanged,
+    /// so a tilemap's colliders work for it without a second physics engine.
     ///
-    /// It composes with [`Self::lock_pos`] / [`Self::lock_rot`] rather than
-    /// replacing them — see [`Self::locks_pos`]. Ticking it can only ever add a
-    /// freeze, so a body that was already locking something keeps doing it, and
-    /// unticking it cannot silently release an axis the author locked by hand.
-    ///
-    /// This is deliberately not a `BodyMode`: the modes are about whether the
-    /// solver simulates a body at all, and a 2D body is fully simulated. Making
-    /// it a mode would have meant no 2D kinematic platforms and no 2D static
-    /// props, which is most of a platformer.
+    /// Composes with [`Self::lock_pos`] / [`Self::lock_rot`] rather than
+    /// replacing them (see [`Self::locks_pos`]): ticking it only adds freezes,
+    /// and unticking it cannot release an axis the author locked by hand. Not a
+    /// `BodyMode`, because a 2D body is fully simulated and can be kinematic or
+    /// static like any other.
     pub two_d: bool,
     /// Rotate the node so its local +Y tracks the body's up (−gravity) — characters
     /// walking a radial-gravity planet stand on it visually, and their children
@@ -1436,31 +1401,23 @@ pub enum Matter {
     /// field of view in radians. One camera holds play-mode authority at a time
     /// (`active`); the gameplay view renders from it, switchable for cutscenes.
     ///
-    /// A non-empty `target` turns the camera into a RENDER target (A1): every
-    /// frame it renders the world into a live texture addressable as
-    /// `rt:<target>` from any material or UI image — cockpit screens, security
-    /// monitors, mirrors. `cull_mask` is a bitmask over the project's layers
-    /// (bit i = layer i visible; `u32::MAX` = everything) applied wherever
-    /// this camera renders — the game view for the active camera, the target
-    /// texture for a target camera.
+    /// A non-empty `target` makes the camera a render target: every frame it
+    /// renders the world into a live texture addressable as `rt:<target>` from
+    /// any material or UI image — cockpit screens, security monitors, mirrors.
+    /// `cull_mask` is a bitmask over the project's layers (bit i = layer i
+    /// visible; `u32::MAX` = everything) applied wherever this camera renders.
     ///
     /// `target_w`/`target_h` are the target texture's size in pixels and
-    /// `target_hz` how often it redraws (0 = every frame). A minimap that only
-    /// needs 256×256 at 10 Hz costs a sixth of what it cost when every target
-    /// was 480×270 every frame. Use [`Matter::TARGET_W`],
-    /// [`Matter::TARGET_H`] for the defaults.
+    /// `target_hz` how often it redraws (0 = every frame); [`Matter::TARGET_W`]
+    /// and [`Matter::TARGET_H`] are the defaults.
     ///
-    /// `ortho` switches the camera to an **orthographic** projection of
-    /// `ortho_height` world units, top to bottom, at every distance — and
-    /// `fov_y` then means nothing, because there is no angle. This is what a 2D
-    /// game wants: under perspective a tilemap two units further back is drawn
-    /// slightly smaller, so a parallax layer changes scale as well as speed and
-    /// two tilemaps at different Z cannot line up. It is also what a strategy or
-    /// isometric camera wants, and what a technical shot wants.
-    ///
-    /// The height is the full height, not a half-extent — the same number
-    /// [`floptle_render::Projection::Orthographic`] takes, so there is no factor
-    /// of two hiding at the boundary. Width follows from the viewport's aspect.
+    /// `ortho` switches to an orthographic projection `ortho_height` world units
+    /// tall at every distance (`fov_y` is then unused) — what a 2D, strategy or
+    /// isometric camera wants, since under perspective a layer further back is
+    /// drawn smaller and two tilemaps at different Z cannot line up. The height
+    /// is the full height, the same number
+    /// [`floptle_render::Projection::Orthographic`] takes; width follows from
+    /// the viewport's aspect.
     Camera {
         fov_y: f32,
         active: bool,
@@ -1567,40 +1524,29 @@ pub enum Matter {
     /// shadows and spans all key off it, so keep it snug. Visual only for now
     /// (no collision until the CPU field evaluator lands — proposal §7.3).
     FieldShape { radius: f32 },
-    /// A grid of spritesheet cells drawn as **one mesh, one draw call**.
+    /// A grid of spritesheet cells drawn as one mesh, one draw call.
     ///
     /// The sheet comes from the node's [`crate::Material`] — its `texture`,
-    /// `sheet_cols`/`sheet_rows` and `filter`. This component is only the grid,
-    /// so a tilemap is dressed exactly like every other surface and a project
-    /// does not learn a second way to say "this texture, chopped this way".
-    /// (The Material's own `cell` is unused: each tile carries its own UVs.)
+    /// `sheet_cols`/`sheet_rows` and `filter` — so a tilemap is dressed like
+    /// every other surface. (The Material's own `cell` is unused: each tile
+    /// carries its own UVs.)
     ///
-    /// **Why this exists at all.** A tilemap built from one quad per tile has a
-    /// hairline of background between tiles that opens and closes as the camera
-    /// moves — each quad's edge is computed through its own transform, so two
-    /// touching edges land either side of a pixel boundary independently. Here
-    /// every tile is a quad in one vertex buffer whose corners are computed by
-    /// the same expression, so a shared edge is *bit-identical* on both sides
-    /// and the rasterizer has no gap to fill. That is a structural fix; the
-    /// alternative games reach for — overlapping tiles by a few percent — only
-    /// hides it, and only for tiles that happen to be opaque at the edge.
+    /// One mesh, because a tilemap built from one quad per tile shows a hairline
+    /// of background between tiles as the camera moves: each quad's edge goes
+    /// through its own transform and lands either side of a pixel boundary
+    /// independently. Here a shared edge is computed by the same expression on
+    /// both sides, so it is bit-identical and there is no gap.
     ///
-    /// `data` is row-major, `rows * cols` long, from the top-left.
+    /// `data` is row-major, `rows * cols` long, from the top-left; each square
+    /// is a packed cell index + orientation (see [`crate::tile`]), and a grid
+    /// written before orientations existed still means what it did.
     /// [`EMPTY_TILE`] leaves a hole rather than drawing cell 0.
+    ///
     /// `tileset` names the project-relative `.tileset.ron` that says what each
-    /// cell of the sheet means — whether it collides, what it is tagged, which
-    /// autotile group it belongs to, whether it animates. Empty = none, and the
-    /// tilemap is then art only.
-    ///
-    /// It is a path rather than inline data because those answers belong to the
-    /// SHEET, not to this grid: tick "solid" on the brick once and every brick in
-    /// every scene collides, including the ones already placed. Inline, the answer
-    /// would be recorded per node and a level built last month would keep the old
-    /// one.
-    ///
-    /// Each square of `data` is a packed cell index + orientation — see
-    /// [`crate::tile`]. A grid written before orientations existed is a list of
-    /// bare indices and still means exactly what it did.
+    /// cell of the sheet means — collision, tags, autotile group, animation.
+    /// Empty = none; the tilemap is then art only. A path rather than inline
+    /// data because those answers belong to the sheet: tick "solid" on the
+    /// brick once and every brick in every scene collides.
     Tilemap {
         cols: u32,
         rows: u32,
@@ -1629,27 +1575,15 @@ pub enum Matter {
     },
     /// **One sprite.** A flat quad wearing a cell of its Material's sheet.
     ///
-    /// A [`SpriteBatch`](Self::SpriteBatch) of one, *named* — and the naming is
-    /// most of the point. A single sprite could always be built out of a Plane
-    /// primitive and a Material, and that is exactly what every 2D project did,
-    /// each of them re-deriving the same three things: that the plane mesh is
-    /// `2 × PRIMITIVE_HALF` across and not one unit (so every sprite came out
-    /// 40% too big until someone measured it), that flipping means a negative
-    /// node scale, and that a sheet cell is a Material field. A node type
-    /// answers all three once.
-    ///
-    /// It carries the two things a Plane genuinely cannot express:
+    /// A [`SpriteBatch`](Self::SpriteBatch) of one, with the two things a Plane
+    /// primitive cannot express:
     ///
     /// * **A size in pixels.** `ppu` is pixels per world unit measured against
     ///   one cell of the sheet, so a 32×32 cell at `ppu = 32` is one unit across
-    ///   however the sheet is sliced — re-slicing it finer does not resize every
-    ///   sprite on it. That is the number a pixel artist already has; world
-    ///   units are a number they would have to work out.
-    /// * **A pivot.** The origin defaults to the sprite's centre, and for a
-    ///   Y-sorted character it wants to be at the **feet** — otherwise the node
-    ///   sorts by a point floating at its waist and walks behind things it is
-    ///   standing in front of. `pivot: [0.5, 0.0]` is bottom-centre, and it is
-    ///   why this and Y-sorting shipped together.
+    ///   however the sheet is sliced.
+    /// * **A pivot.** The origin defaults to the sprite's centre; a Y-sorted
+    ///   character wants it at the feet (`pivot: [0.5, 0.0]`), or it sorts by a
+    ///   point at its waist and walks behind things it stands in front of.
     Sprite {
         /// Pixels per world unit. `0` means "use [`size`](Self::Sprite::size)"
         /// — which is the escape hatch for art that is not pixel art, and for a
@@ -1850,23 +1784,16 @@ pub enum Matter {
     /// A **light probe volume**: the box that baked global illumination is
     /// gathered over, and the box it lights inside.
     ///
-    /// Direct light tells a surface about the sun. Everything else a real room
-    /// looks like is light that already bounced — off a red wall, off a bright
-    /// floor — and no amount of material work invents it. The engine's answer
-    /// before this node was a single flat ambient colour, which lifts the inside
-    /// of a sealed box exactly as much as it lifts an open field.
+    /// Direct light tells a surface about the sun; most of what a room looks
+    /// like is light that already bounced. Baking renders the scene from a
+    /// lattice of points inside the box and keeps the light arriving at each
+    /// from every direction. Inside the box that replaces the flat ambient;
+    /// outside, the flat ambient carries on, so a scene with no volume renders
+    /// as it always did.
     ///
-    /// Baking renders the scene from a lattice of points inside the box and
-    /// keeps, at each one, the light arriving from every direction. Inside the
-    /// box that replaces the flat ambient; outside, the flat ambient carries on
-    /// as before. So a scene with no volume renders exactly what it always did,
-    /// and a scene with one is lit by its own surfaces.
-    ///
-    /// The node's transform positions and *scales* the box: `half_extents` is
-    /// its size at scale 1, and moving the node moves the volume. The bake
-    /// itself lives in a `.fgi` file beside the scene, because it is a build
-    /// artefact measured in hundreds of kilobytes and a `.ron` is a thing people
-    /// read.
+    /// The node's transform positions and scales the box: `half_extents` is its
+    /// size at scale 1. The bake lives in a `.fgi` file beside the scene — it is
+    /// a build artefact measured in hundreds of kilobytes.
     LightProbes {
         /// Half the box, in local units, before the node's scale.
         half_extents: [f32; 3],
@@ -2056,24 +1983,16 @@ pub enum Matter {
     },
     /// A **reflection probe**: what the surfaces in one room reflect.
     ///
-    /// A reflective surface asks two things in turn — "is what I am reflecting
-    /// on screen?", and if not, "then what is out there?". Outdoors the second
-    /// answer is the sky and that is genuinely right. Indoors it is daylight
-    /// arriving through a sealed ceiling, which is the most conspicuous way an
-    /// interior can fail to look like one.
+    /// A reflective surface that finds nothing on screen falls back to the sky,
+    /// which is wrong indoors. A probe captures the view from its own position
+    /// once, and every reflective surface inside its box reflects that instead.
     ///
-    /// This node is the other answer. It captures the view from its own
-    /// position, once, and every reflective surface inside its box uses that
-    /// instead of the sky. A polished floor shows the room it is in.
+    /// The box is the room: it says which surfaces the probe speaks for, and it
+    /// is what makes a reflected wall land on the wall — an environment map on
+    /// its own is a picture at infinity that slides with the camera.
     ///
-    /// **The box is the room, and it does two jobs.** It says which surfaces
-    /// this probe speaks for, and it is what makes a reflected wall land *on*
-    /// the wall: an environment map on its own is a picture at infinity and
-    /// slides as the camera moves. Sized to the room, reflections sit still.
-    ///
-    /// Nothing is written to disk. A capture is fast enough to take on load and
-    /// whenever the probe is moved, which is better than a bake that can go
-    /// stale without saying so — and it means a `.ron` stays a thing people read.
+    /// Nothing is written to disk; the capture is retaken on load and whenever
+    /// the probe moves.
     ReflectionProbe {
         /// Half the box, in local units, before the node's scale.
         half_extents: [f32; 3],

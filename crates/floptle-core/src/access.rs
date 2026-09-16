@@ -1,22 +1,13 @@
 //! Accessibility settings — text scale, colour-vision filter, reduced motion,
 //! captions.
 //!
-//! **Why these live in the engine.** Before this, the whole accessibility
-//! surface was input rebinding, which exists by accident of the action-map work
-//! rather than by intent. Searching the workspace for *colourblind*,
-//! *text scale* and *reduced motion* returned zero hits each.
-//!
-//! Two reasons that is not acceptable. Console platform holders require a subset
-//! of this, so a game built here could not pass certification without
-//! hand-rolling all of it. And roughly 1 in 12 men has some colour vision
-//! deficiency — an engine that calls this "the game's problem" pushes it onto
-//! every game separately, and most will skip it.
-//!
-//! These are player settings, so a game's options menu drives them (`access.*`
-//! in Lua) and the engine honours them in the parts it owns: the UI's text sizes
-//! reflow, the post chain carries the filter, and UI transitions snap instead of
-//! sliding. What the engine cannot honour for you — a game's own camera shake —
-//! reads the same flag.
+//! These are player settings: a game's options menu drives them (`access.*` in
+//! Lua) and the engine honours them in the parts it owns — the UI's text sizes
+//! reflow, the post chain carries the filter, UI transitions snap instead of
+//! sliding. What the engine cannot honour for you, such as a game's own camera
+//! shake, reads the same flag. Console platform holders require a subset of
+//! this for certification, and about 1 in 12 men has some colour vision
+//! deficiency; an engine that leaves it to each game gets it skipped.
 
 /// Which colour vision deficiency the picture is adjusted for.
 ///

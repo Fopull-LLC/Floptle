@@ -1,30 +1,18 @@
-//! **How a 2D camera follows.** Attached to an orthographic Camera node.
+//! How a 2D camera follows. Attached to an orthographic Camera node.
 //!
-//! A 2D game's camera is not a transform somebody animates — it is a rule about
-//! a target, and every 2D project writes the same rule out again in Lua: chase
-//! the player, but not exactly, and not off the edge of the level, and shake
-//! when something hits. Writing it once is not just convenience: three of those
-//! four parts have a version that looks right and is subtly wrong, and a project
-//! only finds out at the boundary.
+//! The rule every 2D game writes: chase the target, but not exactly, not off the
+//! edge of the level, and shake when something hits. In this order:
 //!
-//! The order matters and is the whole design:
-//!
-//! 1. **Dead zone.** The camera does not move at all until the target leaves a
-//!    box around it. Without one, every footstep moves the camera, which reads
-//!    as the world wobbling.
-//! 2. **Smoothing.** What is left is approached *exponentially*, not by a
-//!    fraction per frame — `lerp(a, b, k * dt)` is the version that looks right
-//!    and is frame-rate dependent, so the camera lags differently at 30 and 144.
-//! 3. **Limits.** The result is clamped to the level's bounds, so the camera
-//!    never shows outside the world.
-//! 4. **Shake**, added *after* all of that and **not fed back**.
+//! 1. **Dead zone.** The camera does not move until the target leaves a box
+//!    around it; otherwise every footstep reads as the world wobbling.
+//! 2. **Smoothing.** The remainder is approached exponentially, not by a
+//!    fraction per frame — `lerp(a, b, k * dt)` lags differently at 30 and 144.
+//! 3. **Limits.** The result is clamped to the level's bounds.
+//! 4. **Shake**, added after all of that and not fed back.
 //!
 //! Step 4 is why the camera keeps [`Camera2D::pos`] of its own rather than
-//! reading its node's transform each frame. A shake written into the transform
-//! and read back next frame is a shake the follow then chases and the limits
-//! then clamp: the shake damps itself near a boundary and drags the camera off
-//! its target everywhere else. Keeping the follow state separate is what lets
-//! the two compose instead of fight.
+//! reading its node's transform each frame: a shake written into the transform
+//! and read back is a shake the follow then chases and the limits then clamp.
 
 use crate::math::DVec2;
 

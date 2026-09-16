@@ -1,21 +1,10 @@
-//! What one tilemap square *is*: a cell index plus an orientation, packed into
-//! the `u32` a [`crate::Matter::Tilemap`]'s `data` has always held.
+//! One tilemap square: a cell index plus an orientation, packed into the `u32`
+//! that a [`crate::Matter::Tilemap`]'s `data` holds.
 //!
-//! ## Why the orientation is packed rather than stored beside the index
-//!
-//! A tile sheet is drawn once and used in four directions. Every 2D tool solves
-//! this the same way — Tiled, LDtk and Godot all pack orientation flags into the
-//! high bits of the tile id — and the reason is not thrift. A parallel array of
-//! orientations is a second thing to keep the same length as `data`, and the
-//! moment one of them is resized, or loaded from an older scene, or written by a
-//! script that only knew about the first, the two disagree and the map draws
-//! garbage that looks like an art bug.
-//!
-//! So the square is one number, and every path that already carried a cell
-//! index carries the orientation for free — including a `.ron` scene written
-//! before this existed, because an unrotated tile's flag bits are zero.
-//!
-//! ## The encoding
+//! The orientation lives in the high bits, as Tiled, LDtk and Godot do it, so a
+//! square is one number: every path that carries a cell index carries the
+//! orientation with it, and an unrotated tile from an older scene has zero
+//! flag bits.
 //!
 //! ```text
 //!  bit 31    30 29     28 .......... 0
@@ -24,27 +13,14 @@
 //!  └──────┘ └───────┘ └────────────────┘
 //! ```
 //!
-//! `rot` is quarter-turns clockwise (0–3). 536,870,911 cell indices remain,
-//! which is more sheet than any GPU will sample.
+//! `rot` is quarter-turns clockwise (0–3). [`crate::EMPTY_TILE`] is `u32::MAX`
+//! and reads back as an orientation too; emptiness is checked before
+//! orientation everywhere.
 //!
-//! [`crate::EMPTY_TILE`] is `u32::MAX`, so it reads back as an orientation too —
-//! that is harmless and deliberate: emptiness is checked before orientation
-//! everywhere, and reserving a *separate* sentinel per orientation would have
-//! made four ways to say "nothing here".
-//!
-//! ## The orientation is the dihedral group of the square, and the API says so
-//!
-//! There are exactly eight ways to place a square tile: four rotations, each
-//! optionally mirrored. Which means three independent booleans (`flipX`,
-//! `flipY`, `rotate`) *cannot* be the representation — `flipY` is not
-//! independent, it is `flipX` composed with a half-turn. Storing all three
-//! invites the bug where a game sets `flipY`, reads it back, and gets `false`
-//! because something normalised it on the way through.
-//!
-//! So [`TileXform`] is `(rot, flip_x)` — the eight states, named once — and a
-//! vertical flip is a *composition* you ask for ([`TileXform::flipped_y`]),
-//! never a field. Reads are canonical, and the editor's ⇔ / ⇕ / ↻ buttons
-//! compose through the same functions a script does.
+//! [`TileXform`] is `(rot, flip_x)`: the eight placements of a square. A
+//! vertical flip is `flip_x` composed with a half-turn ([`TileXform::flipped_y`]),
+//! not a third field, so reads are always canonical and the editor's ⇔ / ⇕ / ↻
+//! buttons compose through the same functions a script does.
 
 /// The bits of a packed square that hold the cell index.
 pub const TILE_CELL_MASK: u32 = 0x1FFF_FFFF;
