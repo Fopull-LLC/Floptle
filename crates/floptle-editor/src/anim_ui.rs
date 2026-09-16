@@ -72,6 +72,8 @@ pub struct AnimUiState {
     pub row_filter: String,
     /// Width of the row-name column, in points; dragged at its edge.
     pub label_w: f32,
+    /// The curve view: values over time instead of the dopesheet.
+    pub curves: crate::anim_curves::CurveView,
     /// Last frame's ScrollArea offset (the anchor for cursor-centred zoom).
     pub scroll_off: egui::Vec2,
     /// A scroll offset to force next frame (cursor-anchored zoom / Fit).
@@ -221,6 +223,7 @@ impl Default for AnimUiState {
             row_scale: 1.0,
             row_filter: String::new(),
             label_w: ANIM_LABEL_W,
+            curves: crate::anim_curves::CurveView::new(),
             scroll_off: egui::Vec2::ZERO,
             scroll_target: None,
             fit_pending: false,
@@ -1549,6 +1552,23 @@ impl EditorTabViewer<'_> {
             {
                 self.anim_ui.fit_pending = true;
             }
+            // Dopesheet or curves.
+            ui.separator();
+            if ui
+                .selectable_label(!self.anim_ui.curves.on, "▤ Sheet")
+                .on_hover_text("keys on rows: when things happen")
+                .clicked()
+            {
+                self.anim_ui.curves.on = false;
+            }
+            if ui
+                .selectable_label(self.anim_ui.curves.on, "📈 Curves")
+                .on_hover_text("values over time: how much, and how fast (Tab)")
+                .clicked()
+            {
+                self.anim_ui.curves.on = true;
+            }
+            ui.separator();
             // Row height, in points: the wheel's Alt+scroll as a number, so a big
             // rig can be packed to exactly the height that fits the panel.
             let mut row_px = ANIM_ROW_BASE * self.anim_ui.row_scale;
@@ -1599,6 +1619,8 @@ impl EditorTabViewer<'_> {
                     "right-click a lane = insert key here",
                     "right-click a key = its interpolation (smooth, ease, hold)",
                     "⏵ on a node row = its position / rotation / scale lanes",
+                    "Tab = curves ⇄ sheet · in curves: drag a key in time and value,",
+                    "Shift+drag = value only · Alt+wheel = zoom values · right-click = key here",
                     "⏺ Key all bones · ◎ Key all tracks (toolbar)",
                     "— Navigation —",
                     "Space = play/pause · Home/End = clip ends",
@@ -1895,13 +1917,13 @@ fn row_font(lane_h: f32) -> Option<FontId> {
 }
 
 /// A key glyph's half-size for a row of this height.
-fn key_size(lane_h: f32) -> f32 {
+pub(crate) fn key_size(lane_h: f32) -> f32 {
     (lane_h * 0.24).clamp(2.0, 4.5)
 }
 
 /// The hit target of a key: never smaller than a fingertip can find, whatever
 /// the row height.
-fn key_hit(lane_h: f32) -> egui::Vec2 {
+pub(crate) fn key_hit(lane_h: f32) -> egui::Vec2 {
     egui::vec2(12.0, lane_h.clamp(8.0, 12.0))
 }
 /// The row-name column's starting width and its range.
@@ -1927,7 +1949,7 @@ type NodeFieldMenu = (String, String, Vec<(String, String, &'static str)>);
 /// (or a key that follows its lane), a circle for a smooth one, a square for a
 /// hold, and a diamond with a dot for an ease — so a dopesheet shows its
 /// timing without opening a menu.
-fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32, mode: Option<AnimInterpDoc>, s: f32) {
+pub(crate) fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32, mode: Option<AnimInterpDoc>, s: f32) {
     let outline = Stroke::new(1.0, Color32::from_black_alpha(120));
     match mode {
         Some(AnimInterpDoc::Hold) => {
@@ -2778,6 +2800,83 @@ impl EditorTabViewer<'_> {
             })
             .sum();
         let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
+        // The curve view stands in for the sheet below; the toolbar, keyboard
+        // and undo around it are shared.
+        if st.curves.on {
+            let hovered_rect = ui.available_rect_before_wrap();
+            let edits = crate::anim_curves::curves_ui(
+                ui,
+                &mut st.curves,
+                doc,
+                dur,
+                px,
+                st.snap_fps,
+                label_w,
+                &mut st.playhead,
+                &st.sel_keys,
+            );
+            if let Some((ci, t)) = edits.select {
+                st.sel_keys = vec![(ci, t)];
+                st.sel_prop = None;
+            }
+            if crate::anim_curves::apply_curve_edits(doc, &edits) {
+                st.clip_dirty = true;
+            }
+            st.sheet_hovered = ui.rect_contains_pointer(hovered_rect);
+            // The transport and undo keys the sheet answers, answered here too.
+            if !playing && (tab_focused || st.sheet_hovered) && !ui.ctx().text_edit_focused() {
+                let (sp, home, end, left, right, fit, ctrl, shift, z, y, tab) = ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::F),
+                        i.modifiers.command || i.modifiers.ctrl,
+                        i.modifiers.shift,
+                        i.key_pressed(egui::Key::Z),
+                        i.key_pressed(egui::Key::Y),
+                        i.key_pressed(egui::Key::Tab),
+                    )
+                });
+                let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+                if ctrl && z && !shift && clip_undo_redo(st, false) {
+                    st.clip_dirty = true;
+                }
+                if ctrl && (y || (z && shift)) && clip_undo_redo(st, true) {
+                    st.clip_dirty = true;
+                }
+                if sp {
+                    st.preview_playing = !st.preview_playing;
+                }
+                if home {
+                    st.playhead = 0.0;
+                    st.preview_playing = false;
+                }
+                if end {
+                    st.playhead = dur;
+                    st.preview_playing = false;
+                }
+                if left {
+                    st.playhead = (st.playhead - step).max(0.0);
+                    st.preview_playing = false;
+                }
+                if right {
+                    st.playhead = (st.playhead + step).min(dur);
+                    st.preview_playing = false;
+                }
+                if fit {
+                    st.fit_pending = true;
+                    st.curves.vrange = None;
+                }
+                if tab {
+                    st.curves.on = false;
+                }
+            }
+            anim_sheet_after(st, undo_snap, dirty_before);
+            return;
+        }
         let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
         if let Some(t) = st.scroll_target.take() {
             area = area.scroll_offset(t);
@@ -3802,6 +3901,9 @@ impl EditorTabViewer<'_> {
                 if fit {
                     st.fit_pending = true;
                 }
+                if ui.input(|i| i.key_pressed(egui::Key::Tab)) {
+                    st.curves.on = true;
+                }
                 // Delete removes the multi-selected transform keys first, then a
                 // selected property key, then a selected event.
                 if del && !st.sel_keys.is_empty() {
@@ -4085,7 +4187,25 @@ impl EditorTabViewer<'_> {
             st.playhead %= dur;
         }
     }
+}
 
+/// The frame's close for the curve view: the undo step the sheet commits at
+/// its own end, and the preview loop.
+fn anim_sheet_after(st: &mut AnimUiState, undo_snap: Option<(String, AnimClipDoc)>, dirty_before: bool) {
+    if !dirty_before
+        && st.clip_dirty
+        && let Some((_, d)) = undo_snap
+    {
+        st.clip_undo.push(d);
+        if st.clip_undo.len() > 64 {
+            st.clip_undo.remove(0);
+        }
+        st.clip_redo.clear();
+    }
+    let dur = st.clip_doc.as_ref().map(|(_, d)| d.duration.max(0.01)).unwrap_or(1.0);
+    if st.preview_playing && st.playhead > dur {
+        st.playhead %= dur;
+    }
 }
 
 /// Turn ● Record off and restore the pre-record subtree pose — recording
@@ -4411,7 +4531,7 @@ pub(crate) enum Lane {
 impl Lane {
     pub(crate) const ALL: [Lane; 3] = [Lane::Translation, Lane::Rotation, Lane::Scale];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Lane::Translation => "position",
             Lane::Rotation => "rotation",
@@ -4419,7 +4539,7 @@ impl Lane {
         }
     }
 
-    fn color(self) -> Color32 {
+    pub(crate) fn color(self) -> Color32 {
         match self {
             Lane::Translation => Color32::from_rgb(235, 130, 110),
             Lane::Rotation => Color32::from_rgb(130, 205, 130),
@@ -4430,7 +4550,7 @@ impl Lane {
 
 /// The edits every keyed lane supports, so a position lane and a rotation
 /// lane are handled by one piece of code.
-trait KeyedLane {
+pub(crate) trait KeyedLane {
     fn times(&self) -> &[f32];
     fn modes(&self) -> &[AnimKeyModeDoc];
     fn modes_mut(&mut self) -> &mut Vec<AnimKeyModeDoc>;
@@ -4485,7 +4605,7 @@ keyed_lane!(AnimTrackDoc3);
 keyed_lane!(AnimTrackDoc4);
 
 /// A channel's lane, if it has one.
-fn lane_of(ch: &floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&dyn KeyedLane> {
+pub(crate) fn lane_of(ch: &floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&dyn KeyedLane> {
     match lane {
         Lane::Translation => ch.translation.as_ref().map(|l| l as &dyn KeyedLane),
         Lane::Rotation => ch.rotation.as_ref().map(|l| l as &dyn KeyedLane),
@@ -4493,7 +4613,7 @@ fn lane_of(ch: &floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&dyn KeyedL
     }
 }
 
-fn lane_of_mut(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&mut dyn KeyedLane> {
+pub(crate) fn lane_of_mut(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&mut dyn KeyedLane> {
     match lane {
         Lane::Translation => ch.translation.as_mut().map(|l| l as &mut dyn KeyedLane),
         Lane::Rotation => ch.rotation.as_mut().map(|l| l as &mut dyn KeyedLane),
@@ -4502,7 +4622,7 @@ fn lane_of_mut(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane) -> Option<&mu
 }
 
 /// Delete one lane's key at `t`, dropping the lane when it empties.
-fn delete_lane_key(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane, t: f32) {
+pub(crate) fn delete_lane_key(ch: &mut floptle_scene::AnimChannelDoc, lane: Lane, t: f32) {
     let empty = lane_of_mut(ch, lane).is_some_and(|l| l.delete(t));
     if empty {
         match lane {
@@ -4524,7 +4644,7 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
 /// The interpolation choices for a key: one row per mode, the current one
 /// ticked. "Lane default" clears the key's own mode; `lane_step` says what that
 /// default is, so the row can name it.
-fn interp_menu(
+pub(crate) fn interp_menu(
     ui: &mut egui::Ui,
     current: Option<AnimInterpDoc>,
     lane_step: bool,

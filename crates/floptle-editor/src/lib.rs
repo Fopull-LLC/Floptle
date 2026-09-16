@@ -64,6 +64,8 @@ mod doctor;
 #[cfg(feature = "editor-ui")]
 mod anim_ui;
 #[cfg(feature = "editor-ui")]
+mod anim_curves;
+#[cfg(feature = "editor-ui")]
 mod aseprite;
 mod assets;
 // **The machine's speakers and its microphone**, both of which a dedicated

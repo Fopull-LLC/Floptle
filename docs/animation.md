@@ -93,6 +93,15 @@ Select a node that has a controller (or a rigged model) and open **Window →
   its edge. **🔍 rows** shows only the rows whose
   name matches, so a sixty-bone rig is animated a limb at a time (Ctrl+A then
   selects what is shown).
+- **📈 Curves** (or Tab): the same clip as values over time — one node's
+  position, rotation (in degrees) and scale, each key a point on its curve.
+  Drag a point in time and value (Shift keeps the time), right-click empty
+  space to key a lane at that time without changing the motion, right-click a
+  point for its interpolation. The curves are drawn through the same sampler
+  the game uses, so an eased key shows the motion it will produce. One lane
+  shown draws a real value grid that Alt+wheel zooms and Shift+wheel pans;
+  several shown share the height, each on its own range, since metres and
+  degrees do not share an axis.
 - **Interpolation is per key**: right-click a key → *Interpolation* to choose
   how it reaches the next one — *Linear*, *Smooth* (a spline through the
   neighbouring keys, so the motion has no corner at the key), *Ease in*, *Ease

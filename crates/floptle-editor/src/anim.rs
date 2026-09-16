@@ -736,7 +736,7 @@ fn interp_to_doc(i: Interp) -> AnimInterpDoc {
     }
 }
 
-fn track3_from_doc(d: &AnimTrackDoc3) -> Track<Vec3> {
+pub(crate) fn track3_from_doc(d: &AnimTrackDoc3) -> Track<Vec3> {
     let lane = if d.step { Interp::Step } else { Interp::Linear };
     Track {
         times: d.times.clone(),
@@ -746,7 +746,7 @@ fn track3_from_doc(d: &AnimTrackDoc3) -> Track<Vec3> {
     }
 }
 
-fn track4_from_doc(d: &AnimTrackDoc4) -> Track<Quat> {
+pub(crate) fn track4_from_doc(d: &AnimTrackDoc4) -> Track<Quat> {
     let lane = if d.step { Interp::Step } else { Interp::Linear };
     Track {
         times: d.times.clone(),
