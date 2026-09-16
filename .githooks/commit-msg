@@ -1,0 +1,7 @@
+#!/bin/sh
+# Rejects a commit whose message carries a Co-Authored-By trailer.
+# Enable with:  git config core.hooksPath .githooks
+if grep -qi '^co-authored-by:' "$1"; then
+    echo "commit-msg: Co-Authored-By trailers are not used in this repository" >&2
+    exit 1
+fi

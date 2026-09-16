@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+# Claude Code PreToolUse hook: refuses a Bash command that would write a
+# Co-Authored-By trailer. Wired up in .claude/settings.json.
+import json, sys
+raw = sys.stdin.read()
+try:
+    cmd = json.loads(raw).get("tool_input", {}).get("command", "")
+except ValueError:
+    cmd = raw
+if "co-authored-by" in cmd.lower():
+    sys.stderr.write("Co-Authored-By trailers are not used in this repository; commit without one.\n")
+    sys.exit(2)
