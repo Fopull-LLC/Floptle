@@ -17,9 +17,9 @@
 > chunked diggable terrain with galaxy-scale streaming, custom physics,
 > Lua scripting with an in-editor IDE, timeline particles, node-graph shaders
 > (`.flsl`), skeletal animation, spatial audio + mixer, game UI, and the
-> Floptle Hub launcher all work today — the bundled `solar/` demo is a
-> KSP-style playground: fly a ship between procedurally generated planets,
-> land, dig, and save per slot. Pre-1.0: expect sharp edges and breaking
+> Floptle Hub launcher all work today — the [Solar](https://github.com/Fopull-LLC/Solar)
+> demo is a KSP-style playground built on it: fly a ship between procedurally
+> generated planets, land, dig, and save per slot. Pre-1.0: expect sharp edges and breaking
 > changes between versions. Start with [`docs/VISION.md`](docs/VISION.md),
 > then [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 

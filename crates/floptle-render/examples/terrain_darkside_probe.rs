@@ -27,7 +27,10 @@ fn white() -> TextureData {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().unwrap_or_else(|| "solar/terrain/planetoid.1.cfield".into());
+    let Some(path) = args.next() else {
+        eprintln!("usage: terrain_darkside_probe <planet.cfield> [out_prefix]");
+        std::process::exit(2);
+    };
     let prefix = args.next().unwrap_or_else(|| "darkside".into());
     let bytes = std::fs::read(&path).expect("read cfield (run gen_planetoid first)");
     let mut field = ChunkField::from_bytes(&bytes).expect("parse cfield");

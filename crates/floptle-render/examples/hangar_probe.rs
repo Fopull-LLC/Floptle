@@ -56,7 +56,10 @@ fn main() {
 
     let mut raster = Raster::new(&gpu);
     let unit = raster.register(&gpu, &cube(0.5), None);
-    let root = "solar/textures/hangar";
+    let Some(root) = std::env::args().nth(2) else {
+        eprintln!("usage: hangar_probe <out.png> <textures/hangar dir>");
+        std::process::exit(2);
+    };
     let floor_tex = raster.register_texture(&gpu, &load_png(&format!("{root}/floor_concrete.png")), Default::default());
     let wall_tex = raster.register_texture(&gpu, &load_png(&format!("{root}/wall_panels.png")), Default::default());
     let pad_tex = raster.register_texture(&gpu, &load_png(&format!("{root}/ceiling_plates.png")), Default::default());

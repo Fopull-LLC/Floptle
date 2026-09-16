@@ -1,4 +1,4 @@
-//! Headless probe for solar/shaders/hullPanels.flsl — the fix for Ty's "the
+//! Headless probe for the hullPanels.flsl fixture — the fix for "the
 //! grid changes size as I move closer/farther" bug. It renders the REAL shader
 //! file through the production path on a ROW of identical boxes receding into
 //! the distance. Because the shader now samples `objectPos` (surface-locked
@@ -21,7 +21,7 @@ const H: u32 = 600;
 
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "hull.png".into());
-    let src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../solar/shaders/hullPanels.flsl");
+    let src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-shader/tests/fixtures/hullPanels.flsl");
     let src = std::fs::read_to_string(src_path).expect("read hullPanels.flsl");
 
     let gpu = Gpu::headless(W, H);

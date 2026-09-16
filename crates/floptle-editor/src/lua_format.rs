@@ -383,20 +383,19 @@ end
 mod real_script_tests {
     use super::*;
 
-    /// Every `.lua` in both shipped projects, formatted: the formatter may move
+    /// Every `.lua` in the shipped project, formatted: the formatter may move
     /// whitespace and nothing else. Stripping all whitespace from input and output
     /// must give identical text — which catches a dropped line, a swallowed
-    /// character inside a string, or a mangled long bracket on ~60 real files,
-    /// including the 1000-line controllers.
+    /// character inside a string, or a mangled long bracket on real files.
     ///
     /// It also asserts idempotence per file, because format-on-save runs on files
     /// exactly like these and a non-idempotent formatter would dirty a file every
     /// time it was saved.
     #[test]
-    fn formatting_the_real_projects_moves_only_whitespace() {
+    fn formatting_the_real_scripts_moves_only_whitespace() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut checked = 0;
-        for dir in ["solar/scripts", "assets/scripts", "solar/tests"] {
+        for dir in ["assets/scripts"] {
             let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
             for entry in rd.flatten() {
                 let path = entry.path();

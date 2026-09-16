@@ -67,8 +67,12 @@ out.png
 /*/replays/
 
 # Auto-seeded UI effect examples in the scratch/default project (regenerated on
-# project open; the canonical copies live under each real project, e.g. solar/).
+# project open).
 assets/shaders/examples/ui/
+
+# The Solar demo lives in its own repository (github.com/Fopull-LLC/Solar); a
+# local symlink here keeps older project paths working.
+/solar
 
 # A PROJECT's package registry. `Source::Linked` records an ABSOLUTE path on the
 # machine that linked it — "/home/someone/…" — so this file is developer state,
@@ -93,8 +97,7 @@ assets/shaders/examples/ui/
 /.internal/
 /CLAUDE.md
 
-# Python bytecode from the repo's helper scripts (solar/tools/…). Regenerated on
-# every run and interpreter-version-specific, so it is pure churn in a diff.
+# Python bytecode from helper scripts.
 __pycache__/
 *.pyc
 .venv/

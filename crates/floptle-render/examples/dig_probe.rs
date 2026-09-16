@@ -54,9 +54,10 @@ fn grad_stats(field: &ChunkField, around: Vec3, extent: f32) {
 }
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "solar/terrain/planetoid.1.cfield".into());
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: dig_probe <planet.cfield>");
+        std::process::exit(2);
+    };
     let bytes = std::fs::read(&path).expect("read cfield (run gen_planetoid first)");
     let mut field = ChunkField::from_bytes(&bytes).expect("parse cfield");
 

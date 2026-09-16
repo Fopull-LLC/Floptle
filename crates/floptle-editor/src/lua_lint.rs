@@ -862,17 +862,17 @@ print(used)
         assert!(lint(all, API).is_empty());
     }
 
-    /// Real scripts from both shipped projects: the lints may only report things
+    /// Real scripts from the shipped project: the lints may only report things
     /// worth reporting, so a clean file must stay clean. This is the guard against
     /// a lint that cries wolf on every script in the engine.
     #[test]
-    fn the_real_projects_are_reasonably_clean() {
+    fn the_real_scripts_are_reasonably_clean() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let api = crate::ide::api_labels();
         let api_refs: Vec<&str> = api.iter().map(|s| s.as_str()).collect();
         let mut noisy: Vec<String> = Vec::new();
         let mut files = 0;
-        for dir in ["solar/scripts", "assets/scripts"] {
+        for dir in ["assets/scripts"] {
             let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
             for entry in rd.flatten() {
                 let path = entry.path();

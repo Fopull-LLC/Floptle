@@ -2,7 +2,7 @@
 //! as a scene (`.ron` under scenes/) or a `project.ron`, and report what loaded.
 //! Exit code 1 if anything failed: usable in scripts and CI.
 //!
-//! Usage: cargo run -p floptle-scene --example validate -- solar/scenes/planetoid.ron solar/project.ron
+//! Usage: cargo run -p floptle-scene --example validate -- <project>/scenes/first.ron <project>/project.ron
 
 fn main() {
     let mut failed = false;

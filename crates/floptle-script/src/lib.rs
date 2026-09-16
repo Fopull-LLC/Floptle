@@ -2029,35 +2029,7 @@ mod shipped_script_tests {
         }
     }
 
-    /// The solar demo's scripts must compile too.
-    ///
-    /// They are not shipped into new projects, so `SHIPPED_SCRIPTS` doesn't
-    /// cover them — but they are the largest body of real Lua in the repo, they
-    /// are what the demo project runs, and a syntax error in one only surfaces
-    /// when someone opens the scene it is attached to. Read from disk rather
-    /// than `include_str!` so adding a script to the demo needs no edit here.
-    #[test]
-    fn the_solar_demo_scripts_compile() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar/scripts");
-        let Ok(rd) = std::fs::read_dir(&dir) else { return };
-        let lua = mlua::Lua::new();
-        let mut n = 0;
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).expect("readable");
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            n += 1;
-            if let Err(e) = lua.load(&src).set_name(&name).into_function() {
-                panic!("{name} does not compile:\n{e}");
-            }
-        }
-        assert!(n > 10, "expected the solar demo's scripts, saw {n}");
-    }
-
-    /// …and every controller/camera example must RUN — `start` and a few frames
+    /// Every controller/camera example must RUN — `start` and a few frames
     /// of `update`/`lateUpdate` against a node with a physics body — without a
     /// single runtime error.
     ///

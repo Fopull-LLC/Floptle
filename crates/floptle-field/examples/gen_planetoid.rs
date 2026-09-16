@@ -12,8 +12,8 @@
 //! carry a `|glow` suffix). Texture paths are written ABSOLUTE: asset paths
 //! resolve as-is from the editor's CWD, and the solar project lives outside it.
 //!
-//! Usage:  cargo run --release -p floptle-field --example gen_planetoid [-- <out_dir> [seed]]
-//! Default out_dir is `solar/terrain`, seed 7. The scene expects
+//! Usage:  cargo run --release -p floptle-field --example gen_planetoid -- <out_dir> [seed]
+//! Default seed 7. The scene expects
 //! `<out_dir>/planetoid.1.cfield` (scene "planetoid", terrain id 1).
 
 use floptle_core::math::Vec3;
@@ -59,7 +59,10 @@ fn rgba(rgb: [u8; 3], slot: u8) -> [u8; 4] {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = args.get(1).map(String::as_str).unwrap_or("solar/terrain");
+    let Some(out_dir) = args.get(1).map(String::as_str) else {
+        eprintln!("usage: gen_planetoid <out_dir> [seed]");
+        std::process::exit(2);
+    };
     let seed: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
 
     // Planet-scale world (Ty: "these planets aren't a realistic scale"): radius
@@ -289,7 +292,7 @@ fn main() {
     let tex_dir = std::path::Path::new(out_dir)
         .parent()
         .map(|p| p.join("textures/terrain"))
-        .unwrap_or_else(|| "solar/textures/terrain".into());
+        .unwrap_or_else(|| "textures/terrain".into());
     let lines: Vec<String> = PALETTE
         .iter()
         .map(|(name, glow)| {

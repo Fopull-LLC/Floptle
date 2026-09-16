@@ -50,9 +50,10 @@ fn load_layer(path: &str) -> TextureData {
 }
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "solar/terrain/planetoid.1.cfield".into());
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: solar_probe <planet.cfield>");
+        std::process::exit(2);
+    };
     let bytes = std::fs::read(&path).expect("read cfield (run gen_planetoid first)");
     let field = ChunkField::from_bytes(&bytes).expect("parse cfield");
     println!(
@@ -98,7 +99,7 @@ fn main() {
             };
             // Palette entries are PROJECT-relative (the editor resolves them via
             // resolve_asset_path); this probe's project root is the cfield dir's
-            // parent (solar/terrain/x.cfield -> solar/). Absolute/legacy spellings
+            // parent (<project>/terrain/x.cfield -> <project>/). Absolute/legacy spellings
             // still load as-is when they exist.
             let root = std::path::Path::new(&path).parent().and_then(|p| p.parent());
             let resolved = if std::path::Path::new(tex).exists() {

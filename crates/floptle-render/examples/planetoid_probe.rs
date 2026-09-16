@@ -5,7 +5,7 @@
 //! and GLOWING magma/crystal slots that must stay readable in an unlit cave.
 //!
 //! Run: cargo run --release -p floptle-render --example planetoid_probe
-//!      [-- <terrain_dir> <out_prefix>]   (defaults: solar/terrain, planetoid_probe)
+//!      -- <terrain_dir> [out_prefix]   (default prefix: planetoid_probe)
 
 use floptle_field::ChunkField;
 use floptle_render::{
@@ -44,7 +44,10 @@ fn load_layer(path: &str) -> TextureData {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = args.get(1).map(String::as_str).unwrap_or("solar/terrain");
+    let Some(dir) = args.get(1).map(String::as_str) else {
+        eprintln!("usage: planetoid_probe <terrain_dir> [out_prefix]");
+        std::process::exit(2);
+    };
     let prefix = args.get(2).map(String::as_str).unwrap_or("planetoid_probe");
 
     let planet = ChunkField::from_bytes(&std::fs::read(format!("{dir}/planetoid.1.cfield")).expect("planet cfield"))

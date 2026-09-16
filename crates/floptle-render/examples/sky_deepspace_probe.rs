@@ -31,9 +31,10 @@ struct View {
 }
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "solar/terrain/planetoid.1.cfield".into());
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: sky_deepspace_probe <planet.cfield>");
+        std::process::exit(2);
+    };
     let bytes = std::fs::read(&path).expect("read cfield");
     let field = ChunkField::from_bytes(&bytes).expect("parse cfield");
     let chunk_units = floptle_field::CHUNK as f32 * field.voxel();
