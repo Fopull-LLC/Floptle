@@ -40,8 +40,8 @@ jobs:
           fi
           bad=0
           for c in $(git rev-list "$range"); do
-            if git show -s --format=%B "$c" | grep -qi '^co-authored-by:'; then
-              echo "::error::$c carries a Co-Authored-By trailer"; bad=1
+            if git show -s --format=%B "$c" | grep -qiE '^co-authored-by:|generated with|🤖'; then
+              echo "::error::$c carries an attribution line"; bad=1
             fi
           done
           exit $bad
