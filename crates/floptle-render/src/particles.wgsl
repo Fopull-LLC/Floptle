@@ -30,8 +30,9 @@ struct ParticleGlobals {
 @group(0) @binding(0) var<uniform> g: ParticleGlobals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
-// The scene's depth as drawn so far, for the soft edges.
-@group(2) @binding(0) var scene_depth: texture_depth_2d;
+// The scene's depth as drawn so far, for the soft edges. A float texture, not a
+// depth one: GLSL cannot fetch a texel from a depth sampler.
+@group(2) @binding(0) var scene_depth: texture_2d<f32>;
 
 // The RGB a particle fades TOWARD in full fog — the blend mode's no-op identity, set
 // per pipeline: 0 for alpha/additive/screen/premultiplied (fade to nothing), 1 for
@@ -136,7 +137,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Soft edges: fade out over the last `soft` units before the surface behind,
     // so a sprite crossing a floor or a wall has no hard line through it.
     if (in.soft > 0.0) {
-        let behind = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0);
+        let behind = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0).x;
         let gap = view_distance(behind) - view_distance(in.clip.z);
         col = attenuate(col, clamp(gap / in.soft, 0.0, 1.0));
     }

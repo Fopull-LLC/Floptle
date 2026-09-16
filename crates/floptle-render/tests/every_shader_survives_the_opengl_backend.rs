@@ -64,6 +64,11 @@ fn glsl_refusal(source: &str) -> Option<String> {
     };
 
     for ep in &module.entry_points {
+        // A compute stage never runs on GL — the engine's compute passes are
+        // skipped there — so what GLSL cannot express of one is not a finding.
+        if ep.stage == naga::ShaderStage::Compute {
+            continue;
+        }
         // **Resolve `override` declarations first**, which is what wgpu does
         // before handing a module to any backend. Without this the writer
         // refuses with "overrides should not be present at this stage" — a
@@ -101,11 +106,10 @@ fn glsl_refusal(source: &str) -> Option<String> {
             Ok(mut w) => w.write().err().map(|e| e.to_string()),
             Err(e) => Some(e.to_string()),
         };
-        // A stage GL cannot express at all is not a finding — the engine's
-        // compute passes never run there. Only refusals about the shader.
-        if let Some(why) = refused
-            && !why.contains("not supported")
-        {
+        // Every refusal counts, "not supported" included: that is exactly what
+        // GLSL says about a `textureLoad` from a depth texture, and a pipeline
+        // that fails to build on GL is the failure this test exists to catch.
+        if let Some(why) = refused {
             return Some(format!("{} `{}`: {why}", stage_name(ep.stage), ep.name));
         }
     }

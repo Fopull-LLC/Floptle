@@ -183,7 +183,7 @@ struct Lights {
 @group(0) @binding(0) var<uniform> L: Lights;
 @group(1) @binding(0) var g_albedo: texture_2d<f32>;
 @group(1) @binding(1) var g_surface: texture_2d<f32>;
-@group(1) @binding(2) var g_depth: texture_depth_2d;
+@group(1) @binding(2) var g_depth: texture_2d<f32>; // the depth, bound as a float: GLSL cannot fetch from a depth sampler
 
 struct FullOut {
     @builtin(position) clip: vec4<f32>,
@@ -313,7 +313,7 @@ fn shade(in: FullOut) -> Delta {
         return out;
     }
     let surf = textureLoad(g_surface, px, 0);
-    let depth = textureLoad(g_depth, px, 0);
+    let depth = textureLoad(g_depth, px, 0).x;
     let rank = u32(round(surf.r * 63.0));
 
     // Put the pixel back in the world so distance to a light means something.

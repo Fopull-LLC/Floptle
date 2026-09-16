@@ -240,7 +240,10 @@ impl Particles {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                        // The depth texture bound as an unfilterable float, not as a depth
+                        // texture: GLSL has no texelFetch for a depth sampler, and the
+                        // GL backend would refuse the pipeline.
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },

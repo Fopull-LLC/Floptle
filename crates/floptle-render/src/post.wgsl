@@ -313,7 +313,7 @@ fn fs_denoise(in: VsOut) -> @location(0) vec4<f32> {
 //
 // f.z = focus distance (view depth), f.w = range, g.x = max blur (texels),
 // a.xy = texel.
-@group(1) @binding(0) var dof_depth: texture_depth_2d;
+@group(1) @binding(0) var dof_depth: texture_2d<f32>; // the depth, bound as a float: GLSL cannot fetch from a depth sampler
 // One camera block for every pass that needs the frame's own geometry: depth of
 // field reads `inv_proj`, motion blur reads the other three. One struct and one
 // buffer rather than two, because they share a bind-group layout and a second
@@ -336,7 +336,7 @@ struct DofCam {
 fn dof_view_depth(uv: vec2<f32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(dof_depth));
     let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
-    let d = textureLoad(dof_depth, px, 0);
+    let d = textureLoad(dof_depth, px, 0).x;
     let clip = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, d, 1.0);
     let view = dof_cam.inv_proj * clip;
     return -view.z / max(view.w, 1e-6);
@@ -590,7 +590,7 @@ fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
 fn motion_velocity(uv: vec2<f32>) -> vec2<f32> {
     let dims = vec2<i32>(textureDimensions(dof_depth));
     let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
-    let d = textureLoad(dof_depth, px, 0);
+    let d = textureLoad(dof_depth, px, 0).x;
     // The far plane is the sky. It has no position to reproject, and treating it
     // as a point at infinity is what makes a pan smear the sky the RIGHT amount:
     // the reprojection below already handles it, because a direction transformed

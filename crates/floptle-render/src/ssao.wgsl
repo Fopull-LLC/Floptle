@@ -13,7 +13,7 @@
 // makes the pass resolution-agnostic: in retro mode it samples the low-res retro
 // depth and the AO simply goes chunky with the pixels.
 
-@group(0) @binding(0) var depth_tex: texture_depth_2d;
+@group(0) @binding(0) var depth_tex: texture_2d<f32>; // the depth, bound as a float: GLSL cannot fetch from a depth sampler
 struct SsaoParams {
     proj: mat4x4<f32>,     // camera projection (view → clip)
     inv_proj: mat4x4<f32>, // clip → view
@@ -44,7 +44,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
 fn load_depth(pix: vec2<i32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(depth_tex));
     let p = clamp(pix, vec2<i32>(0), dims - 1);
-    return textureLoad(depth_tex, p, 0);
+    return textureLoad(depth_tex, p, 0).x;
 }
 
 // View-space position of the surface seen at `uv` with depth `d`.
