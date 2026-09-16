@@ -108,7 +108,7 @@ where you wrote it, so it is never a mystery.
 Everything else is the game's, **`tab` included**. That is worth stating because
 until **0.33.0** it was not: egui gave Tab to the editor's own focus traversal
 before the game saw it, so a press cycled the editor's panels and
-`input.pressed("tab")` returned `false` (`floptle/0084`). Tab is *the* convention
+`input.pressed("tab")` returned `false`. Tab is *the* convention
 for opening an inventory — Minecraft, Terraria, Valheim, Don't Starve — so it is
 the first key both a player and a developer reach for, and the failure had no
 symptom: `false` is exactly what a key nobody pressed looks like. A game shipped a

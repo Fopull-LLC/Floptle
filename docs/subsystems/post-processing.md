@@ -302,7 +302,7 @@ viewport runs its own `PostStack` so the node applies there too; the editor
 gathers the node once per frame (`post_process_uniforms`).
 
 **Posterize is not in that chain**, and where it sits is load-bearing rather
-than incidental (`floptle/0127`). It is its own pass — `Raster::quantize_palette`,
+than incidental. It is its own pass — `Raster::quantize_palette`,
 [`crate::palette`] — run by the caller after the raster and raymarch passes and
 immediately *before* `light2d_pass`. Posterize quantizes the **palette**, the
 set of values the art is allowed to be; a light is a multiplier on the palette

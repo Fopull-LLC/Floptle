@@ -150,7 +150,7 @@ That is fine for a room and quadratic for a level: 400 bodies over 1,681 collide
 cost 4.5 s for 120 steps.
 
 There is now a spatial index over the colliders, rebuilt once per tick, and each
-body asks it which colliders can possibly reach it (`floptle/0076`):
+body asks it which colliders can possibly reach it:
 
 | colliders × bodies | before | after |
 |---|---:|---:|

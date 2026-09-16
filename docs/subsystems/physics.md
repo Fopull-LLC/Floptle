@@ -260,7 +260,7 @@ the **node** it landed on, and where the surface has more than one material, the
 shape queries reported it from the start; the ray march had it in hand and threw
 it away, so `raycast` answered nothing for the whole of static geometry while
 `spherecast` — documented as returning the same fields — answered the node
-(`floptle/0174`). One builder now assembles every hit table, which is what stops
+(an earlier report). One builder now assembles every hit table, which is what stops
 the two drifting apart again.
 
 `hit.material` is the interesting half. A map mesh carries a material slot **per

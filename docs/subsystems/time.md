@@ -258,7 +258,7 @@ origin (a regression test now proves a rebase renders zero discontinuity:
    uncapped frames pass through unsnapped.
 
    **It can only do that if it knows the refresh period, and for a long time it
-   often did not** (`floptle/0160`). The period came from `current_monitor()`,
+   often did not**. The period came from `current_monitor()`,
    and a `None` from that call was mapped onto `0.0` — which is the value that
    switches snapping off. On Wayland `current_monitor()` returns `None` from
    window creation until the surface is mapped, and `None` again on an output
@@ -275,7 +275,7 @@ origin (a regression test now proves a rebase renders zero discontinuity:
 
 **Reading the result.** The window title reports fps from a smoothed frame
 *time*, inverted at the end, plus a **1% low** beside the mean. Smoothing
-`1.0 / dt` instead — which it did until `floptle/0160` — averages a reciprocal,
+`1.0 / dt` instead — which it once did — averages a reciprocal,
 which is biased toward the fast frames: on a real capture of frames arriving in
 bursts of 0.08 ms between 16 ms blocks, a true 144 fps read as **4312**. A
 readout that flatters exactly the frame-time distribution that feels worst is

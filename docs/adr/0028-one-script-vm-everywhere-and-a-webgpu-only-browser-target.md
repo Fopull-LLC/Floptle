@@ -141,7 +141,7 @@ novelty.
 - **Keep LuaJIT on native, a second VM on the web.** Rejected: two dialects
   documented and tested forever, and the divergence would be discovered by
   players on the platform with the worst debugging story.
-- **LuaJIT FFI cdata for the vector problem** (card `floptle/0176`'s original
+- **LuaJIT FFI cdata for the vector problem** (the original
   fix). It is the right answer inside a LuaJIT-only world and it dies in a wasm
   one. Superseded by Luau's native vector, which is faster, allocates nothing,
   and is portable to every target. **Do not build it** — noted on that card.

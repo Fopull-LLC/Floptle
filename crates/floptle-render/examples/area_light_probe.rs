@@ -26,8 +26,6 @@ const S: u32 = 256;
 const POINT: f32 = 0.0;
 const SPHERE: f32 = 1.0;
 const RECT: f32 = 2.0;
-#[allow(dead_code)]
-const DISK: f32 = 3.0;
 const TUBE: f32 = 4.0;
 /// Every light in this file has the same reach, so a brightness difference is
 /// never the falloff curve in disguise.

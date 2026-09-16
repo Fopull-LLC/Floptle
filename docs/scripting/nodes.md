@@ -250,7 +250,7 @@ to another script:
 >
 > `name` is **not** reserved. A script's own `name` wins — `materials.name(id)`
 > returning a display name is the obvious thing to write, and it used to be the
-> one thing you could not (`floptle/0085`). Ask `kind` when you want to know
+> one thing you could not. Ask `kind` when you want to know
 > which script a handle is.
 
 ```lua

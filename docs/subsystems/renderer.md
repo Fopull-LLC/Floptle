@@ -254,7 +254,7 @@ So:
   (8.2 ms/frame)`. The two together answer the question an fps number alone
   cannot. Blocking in `acquire()` is measured and excluded, because waiting for
   the display is not the same thing as being slow.
-- **The engine says which one it is, out loud** (`floptle/0169`). The escape
+- **The engine says which one it is, out loud**. The escape
   hatch above fixes it once you know to reach for it, but a user staring at
   "my level runs at 20 fps" has no reason to suspect the display rather than
   their own content — the first two releases of this fix shipped the knob and

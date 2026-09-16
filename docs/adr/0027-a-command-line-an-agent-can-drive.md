@@ -146,7 +146,7 @@ required for a build, which is exactly the thing that is not true.
   (always the newest release) and under each version's own tag — so a page
   describing the command line renders from the table rather than from a copy of
   it. The website's CLI page was hand-carried once and went stale at seven verbs
-  while the engine had twenty-one (`floptle/0201`).
+  while the engine had twenty-one.
 - **The docs-coverage discipline extends to the CLI.** An undocumented package
   binding is already a build failure (`docs/editor-scripting.md`); a verb absent
   from the docs, or a documented verb absent from the table, is the same class
