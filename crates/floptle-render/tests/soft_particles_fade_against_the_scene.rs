@@ -82,7 +82,15 @@ fn centre_brightness(gpu: &Gpu, particles: &mut Particles, raster: &Raster, quad
 #[test]
 fn a_particle_fades_out_where_it_meets_the_scene() {
     let gpu = Gpu::headless(SIZE, SIZE);
+    // CI's OpenGL device cannot build the raster pass at all (no view formats),
+    // which the shot tests skip on the same grounds; the particle pipelines
+    // themselves are built first, so a shader GL refuses still fails here.
     let mut particles = Particles::new(&gpu);
+    let downlevel = gpu.adapter.get_downlevel_capabilities().flags;
+    if !downlevel.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass, so nothing can be drawn");
+        return;
+    }
     let raster = Raster::new(&gpu);
 
     // 0.1 in front of the surface, soft over 0.5: a fifth of the way up, in
