@@ -44,7 +44,26 @@ fn modules() -> Vec<(&'static str, String)> {
         ("retro.wgsl", one("retro.wgsl")),
         ("ssao.wgsl", one("ssao.wgsl")),
         ("ui.wgsl", one("ui.wgsl")),
+        // An authored post shader, assembled exactly as the editor builds it:
+        // the prelude declares the depth binding every post effect reads.
+        ("post prelude + inkOutline.flsl", authored_post_module()),
     ]
+}
+
+fn authored_post_module() -> String {
+    let src = floptle_shader::examples::EXAMPLES
+        .iter()
+        .find(|(n, _)| *n == "inkOutline.flsl")
+        .expect("the ink outline example is shipped")
+        .1;
+    let compiled = floptle_shader::compile_post(src).expect("inkOutline compiles");
+    format!(
+        "{}\n{}\n{}\n{}",
+        floptle_shader::transpile::POST_PRELUDE,
+        floptle_shader::transpile::POST_FIELD_SHIM,
+        floptle_shader::stdlib::SUPPORT_WGSL,
+        compiled.chunk
+    )
 }
 
 /// Write one module's every entry point as GLSL, returning the first refusal.

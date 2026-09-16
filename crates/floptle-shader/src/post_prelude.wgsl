@@ -27,7 +27,8 @@ struct PostChainParams {
 };
 @group(0) @binding(2) var<uniform> p: PostChainParams;
 
-@group(1) @binding(0) var post_depth_tex: texture_depth_2d;
+// The depth, bound as a float texture: GLSL cannot fetch a texel from a depth sampler.
+@group(1) @binding(0) var post_depth_tex: texture_2d<f32>;
 struct PostCam {
     inv_proj: mat4x4<f32>, // clip → view
 };
@@ -78,7 +79,7 @@ fn flsl_post_raw_depth(uv: vec2<f32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(post_depth_tex));
     let pix = clamp(vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dims)),
                     vec2<i32>(0), dims - vec2<i32>(1));
-    return textureLoad(post_depth_tex, pix, 0);
+    return textureLoad(post_depth_tex, pix, 0).x;
 }
 
 // View-space position of whatever is seen at `uv`.
