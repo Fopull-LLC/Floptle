@@ -28,6 +28,7 @@ use floptle_core::math::{Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
+    key_mode_at, AnimInterpDoc, AnimKeyModeDoc,
     AnimChannelDoc, AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc,
     AnimTrackDoc3, AnimTrackDoc4, SpriteAnimDoc, ANIM_CLIP_EXT, ANIM_CTL_EXT,
 };
@@ -679,9 +680,9 @@ pub fn clip_from_doc(doc: &AnimClipDoc, skeleton: &Skeleton) -> Clip {
     Clip { name: doc.name.clone(), duration: doc.duration.max(1e-3), channels, events }
 }
 
-/// Per-key interpolation for the runtime, from the doc's `hold_times`.
+/// Per-key interpolation for the runtime, from the doc's `modes`.
 ///
-/// The doc stores which TIMES hold; the runtime wants one mode per key, indexed,
+/// The doc stores modes by TIME; the runtime wants one mode per key, indexed,
 /// because sampling has the index in hand and looking a float up in a list per
 /// sample would be absurd. This is the one place the two forms meet, which is
 /// also why the fragile parallel-array form never has to survive an edit: it is
@@ -689,35 +690,50 @@ pub fn clip_from_doc(doc: &AnimClipDoc, skeleton: &Skeleton) -> Clip {
 ///
 /// Empty out when every key agrees with the lane — `Track::interp_at` then falls
 /// through to the lane's own mode, and nothing is allocated for the clips that
-/// do not use this.
-///
-/// A `hold_times` entry matching no key is ignored, which is what makes the
-/// time-keyed form safe: see [`floptle_scene::AnimTrackDoc3::hold_times`].
-fn key_interp_from_doc(times: &[f32], hold_times: &[f32], lane: Interp) -> Vec<Interp> {
-    if hold_times.is_empty() {
+/// do not use this. A mode on a time no key has is ignored, which is what makes
+/// the time-keyed form safe: see [`floptle_scene::AnimTrackDoc3::modes`].
+fn key_interp_from_doc(times: &[f32], modes: &[AnimKeyModeDoc], lane: Interp) -> Vec<Interp> {
+    if modes.is_empty() {
         return Vec::new();
     }
     let per_key: Vec<Interp> = times
         .iter()
-        .map(|t| {
-            if hold_times.iter().any(|h| (h - t).abs() < 1e-4) {
-                Interp::Step
-            } else {
-                Interp::Linear
-            }
-        })
+        .map(|&t| key_mode_at(modes, t).map(interp_from_doc).unwrap_or(lane))
         .collect();
     if per_key.iter().all(|&i| i == lane) { Vec::new() } else { per_key }
 }
 
-/// The doc's `hold_times`, from the runtime's per-key modes.
-fn key_interp_to_doc(times: &[f32], key_interp: &[Interp]) -> Vec<f32> {
+/// The doc's `modes`, from the runtime's per-key modes: only the keys that
+/// differ from the lane, so a clip that never chose one writes nothing.
+fn key_interp_to_doc(times: &[f32], key_interp: &[Interp], lane: Interp) -> Vec<AnimKeyModeDoc> {
     times
         .iter()
         .zip(key_interp)
-        .filter(|(_, i)| **i == Interp::Step)
-        .map(|(t, _)| *t)
+        .filter(|(_, i)| **i != lane)
+        .map(|(&t, &i)| AnimKeyModeDoc { t, mode: interp_to_doc(i) })
         .collect()
+}
+
+pub(crate) fn interp_from_doc(m: AnimInterpDoc) -> Interp {
+    match m {
+        AnimInterpDoc::Hold => Interp::Step,
+        AnimInterpDoc::Linear => Interp::Linear,
+        AnimInterpDoc::Smooth => Interp::Smooth,
+        AnimInterpDoc::EaseIn => Interp::EaseIn,
+        AnimInterpDoc::EaseOut => Interp::EaseOut,
+        AnimInterpDoc::EaseInOut => Interp::EaseInOut,
+    }
+}
+
+fn interp_to_doc(i: Interp) -> AnimInterpDoc {
+    match i {
+        Interp::Step => AnimInterpDoc::Hold,
+        Interp::Linear => AnimInterpDoc::Linear,
+        Interp::Smooth => AnimInterpDoc::Smooth,
+        Interp::EaseIn => AnimInterpDoc::EaseIn,
+        Interp::EaseOut => AnimInterpDoc::EaseOut,
+        Interp::EaseInOut => AnimInterpDoc::EaseInOut,
+    }
 }
 
 fn track3_from_doc(d: &AnimTrackDoc3) -> Track<Vec3> {
@@ -726,7 +742,7 @@ fn track3_from_doc(d: &AnimTrackDoc3) -> Track<Vec3> {
         times: d.times.clone(),
         values: d.values.iter().map(|v| Vec3::from(*v)).collect(),
         interp: lane,
-        key_interp: key_interp_from_doc(&d.times, &d.hold_times, lane),
+        key_interp: key_interp_from_doc(&d.times, &d.modes, lane),
     }
 }
 
@@ -736,7 +752,7 @@ fn track4_from_doc(d: &AnimTrackDoc4) -> Track<Quat> {
         times: d.times.clone(),
         values: d.values.iter().map(|v| Quat::from_array(*v).normalize()).collect(),
         interp: lane,
-        key_interp: key_interp_from_doc(&d.times, &d.hold_times, lane),
+        key_interp: key_interp_from_doc(&d.times, &d.modes, lane),
     }
 }
 
@@ -769,7 +785,7 @@ fn prop_track_from_doc(d: &AnimPropTrackDoc) -> PropertyTrack {
         // A text or frame lane has no per-key choice to make: half of one
         // picture and half of the next is not a picture. Forcing the lane to
         // Step and dropping the overrides keeps a mis-set file from trying.
-        key_interp: if is_text { Vec::new() } else { key_interp_from_doc(&d.times, &d.hold_times, lane) },
+        key_interp: if is_text { Vec::new() } else { key_interp_from_doc(&d.times, &d.modes, lane) },
     }
 }
 
@@ -807,7 +823,8 @@ fn track3_to_doc(t: &Track<Vec3>) -> AnimTrackDoc3 {
         times: t.times.clone(),
         values: t.values.iter().map(|v| v.to_array()).collect(),
         step: t.interp == Interp::Step,
-        hold_times: key_interp_to_doc(&t.times, &t.key_interp),
+        modes: key_interp_to_doc(&t.times, &t.key_interp, t.interp),
+        hold_times: Vec::new(),
     }
 }
 
@@ -816,7 +833,8 @@ fn track4_to_doc(t: &Track<Quat>) -> AnimTrackDoc4 {
         times: t.times.clone(),
         values: t.values.iter().map(|v| v.to_array()).collect(),
         step: t.interp == Interp::Step,
-        hold_times: key_interp_to_doc(&t.times, &t.key_interp),
+        modes: key_interp_to_doc(&t.times, &t.key_interp, t.interp),
+        hold_times: Vec::new(),
     }
 }
 
@@ -840,7 +858,8 @@ fn prop_track_to_doc(t: &PropertyTrack) -> AnimPropTrackDoc {
         times: t.times.clone(),
         values: t.values.iter().map(prop_value_to_doc).collect(),
         step: t.interp == Interp::Step,
-        hold_times: key_interp_to_doc(&t.times, &t.key_interp),
+        modes: key_interp_to_doc(&t.times, &t.key_interp, t.interp),
+        hold_times: Vec::new(),
     }
 }
 
@@ -2168,6 +2187,7 @@ mod tests {
             ],
             // Deliberately wrong: a file that says this lane may interpolate.
             step: false,
+            modes: Vec::new(),
             hold_times: Vec::new(),
         };
         let track = prop_track_from_doc(&doc);
@@ -2492,6 +2512,7 @@ mod tests {
                         times: vec![0.0, 1.0],
                         values: vec![[0.0, 0.0, 0.0], [0.0, 4.0, 0.0]],
                         step: false,
+                        modes: Vec::new(),
                         hold_times: Vec::new(),
                     }),
                     rotation: None,
@@ -2736,31 +2757,36 @@ mod tests {
     /// else's files: a clip that never uses per-key modes must serialize with no
     /// new field at all, or every project in the world gets a diff.
     #[test]
-    fn a_per_key_hold_round_trips_and_costs_an_unused_clip_nothing() {
+    fn a_per_key_mode_round_trips_and_costs_an_unused_clip_nothing() {
         let held = AnimTrackDoc3 {
             times: vec![0.0, 1.0, 2.0],
             values: vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
             step: false,
-            hold_times: vec![0.0],
+            modes: vec![
+                AnimKeyModeDoc { t: 0.0, mode: AnimInterpDoc::Hold },
+                AnimKeyModeDoc { t: 1.0, mode: AnimInterpDoc::EaseInOut },
+            ],
+            hold_times: Vec::new(),
         };
         let track = track3_from_doc(&held);
         assert_eq!(track.interp_at(0), Interp::Step, "the held key did not arrive held");
-        assert_eq!(track.interp_at(1), Interp::Linear, "a key that does not hold was held");
+        assert_eq!(track.interp_at(1), Interp::EaseInOut, "the eased key did not arrive eased");
+        assert_eq!(track.interp_at(2), Interp::Linear, "a key with no mode follows the lane");
         // Sampled inside the held segment, not at its edges — the edges agree
         // whichever way round the mode is read.
         assert_eq!(track.sample(0.5), Some(Vec3::ZERO));
         let back = track3_to_doc(&track);
-        assert_eq!(back.hold_times, vec![0.0], "the hold did not survive the save");
+        assert_eq!(back.modes, held.modes, "the modes did not survive the save");
 
-        // …and a lane that uses none of this writes none of it. `hold_times` is
+        // …and a lane that uses none of this writes none of it. `modes` is
         // `skip_serializing_if = "Vec::is_empty"`, so empty here is literally a
         // file with no new key in it.
-        let plain = AnimTrackDoc3 { hold_times: Vec::new(), ..held };
+        let plain = AnimTrackDoc3 { modes: Vec::new(), ..held };
         let plain_back = track3_to_doc(&track3_from_doc(&plain));
         assert!(
-            plain_back.hold_times.is_empty(),
-            "a clip that never held a key grew a hold_times field: {:?}",
-            plain_back.hold_times
+            plain_back.modes.is_empty(),
+            "a clip that never chose a mode grew a modes field: {:?}",
+            plain_back.modes
         );
     }
 

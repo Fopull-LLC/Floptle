@@ -66,8 +66,12 @@ pub struct AnimPropTrackDoc {
     pub values: Vec<AnimPropValueDoc>,
     #[serde(default)]
     pub step: bool,
-    /// Which keys hold, by time — see [`AnimTrackDoc3::hold_times`].
+    /// Per-key interpolation, by time — see [`AnimTrackDoc3::modes`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<AnimKeyModeDoc>,
+    /// Older files: the keys that hold, by time. Folded into `modes` on load
+    /// and never written again.
+    #[serde(default, skip_serializing)]
     pub hold_times: Vec<f32>,
 }
 
@@ -134,23 +138,24 @@ pub struct AnimTrackDoc3 {
     pub values: Vec<[f32; 3]>,
     #[serde(default)]
     pub step: bool,
-    /// **Which keys hold**, by their time: a key listed here keeps its value
-    /// until the next key instead of interpolating toward it. Keys not listed
-    /// use the lane's `step`.
+    /// **How each key reaches the next**, by the key's time: hold, linear, a
+    /// smooth spline, or an ease. A key not listed uses the lane's `step`.
     ///
     /// By TIME rather than by index, and that is the whole design. The obvious
-    /// spelling is a `Vec<bool>` parallel to `times`, and it is a trap: a dozen
-    /// places in the editor insert into or remove from `times`, and every one of
-    /// them that forgot the parallel array would shift every flag after it onto
-    /// the wrong key — silently, and only visibly as "the animation is wrong
+    /// spelling is a list parallel to `times`, and it is a trap: a dozen places
+    /// in the editor insert into or remove from `times`, and every one of them
+    /// that forgot the parallel list would shift every mode after it onto the
+    /// wrong key — silently, and only visibly as "the animation is wrong
     /// somewhere". Keyed by time, a missed update leaves an entry that matches
     /// nothing, which does nothing.
     ///
-    /// Empty unless a lane actually uses it, and skipped on serialize, so a clip
-    /// that never touches this writes the same bytes every previous version of
-    /// the editor wrote — and those versions read this one by ignoring a field
-    /// they do not know.
+    /// Empty unless a lane uses it, and skipped on serialize, so a clip that
+    /// never touches this writes the same bytes it always did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<AnimKeyModeDoc>,
+    /// Older files: the keys that hold, by time. Folded into `modes` on load
+    /// and never written again.
+    #[serde(default, skip_serializing)]
     pub hold_times: Vec<f32>,
 }
 
@@ -161,24 +166,113 @@ pub struct AnimTrackDoc4 {
     pub values: Vec<[f32; 4]>,
     #[serde(default)]
     pub step: bool,
-    /// **Which keys hold**, by their time: a key listed here keeps its value
-    /// until the next key instead of interpolating toward it. Keys not listed
-    /// use the lane's `step`.
-    ///
-    /// By TIME rather than by index, and that is the whole design. The obvious
-    /// spelling is a `Vec<bool>` parallel to `times`, and it is a trap: a dozen
-    /// places in the editor insert into or remove from `times`, and every one of
-    /// them that forgot the parallel array would shift every flag after it onto
-    /// the wrong key — silently, and only visibly as "the animation is wrong
-    /// somewhere". Keyed by time, a missed update leaves an entry that matches
-    /// nothing, which does nothing.
-    ///
-    /// Empty unless a lane actually uses it, and skipped on serialize, so a clip
-    /// that never touches this writes the same bytes every previous version of
-    /// the editor wrote — and those versions read this one by ignoring a field
-    /// they do not know.
+    /// Per-key interpolation, by time — see [`AnimTrackDoc3::modes`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<AnimKeyModeDoc>,
+    /// Older files: the keys that hold, by time. Folded into `modes` on load
+    /// and never written again.
+    #[serde(default, skip_serializing)]
     pub hold_times: Vec<f32>,
+}
+
+/// How one key reaches the next.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnimInterpDoc {
+    /// Keep this key's value, then snap to the next.
+    Hold,
+    #[default]
+    Linear,
+    /// A spline through the neighbouring keys: no corner at the key.
+    Smooth,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+impl AnimInterpDoc {
+    pub const ALL: [AnimInterpDoc; 6] = [
+        AnimInterpDoc::Linear,
+        AnimInterpDoc::Smooth,
+        AnimInterpDoc::EaseIn,
+        AnimInterpDoc::EaseOut,
+        AnimInterpDoc::EaseInOut,
+        AnimInterpDoc::Hold,
+    ];
+
+    /// The name shown in the editor.
+    pub fn label(self) -> &'static str {
+        match self {
+            AnimInterpDoc::Hold => "Hold",
+            AnimInterpDoc::Linear => "Linear",
+            AnimInterpDoc::Smooth => "Smooth",
+            AnimInterpDoc::EaseIn => "Ease in",
+            AnimInterpDoc::EaseOut => "Ease out",
+            AnimInterpDoc::EaseInOut => "Ease in-out",
+        }
+    }
+}
+
+/// One key's interpolation, by the key's time.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct AnimKeyModeDoc {
+    pub t: f32,
+    pub mode: AnimInterpDoc,
+}
+
+/// Two key times are the same key.
+pub fn same_key_time(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-4
+}
+
+/// The mode set on the key at `t`, if any.
+pub fn key_mode_at(modes: &[AnimKeyModeDoc], t: f32) -> Option<AnimInterpDoc> {
+    modes.iter().find(|m| same_key_time(m.t, t)).map(|m| m.mode)
+}
+
+/// Set (or with `None`, clear) the mode on the key at `t`. Kept sorted by time.
+pub fn set_key_mode(modes: &mut Vec<AnimKeyModeDoc>, t: f32, mode: Option<AnimInterpDoc>) {
+    modes.retain(|m| !same_key_time(m.t, t));
+    if let Some(mode) = mode {
+        modes.push(AnimKeyModeDoc { t, mode });
+        modes.sort_by(|a, b| a.t.total_cmp(&b.t));
+    }
+}
+
+/// A key retimed from `old` to `new` keeps its mode.
+pub fn move_key_mode(modes: &mut Vec<AnimKeyModeDoc>, old: f32, new: f32) {
+    if let Some(mode) = key_mode_at(modes, old) {
+        set_key_mode(modes, old, None);
+        set_key_mode(modes, new, Some(mode));
+    }
+}
+
+/// Fold an older file's `hold_times` into `modes`.
+fn fold_hold_times(modes: &mut Vec<AnimKeyModeDoc>, hold_times: &mut Vec<f32>) {
+    for t in hold_times.drain(..) {
+        if key_mode_at(modes, t).is_none() {
+            set_key_mode(modes, t, Some(AnimInterpDoc::Hold));
+        }
+    }
+}
+
+impl AnimClipDoc {
+    /// Bring a loaded clip up to the current form.
+    pub fn normalize(&mut self) {
+        for ch in &mut self.channels {
+            if let Some(l) = ch.translation.as_mut() {
+                fold_hold_times(&mut l.modes, &mut l.hold_times);
+            }
+            if let Some(l) = ch.rotation.as_mut() {
+                fold_hold_times(&mut l.modes, &mut l.hold_times);
+            }
+            if let Some(l) = ch.scale.as_mut() {
+                fold_hold_times(&mut l.modes, &mut l.hold_times);
+            }
+            for p in &mut ch.properties {
+                fold_hold_times(&mut p.modes, &mut p.hold_times);
+            }
+        }
+    }
 }
 
 /// A point on the clip's timeline that calls `func` on the node's scripts.
@@ -419,6 +513,7 @@ impl SpriteAnimDoc {
                     times,
                     values,
                     step: true,
+                    modes: Vec::new(),
                     hold_times: Vec::new(),
                 }],
                 ..Default::default()
@@ -440,7 +535,9 @@ use std::path::Path;
 
 pub fn load_anim_clip(path: &Path) -> Result<AnimClipDoc, SceneError> {
     let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
-    ron::from_str(&text).map_err(SceneError::Ron)
+    let mut doc: AnimClipDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
+    doc.normalize();
+    Ok(doc)
 }
 
 pub fn load_sprite_anim(path: &Path) -> Result<SpriteAnimDoc, SceneError> {
@@ -496,12 +593,14 @@ mod tests {
                     times: vec![0.0, 1.5],
                     values: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
                     step: false,
+                    modes: Vec::new(),
                     hold_times: Vec::new(),
                 }),
                 rotation: Some(AnimTrackDoc4 {
                     times: vec![0.0],
                     values: vec![[0.0, 0.0, 0.0, 1.0]],
                     step: true,
+                    modes: Vec::new(),
                     hold_times: Vec::new(),
                 }),
                 scale: None,
@@ -513,6 +612,7 @@ mod tests {
                         times: vec![0.0, 1.5],
                         values: vec![AnimPropValueDoc::Float(0.0), AnimPropValueDoc::Float(1.0)],
                         step: false,
+                        modes: Vec::new(),
                         hold_times: Vec::new(),
                     },
                     AnimPropTrackDoc {
@@ -524,6 +624,7 @@ mod tests {
                             AnimPropValueDoc::Text("textures/b.png".into()),
                         ],
                         step: true,
+                        modes: Vec::new(),
                         hold_times: Vec::new(),
                     },
                 ],
@@ -715,5 +816,51 @@ mod tests {
         };
         let times = doc.to_clip("X", "").channels[0].properties[0].times.clone();
         assert!((times[1] - 0.05).abs() < 1e-6, "half a slot was not kept: {times:?}");
+    }
+
+    /// A clip written before keys had modes listed the keys that hold; it
+    /// loads as `Hold` modes, and is never written in the old form again.
+    #[test]
+    fn an_older_clips_hold_times_become_hold_modes() {
+        let text = r#"(
+            name: "old",
+            duration: 2.0,
+            source_model: "",
+            channels: [(
+                node: "Arm",
+                translation: Some((
+                    times: [0.0, 1.0, 2.0],
+                    values: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
+                    step: false,
+                    hold_times: [1.0],
+                )),
+                properties: [],
+            )],
+            events: [],
+        )"#;
+        let mut doc: AnimClipDoc = ron::from_str(text).unwrap();
+        doc.normalize();
+        let lane = doc.channels[0].translation.as_ref().unwrap();
+        assert!(lane.hold_times.is_empty(), "the old list is folded away");
+        assert_eq!(key_mode_at(&lane.modes, 1.0), Some(AnimInterpDoc::Hold));
+        assert_eq!(key_mode_at(&lane.modes, 0.0), None);
+        let out = ron::ser::to_string(&doc).unwrap();
+        assert!(!out.contains("hold_times"), "never written again:\n{out}");
+        assert!(out.contains("modes"), "the modes are what is written:\n{out}");
+    }
+
+    /// A key keeps its mode through a retime, and a mode on a time no key has
+    /// is harmless.
+    #[test]
+    fn a_retimed_key_keeps_its_mode() {
+        let mut modes = Vec::new();
+        set_key_mode(&mut modes, 0.5, Some(AnimInterpDoc::Smooth));
+        set_key_mode(&mut modes, 0.25, Some(AnimInterpDoc::EaseIn));
+        assert_eq!(modes[0].t, 0.25, "kept sorted by time");
+        move_key_mode(&mut modes, 0.5, 0.75);
+        assert_eq!(key_mode_at(&modes, 0.5), None);
+        assert_eq!(key_mode_at(&modes, 0.75), Some(AnimInterpDoc::Smooth));
+        set_key_mode(&mut modes, 0.75, None);
+        assert_eq!(modes.len(), 1);
     }
 }

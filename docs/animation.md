@@ -84,6 +84,19 @@ Select a node that has a controller (or a rigged model) and open **Window →
 - **Key rows**: one row per animated node; diamonds are keys (the union of the
   T/R/S lanes). Drag to retime, right-click to delete. `snap` quantizes to a
   frame grid (8/12/24/30/60 fps).
+- **Fit the sheet to the rig**: the row height is yours — Alt+wheel over the
+  sheet or type it in the toolbar (4–80 px); packed rows keep their keys
+  clickable and name themselves on hover. **🔍 rows** shows only the rows whose
+  name matches, so a sixty-bone rig is animated a limb at a time (Ctrl+A then
+  selects what is shown).
+- **Interpolation is per key**: right-click a key → *Interpolation* to choose
+  how it reaches the next one — *Linear*, *Smooth* (a spline through the
+  neighbouring keys, so the motion has no corner at the key), *Ease in*, *Ease
+  out*, *Ease in-out*, or *Hold* (keep the pose, then snap). With several keys
+  selected the choice applies to all of them. The key's shape says which: a
+  diamond is linear, a circle smooth, a square a hold, and a dotted diamond an
+  ease. In the file this is `modes: [(t: 0.5, mode: Smooth)]` on the lane,
+  listed by the key's time.
 - **● Record** (scene animation): with record on, pose the node's children with
   the gizmo or Inspector and **keys are written at the playhead** for whatever
   you moved. Scrubbing previews what you've keyed so far, so scrub → pose →

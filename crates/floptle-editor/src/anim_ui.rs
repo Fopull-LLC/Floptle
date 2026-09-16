@@ -15,7 +15,8 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2 
 use floptle_anim::TransformTRS;
 use floptle_core::{AnimController, Entity, Matter, Name};
 use floptle_scene::{
-    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc, AnimStateDoc,
+    key_mode_at, move_key_mode, same_key_time, set_key_mode, AnimClipDoc, AnimControllerDoc,
+    AnimEventDoc, AnimInterpDoc, AnimKeyModeDoc, AnimPropTrackDoc, AnimPropValueDoc, AnimStateDoc,
     AnimTrackDoc3, AnimTrackDoc4, AnimTransitionDoc,
 };
 
@@ -66,6 +67,9 @@ pub struct AnimUiState {
     pub zoom: f32,
     /// Vertical (row-height) zoom multiplier — Alt+scroll over the dopesheet.
     pub row_scale: f32,
+    /// Only rows whose node name contains this are shown. Empty = every row.
+    /// A sixty-bone rig is animated a limb at a time.
+    pub row_filter: String,
     /// Last frame's ScrollArea offset (the anchor for cursor-centred zoom).
     pub scroll_off: egui::Vec2,
     /// A scroll offset to force next frame (cursor-anchored zoom / Fit).
@@ -208,6 +212,7 @@ impl Default for AnimUiState {
             record: false,
             zoom: 120.0,
             row_scale: 1.0,
+            row_filter: String::new(),
             scroll_off: egui::Vec2::ZERO,
             scroll_target: None,
             fit_pending: false,
@@ -1534,6 +1539,28 @@ impl EditorTabViewer<'_> {
             {
                 self.anim_ui.fit_pending = true;
             }
+            // Row height, in points: the wheel's Alt+scroll as a number, so a big
+            // rig can be packed to exactly the height that fits the panel.
+            let mut row_px = ANIM_ROW_BASE * self.anim_ui.row_scale;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut row_px)
+                        .speed(0.25)
+                        .range((ANIM_ROW_BASE * ANIM_ROW_MIN)..=(ANIM_ROW_BASE * ANIM_ROW_MAX))
+                        .suffix(" px")
+                        .max_decimals(0),
+                )
+                .on_hover_text("row height (Alt+wheel over the sheet does the same)")
+                .changed()
+            {
+                self.anim_ui.row_scale = (row_px / ANIM_ROW_BASE).clamp(ANIM_ROW_MIN, ANIM_ROW_MAX);
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.anim_ui.row_filter)
+                    .hint_text("🔍 rows")
+                    .desired_width(90.0),
+            )
+            .on_hover_text("show only the rows whose name contains this");
             // Live selection count (multi-select feedback).
             if !self.anim_ui.sel_keys.is_empty() {
                 ui.separator();
@@ -1560,11 +1587,13 @@ impl EditorTabViewer<'_> {
                     "Ctrl+Z / Ctrl+Y = undo / redo",
                     "double-click a lane = key pose there",
                     "right-click a lane = insert key here",
+                    "right-click a key = its interpolation (smooth, ease, hold)",
                     "⏺ Key all bones · ◎ Key all tracks (toolbar)",
                     "— Navigation —",
                     "Space = play/pause · Home/End = clip ends",
                     "←/→ = step · , / . (or [ / ]) = prev/next key",
-                    "F = fit · wheel = zoom · Alt+wheel = row height",
+                    "F = fit · wheel = zoom · Alt+wheel = row height (or type it)",
+                    "🔍 rows = show only the rows whose name matches",
                     "Shift+wheel = pan",
                 ] {
                     if line.starts_with('—') {
@@ -1841,8 +1870,29 @@ impl EditorTabViewer<'_> {
 /// the particle timeline.
 const ANIM_ZOOM_MIN: f32 = 6.0;
 const ANIM_ZOOM_MAX: f32 = 3000.0;
-const ANIM_ROW_MIN: f32 = 0.5;
+/// Row height at `row_scale = 1`, in points.
+const ANIM_ROW_BASE: f32 = 20.0;
+/// Row-height range: a large rig packs to a few points a row so the whole
+/// skeleton fits on one screen; a row can also be four times the base.
+const ANIM_ROW_MIN: f32 = 0.2;
 const ANIM_ROW_MAX: f32 = 4.0;
+
+/// The label font for a row of this height — shrinks with the row, and is
+/// `None` once the row is too short to carry text at all.
+fn row_font(lane_h: f32) -> Option<FontId> {
+    (lane_h >= 8.0).then(|| FontId::proportional((lane_h * 0.55).clamp(7.0, 11.0)))
+}
+
+/// A key glyph's half-size for a row of this height.
+fn key_size(lane_h: f32) -> f32 {
+    (lane_h * 0.24).clamp(2.0, 4.5)
+}
+
+/// The hit target of a key: never smaller than a fingertip can find, whatever
+/// the row height.
+fn key_hit(lane_h: f32) -> egui::Vec2 {
+    egui::vec2(12.0, lane_h.clamp(8.0, 12.0))
+}
 const ANIM_LABEL_W: f32 = 130.0;
 /// Property-lane key + label colours — a teal, distinct from the amber transform
 /// keys, so a node's property lanes read apart from its transform lane.
@@ -1859,18 +1909,43 @@ const STRETCH_COL: Color32 = Color32::from_rgb(235, 170, 90);
 type NodeFieldMenu = (String, String, Vec<(String, String, &'static str)>);
 
 /// Draw a dopesheet key diamond centred at `c`.
-fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32) {
-    let s = 4.5;
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            Pos2::new(c.x, c.y - s),
-            Pos2::new(c.x + s, c.y),
-            Pos2::new(c.x, c.y + s),
-            Pos2::new(c.x - s, c.y),
-        ],
-        col,
-        Stroke::new(1.0, Color32::from_black_alpha(120)),
-    ));
+/// A key, shaped by how it reaches the next one: a diamond for a linear move
+/// (or a key that follows its lane), a circle for a smooth one, a square for a
+/// hold, and a diamond with a dot for an ease — so a dopesheet shows its
+/// timing without opening a menu.
+fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32, mode: Option<AnimInterpDoc>, s: f32) {
+    let outline = Stroke::new(1.0, Color32::from_black_alpha(120));
+    match mode {
+        Some(AnimInterpDoc::Hold) => {
+            painter.rect(
+                Rect::from_center_size(c, egui::vec2(2.0 * s - 1.0, 2.0 * s - 1.0)),
+                1.0,
+                col,
+                outline,
+                egui::StrokeKind::Inside,
+            );
+        }
+        Some(AnimInterpDoc::Smooth) => {
+            painter.circle(c, s, col, outline);
+        }
+        _ => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(c.x, c.y - s),
+                    Pos2::new(c.x + s, c.y),
+                    Pos2::new(c.x, c.y + s),
+                    Pos2::new(c.x - s, c.y),
+                ],
+                col,
+                outline,
+            ));
+            if s >= 3.0
+                && matches!(mode, Some(AnimInterpDoc::EaseIn | AnimInterpDoc::EaseOut | AnimInterpDoc::EaseInOut))
+            {
+                painter.circle_filled(c, s / 3.0, Color32::from_black_alpha(160));
+            }
+        }
+    }
 }
 
 /// Scroll-wheel navigation for the dopesheet, mirroring the particle timeline: plain
@@ -2419,7 +2494,7 @@ impl EditorTabViewer<'_> {
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let px = st.zoom;
         let label_w = ANIM_LABEL_W;
-        let lane_h = 20.0 * st.row_scale;
+        let lane_h = ANIM_ROW_BASE * st.row_scale;
         let ruler_h = 22.0;
         let event_h = 20.0;
         // Where a "key at playhead" lands, on the snap grid like record.
@@ -2667,8 +2742,20 @@ impl EditorTabViewer<'_> {
             st.clip_dirty = true;
         }
 
-        // One lane per channel (its transform union) PLUS one per property track.
-        let n_rows: usize = doc.channels.iter().map(|c| 1 + c.properties.len()).sum();
+        // One lane per channel (its transform union) PLUS one per property track,
+        // counting only the rows the filter lets through.
+        let row_filter = st.row_filter.trim().to_lowercase();
+        let row_shown = |node: &str| {
+            row_filter.is_empty()
+                || node.to_lowercase().contains(&row_filter)
+                || (node.is_empty() && "(this node)".contains(&row_filter))
+        };
+        let n_rows: usize = doc
+            .channels
+            .iter()
+            .filter(|c| row_shown(&c.node))
+            .map(|c| 1 + c.properties.len())
+            .sum();
         let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
         let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
         if let Some(t) = st.scroll_target.take() {
@@ -2831,8 +2918,10 @@ impl EditorTabViewer<'_> {
             // Per-key interpolation: (channel, time, hold?) for a transform key,
             // (channel, lane, time, hold?) for a property key. Deferred like
             // every other edit here — the menu runs inside the painter's borrow.
-            let mut key_hold: Option<(usize, f32, bool)> = None;
-            let mut prop_key_hold: Option<(usize, usize, f32, bool)> = None;
+            // A mode chosen from a key's menu: for the clicked key, or for the
+            // whole selection when the clicked key is part of it.
+            let mut key_mode: Option<(usize, f32, bool, Option<AnimInterpDoc>)> = None;
+            let mut prop_key_mode: Option<(usize, usize, f32, Option<AnimInterpDoc>)> = None;
             let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
             let mut pose_key_at: Option<(usize, f32)> = None; // key the LIVE pose on channel ci at t
             let mut prop_key_at: Option<(usize, usize, f32)> = None; // key the live/carried value
@@ -2851,6 +2940,9 @@ impl EditorTabViewer<'_> {
                 }
             };
             for ci in 0..doc.channels.len() {
+                if !row_shown(&doc.channels[ci].node) {
+                    continue;
+                }
                 // --- node lane: label + transform-union diamonds ---
                 let y = rows_top + row_i as f32 * lane_h;
                 stripe(&painter, row_i, y, ui);
@@ -2948,17 +3040,23 @@ impl EditorTabViewer<'_> {
                         pending_select = Some(TrackSelect::Node(e));
                     }
                 }
-                painter.text(
-                    Pos2::new(full.left() + 4.0, cy),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(11.0),
-                    if lresp.hovered() {
-                        ui.visuals().strong_text_color()
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                );
+                if let Some(font) = row_font(lane_h) {
+                    painter.text(
+                        Pos2::new(full.left() + 4.0, cy),
+                        Align2::LEFT_CENTER,
+                        label,
+                        font,
+                        if lresp.hovered() {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    );
+                }
+                // A row too short for its name still says it on hover.
+                if row_font(lane_h).is_none() {
+                    lresp.clone().on_hover_text(label);
+                }
                 // Lane strip: double-click keys the node's CURRENT pose there;
                 // right-click inserts a key at the click position; a plain click on
                 // empty lane deselects.
@@ -3025,16 +3123,16 @@ impl EditorTabViewer<'_> {
                     }
                     let id = ui.id().with(("anim-key", ci, ki));
                     let resp = ui
-                        .interact(Rect::from_center_size(c, egui::vec2(12.0, 12.0)), id, Sense::click_and_drag());
+                        .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
                     let col = if resp.hovered() || dragging_this || selected {
                         ACCENT
                     } else {
                         KEY_COLOR
                     };
-                    key_diamond(&painter, c, col);
+                    key_diamond(&painter, c, col, channel_key_mode(&doc.channels[ci], t), key_size(lane_h));
                     if selected {
                         // A ring around multi-selected keys, so a selection reads at a glance.
-                        painter.circle_stroke(c, 8.0, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)));
+                        painter.circle_stroke(c, key_size(lane_h) + 3.5, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)));
                     }
                     if resp.clicked() {
                         let shift = ui.input(|i| i.modifiers.shift);
@@ -3098,26 +3196,19 @@ impl EditorTabViewer<'_> {
                             delete_key = Some((ci, t));
                             ui.close();
                         }
-                        // How THIS key reaches the next one. The lane-wide
-                        // toggle is still there and still means "the default for
-                        // keys that have not been told otherwise" — this is the
-                        // one people reach for, because stepped animation is not
-                        // a clip that never interpolates but a clip that holds
-                        // each pose and snaps on the beats the animator chose.
+                        // How THIS key reaches the next one — per key, because
+                        // a clip holds on its beats and eases through the rest.
                         ui.separator();
-                        let held = channel_key_holds(&doc.channels[ci], t);
-                        if ui
-                            .selectable_label(held, "⇥ Hold until next key")
-                            .on_hover_text(
-                                "this key keeps its pose and snaps to the next one instead of \
-                                 easing into it. Set per key, so a clip can hold on its beats \
-                                 and still move smoothly everywhere else.",
-                            )
-                            .clicked()
-                        {
-                            key_hold = Some((ci, t, !held));
-                            ui.close();
-                        }
+                        let current = channel_key_mode(&doc.channels[ci], t);
+                        let lane_default = doc.channels[ci]
+                            .translation
+                            .as_ref()
+                            .map(|l| l.step)
+                            .or(doc.channels[ci].rotation.as_ref().map(|l| l.step))
+                            .unwrap_or(false);
+                        interp_menu(ui, current, lane_default, &mut |mode| {
+                            key_mode = Some((ci, t, selected && st.sel_keys.len() > 1, mode));
+                        });
                     });
                 }
                 // --- property lanes, indented under the node ---
@@ -3169,17 +3260,21 @@ impl EditorTabViewer<'_> {
                             ui.close();
                         }
                     });
-                    painter.text(
-                        Pos2::new(full.left() + 10.0, cy),
-                        Align2::LEFT_CENTER,
-                        format!("   {comp}.{field}"),
-                        FontId::proportional(10.5),
-                        if plresp.hovered() {
-                            PROP_LABEL_COLOR.gamma_multiply(1.4)
-                        } else {
-                            PROP_LABEL_COLOR
-                        },
-                    );
+                    if let Some(font) = row_font(lane_h) {
+                        painter.text(
+                            Pos2::new(full.left() + 10.0, cy),
+                            Align2::LEFT_CENTER,
+                            format!("   {comp}.{field}"),
+                            font,
+                            if plresp.hovered() {
+                                PROP_LABEL_COLOR.gamma_multiply(1.4)
+                            } else {
+                                PROP_LABEL_COLOR
+                            },
+                        );
+                    } else {
+                        plresp.clone().on_hover_text(format!("{comp}.{field}"));
+                    }
                     // Lane strip: double-click = key the current value at that time.
                     let lane_strip = Rect::from_min_size(
                         Pos2::new(tl_left, y),
@@ -3213,14 +3308,20 @@ impl EditorTabViewer<'_> {
                         let c = Pos2::new(time_to_x(draw_t), cy);
                         let id = ui.id().with(("anim-prop-key", ci, ti, ki));
                         let resp = ui
-                            .interact(Rect::from_center_size(c, egui::vec2(11.0, 11.0)), id, Sense::click_and_drag());
+                            .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
                         let selected = st.sel_prop == Some((ci, ti, ki));
                         let col = if resp.hovered() || dragging_this || selected {
                             ACCENT
                         } else {
                             PROP_KEY_COLOR
                         };
-                        key_diamond(&painter, c, col);
+                        key_diamond(
+                            &painter,
+                            c,
+                            col,
+                            key_mode_at(&doc.channels[ci].properties[ti].modes, t),
+                            key_size(lane_h),
+                        );
                         if resp.clicked() {
                             prop_select = Some((ci, ti, ki));
                         }
@@ -3261,21 +3362,11 @@ impl EditorTabViewer<'_> {
                             if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
                             {
                                 ui.separator();
-                                let held = doc.channels[ci].properties[ti]
-                                    .hold_times
-                                    .iter()
-                                    .any(|h| (h - t).abs() < 1e-4);
-                                if ui
-                                    .selectable_label(held, "⇥ Hold until next key")
-                                    .on_hover_text(
-                                        "this key keeps its value and snaps to the next one \
-                                         instead of easing into it",
-                                    )
-                                    .clicked()
-                                {
-                                    prop_key_hold = Some((ci, ti, t, !held));
-                                    ui.close();
-                                }
+                                let pt = &doc.channels[ci].properties[ti];
+                                let current = key_mode_at(&pt.modes, t);
+                                interp_menu(ui, current, pt.step, &mut |mode| {
+                                    prop_key_mode = Some((ci, ti, t, mode));
+                                });
                             }
                         });
                     }
@@ -3319,14 +3410,23 @@ impl EditorTabViewer<'_> {
                 drop_empty_channel(doc, ci);
                 st.clip_dirty = true;
             }
-            if let Some((ci, t, hold)) = key_hold {
-                set_channel_key_hold(&mut doc.channels[ci], t, hold);
+            if let Some((ci, t, whole_selection, mode)) = key_mode {
+                let targets: Vec<(usize, f32)> = if whole_selection {
+                    st.sel_keys.clone()
+                } else {
+                    vec![(ci, t)]
+                };
+                for (ci, t) in targets {
+                    if let Some(ch) = doc.channels.get_mut(ci) {
+                        set_channel_key_mode(ch, t, mode);
+                    }
+                }
                 st.clip_dirty = true;
             }
-            if let Some((ci, ti, t, hold)) = prop_key_hold
+            if let Some((ci, ti, t, mode)) = prop_key_mode
                 && let Some(pt) = doc.channels[ci].properties.get_mut(ti)
             {
-                set_hold(&mut pt.hold_times, t, hold);
+                set_key_mode(&mut pt.modes, t, mode);
                 st.clip_dirty = true;
             }
             // Context-menu "Delete N keys" (works regardless of keyboard focus).
@@ -3496,8 +3596,9 @@ impl EditorTabViewer<'_> {
                 // the playhead (same path as paste). , / . (or [ / ]) jump the playhead
                 // to the previous / next keyframe across all lanes.
                 if ctrl && a {
+                    // Every key on a SHOWN row: a filtered sheet selects what it shows.
                     st.sel_keys.clear();
-                    for (ci, ch) in doc.channels.iter().enumerate() {
+                    for (ci, ch) in doc.channels.iter().enumerate().filter(|(_, ch)| row_shown(&ch.node)) {
                         for t in union_times(ch) {
                             st.sel_keys.push((ci, t));
                         }
@@ -4148,7 +4249,7 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
         if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
             let v = l.values.remove(i);
             l.times.remove(i);
-            move_hold(&mut l.hold_times, old, new);
+            move_key_mode(&mut l.modes, old, new);
             if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
                 l.values[j] = v; // merge onto the existing key
                 return;
@@ -4162,7 +4263,7 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
         if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
             let v = l.values.remove(i);
             l.times.remove(i);
-            move_hold(&mut l.hold_times, old, new);
+            move_key_mode(&mut l.modes, old, new);
             if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
                 l.values[j] = v;
                 return;
@@ -4183,77 +4284,85 @@ fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
     }
 }
 
-/// Carry a key's hold with it when the key is retimed.
-///
-/// A time-keyed list survives a missed update — the entry simply matches nothing
-/// — but "survives" is not "is right": a hold left behind at the old time would
-/// reattach itself to whatever key is keyed there next, which looks like the
-/// editor inventing a hold nobody asked for. Cheap to do, so it is done.
-fn move_hold(hold_times: &mut Vec<f32>, old: f32, new: f32) {
-    if hold_times.iter().any(|&h| (h - old).abs() < 1e-4) {
-        set_hold(hold_times, old, false);
-        set_hold(hold_times, new, true);
-    }
+/// The interpolation choices for a key: one row per mode, the current one
+/// ticked. "Lane default" clears the key's own mode; `lane_step` says what that
+/// default is, so the row can name it.
+fn interp_menu(
+    ui: &mut egui::Ui,
+    current: Option<AnimInterpDoc>,
+    lane_step: bool,
+    choose: &mut dyn FnMut(Option<AnimInterpDoc>),
+) {
+    ui.menu_button("↗ Interpolation", |ui| {
+        for mode in AnimInterpDoc::ALL {
+            let tip = match mode {
+                AnimInterpDoc::Linear => "a straight move at one speed",
+                AnimInterpDoc::Smooth => "a curve through the neighbouring keys, with no corner at this one",
+                AnimInterpDoc::EaseIn => "leaves slowly, arrives at full speed",
+                AnimInterpDoc::EaseOut => "leaves at full speed, settles slowly",
+                AnimInterpDoc::EaseInOut => "leaves and settles slowly",
+                AnimInterpDoc::Hold => "keeps this value, then snaps to the next key",
+            };
+            if ui.selectable_label(current == Some(mode), mode.label()).on_hover_text(tip).clicked() {
+                choose(Some(mode));
+                ui.close();
+            }
+        }
+        ui.separator();
+        let default_name = if lane_step { "hold" } else { "linear" };
+        if ui
+            .selectable_label(false, format!("Lane default ({default_name})"))
+            .on_hover_text("forget this key's own choice and follow the lane")
+            .clicked()
+        {
+            choose(None);
+            ui.close();
+        }
+    });
 }
 
-/// Mark (or unmark) the key at `t` on one lane as holding until the next key.
-///
-/// The list is by TIME, so this is an insert or a remove and there is no index
-/// to keep in step with anything — see
-/// [`floptle_scene::AnimTrackDoc3::hold_times`] for why that matters.
-fn set_hold(hold_times: &mut Vec<f32>, t: f32, hold: bool) {
-    let at = hold_times.iter().position(|&h| (h - t).abs() < 1e-4);
-    match (hold, at) {
-        (true, None) => {
-            hold_times.push(t);
-            hold_times.sort_by(f32::total_cmp);
-        }
-        (false, Some(i)) => {
-            hold_times.remove(i);
-        }
-        _ => {}
-    }
-}
-
-/// Does the dope-sheet key at `t` hold?
+/// The mode of the dope-sheet key at `t`, when every lane keyed there agrees.
 ///
 /// A dope-sheet key is the union of the channel's three transform lanes at one
-/// time, so "held" means every lane that HAS a key there holds it. Any-of would
-/// show the tick for a key that is half-held, which is a state you cannot get to
-/// from this menu and would be a lie about the two lanes that are not.
-fn channel_key_holds(ch: &floptle_scene::AnimChannelDoc, t: f32) -> bool {
-    let mut any = false;
-    let mut all = true;
-    let mut lane = |times: &[f32], holds: &[f32]| {
-        if times.iter().any(|&x| (x - t).abs() < 1e-4) {
-            any = true;
-            all &= holds.iter().any(|&h| (h - t).abs() < 1e-4);
+/// time, so the key "has" a mode only when every lane that has a key there has
+/// that mode; `None` is a mixed key or an unset one, which the menu shows as
+/// nothing ticked rather than lying about two of the lanes.
+fn channel_key_mode(ch: &floptle_scene::AnimChannelDoc, t: f32) -> Option<AnimInterpDoc> {
+    let mut found: Option<Option<AnimInterpDoc>> = None;
+    let mut lane = |times: &[f32], modes: &[AnimKeyModeDoc]| {
+        if times.iter().any(|&x| same_key_time(x, t)) {
+            let m = key_mode_at(modes, t);
+            found = match found {
+                None => Some(m),
+                Some(prev) if prev == m => Some(m),
+                Some(_) => Some(None),
+            };
         }
     };
     if let Some(l) = &ch.translation {
-        lane(&l.times, &l.hold_times);
+        lane(&l.times, &l.modes);
     }
     if let Some(l) = &ch.rotation {
-        lane(&l.times, &l.hold_times);
+        lane(&l.times, &l.modes);
     }
     if let Some(l) = &ch.scale {
-        lane(&l.times, &l.hold_times);
+        lane(&l.times, &l.modes);
     }
-    any && all
+    found.flatten()
 }
 
-/// Hold (or release) every transform lane keyed at `t` on this channel.
-fn set_channel_key_hold(ch: &mut floptle_scene::AnimChannelDoc, t: f32, hold: bool) {
-    for (times, holds) in [
-        ch.translation.as_mut().map(|l| (&l.times, &mut l.hold_times)),
-        ch.rotation.as_mut().map(|l| (&l.times, &mut l.hold_times)),
-        ch.scale.as_mut().map(|l| (&l.times, &mut l.hold_times)),
+/// Set the mode of every transform lane keyed at `t` on this channel.
+fn set_channel_key_mode(ch: &mut floptle_scene::AnimChannelDoc, t: f32, mode: Option<AnimInterpDoc>) {
+    for (times, modes) in [
+        ch.translation.as_mut().map(|l| (&l.times, &mut l.modes)),
+        ch.rotation.as_mut().map(|l| (&l.times, &mut l.modes)),
+        ch.scale.as_mut().map(|l| (&l.times, &mut l.modes)),
     ]
     .into_iter()
     .flatten()
     {
-        if times.iter().any(|&x| (x - t).abs() < 1e-4) {
-            set_hold(holds, t, hold);
+        if times.iter().any(|&x| same_key_time(x, t)) {
+            set_key_mode(modes, t, mode);
         }
     }
 }
@@ -4264,7 +4373,7 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
         if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
             l.times.remove(i);
             l.values.remove(i);
-            set_hold(&mut l.hold_times, t, false);
+            set_key_mode(&mut l.modes, t, None);
         }
         l.times.is_empty()
     }
@@ -4272,7 +4381,7 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
         if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
             l.times.remove(i);
             l.values.remove(i);
-            set_hold(&mut l.hold_times, t, false);
+            set_key_mode(&mut l.modes, t, None);
         }
         l.times.is_empty()
     }
@@ -4462,6 +4571,7 @@ fn write_copied_key(doc: &mut AnimClipDoc, key: &CopiedKey, t: f32) {
                     times: Vec::new(),
                     values: Vec::new(),
                     step: *step,
+                    modes: Vec::new(),
                     hold_times: Vec::new(),
                 });
                 ch.properties.len() - 1
@@ -4603,6 +4713,7 @@ fn write_property_value(
                 times: Vec::new(),
                 values: Vec::new(),
                 step: steps_by_nature(comp, field),
+                modes: Vec::new(),
                 hold_times: Vec::new(),
             });
             props.len() - 1
@@ -4643,6 +4754,7 @@ fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field:
         times: Vec::new(),
         values: Vec::new(),
         step: steps_by_nature(component, field),
+        modes: Vec::new(),
         hold_times: Vec::new(),
     });
 }

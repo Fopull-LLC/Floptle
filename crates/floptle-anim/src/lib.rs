@@ -195,12 +195,51 @@ impl Skin {
     }
 }
 
-/// Keyframe interpolation. glTF cubic-spline channels are de-tangented to
-/// `Linear` at import (Blender exports Linear for bones — the cold path).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a key reaches the next one. glTF cubic-spline channels are de-tangented
+/// to `Linear` at import (Blender exports Linear for bones — the cold path).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Interp {
+    /// Hold this key's value, then snap to the next.
     Step,
+    #[default]
     Linear,
+    /// A spline through the neighbouring keys, so the motion has no corners at
+    /// the keys: the tangent at each key is set by the keys either side of it.
+    Smooth,
+    /// Start slowly, arrive at full speed.
+    EaseIn,
+    /// Leave at full speed, settle slowly.
+    EaseOut,
+    /// Start and settle slowly.
+    EaseInOut,
+}
+
+impl Interp {
+    /// A blend factor 0..1 remapped by the mode's easing. `Smooth` is not an
+    /// easing — its shape comes from the neighbouring keys — and stays linear here.
+    #[inline]
+    pub fn ease(self, k: f32) -> f32 {
+        match self {
+            Interp::EaseIn => k * k * k,
+            Interp::EaseOut => 1.0 - (1.0 - k).powi(3),
+            Interp::EaseInOut => {
+                if k < 0.5 {
+                    4.0 * k * k * k
+                } else {
+                    1.0 - (-2.0 * k + 2.0).powi(3) * 0.5
+                }
+            }
+            _ => k,
+        }
+    }
+}
+
+/// The cubic Hermite basis at `k`: weights for the start value, the start
+/// tangent, the end value and the end tangent.
+#[inline]
+fn hermite(k: f32) -> [f32; 4] {
+    let (k2, k3) = (k * k, k * k * k);
+    [2.0 * k3 - 3.0 * k2 + 1.0, k3 - 2.0 * k2 + k, -2.0 * k3 + 3.0 * k2, k3 - k2]
 }
 
 /// One property lane: parallel `times`/`values`, binary-searched on sample.
@@ -236,8 +275,10 @@ impl<T> Track<T> {
 }
 
 impl<T: Copy> Track<T> {
-    /// The bracketing keys at `t`: (index a, index b, blend k in 0..1).
-    fn bracket(&self, t: f32) -> Option<(usize, usize, f32)> {
+    /// The bracketing keys at `t`: (index a, index b, blend k in 0..1, mode).
+    /// `k` is already eased; a `Smooth` segment is left for the sampler to
+    /// shape from the neighbouring keys.
+    fn bracket(&self, t: f32) -> Option<(usize, usize, f32, Interp)> {
         if self.times.is_empty() || self.values.len() != self.times.len() {
             return None;
         }
@@ -245,10 +286,10 @@ impl<T: Copy> Track<T> {
         // partition_point = first index with times[i] > t.
         let hi = self.times.partition_point(|&k| k <= t);
         if hi == 0 {
-            return Some((0, 0, 0.0));
+            return Some((0, 0, 0.0, Interp::Linear));
         }
         if hi >= n {
-            return Some((n - 1, n - 1, 0.0));
+            return Some((n - 1, n - 1, 0.0, Interp::Linear));
         }
         let (a, b) = (hi - 1, hi);
         let (ta, tb) = (self.times[a], self.times[b]);
@@ -257,32 +298,100 @@ impl<T: Copy> Track<T> {
         // after key `a` — which is the convention every keyframe editor uses and
         // the only one that lets a single hold be authored without touching the
         // key on the far side of it.
-        match self.interp_at(a) {
-            Interp::Step => Some((a, a, 0.0)),
-            Interp::Linear => Some((a, b, k)),
+        let mode = self.interp_at(a);
+        match mode {
+            Interp::Step => Some((a, a, 0.0, mode)),
+            _ => Some((a, b, mode.ease(k), mode)),
         }
+    }
+
+    /// The tangent at key `i` for a smooth segment: the finite difference
+    /// across its neighbours, scaled to the segment `a → b`'s duration so it
+    /// drops straight into the Hermite basis. One-sided at the ends.
+    fn smooth_tangent(&self, i: usize, a: usize, b: usize, diff: impl Fn(T, T) -> T, scale: impl Fn(T, f32) -> T) -> T {
+        let n = self.times.len();
+        let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
+        let span = (self.times[hi] - self.times[lo]).max(1e-6);
+        let seg = self.times[b] - self.times[a];
+        scale(diff(self.values[hi], self.values[lo]), seg / span)
     }
 }
 
 impl Track<Vec3> {
     pub fn sample(&self, t: f32) -> Option<Vec3> {
-        let (a, b, k) = self.bracket(t)?;
+        let (a, b, k, mode) = self.bracket(t)?;
+        if mode == Interp::Smooth && a != b {
+            let ma = self.smooth_tangent(a, a, b, |x, y| x - y, |v, s| v * s);
+            let mb = self.smooth_tangent(b, a, b, |x, y| x - y, |v, s| v * s);
+            let h = hermite(k);
+            return Some(self.values[a] * h[0] + ma * h[1] + self.values[b] * h[2] + mb * h[3]);
+        }
         Some(self.values[a].lerp(self.values[b], k))
     }
 }
 
 impl Track<Quat> {
     pub fn sample(&self, t: f32) -> Option<Quat> {
-        let (a, b, k) = self.bracket(t)?;
+        let (a, b, k, mode) = self.bracket(t)?;
+        if mode == Interp::Smooth && a != b {
+            // Squad: a slerp between the keys and a slerp between their
+            // spline control points, blended by a parabola — the rotation
+            // passes through each key with a continuous angular velocity.
+            let n = self.times.len();
+            let ctrl = |i: usize| squad_control(self.values[i.saturating_sub(1)], self.values[i], self.values[(i + 1).min(n - 1)]);
+            let (qa, qb) = (self.values[a], self.values[b]);
+            let (sa, sb) = (ctrl(a), ctrl(b));
+            let outer = qa.slerp(qb, k);
+            let inner = sa.slerp(sb, k);
+            return Some(outer.slerp(inner, 2.0 * k * (1.0 - k)).normalize());
+        }
         Some(self.values[a].slerp(self.values[b], k).normalize())
     }
 }
 
 impl Track<f32> {
     pub fn sample(&self, t: f32) -> Option<f32> {
-        let (a, b, k) = self.bracket(t)?;
+        let (a, b, k, mode) = self.bracket(t)?;
+        if mode == Interp::Smooth && a != b {
+            let ma = self.smooth_tangent(a, a, b, |x, y| x - y, |v, s| v * s);
+            let mb = self.smooth_tangent(b, a, b, |x, y| x - y, |v, s| v * s);
+            let h = hermite(k);
+            return Some(self.values[a] * h[0] + ma * h[1] + self.values[b] * h[2] + mb * h[3]);
+        }
         Some(self.values[a] + (self.values[b] - self.values[a]) * k)
     }
+}
+
+/// The logarithm of a unit quaternion: the rotation as an axis scaled by half
+/// its angle.
+fn quat_log(q: Quat) -> Vec3 {
+    let q = if q.w < 0.0 { -q } else { q };
+    let v = Vec3::new(q.x, q.y, q.z);
+    let len = v.length();
+    if len < 1e-6 {
+        return Vec3::ZERO;
+    }
+    v * (len.atan2(q.w) / len)
+}
+
+/// The inverse of [`quat_log`].
+fn quat_exp(v: Vec3) -> Quat {
+    let len = v.length();
+    if len < 1e-6 {
+        return Quat::IDENTITY;
+    }
+    let s = len.sin() / len;
+    Quat::from_xyzw(v.x * s, v.y * s, v.z * s, len.cos())
+}
+
+/// The squad control point at `q` between its neighbours `prev` and `next`.
+fn squad_control(prev: Quat, q: Quat, next: Quat) -> Quat {
+    // Keep the neighbours in q's hemisphere so the logs measure the short way round.
+    let prev = if prev.dot(q) < 0.0 { -prev } else { prev };
+    let next = if next.dot(q) < 0.0 { -next } else { next };
+    let inv = q.conjugate();
+    let sum = quat_log(inv * next) + quat_log(inv * prev);
+    (q * quat_exp(sum * -0.25)).normalize()
 }
 
 /// One **sprite frame**: which image, how that image is cut, and which piece.
@@ -366,9 +475,25 @@ impl PropertyTrack {
         }
         let b = hi;
         let (ta, tb) = (self.times[a], self.times[b]);
-        let k = if tb > ta { ((t - ta) / (tb - ta)).clamp(0.0, 1.0) } else { 0.0 };
+        let mode = self.interp_at(a);
+        let k = if tb > ta { mode.ease(((t - ta) / (tb - ta)).clamp(0.0, 1.0)) } else { 0.0 };
         match (&self.values[a], &self.values[b]) {
-            (PropValue::Float(x), PropValue::Float(y)) => Some(PropValue::Float(x + (y - x) * k)),
+            (PropValue::Float(x), PropValue::Float(y)) => {
+                if mode == Interp::Smooth {
+                    // The spline through the neighbouring numeric keys.
+                    let at = |i: usize| match &self.values[i] {
+                        PropValue::Float(v) => *v,
+                        _ => *x,
+                    };
+                    let (lo, hi2) = (a.saturating_sub(1), (b + 1).min(n - 1));
+                    let seg = tb - ta;
+                    let ma = (at(b) - at(lo)) / (self.times[b] - self.times[lo]).max(1e-6) * seg;
+                    let mb = (at(hi2) - at(a)) / (self.times[hi2] - self.times[a]).max(1e-6) * seg;
+                    let h = hermite(k);
+                    return Some(PropValue::Float(x * h[0] + ma * h[1] + y * h[2] + mb * h[3]));
+                }
+                Some(PropValue::Float(x + (y - x) * k))
+            }
             // Text, frames and mismatched pairs can't blend — hold the earlier
             // key. For a frame this is not a fallback but the only meaning it
             // has: half of one picture and half of the next is not a picture,
@@ -1292,6 +1417,83 @@ mod tests {
         // Segment 1→2 EASES.
         assert_eq!(tr.sample(1.5), Some(15.0));
         assert_eq!(tr.sample(2.0), Some(20.0));
+    }
+
+    /// An eased key starts or settles slowly: halfway through its time it is
+    /// nowhere near halfway through its move.
+    #[test]
+    fn an_eased_key_is_slow_at_one_end() {
+        let track = |mode| Track {
+            times: vec![0.0, 1.0],
+            values: vec![0.0f32, 8.0],
+            interp: Interp::Linear,
+            key_interp: vec![mode, Interp::Linear],
+        };
+        assert_eq!(track(Interp::EaseIn).sample(0.5), Some(1.0));
+        assert_eq!(track(Interp::EaseOut).sample(0.5), Some(7.0));
+        assert_eq!(track(Interp::EaseInOut).sample(0.5), Some(4.0));
+        assert!(track(Interp::EaseInOut).sample(0.25).unwrap() < 1.0);
+        assert!(track(Interp::EaseInOut).sample(0.75).unwrap() > 7.0);
+        // Every mode still lands on its keys.
+        for mode in [Interp::EaseIn, Interp::EaseOut, Interp::EaseInOut, Interp::Smooth] {
+            assert_eq!(track(mode).sample(0.0), Some(0.0));
+            assert_eq!(track(mode).sample(1.0), Some(8.0));
+        }
+    }
+
+    /// A smooth key has no corner: the velocity just before it equals the
+    /// velocity just after it, and the curve still passes through every key.
+    #[test]
+    fn a_smooth_key_has_the_same_velocity_on_both_sides() {
+        let tr = Track {
+            times: vec![0.0, 1.0, 3.0, 4.0],
+            values: vec![Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 6.0, 0.0), Vec3::new(0.0, 6.0, 0.0)],
+            interp: Interp::Smooth,
+            key_interp: Vec::new(),
+        };
+        for (i, &t) in tr.times.iter().enumerate() {
+            assert!((tr.sample(t).unwrap() - tr.values[i]).length() < 1e-5, "misses key {i}");
+        }
+        let h = 1e-3;
+        for &t in &tr.times[1..3] {
+            let before = (tr.sample(t).unwrap() - tr.sample(t - h).unwrap()) / h;
+            let after = (tr.sample(t + h).unwrap() - tr.sample(t).unwrap()) / h;
+            assert!((before - after).length() < 0.05, "a corner at {t}: {before} then {after}");
+        }
+        // A linear lane over the same keys does have corners, so the test can tell.
+        let linear = Track { interp: Interp::Linear, ..tr.clone() };
+        let before = (linear.sample(1.0).unwrap() - linear.sample(1.0 - h).unwrap()) / h;
+        let after = (linear.sample(1.0 + h).unwrap() - linear.sample(1.0).unwrap()) / h;
+        assert!((before - after).length() > 1.0, "linear should have a corner here");
+    }
+
+    /// The same for a rotation lane: squad passes through every key and turns
+    /// at the same rate on both sides of one.
+    #[test]
+    fn a_smooth_rotation_passes_through_its_keys_without_a_corner() {
+        let rot = |deg: f32| Quat::from_rotation_y(deg.to_radians());
+        let tr = Track {
+            times: vec![0.0, 1.0, 2.0, 3.0],
+            values: vec![rot(0.0), rot(40.0), rot(50.0), rot(120.0)],
+            interp: Interp::Smooth,
+            key_interp: Vec::new(),
+        };
+        for (i, &t) in tr.times.iter().enumerate() {
+            assert!(tr.sample(t).unwrap().dot(tr.values[i]).abs() > 0.99999, "misses key {i}");
+        }
+        // A wide step: the angle between two nearly equal quaternions is lost
+        // to f32 precision below a few milliradians.
+        let h = 0.02;
+        let rate = |a: Quat, b: Quat| a.angle_between(b) / h;
+        for &t in &tr.times[1..3] {
+            let before = rate(tr.sample(t - h).unwrap(), tr.sample(t).unwrap());
+            let after = rate(tr.sample(t).unwrap(), tr.sample(t + h).unwrap());
+            assert!((before - after).abs() < 0.15, "a corner at {t}: {before} then {after} rad/s");
+        }
+        let linear = Track { interp: Interp::Linear, ..tr.clone() };
+        let before = rate(linear.sample(1.0 - h).unwrap(), linear.sample(1.0).unwrap());
+        let after = rate(linear.sample(1.0).unwrap(), linear.sample(1.0 + h).unwrap());
+        assert!((before - after).abs() > 0.3, "linear should turn at a different rate after key 1");
     }
 
     /// An empty `key_interp` is the lane's own mode, for every key — which is

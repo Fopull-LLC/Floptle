@@ -2,7 +2,7 @@
 //! nobody can click on is otherwise impossible.
 
 impl crate::Editor {
-    /// `FLOPTLE_AUTO_OPEN=particles:<effect key>` or `animation:<node name>`:
+    /// `FLOPTLE_AUTO_OPEN=particles:<effect key>` or `animation:<node>[:<state>[:<row px>]]`:
     /// put that editor in front with the thing open, once the scene is up.
     /// Called every frame; does nothing without the variable.
     #[cfg(feature = "editor-ui")]
@@ -29,14 +29,22 @@ impl crate::Editor {
                     Some(crate::EditorTab::Particles)
                 }
                 "animation" => {
+                    // `animation:<node>[:<state>[:<row height px>]]`.
+                    let mut parts = what.splitn(3, ':');
+                    let node_name = parts.next().unwrap_or_default();
+                    let state = parts.next();
+                    if let Some(px) = parts.next().and_then(|p| p.parse::<f32>().ok()) {
+                        self.anim_ui.row_scale = px / 20.0;
+                    }
                     let node = self
                         .world
                         .query::<floptle_core::Name>()
-                        .find(|(_, n)| n.0 == what)
+                        .find(|(_, n)| n.0 == node_name)
                         .map(|(e, _)| e);
                     if let Some(e) = node {
                         self.selection = vec![e];
                         self.anim_ui.target = Some(e);
+                        self.anim_ui.sel_anim = state.map(str::to_string);
                     }
                     Some(crate::EditorTab::Animation)
                 }

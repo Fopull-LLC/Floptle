@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod anim;
 pub use anim::{
-    load_anim_clip, load_anim_controller, save_anim_clip, save_anim_controller, AnimChannelDoc,
+    key_mode_at, load_anim_clip, load_anim_controller, move_key_mode, same_key_time, save_anim_clip,
+    save_anim_controller, set_key_mode, AnimChannelDoc, AnimInterpDoc, AnimKeyModeDoc,
     AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimLayerDoc, AnimPropTrackDoc, AnimPropValueDoc,
     load_sprite_anim, save_sprite_anim, AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4,
     AnimTransitionDoc, SpriteAnimDoc, SpriteAnimFrameDoc, SpriteFrameDoc, ANIM_CLIP_EXT,
