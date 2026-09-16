@@ -145,7 +145,7 @@ impl<'a> TileGrid<'a> {
     /// eight-connectivity leaks a fill through a diagonal wall, which is the one
     /// mistake in a bucket tool nobody forgives.
     ///
-    /// Matching compares the CELL, not the orientation: filling a region of the
+    /// Matching compares the cell, not the orientation: filling a region of the
     /// same tile placed at different rotations is one region, because it looks
     /// like one region.
     pub fn flood_fill(&mut self, x: i32, y: i32, packed: u32) -> bool {
@@ -272,14 +272,14 @@ impl<'a> TileGrid<'a> {
         mask
     }
 
-    /// Recompute the autotiled squares in a rectangle GROWN BY ONE.
+    /// Recompute the autotiled squares in a rectangle GROWN by one.
     ///
     /// The one-ring is not an optimisation, it is the correctness condition:
     /// painting a square changes what its neighbours should draw, so a retile that
     /// covered only the painted squares would leave a seam of stale edge tiles
     /// exactly one square wide around every stroke.
     ///
-    /// Squares whose group has nothing authored for their neighbourhood are LEFT
+    /// Squares whose group has nothing authored for their neighbourhood are left
     /// ALONE (see [`Autotiler::resolve`]) — a half-drawn group makes holes in what
     /// you paint, never erases what was already there.
     pub fn retile(
@@ -291,7 +291,7 @@ impl<'a> TileGrid<'a> {
     ) -> usize {
         let (x0, x1) = (a.0.min(b.0) - 1, a.0.max(b.0) + 1);
         let (y0, y1) = (a.1.min(b.1) - 1, a.1.max(b.1) + 1);
-        // Read the masks BEFORE writing anything: a retile that wrote as it went
+        // Read the masks before writing anything: a retile that wrote as it went
         // would have later squares mask against tiles the same pass just changed,
         // so the result would depend on scan order.
         let mut writes: Vec<(i32, i32, u32)> = Vec::new();
@@ -299,7 +299,7 @@ impl<'a> TileGrid<'a> {
             for x in x0..=x1 {
                 let Some(p) = self.get(x, y) else { continue };
                 // The group whose art is already here. A tile drawn by more than
-                // one group retiles as the FIRST that claims it — the square has
+                // one group retiles as the first that claims it — the square has
                 // to pick one, and any other answer would depend on which
                 // neighbour was looked at first.
                 //
@@ -323,7 +323,7 @@ impl<'a> TileGrid<'a> {
 
     /// Resize the grid, keeping what overlaps.
     ///
-    /// `(ox, oy)` is where the OLD top-left lands in the new grid, so growing a
+    /// `(ox, oy)` is where the old top-left lands in the new grid, so growing a
     /// map upward is `oy = 1` rather than a separate function. Returns the new
     /// `(cols, rows)` — the caller writes them back onto the component.
     pub fn resized(&self, cols: u32, rows: u32, ox: i32, oy: i32) -> (u32, u32, Vec<u32>) {
@@ -428,7 +428,7 @@ impl Stamp {
         for y in 0..self.rows {
             for x in 0..self.cols {
                 // A clockwise turn sends (x, y) to (rows - 1 - y, x) — in ROW
-                // space, where y counts DOWN the screen.
+                // space, where y counts down the screen.
                 let (nx, ny) = (self.rows - 1 - y, x);
                 let p = self.get(x, y).unwrap_or(EMPTY_TILE);
                 data[(ny * cols + nx) as usize] =
@@ -693,7 +693,7 @@ mod tests {
         let s = Stamp { cols: 3, rows: 1, data: vec![1, 2, 3] };
         let r = s.rotated_cw();
         assert_eq!((r.cols, r.rows), (1, 3), "the layout turned");
-        // Clockwise: the leftmost square ends up at the TOP.
+        // Clockwise: the leftmost square ends up at the top.
         assert_eq!(r.get(0, 0).map(tile_index), Some(1));
         assert_eq!(r.get(0, 2).map(tile_index), Some(3));
         // …and every square carries a quarter-turn of its own.
@@ -837,7 +837,7 @@ mod tests {
         // the map (N, W) — all four read as filled.
         let at = Autotiler::build(&set);
         assert_eq!(g.neighbour_mask(0, 0, 0, &set, &at) & EDGES, EDGES);
-        // A hole IS a hole, though.
+        // A hole is a hole, though.
         let mut d = vec![0u32; 9];
         let mut g = TileGrid::new(3, 3, &mut d);
         g.set(1, 0, EMPTY_TILE); // north of centre
@@ -876,7 +876,7 @@ mod tests {
         g.retile((2, 2), (2, 2), &set, &at);
         assert_eq!(mask_at(&set, &g, 2, 2), 0, "a lone square has no neighbours");
 
-        // Now paint the square to its east and retile ONLY that square. The
+        // Now paint the square to its east and retile only that square. The
         // one-ring must update the first square to see a neighbour to the east.
         g.set(3, 2, 0);
         g.retile((3, 2), (3, 2), &set, &at);

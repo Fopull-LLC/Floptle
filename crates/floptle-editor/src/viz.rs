@@ -18,12 +18,12 @@ pub(crate) fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) 
     Some(Vec2::new((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
 }
 
-/// Project a script's `gizmo.*` commands into screen-space segments for ONE camera and
+/// Project a script's `gizmo.*` commands into screen-space segments for one camera and
 /// viewport. `origin` + `size` are physical pixels, so a docked Game tab passes its own
 /// sub-rect while a full-window view passes `(0,0)` and the surface size.
 ///
 /// Split out because the Game view can now draw these too: a hitbox you can only see
-/// while NOT playing is the wrong way round for tuning one (floptle/0024).
+/// while not playing is the wrong way round for tuning one (floptle/0024).
 pub(crate) fn project_script_gizmos(
     cmds: &[floptle_script::GizmoCmd],
     cam_world: DVec3,
@@ -226,7 +226,7 @@ pub(crate) fn terrain_collision_wire(field: &floptle_field::ChunkField) -> Vec<(
 }
 
 /// The field's own zero crossing, coarsely, from the shadow proxy — what the
-/// collider sees when a terrain is set to collide with the FIELD.
+/// collider sees when a terrain is set to collide with the field.
 pub(crate) fn terrain_collider_wire(b: &floptle_field::BakedSdf, stride: u32) -> Vec<(Vec3, Vec3)> {
     let [w, h, d] = b.dims;
     let s = stride.max(1);
@@ -308,7 +308,7 @@ pub(crate) fn terrain_collider_wire(b: &floptle_field::BakedSdf, stride: u32) ->
     segs
 }
 
-/// Build a light's projected gizmo: the SHAPE it emits from, plus a horizontal
+/// Build a light's projected gizmo: the shape it emits from, plus a horizontal
 /// ring at its `range` (so its reach on the ground is visible). Empty if it
 /// doesn't project in front of the camera.
 ///
@@ -323,7 +323,7 @@ pub(crate) fn point_light_lines(
     scale: Vec3,
     range: f32,
     shape: floptle_core::LightShape,
-    // The FULL cone angle in degrees; `OMNI_ANGLE` and up draws no cone.
+    // The full cone angle in degrees; `OMNI_ANGLE` and up draws no cone.
     spot_angle: f32,
     cam_world: DVec3,
     vp: Mat4,
@@ -410,7 +410,7 @@ pub(crate) fn point_light_lines(
         }
     }
     let r = range.clamp(0.2, 500.0) as f64;
-    // AN AIMED LAMP DRAWS ITS CONE, not a ring around itself. The ring says
+    // AN AIMED LAMP draws its CONE, not a ring around itself. The ring says
     // "this reaches this far in every direction", which for a spot is exactly
     // the thing that is not true — and a spot pointed at the ceiling looks
     // identical to one pointed at the floor if all you can see is a circle.
@@ -456,7 +456,7 @@ pub(crate) fn point_light_lines(
 
 /// Directional ("sun") light gizmo: a small sun disc with radiating spokes, plus a
 /// bundle of parallel rays flowing along −`dir` (the way the light travels) to `anchor`,
-/// each capped with an arrowhead. `dir` points TOWARD the sun (matches `Light.direction`).
+/// each capped with an arrowhead. `dir` points toward the sun (matches `Light.direction`).
 /// The directional light has no world position, so callers anchor it in front of the
 /// camera. All-`DVec3` so it stays precise under floating origin (ADR-0015). Empty if the
 /// direction is degenerate or nothing projects in front of the camera.
@@ -1016,7 +1016,7 @@ pub(crate) fn particle_gizmo_lines(
                     seg3(&mut out, m_force, center - a * s, center + a * s, PG_FORCE, cam_world, vp, w, h);
                 }
                 for a in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
-                    // Attractor: arrows point IN toward the center; repeller: OUT.
+                    // Attractor: arrows point in toward the center; repeller: out.
                     let (base, dir) =
                         if attract { (center + a * 0.6, -a) } else { (center + a * 0.28, a) };
                     push_arrow(&mut out, m_force, base, dir, 0.32, PG_FORCE, cam_world, vp, w, h);
@@ -1038,7 +1038,7 @@ pub(crate) fn particle_gizmo_lines(
 /// so this is the difference between "clickable" and "a game of darts".
 pub(crate) const BONE_PICK_PX: f32 = 12.0;
 
-/// The narrowest a bone's BODY is ever allowed to be for picking, in physical
+/// The narrowest a bone's body is ever allowed to be for picking, in physical
 /// pixels. A bone drawn thinner than this on screen — a finger, a far-off rig —
 /// is still a thing you are entitled to click at.
 pub(crate) const BONE_BODY_PX: f32 = 7.0;
@@ -1075,8 +1075,8 @@ pub(crate) struct RigViz {
     /// The mesh node the rig hangs off.
     pub mesh: floptle_core::Entity,
     /// Parent joint → joint, as octahedra. Never includes a bone whose head
-    /// is the skeleton ROOT (see [`is_root_bone`]) — that bone has no real
-    /// shape (a root anchors nothing), so it never draws as one, in EVERY
+    /// is the skeleton root (see [`is_root_bone`]) — that bone has no real
+    /// shape (a root anchors nothing), so it never draws as one, in every
     /// selection state. Its child still gets its own dot in `joints`.
     pub bones: Vec<BoneViz>,
     /// Per joint: where it is on screen, its skeleton index, and how far it is
@@ -1087,7 +1087,7 @@ pub(crate) struct RigViz {
     pub selected: Option<usize>,
 }
 
-/// A bone's head has no parent of its own — it IS the skeleton root. A root
+/// A bone's head has no parent of its own — it is the skeleton root. A root
 /// anchors nothing, so a bone hanging directly off it (`Head`, `LeftArm`, …
 /// in a flat rig, which is most of them) has no meaningful shape: head and
 /// tail don't bound a limb, they bound "the model's core" and one point on
@@ -1202,7 +1202,7 @@ fn octahedron(
     })
 }
 
-/// The bone BODY nearest `cursor`, when the click missed every joint dot.
+/// The bone body nearest `cursor`, when the click missed every joint dot.
 ///
 /// Answers with the bone's head joint — the one whose rotation swings it — so
 /// clicking a limb and clicking the dot at the top of that limb do the same
@@ -1363,16 +1363,16 @@ mod rig_pick_tests {
         assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 2)));
     }
 
-    /// **The reported problem.** A bone whose head IS the skeleton root has
+    /// **The reported problem.** A bone whose head is the skeleton root has
     /// no shape of its own — the root anchors nothing, so `LeftArm`,
     /// `LeftLeg`, and every other bone hanging straight off "Armature" in a
     /// flat rig used to draw as a starburst of lines fanning out from the
     /// model's core, and — worse — was only muted when the "Armature" row
-    /// ITSELF was selected. Selecting an ordinary bone under it (exactly what
+    /// itself was selected. Selecting an ordinary bone under it (exactly what
     /// posing a character means doing) left the starburst fully solid and
     /// pickable, competing with the real bone dots for every click. The fix
     /// is structural, not selection-dependent: a root-attached bone is never
-    /// classified as drawable, in ANY selection state.
+    /// classified as drawable, in any selection state.
     #[test]
     fn a_bone_hanging_off_the_root_has_no_shape_of_its_own() {
         let nodes = vec![

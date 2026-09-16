@@ -65,7 +65,7 @@ impl Kind {
 /// Expressions this engine answers with a vector, used to decide that a local
 /// holds one.
 ///
-/// Deliberately a list of ENGINE spellings rather than a guess at any
+/// Deliberately a list of engine spellings rather than a guess at any
 /// expression: the cost of a false positive here is somebody editing working
 /// code, which is worse than the cost of a miss (the miss still raises loudly
 /// in `fast`, because mutation is an error there rather than a silent nil).
@@ -373,7 +373,7 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
                 if files.len() == 1 { "" } else { "s" }
             );
         }
-        // Said on BOTH paths, and last, because the sentence people act on is
+        // Said on both paths, and last, because the sentence people act on is
         // the clean one: a textual scan cannot see a vector that arrived
         // through a table, a function's return, or a name it could not follow.
         floptle_say::say!(

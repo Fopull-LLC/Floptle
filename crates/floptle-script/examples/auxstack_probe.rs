@@ -6,12 +6,12 @@
 //! cannot create a Lua reference, out of auxiliary stack space (used 7999 slots)
 //! ```
 //!
-//! The ledger's hypothesis was that the host's `envs` map — one live
+//! The hypothesis was that the host's `envs` map — one live
 //! `mlua::Table` per instance — was spending a bounded resource that the
 //! `RegistryKey` beside it does not. This probe is the confirmation the task
-//! asks for BEFORE the rewrite: hold N of each, and see which one falls over.
+//! asks for before the rewrite: hold N of each, and see which one falls over.
 //!
-//! It was, twice over: the host held a live `Table` per instance in `envs` AND
+//! It was, twice over: the host held a live `Table` per instance in `envs` and
 //! another as each instance's cached `node` table, so the ceiling landed around
 //! four thousand instances. Both are registry keys now.
 //!

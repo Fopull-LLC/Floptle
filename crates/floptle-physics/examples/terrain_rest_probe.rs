@@ -1,5 +1,5 @@
 //! Drop capsule bodies onto a real project's terrain and measure how far each
-//! settled body's feet sit from the DRAWN surface — the surface-nets triangles
+//! settled body's feet sit from the drawn surface — the surface-nets triangles
 //! at stride 1, transformed exactly as the renderer places them.
 //!
 //! Run:
@@ -8,7 +8,7 @@
 //!     "<project>/terrain/<scene>.<id>.cfield" <scale> <anchor_y> [radius] [height]
 //! ```
 //!
-//! Two numbers per body, both in WORLD units:
+//! Two numbers per body, both in world units:
 //! - `contact`: distance from the bottom sphere's centre to the closest drawn
 //!   point, minus the radius. Zero means the capsule touches the picture.
 //! - `feet`: height of the capsule's lowest point above the drawn ground
@@ -135,8 +135,8 @@ fn main() {
 
     // `--log <file> --half <h>`: a position log from a real Play session
     // (`POS x y z grounded` per tick, world units, capsule centre). For every
-    // logged tick, how far the capsule's lowest point sits from the DRAWN
-    // ground under it, and from the FIELD's own zero crossing under it —
+    // logged tick, how far the capsule's lowest point sits from the drawn
+    // ground under it, and from the field's own zero crossing under it —
     // which of the two surfaces the body actually rests on.
     if let Some(i) = args.iter().position(|a| a == "--log") {
         let file = args.get(i + 1).expect("--log <file>");
@@ -291,7 +291,7 @@ fn main() {
         let contact = best - radius;
         let under = ground_under(b.pos.x, b.pos.z).map(|(y, _)| y).unwrap_or(f32::NAN);
         let feet_gap = feet.y - under;
-        // Toe clip: the drawn ground rising ABOVE the sole anywhere on a small
+        // Toe clip: the drawn ground rising above the sole anywhere on a small
         // foot-sized disc around the centre line (0.22 = the knight's shoe).
         let mut toe = f32::MIN;
         for k in 0..8 {

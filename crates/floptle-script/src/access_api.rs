@@ -21,7 +21,7 @@
 //! transitions snap when motion is reduced. What it cannot honour for a game — a
 //! camera shake the game drives — reads `access.reducedMotion()` and skips it.
 //!
-//! Persisting these is the GAME's, via `save.*`, deliberately: they are the
+//! Persisting these is the game's, via `save.*`, deliberately: they are the
 //! player's settings and belong in the player's save, not in a project file that
 //! ships to everyone.
 
@@ -93,7 +93,7 @@ pub fn install(lua: &Lua, access: &SharedAccess, captions: &CaptionQueue) -> mlu
         t.set(
             "setColorFilter",
             lua.create_function(move |_, (name, strength): (String, Option<f64>)| {
-                // Through the SAME parser the engine acts on, offering that
+                // Through the same parser the engine acts on, offering that
                 // parser's own list — a misspelled filter that quietly meant
                 // "off" is an accessibility setting that appears to do nothing.
                 let f = crate::opts::parse_enum(

@@ -8,7 +8,7 @@
 //!
 //! # The one thing that can go wrong
 //!
-//! A bounding radius that is too SMALL pops geometry out at the screen edge,
+//! A bounding radius that is too small pops geometry out at the screen edge,
 //! which is far more visible than the cost being saved. So every radius here is
 //! derived from measured bounds and rounded **up**, and the source of each bound
 //! is written down:
@@ -32,7 +32,7 @@ use floptle_core::math::{Mat4, Vec3, Vec4};
 /// √3/2 — half the diagonal of a unit cube.
 ///
 /// The conversion from "longest edge of a box" to "radius of a sphere that
-/// contains it". Using `size/2` instead would be a sphere INSIDE the box, and a
+/// contains it". Using `size/2` instead would be a sphere inside the box, and a
 /// long thin model rotated 45° would pop.
 const BOX_TO_SPHERE: f32 = 0.866_025_4;
 
@@ -69,7 +69,7 @@ impl Frustum {
     /// frustum at all?
     ///
     /// Conservative in the only direction that matters: a sphere straddling a
-    /// plane is IN. Rejecting on any single plane is enough — the classic
+    /// plane is in. Rejecting on any single plane is enough — the classic
     /// false-positive in a corner region costs one wasted instance, while a false
     /// negative costs a visible pop.
     pub fn contains_sphere(&self, centre: Vec3, radius: f32) -> bool {

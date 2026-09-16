@@ -1,12 +1,7 @@
-# Release pipeline (ADR-0021 / docs/updating-the-hub.md §3). On a semver tag `v*`, build a
-# self-contained editor bundle per OS, checksum it, publish the archives + a machine-
-# readable `releases.json` manifest to GitHub Releases. The Floptle Hub reads that manifest
-# to list + install versions.
-#
-# NOTE: this workflow can only be validated by an actual tag push (CI is not runnable in
-# the dev sandbox). The bundle layout + manifest schema mirror the locally-tested
-# scripts/package.sh and the Hub's install/unpack code, so the shapes are known-good; the
-# GitHub-specific glue (uploads, URL construction) is what a first `v*` push exercises.
+# Release pipeline (ADR-0021, docs/updating-the-hub.md). On a semver tag `v*`:
+# build a self-contained editor bundle per platform, checksum it, and publish
+# the archives plus a machine-readable `releases.json` manifest to GitHub
+# Releases. The Floptle Hub reads that manifest to list and install versions.
 name: release
 
 on:
@@ -17,11 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  # Nothing publishes until the suite and the lint pass are green ON THE TAGGED
-  # COMMIT. A local run before tagging is not evidence — it can be stale, it can
-  # be a dirty tree, and on a full disk `cargo test` prints nothing at all and
-  # reads as a pass. This is the only check that is actually about the artifact
-  # being shipped. Same definition of green as every other push (ci.yml).
+  # Nothing publishes until ci.yml is green on the tagged commit.
   gate:
     uses: ./.github/workflows/ci.yml
 
@@ -34,26 +25,20 @@ jobs:
         include:
           - { os: ubuntu-latest,  target: linux-x86_64,  rust: x86_64-unknown-linux-gnu }
           - { os: macos-14,       target: macos-aarch64, rust: aarch64-apple-darwin }
-          # Intel macOS CROSS-COMPILES on the ARM runner (Apple toolchains are
-          # multi-arch) — macos-13 Intel runners are retired and queue forever.
+          # Intel macOS cross-compiles on the ARM runner; Intel runners are retired.
           - { os: macos-14,       target: macos-x86_64,  rust: x86_64-apple-darwin }
           - { os: windows-latest, target: windows-x86_64, rust: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # Linux needs the windowing/GPU dev headers to build the editor (wgpu + winit),
-      # ALSA for the audio backend (cpal → alsa-sys) and udev for the gamepad backend
-      # (gilrs → libudev-sys, whose build script does an unconditional
-      # `pkg_config::find_library("libudev").unwrap()` and PANICS without the .pc file).
-      # macOS/Windows use OS APIs for all three and need nothing extra.
+      # Linux needs windowing/GPU headers (wgpu + winit), ALSA (audio) and udev
+      # (gamepads); macOS and Windows use OS APIs for all three.
       - name: Linux build deps
         if: runner.os == 'Linux'
         run: |
-          # `|| true`: the runner image carries third-party repos (Chrome,
-          # Microsoft) nothing here installs from, and a hash-sum mismatch on
-          # one of them exits 100 with every Ubuntu index already fetched —
-          # twice in a row on 2026-09-09. The install below is the real check.
+          # Third-party apt repos on the image occasionally fail their index
+          # fetch; the install below is the real check.
           sudo apt-get update || true
           sudo apt-get install -y \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
@@ -69,50 +54,35 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      # Three binaries, because a bundle serves three jobs: the editor is what
-      # the Hub runs, the PLAYER is what File ⏵ Export Game… ships (it has no
-      # authoring half compiled into it), and the Hub updates itself.
+      # The editor (what the Hub runs), the player (what Export Game ships,
+      # with no authoring half), and the Hub itself.
       - name: Build editor + player + hub
         run: |
           cargo build --release -p floptle-editor --target ${{ matrix.rust }}
           cargo build --release -p floptle-player --target ${{ matrix.rust }}
           cargo build --release -p floptle-hub --target ${{ matrix.rust }}
 
-      # The managed relay, x86_64 Linux only — the shape the us-east box
-      # actually is (an Always Free E2.1.Micro, not the Ampere A1 the plan
-      # assumed), and building on a 954 MB box is not a fallback. Shipped as a
-      # BARE BINARY beside its checksum rather than inside a bundle: the install
-      # is four lines on a minimal image with nothing on it, and a tarball would
-      # only add a step. It links floptle-net and ureq and nothing windowing, so
-      # it needs no libraries the box does not have.
+      # The managed relay, x86_64 Linux only, shipped as a bare binary beside
+      # its checksum: the install is a few lines on a minimal image.
       - name: Build the managed relay (linux-x86_64)
         if: matrix.target == 'linux-x86_64'
         run: cargo build --release -p floptle-relay --target ${{ matrix.rust }}
 
-      # The load-generator that sizes the relay (`floptle/0218`). Published for
-      # BOTH Linux architectures: the relay is x86_64 today and may move to an
-      # A1, and the box it is DRIVEN FROM is aarch64 — a bench run from a laptop
-      # measures a home upstream rather than a region link.
+      # The load generator that sizes a relay, for both Linux architectures:
+      # it is run from a region box, not a laptop.
       - name: Build the relay bench (linux-x86_64)
         if: matrix.target == 'linux-x86_64'
         run: cargo build --release -p floptle-relay-bench --target ${{ matrix.rust }}
 
-      # The verb table, as a release artifact (`floptle/0201`). `cli.rs` is the
-      # one source of truth for the command line — the parser, `--help` and
-      # `help --json` are all generated from it — and fopull.com/floptle/cli
-      # was hand-carried from it: seven verbs when the engine had 21, and wrong
-      # about `needs_gpu` and `writes_project` for `run` and `shot`, the two
-      # flags the page exists to publish. Published beside `releases.json` and
-      # `docs.json`, the site renders from it the way it already does for
-      # releases and docs, and cannot describe a verb the engine does not have.
+      # The verb table as a release artifact. `cli.rs` generates the parser,
+      # `--help` and `help --json`; the website renders its CLI page from this
+      # file so it cannot describe a verb the engine does not have.
       - name: Describe the command line (linux-x86_64)
         if: matrix.target == 'linux-x86_64'
         shell: bash
         run: |
           ./target/${{ matrix.rust }}/release/floptle help --json > cli.json
-          # A page renders `name`, `summary`, `needsGpu` and `writesProject` per
-          # verb; an artifact missing any of them is a broken page, so it is a
-          # broken release.
+          # The site renders these four fields per verb.
           jq -e '.version and (.verbs | length > 0)' cli.json >/dev/null
           jq -e '[.verbs[] | has("name") and has("summary") and has("needsGpu") and has("writesProject")] | all' cli.json >/dev/null
           echo "cli.json: $(jq '.verbs | length' cli.json) verbs for $(jq -r .version cli.json)"
@@ -127,14 +97,10 @@ jobs:
           chmod +x "$R"
           sha256sum "$R" > "$R.sha256"
           echo "relay sha256: $(cut -d' ' -f1 < "$R.sha256")"
-          # Proof it runs on a box with nothing installed, and that this is the
-          # MANAGED binary rather than the July open relay — which parsed
-          # --help as a port number, and is how the two are told apart.
+          # Proof it runs on a box with nothing installed.
           ldd "$R" || true
-          # To a FILE, not through `head`. GitHub runs these with `pipefail`,
-          # and a `head` that closes the pipe early makes the writer fail — so
-          # the day this table outgrows the pipe buffer, the step would start
-          # failing for a reason that has nothing to do with the build.
+          # To a file, not through `head`: under `pipefail` a `head` that
+          # closes the pipe early fails the writer.
           ./"$R" --help > relay-help.txt
           head -3 relay-help.txt
 
@@ -142,15 +108,12 @@ jobs:
           cp "target/${{ matrix.rust }}/release/floptle-relay-bench" "$B"
           chmod +x "$B"
           sha256sum "$B" > "$B.sha256"
-          # Same reason as above: to a FILE, never through `head` under
-          # `pipefail`.
+          # To a file for the same reason.
           ./"$B" --help > bench-help.txt
           head -3 bench-help.txt
 
-      # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
-      # archive root, matching floptle_hub::install::unpack. The HUB ships as its own
-      # small archive beside it — the thing a new user downloads first (the Hub then
-      # installs engine versions itself).
+      # A flat archive (contents at the root, as floptle_hub::install::unpack
+      # expects). The Hub ships as its own small archive beside it.
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -159,7 +122,7 @@ jobs:
           B="floptle-$VER-$T"
           mkdir -p "$B"
           cp "target/${{ matrix.rust }}/release/floptle" "$B/floptle"
-          # An export for this platform copies THIS binary out of the bundle.
+          # An export for this platform copies this binary out of the bundle.
           cp "target/${{ matrix.rust }}/release/floptle-player" "$B/floptle-player"
           printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
           tar -C "$B" -czf "$B.tar.gz" .
@@ -171,9 +134,7 @@ jobs:
           mkdir -p "$H"
           cp "target/${{ matrix.rust }}/release/floptle-hub" "$H/floptle-hub"
           tar -C "$H" -czf "$H.tar.gz" .
-          # The Hub needs a URL and a checksum for ITS OWN bundle to update itself.
-          # Without this fragment the archive exists on the release page and no program
-          # can find it, which is how the Hub went four months with no way to update.
+          # The Hub needs a URL and checksum for its own bundle to update itself.
           if command -v sha256sum >/dev/null 2>&1; then HSHA=$(sha256sum "$H.tar.gz" | cut -d' ' -f1)
           else HSHA=$(shasum -a 256 "$H.tar.gz" | cut -d' ' -f1); fi
           HSIZE=$(wc -c < "$H.tar.gz" | tr -d ' ')
@@ -217,20 +178,14 @@ jobs:
             cli.json
           if-no-files-found: error
 
-  # The ARM box's half of the dedicated-server story (`floptle/0197`).
+  # The dedicated-server binaries for the ARM region boxes, published as bare
+  # binaries rather than as a platform (linux-aarch64 is deliberately not in
+  # the Hub's install list or the export dialog):
   #
-  # `floptle-dist::PLATFORMS` has never carried a linux-aarch64, because nothing
-  # ran an engine on ARM Linux until Floptle Cloud's fleet box did. This is
-  # deliberately NOT a new platform: adding one would put linux-aarch64 in the
-  # Hub's install list and the export dialog, and neither of those wants it. It
-  # is two bare binaries, published beside the relay's, the way `floptle/0191`
-  # settled for an artifact that is not a game bundle.
-  #
-  #   floptle-server  the engine a fleet box runs a project bundle with. The
-  #                   version pinned in a bundle's manifest is which one the
-  #                   agent downloads, so every release has to publish one or a
-  #                   deployment on that version can never start.
-  #   floptle-fleet   the agent itself: polls /desired, runs one server per
+  #   floptle-server  the engine a fleet box runs a project bundle with; the
+  #                   version pinned in a bundle's manifest is the one the
+  #                   agent downloads, so every release publishes one.
+  #   floptle-fleet   the agent: polls /desired, runs one server per
   #                   deployment, reports to /status.
   fleet:
     name: bundle linux-aarch64 (server + fleet agent)
@@ -239,18 +194,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `floptle-server` is a shim over the editor library, so the build needs
-      # the same headers the linux-x86_64 bundle does — even though the binary
-      # links none of them at run time (rc5 verified libc/libm/libgcc_s/libstdc++
-      # on the real box). wgpu and winit dlopen; the ALSA and udev packages are
-      # here because their -sys build scripts look for a .pc file and panic
-      # without one.
+      # `floptle-server` is a shim over the editor library, so it needs the
+      # same build headers as the x86_64 bundle even though it links none of
+      # them at run time.
       - name: Linux build deps
         run: |
-          # `|| true`: the runner image carries third-party repos (Chrome,
-          # Microsoft) nothing here installs from, and a hash-sum mismatch on
-          # one of them exits 100 with every Ubuntu index already fetched —
-          # twice in a row on 2026-09-09. The install below is the real check.
+          # Third-party apt repos on the image occasionally fail their index
+          # fetch; the install below is the real check.
           sudo apt-get update || true
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev \
             libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
@@ -276,21 +226,15 @@ jobs:
             chmod +x "$OUT"
             sha256sum "$OUT" > "$OUT.sha256"
             echo "$BIN sha256: $(cut -d' ' -f1 < "$OUT.sha256")"
-            # Proof it runs on a box with nothing installed. The agent verifies
-            # the PUBLISHED checksum before it will execute an engine, so a
-            # missing .sha256 here is a deployment that can never start.
+            # The agent verifies the published checksum before it runs an
+            # engine, so a missing .sha256 is a deployment that cannot start.
             ldd "$OUT" || true
           done
-          # `--help` exits 0 and prints a table. This is how an operator tells a
-          # current binary from one already on a box — the July relay read
-          # `--help` as a port number, and `floptle-server` had no help path at
-          # all until this release. To a FILE, not through `head`: these steps
-          # run with `pipefail` and a `head` that closes the pipe early makes the
-          # writer fail for a reason that has nothing to do with the build.
+          # `--help` exits 0 and prints a table; written to a file because
+          # `head` closing the pipe early fails the writer under `pipefail`.
           ./"floptle-fleet-$VER-linux-aarch64" --help > fleet-help.txt
           head -3 fleet-help.txt
-          # ⚠ The bench is RUN FROM this box (`floptle/0218`): driving a region
-          # relay from a laptop measures a home upstream, not a region link.
+          # The bench runs from a region box; a laptop measures a home upstream.
           ./"floptle-relay-bench-$VER-linux-aarch64" --help > bench-help.txt
           head -3 bench-help.txt
 
@@ -366,12 +310,10 @@ jobs:
     name: publish
     needs: [build, web, fleet]
     runs-on: ubuntu-latest
-    # Distribution is PUBLIC (Fopull-LLC/Floptle-releases): the Hub's default
-    # manifest URL points there and anyone can download — the engine source
-    # stays in this private repo. Publishing there needs the RELEASES_TOKEN
-    # secret (a PAT with write access to the releases repo); without it, this
-    # job still archives everything on THIS repo and someone with local gh
-    # auth finishes with scripts/publish-public.sh <tag>.
+    # Bundles are published to Fopull-LLC/Floptle-releases, where the Hub's
+    # default manifest URL points. That needs the RELEASES_TOKEN secret; without
+    # it this job still archives everything on this repo and
+    # scripts/publish-public.sh <tag> finishes the publish by hand.
     env:
       PUBLIC_REPO: Fopull-LLC/Floptle-releases
     steps:
@@ -411,13 +353,8 @@ jobs:
             '{version:$v, channel:$c, date:$d, notes_url:$n, artifacts:$a, hub_artifacts:$h}')
           # Start from the PUBLIC manifest if one is published, else empty.
           #
-          # READ FROM A FILE, NOT FROM ARGV. This was `--argjson m "$EXISTING"` with the
-          # whole manifest in a shell variable, and it worked right up until the manifest
-          # grew release notes: Linux caps a SINGLE argv entry at 128 KB (MAX_ARG_STRLEN)
-          # no matter how large ARG_MAX is, and the manifest passed 240 KB. The failure is
-          # `jq: Argument list too long` from the kernel, before jq runs — so it says
-          # nothing about which argument, and it only appears on the release AFTER the one
-          # that grew the file. `--slurpfile` reads it directly and has no size limit.
+          # Read from a file, not argv: Linux caps a single argv entry at 128 KB
+          # and the manifest is larger than that.
           mkdir -p prev
           if ! gh release download manifest --repo "$PUBLIC_REPO" --pattern releases.json --dir prev 2>/dev/null; then
             echo '{"schema":1,"channels":{},"versions":[]}' > prev/releases.json
@@ -429,8 +366,7 @@ jobs:
               channels: (($prev.channels // {}) | .[$c] = ((((.[$c] // []) + [$v]) | unique))),
               versions: (((($prev.versions // []) | map(select(.version != $v))) + [$e]))
             }' > releases.json
-          # A merge that silently dropped the history would publish a manifest listing one
-          # version, and every Hub in the world would show one version. Cheap to assert.
+          # A merge that dropped the history would leave every Hub showing one version.
           test "$(jq '.versions | length' releases.json)" -ge "$(jq '.versions | length' prev/releases.json)" \
             || { echo "::error::the merge lost versions"; exit 1; }
           # Fill every entry's notes from docs/releases/ — this version's, and any older
@@ -439,26 +375,21 @@ jobs:
           scripts/embed-release-notes.sh releases.json docs/releases docs/news.md
           jq '{schema, channels, news: (.news | length), versions: [.versions[] | {version, title, notes: (.notes | length), changed: (.changed // "both"), engine: (.artifacts | keys), hub: (.hub_artifacts // {} | keys)}]}' releases.json
 
-      # `cli.json` rides with them (`floptle/0201`): the verb table the linux
-      # build wrote from `floptle help --json`, published at the same stable URL
-      # as the manifest so the site's CLI page renders from it.
+      # `cli.json`, the verb table the Linux build wrote, at the same stable URL.
       - name: The verb table is here
         shell: bash
         run: test -s artifacts/bundle-linux-x86_64/cli.json
 
-      # The docs feed fopull.com renders (contracts/engine-site-feed.md). It rides
-      # the release rather than the website reading `main`, for the same reason the
-      # notes do: docs describe a BUILD. Scraping the branch would put a guide to
-      # an unreleased feature next to a download button for the version without it.
+      # The docs feed fopull.com renders. It rides the release rather than the
+      # branch so a guide never describes a feature the download lacks.
       - name: Build the docs feed
         shell: bash
         run: |
           set -euo pipefail
           scripts/build-docs-feed.sh docs.json docs "${GITHUB_REF_NAME#v}"
 
-      # The release notes ARE docs/releases/<tag>.md. One file, written once, shown on the
-      # GitHub release page and inside the Hub — rather than a page nobody reads saying
-      # "Automated release v0.21.0" beside a document that says what actually changed.
+      # The release notes are docs/releases/<tag>.md, shown on the release page
+      # and inside the Hub.
       - name: Resolve the release notes
         shell: bash
         run: |
@@ -471,8 +402,8 @@ jobs:
             printf 'Floptle %s\n\nDownload the floptle-hub archive for your platform; the Hub installs engine versions.\n' "$TAG" > NOTES.md
           fi
 
-      # Archive of record on the private repo — always happens, and is what
-      # scripts/publish-public.sh mirrors when RELEASES_TOKEN isn't set.
+      # Archive of record on this repo; scripts/publish-public.sh mirrors it
+      # when RELEASES_TOKEN is not set.
       - name: Archive on this repo
         env:
           GH_TOKEN: ${{ github.token }}
@@ -481,8 +412,7 @@ jobs:
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
           shopt -s nullglob
-          # The relay ships as a bare binary + checksum, so it is not caught by
-          # the bundle globs above (`floptle/0191`).
+          # The relay ships as a bare binary + checksum, outside the bundle globs.
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
                    artifacts/*/floptle-relay-*-linux-x86_64 \
                    artifacts/*/floptle-relay-*-linux-x86_64.sha256 \
@@ -508,8 +438,7 @@ jobs:
           export GH_TOKEN="$RELEASES_TOKEN"
           TAG="$GITHUB_REF_NAME"
           shopt -s nullglob
-          # The relay ships as a bare binary + checksum, so it is not caught by
-          # the bundle globs above (`floptle/0191`).
+          # The relay ships as a bare binary + checksum, outside the bundle globs.
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip \
                    artifacts/*/floptle-relay-*-linux-x86_64 \
                    artifacts/*/floptle-relay-*-linux-x86_64.sha256 \
@@ -521,11 +450,9 @@ jobs:
                    artifacts/*/floptle-relay-bench-*-linux-aarch64.sha256)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
-          # A stable 'manifest' release so the Hub's default manifest URL always resolves to
-          # the newest list (releases/download/manifest/releases.json). It's a PRERELEASE
-          # and the version release is explicitly marked LATEST: GitHub otherwise crowns
-          # the most recently CREATED release, which made /releases/latest land on the
-          # manifest holder (a page with no downloads) instead of the real bundles.
+          # A fixed 'manifest' release so the Hub's default URL always resolves to
+          # the newest list. It is a prerelease and the version release is marked
+          # latest explicitly, or /releases/latest would land on the manifest holder.
           gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --prerelease --notes "Machine-readable version manifest for the Floptle Hub — not a download page. Get Floptle from the LATEST release instead." || true
           gh release upload manifest releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
           gh release edit manifest --repo "$PUBLIC_REPO" --prerelease

@@ -32,7 +32,7 @@ use floptle_core::World;
 
 /// Time `f(n)` at `n` and `4n` and hand back the growth ratio.
 ///
-/// Takes the BEST of several runs rather than the mean, because scheduler noise
+/// Takes the best of several runs rather than the mean, because scheduler noise
 /// only ever adds time — the fastest observed run is the closest thing to the
 /// real cost.
 ///
@@ -61,7 +61,7 @@ fn growth(n: usize, mut f: impl FnMut(usize)) -> f64 {
         f(size);
         t.elapsed()
     };
-    // Warm caches, let any lazy init happen, and spin the core up — at BOTH
+    // Warm caches, let any lazy init happen, and spin the core up — at both
     // sizes, so neither is the one that pays for the allocator's first call.
     f(n);
     f(n * 4);
@@ -91,7 +91,7 @@ fn assert_linearish(what: &str, ratio: f64) {
     );
 }
 
-/// The harness has to be able to FAIL, or every guard below is decoration.
+/// The harness has to be able to fail, or every guard below is decoration.
 ///
 /// A test that passes against the bug it guards is worse than no test: it reads
 /// as coverage. So this measures work that is deliberately linear and work that
@@ -132,7 +132,7 @@ struct Tag(u32);
 
 /// Reading a component per node, which is what every per-node pass does.
 ///
-/// This was a LINEAR SCAN per lookup. Every system that walked the scene and
+/// This was a linear SCAN per lookup. Every system that walked the scene and
 /// asked for a component was therefore quadratic in the scene, and at 5,500
 /// nodes it cost 60 ms a frame doing nothing but finding things.
 #[test]
@@ -215,7 +215,7 @@ fn field(far: f32) -> ScatterSource {
 
 /// Scatter residency against the knob that sets it.
 ///
-/// This one is quadratic BY DESIGN — the swept area really does grow with the
+/// This one is quadratic by DESIGN — the swept area really does grow with the
 /// square of the view distance, and no amount of cleverness changes that a
 /// bigger disc holds more chunks. What must not happen is it getting worse than
 /// its own geometry, which is what the missing region clamp did: 4,489 keys
@@ -255,7 +255,7 @@ fn sweeping_the_resident_chunks_is_linear_in_how_many_there_are() {
 }
 
 /// The spatial index (`floptle/0076`): N sphere queries over N items must stay
-/// roughly LINEAR in N, where the honest scan they replace is quadratic.
+/// roughly linear in N, where the honest scan they replace is quadratic.
 ///
 /// This is the guard the card asked for, and it is the measurement that decided
 /// the shape. "What is near here?" asked once per body per frame — which is what
@@ -264,7 +264,7 @@ fn sweeping_the_resident_chunks_is_linear_in_how_many_there_are() {
 /// grows 4x. Every accidental quadratic that reached a player in this engine had
 /// that same signature.
 ///
-/// The rebuild is INSIDE the measurement on purpose. An index whose query is
+/// The rebuild is inside the measurement on purpose. An index whose query is
 /// sub-linear but whose build is worse than the scan it replaced is not a win,
 /// and measuring only the query would hide that.
 #[test]
@@ -297,7 +297,7 @@ fn n_sphere_queries_over_n_bodies_stay_linear() {
     assert_linearish("spatial::Grid, n queries over n items", ratio);
 }
 
-/// …and the honest scan it replaces is measured in the SAME run, so "linear" is
+/// …and the honest scan it replaces is measured in the same run, so "linear" is
 /// falsifiable.
 ///
 /// Without a before-number, any cheap-enough loop looks linear at these sizes.

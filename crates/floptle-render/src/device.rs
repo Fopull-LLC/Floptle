@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 use winit::window::Window;
 
 /// GPU errors waiting for the host to pick up, plus every message already
-/// reported this session.
+/// reported since the device was created.
 ///
 /// The `seen` half matters as much as the queue: a bad pipeline is rejected on
-/// EVERY frame the pass runs, so reporting each occurrence would write sixty
+/// every frame the pass runs, so reporting each occurrence would write sixty
 /// identical Console lines a second and bury whatever else is wrong. Each
 /// distinct message is said once, which is the same bargain the shader
 /// compiler's error reporting already makes.
@@ -107,7 +107,7 @@ pub struct Gpu {
     /// fall back rather than fail.
     present_modes: Vec<wgpu::PresentMode>,
     vsync: Vsync,
-    /// The format the frame's VIEW has — what every pass that targets the
+    /// The format the frame's view has — what every pass that targets the
     /// screen renders into. Equal to `config.format` everywhere a surface
     /// offers an sRGB format directly. A browser's canvas does not: WebGPU
     /// exposes only `Rgba8Unorm`/`Bgra8Unorm` and expects an sRGB *view*
@@ -246,7 +246,7 @@ impl Gpu {
         // been one mismatched pipeline in a pass that draws once a frame.
         //
         // So: record it, keep the frame, let the editor say so. Deliberately
-        // NOT installed on the headless path (see `headless_with`) — a probe
+        // not installed on the headless path (see `headless_with`) — a probe
         // that swallowed a validation error would report a pass it never made,
         // and that trade only makes sense when there is a person at the window.
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| gpu_error(&e)));
@@ -258,7 +258,7 @@ impl Gpu {
         // sRGB view of the non-sRGB swapchain instead. See `frame_format`.
         let frame_format = if format.is_srgb() { format } else { format.add_srgb_suffix() };
         let view_formats = if frame_format == format { vec![] } else { vec![frame_format] };
-        // Fifo (classic vsync) is the DEFAULT, deliberately — see [`Vsync`] for
+        // Fifo (classic vsync) is the default, deliberately — see [`Vsync`] for
         // why, and for why it is no longer the only choice.
         let present_modes = caps.present_modes.clone();
         let vsync = Vsync::default();
@@ -446,7 +446,7 @@ impl Gpu {
         &self.depth_view
     }
 
-    /// The depth TEXTURE behind [`depth_view`](Self::depth_view) — the copy target
+    /// The depth texture behind [`depth_view`](Self::depth_view) — the copy target
     /// when the opaque depth prepass primes the frame's depth buffer.
     pub fn depth_texture(&self) -> &wgpu::Texture {
         &self.depth_tex
@@ -473,7 +473,7 @@ impl Gpu {
     ///
     /// So the scene renders into a floating-point target and stays in linear
     /// light, at whatever intensity it actually has, all the way to the end of
-    /// the post chain — where exactly ONE pass maps it down to the display
+    /// the post chain — where exactly one pass maps it down to the display
     /// ([`PostSettings::tonemap`](crate::PostSettings)). Every pass in between —
     /// depth of field, denoise, grade, bloom, lens, sharpen — is then working on
     /// the real values.

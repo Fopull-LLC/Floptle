@@ -348,7 +348,7 @@ mod arg_tests {
     /// A flag table that is out of date is worse than none, because it is
     /// believed — and this one is what an operator reads to tell a managed
     /// binary from the open one before installing it on a live box. The list
-    /// comes off this file's OWN match arms rather than a second hand-written
+    /// comes off this file's own match arms rather than a second hand-written
     /// list, so adding a flag and not documenting it fails here.
     #[test]
     fn every_flag_the_parser_takes_is_in_the_help_table() {

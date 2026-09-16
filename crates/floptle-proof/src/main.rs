@@ -1,6 +1,6 @@
 //! Floptle — Beat 1 "Am I Dreaming?" proof slice.
 //!
-//! A standalone, hardcoded-WGSL binary (NO engine: no ECS/RON/shader-IR/gravity).
+//! A standalone, hardcoded-WGSL binary (no engine: no ECS/RON/shader-IR/gravity).
 //! It flies a free camera through a time-morphing Mandelbox raymarched at half
 //! resolution into an HDR target, runs a feedback/swirl post pass for melting
 //! dream-trails, and upscales with tonemap + chromatic aberration + vignette +

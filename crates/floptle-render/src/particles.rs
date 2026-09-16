@@ -5,7 +5,7 @@
 //! face the camera.
 //!
 //! Draws the per-frame instance data the VFX sim produces (`floptle-vfx`), into the
-//! same color/depth targets the scene composited in, BEFORE post and the retro
+//! same color/depth targets the scene composited in, before post and the retro
 //! upscale — so particles are depth-tested against meshes and raymarched matter,
 //! captured by SSAO/bloom/vignette, and pixelate with the world in retro mode.
 //!
@@ -86,7 +86,7 @@ impl ParticleBlend {
 /// world-space basis the quad spans (so a track can face the camera, lie flat,
 /// stand upright, or stretch along its motion — the CPU packer picks the basis per
 /// [`BillboardOrient`]). Written by the CPU sim today; the GPU compute backend will
-/// write the very same buffer on-device (proposal §4.4 — the sim's output IS the
+/// write the very same buffer on-device (proposal §4.4 — the sim's output is the
 /// instance buffer).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -195,7 +195,7 @@ impl Particles {
                 count: None,
             }],
         });
-        // Group 1 IS the raster surface layout — the same builder, not a copy of
+        // Group 1 is the raster surface layout — the same builder, not a copy of
         // it — so the two passes share registered textures. A bind group is only
         // usable with a structurally-equal layout, and "we wrote the same entries
         // in two places" stops being true the moment one side gains a slot, which

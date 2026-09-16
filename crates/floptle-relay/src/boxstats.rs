@@ -3,7 +3,7 @@
 //! The fleet agent gained saturation detection when Floptle Cloud started
 //! sizing its own fleet; the relay reported nothing about itself at all, so the
 //! way we would have learned it was overloaded is complaints. It is the box a
-//! signup surge reaches FIRST — every free-tier player in a region goes through
+//! signup surge reaches first — every free-tier player in a region goes through
 //! it, long before anyone rents a dedicated server.
 //!
 //! The four fields the fleet agent sends are sent here under the same names and

@@ -86,7 +86,7 @@ pub(crate) struct GiStatus {
     /// Probes in the bake currently on disk (0 = none yet), and its bounces.
     pub baked_probes: usize,
     pub baked_bounces: u32,
-    /// The grid the node's CURRENT settings would produce. Shown before you
+    /// The grid the node's current settings would produce. Shown before you
     /// bake, because probe count is the one number that decides whether this
     /// takes four seconds or four minutes, and it is derived from two other
     /// numbers in a way nobody should have to do in their head.
@@ -152,7 +152,7 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// The scene's light probe volume, if it has one: `(entity, settings)`.
 ///
-/// The FIRST one, deliberately. Several volumes is a real thing to want later (a
+/// The first one, deliberately. Several volumes is a real thing to want later (a
 /// level of rooms at different densities), but "the second one is silently
 /// ignored" is a much better failure than "two volumes fight over the same
 /// uniform slots and the light flickers".
@@ -414,7 +414,7 @@ impl crate::Editor {
         // tab in front and look around with the Scene view's own camera, in
         // flicks, the way a hand on a mouse does — the condition under which
         // the sky was reported to flicker. Opt-in and separate from the frame
-        // dump, so a person reproducing something BY HAND with the dump on is
+        // dump, so a person reproducing something by HAND with the dump on is
         // not fought for the camera. Re-asserted every few frames, because
         // pressing Play brings the Game tab forward itself.
         #[cfg(feature = "editor-ui")]
@@ -490,7 +490,7 @@ impl crate::Editor {
         }
 
         // A bounce is done: fold the clearance measurements in and publish it,
-        // so the NEXT bounce's renders see this one's light. That is all
+        // so the next bounce's renders see this one's light. That is all
         // "multi-bounce" is — the same bake, run again, with the answer from
         // last time turned on.
         for (p, s) in bake.probes.iter_mut().zip(bake.stats.iter()) {
@@ -562,7 +562,7 @@ impl crate::Editor {
                 let cam = RenderCamera::new(
                     pos,
                     face_def.rotation(),
-                    // A cube face IS a 90° square frustum. Anything else and the
+                    // A cube face is a 90° square frustum. Anything else and the
                     // texel directions the integrator assumes stop matching the
                     // pixels it is handed.
                     Projection::Perspective {
@@ -588,7 +588,7 @@ impl crate::Editor {
             }
         }
 
-        // One stall for the whole batch. The GPU borrow is taken HERE rather
+        // One stall for the whole batch. The GPU borrow is taken here rather
         // than at the top, because `render_world_into` above needs `&mut self`.
         let Some(gpu) = self.gpu.as_ref() else { return };
         let layers = count as u32 * 6;

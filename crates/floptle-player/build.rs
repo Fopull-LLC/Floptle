@@ -1,7 +1,7 @@
 //! The executable's own icon on Windows (`branding/floptle.ico`), compiled in
 //! as a resource so Explorer, the taskbar and the Start menu show the logo
 //! for the file itself — a window icon set at runtime covers only the window.
-//! Decided by the TARGET, not the host: a Linux machine cross-building for
+//! Decided by the target, not the host: a Linux machine cross-building for
 //! Windows still embeds it, given a `windres`; without one it warns and the
 //! build goes on, because an icon is not worth a failed build.
 

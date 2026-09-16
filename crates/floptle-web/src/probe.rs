@@ -203,7 +203,7 @@ fn shader_modules() -> Vec<(&'static str, String)> {
 /// cover what the shader compiler *writes* — the `.flsl` stdlib spliced into
 /// every generated shader, and the chunk transpiled from the graph — and that
 /// is the half a game actually ships. It went unchecked until a real game's
-/// sky and water shaders were refused whole in a tab (2026-09-05: an
+/// sky and water shaders were refused whole in a tab (an
 /// unparenthesised `*` before a `^` in the stdlib's hash, which naga accepts
 /// and a browser does not).
 ///

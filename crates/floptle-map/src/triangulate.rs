@@ -92,7 +92,7 @@ fn face_tris(mesh: &MapMesh, face: &Face, n: Vec3) -> Vec<[u32; 3]> {
     let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
         (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     };
-    // ON an edge counts as inside. A strict test looks more permissive and is wrong:
+    // on an edge counts as inside. A strict test looks more permissive and is wrong:
     // the reflex corner of an L sits exactly on the diagonal of the ear you would cut
     // across the notch, so a strict test calls it "outside", accepts the ear, and lays
     // a triangle over the hole — the very artifact this function exists to stop.
@@ -173,7 +173,7 @@ fn face_uv(p: Vec3, n: Vec3) -> [f32; 2] {
 /// Semantics (the editor and tests rely on these exactly):
 /// - One `SlotMesh` per slot index that has at least one face, ordered by
 ///   slot index ascending. Out-of-range face slots clamp to 0.
-/// - Vertices are NOT shared between faces (flat shading: every corner gets
+/// - Vertices are not shared between faces (flat shading: every corner gets
 ///   the face normal). Within one face, corners are emitted once and the face is
 ///   split by [`face_tris`] — shorter diagonal for a quad, ear clipping above that
 ///   — which preserves CCW winding and does not fold on a concave or warped face.
@@ -391,7 +391,7 @@ mod tests {
             };
             let s = &triangulate(&m)[0];
             assert_eq!(s.tri_faces.len(), 2);
-            // The shared edge of the two triangles IS the diagonal.
+            // The shared edge of the two triangles is the diagonal.
             let tri: Vec<Vec<usize>> = (0..2)
                 .map(|t| (0..3).map(|k| s.indices[t * 3 + k] as usize).collect())
                 .collect();

@@ -274,7 +274,7 @@ mod tests {
                 else {
                     continue;
                 };
-                // Under BOTH vectors. A new project is `fast`, so a template
+                // Under both vectors. A new project is `fast`, so a template
                 // exercised only in `exact` (the host's default) would be tested
                 // under the one mode no new project has — and `v.x = n` in a
                 // template raises only in `fast`.

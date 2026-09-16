@@ -8,7 +8,7 @@
 //!    So a cut point is always either an existing corner or a point along one of
 //!    the face's edges ([`CutPoint`]), and the editor snaps the cursor onto the
 //!    nearest one.
-//! 2. **Splitting an edge splits it for EVERY face that uses it.** Cutting a
+//! 2. **Splitting an edge splits it for every face that uses it.** Cutting a
 //!    wall's edge without telling the floor that shares it leaves a T-junction:
 //!    the floor still spans the full edge while the wall now has a corner half
 //!    way along it, and the rasteriser shows a hairline crack down the seam. So
@@ -45,7 +45,7 @@ impl CutPoint {
         }
     }
 
-    /// The canonical edge this point sits on, if any — two points on the SAME
+    /// The canonical edge this point sits on, if any — two points on the same
     /// edge can never divide a face, so the editor refuses that pairing early
     /// (with a message) instead of letting the cut fail at the end.
     fn edge_key(self) -> Option<(u32, u32)> {
@@ -120,7 +120,7 @@ pub fn face_plane_hit(mesh: &MapMesh, face: u32, ro: Vec3, rd: Vec3) -> Option<V
 }
 
 /// Which corner of `face`'s ring a cut point resolves to, or the edge it sits
-/// along — the shape of the ring AFTER materializing it, without materializing
+/// along — the shape of the ring after materializing it, without materializing
 /// anything. `Ok(Some(i))` = ring index `i`; `Ok(None)` = mid-edge between ring
 /// indices `(i, i+1)`, returned as `Err`-free via the second tuple slot.
 fn ring_slot(mesh: &MapMesh, ring: &[u32], p: CutPoint) -> Option<RingSlot> {
@@ -179,7 +179,7 @@ pub fn knife_refusal(mesh: &MapMesh, face: u32, p0: CutPoint, p1: CutPoint) -> O
     let (Some(s0), Some(s1)) = (ring_slot(mesh, ring, p0), ring_slot(mesh, ring, p1)) else {
         return Some("that cut doesn't run between two corners of the same face".into());
     };
-    // Adjacency AFTER materializing: a mid-edge point becomes a new corner
+    // Adjacency after materializing: a mid-edge point becomes a new corner
     // between the two ends of its edge, so it is adjacent to exactly those two.
     let joined = match (s0, s1) {
         (RingSlot::Corner(i), RingSlot::Corner(j)) => {
@@ -187,7 +187,7 @@ pub fn knife_refusal(mesh: &MapMesh, face: u32, p0: CutPoint, p1: CutPoint) -> O
         }
         (RingSlot::Corner(i), RingSlot::MidEdge(e))
         | (RingSlot::MidEdge(e), RingSlot::Corner(i)) => i == e || i == (e + 1) % n,
-        // Two mid-edge points on DIFFERENT edges are never adjacent: each one's
+        // Two mid-edge points on different edges are never adjacent: each one's
         // neighbours are the original corners of its own edge.
         (RingSlot::MidEdge(a), RingSlot::MidEdge(b)) => a == b,
     };
@@ -266,7 +266,7 @@ pub fn knife(out: &mut MapMesh, face: u32, p0: CutPoint, p1: CutPoint) -> Result
     if face as usize >= out.faces.len() {
         return Err("no face to cut".into());
     }
-    // Every reason a cut can be refused, decided BEFORE anything is edited and
+    // Every reason a cut can be refused, decided before anything is edited and
     // by the same function the editor's live preview calls — so what the
     // telegraph shows and what the click does can never disagree.
     if let Some(why) = knife_refusal(out, face, p0, p1) {
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(m.verts.len(), 10, "two new corners");
         assert_eq!(m.faces[a as usize].verts.len(), 4);
         assert_eq!(m.faces[b as usize].verts.len(), 4);
-        // Exactly two OTHER faces (the walls under those two edges) grew by one
+        // Exactly two other faces (the walls under those two edges) grew by one
         // corner each; nothing else changed shape.
         let grew: Vec<u32> = (0..m.faces.len() as u32)
             .filter(|&i| i != a && i != b && (i as usize) < before.len())
@@ -387,7 +387,7 @@ mod tests {
         assert!(knife(&mut m, f, CutPoint::Vert(ring[0]), CutPoint::Vert(ring[0])).is_err());
         // A face that isn't there.
         assert!(knife(&mut m, 99, CutPoint::Vert(0), CutPoint::Vert(2)).is_err());
-        // A refusal that only becomes visible AFTER the first point has split
+        // A refusal that only becomes visible after the first point has split
         // an edge: mid-edge to the corner that edge starts at. The split must
         // be rolled back with it, or the mesh keeps a corner from a cut that
         // never happened.
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(m, before, "a refused cut must not have edited anything");
     }
 
-    /// A cut inherits the face's material slot on BOTH halves — cutting a
+    /// A cut inherits the face's material slot on both halves — cutting a
     /// differently-textured face must not repaint half of it.
     #[test]
     fn both_halves_keep_the_faces_slot() {
@@ -457,7 +457,7 @@ mod tests {
                 CutPoint::Edge { a: ring[2], b: ring[3], t: 0.5 },
             ),
             // Refused: neighbouring corners, both ends on one edge, the same
-            // point twice, and mid-edge to a corner OF that edge.
+            // point twice, and mid-edge to a corner of that edge.
             (CutPoint::Vert(ring[0]), CutPoint::Vert(ring[1])),
             (
                 CutPoint::Edge { a: ring[0], b: ring[1], t: 0.25 },
@@ -466,7 +466,7 @@ mod tests {
             (CutPoint::Vert(ring[0]), CutPoint::Vert(ring[0])),
             (CutPoint::Edge { a: ring[0], b: ring[1], t: 0.5 }, CutPoint::Vert(ring[0])),
             (CutPoint::Edge { a: ring[0], b: ring[1], t: 0.5 }, CutPoint::Vert(ring[1])),
-            // A cut running from an edge to a corner it is NOT adjacent to works.
+            // A cut running from an edge to a corner it is not adjacent to works.
             (CutPoint::Edge { a: ring[0], b: ring[1], t: 0.5 }, CutPoint::Vert(ring[3])),
             // An end snapped to a corner by END_SNAP is that corner, so this is
             // "neighbouring corners" in disguise.
@@ -503,7 +503,7 @@ mod tests {
         // Straight down onto the top: the plane hit is the top surface.
         let p = face_plane_hit(&m, top, Vec3::new(0.2, 5.0, 0.1), Vec3::NEG_Y).unwrap();
         assert!((p.y - 1.0).abs() < 1e-5, "{p}");
-        // A ray aimed well OUTSIDE the face still answers on its plane — that is
+        // A ray aimed well outside the face still answers on its plane — that is
         // what lets the cursor drift past an edge without the cut giving up.
         let p = face_plane_hit(&m, top, Vec3::new(9.0, 5.0, 0.0), Vec3::NEG_Y).unwrap();
         assert!((p.y - 1.0).abs() < 1e-5 && (p.x - 9.0).abs() < 1e-5, "{p}");

@@ -14,7 +14,7 @@
 //! 1. The presets here are stated exactly ([`preset_masks`]), in ascending mask
 //!    order, and documented as such rather than named after a tool.
 //! 2. Every tile's mask is drawn in the palette as a little 3×3 diagram of the
-//!    neighbourhood it answers. If a preset guessed wrong you can SEE which
+//!    neighbourhood it answers. If a preset guessed wrong you can see which
 //!    tiles disagree, and fixing one is a click. That is the part that makes a
 //!    guess safe.
 //!
@@ -69,7 +69,7 @@ pub const OFFSETS: [(i32, i32, u8); 8] = [
 
 /// Reduce a raw 8-neighbour mask to the canonical form its kind distinguishes.
 ///
-/// This is where the corner rule lives, and it is applied on BOTH sides — when a
+/// This is where the corner rule lives, and it is applied on both sides — when a
 /// preset assigns masks and when a paint looks one up — so the two cannot
 /// disagree about what a mask means.
 pub fn canonical(kind: AutotileKind, mask: u8) -> u8 {
@@ -90,7 +90,7 @@ pub fn canonical(kind: AutotileKind, mask: u8) -> u8 {
 /// Every mask a kind can produce, ascending. 16 for [`AutotileKind::Edge4`], 47
 /// for [`AutotileKind::Blob8`].
 ///
-/// This IS the preset: hand a group its `n`th tile and it answers the `n`th mask
+/// This is the preset: hand a group its `n`th tile and it answers the `n`th mask
 /// in this list. Ascending numeric order is chosen because it is the one order
 /// that can be *derived* rather than remembered — anybody can regenerate this
 /// list, and the palette prints each tile's mask beside it so a mismatch with
@@ -235,7 +235,7 @@ impl Autotiler {
     /// The cell a group draws for a raw 8-neighbour mask, or `None` when the
     /// group has nothing authored for it.
     ///
-    /// The FIRST variant — what the panel previews for a rule. A paint stroke
+    /// The first variant — what the panel previews for a rule. A paint stroke
     /// wants [`Self::resolve_at`], which spreads the variants across the map.
     ///
     /// `None` means *leave the square alone* to every caller — never "erase it".
@@ -249,7 +249,7 @@ impl Autotiler {
     ///
     /// With one tile on the rule this is [`Self::resolve`]. With several it
     /// picks one from the square's own coordinates, so a field of grass varies
-    /// and — the part that matters — varies the SAME way every time the map is
+    /// and — the part that matters — varies the same way every time the map is
     /// retiled, on every machine. A variant chosen from a random number
     /// generator would reshuffle the level on every load.
     pub fn resolve_at(&self, group: u16, mask: u8, x: i32, y: i32) -> Option<u32> {
@@ -392,7 +392,7 @@ mod tests {
         let at = Autotiler::build(&set);
         let missing = at.missing(0);
         assert_eq!(missing.len(), 47 - 4, "43 neighbourhoods still undrawn");
-        // The four that ARE drawn resolve.
+        // The four that are drawn resolve.
         for m in preset_masks(AutotileKind::Blob8).into_iter().take(4) {
             assert!(at.resolve(0, m).is_some(), "mask {m:#010b} was assigned");
         }
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(seen, [base, 20, 21].into_iter().collect(), "all three, and only those");
     }
 
-    /// The variant a square gets must depend ONLY on where it is — asked twice,
+    /// The variant a square gets must depend only on where it is — asked twice,
     /// asked in another process, asked next year, the same square answers the
     /// same tile. A level that reshuffled itself on load would be unusable.
     #[test]
@@ -487,7 +487,7 @@ mod tests {
         }
         set.groups[0].add_to_rule(0, 1);
         set.groups[1].add_to_rule(0, 2);
-        // Tile 3 is drawn by BOTH — the lower group has to win on either side.
+        // Tile 3 is drawn by both — the lower group has to win on either side.
         set.groups[1].add_to_rule(4, 3);
         set.groups[0].add_to_rule(4, 3);
         let at = Autotiler::build(&set);

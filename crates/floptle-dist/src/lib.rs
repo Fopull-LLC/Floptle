@@ -1,7 +1,7 @@
 //! Shared distribution plumbing.
 //!
 //! One release bundle — an engine binary plus its `version.json` — is what the
-//! Hub installs to run the editor AND what an exported game ships as its player.
+//! Hub installs to run the editor and what an exported game ships as its player.
 //! They are the same artifact, so they share the same code for finding,
 //! fetching, and verifying it. See docs/updating-the-hub.md §3–§4.4 and
 //! docs/export-builds.md.
@@ -26,7 +26,7 @@ pub const DEFAULT_MANIFEST_URL: &str =
 
 /// Every platform the release pipeline publishes a bundle for, in the order a
 /// UI should offer them. These are the artifact keys in `releases.json` — and,
-/// because an export template IS a release bundle, also the set of platforms a
+/// because an export template is a release bundle, also the set of platforms a
 /// game can be exported for.
 pub const PLATFORMS: &[&str] =
     &["linux-x86_64", "windows-x86_64", "macos-aarch64", "macos-x86_64"];
@@ -94,7 +94,7 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Where an unpacked export template for `(version, platform)` lives, under `data`.
-/// Versioned because a template MUST match the editor that stamped it — mixing
+/// Versioned because a template must match the editor that stamped it — mixing
 /// them ships a game whose netcode protocol disagrees with itself.
 pub fn template_dir(data: &std::path::Path, version: &str, platform: &str) -> std::path::PathBuf {
     data.join("templates").join(version).join(platform)
@@ -105,7 +105,7 @@ pub fn template_binary(data: &std::path::Path, version: &str, platform: &str) ->
     template_dir(data, version, platform).join(editor_bin_name_for(platform))
 }
 
-/// The PLAYER binary's name inside a bundle, for `platform`.
+/// The player binary's name inside a bundle, for `platform`.
 ///
 /// A bundle carries two binaries: the editor, which the Hub runs, and the
 /// player, which **File ⏵ Export Game…** ships. They are separate programs —
@@ -156,7 +156,7 @@ mod tests {
         assert!(PLATFORMS.contains(&platform_target().as_str()), "{} missing", platform_target());
     }
 
-    /// A template is pinned to BOTH the version and the platform — two editors,
+    /// A template is pinned to both the version and the platform — two editors,
     /// or two targets, must never share a cache slot.
     #[test]
     fn template_paths_are_keyed_on_version_and_platform() {

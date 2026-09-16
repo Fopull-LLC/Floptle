@@ -45,7 +45,7 @@ pub struct CompiledFragment {
     pub uniforms: Vec<ir::Uniform>,
     /// Texture slot names, in group(3) binding order (binding 1+2i / 2+2i).
     pub textures: Vec<String>,
-    /// Each slot's DEFAULT image path, aligned with [`Self::textures`] — what
+    /// Each slot's default image path, aligned with [`Self::textures`] — what
     /// binds when the material leaves the slot empty (see
     /// [`ShaderIr::texture_defaults`](crate::ir::ShaderIr::texture_defaults)).
     pub texture_defaults: Vec<Option<String>>,
@@ -166,7 +166,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     w.line("}".into(), None);
     w.line(String::new(), None);
 
-    // The entry point: scene fog + the node's own alpha compose OUTSIDE the
+    // The entry point: scene fog + the node's own alpha compose outside the
     // authored surface, so every custom material stays scene-coherent.
     w.line("@fragment".into(), None);
     w.line("fn fs_flsl(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {".into(), None);
@@ -193,7 +193,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// The engine-lighting helper included in every fragment chunk: the built-in
 /// surface path (raster.wgsl `fs`) refactored over an authored albedo — sun +
 /// marched shadows + AO + point lights + the node Material's specular/rim.
-/// MUST stay in sync with `fs` in raster.wgsl.
+/// must stay in sync with `fs` in raster.wgsl.
 pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, front: bool, albedo: vec3<f32>) -> vec3<f32> {
     let n = facing_normal(normalize(in.normal), front);
     let v = normalize(-in.view_pos);
@@ -241,7 +241,7 @@ pub(crate) enum EmitCtx {
 /// The preview transpiler's live-scalar registry: every literal number (and
 /// color literal) in the shader gets a lane in a uniform array instead of
 /// being baked into the WGSL, so dragging an inline value updates the preview
-/// WITHOUT a pipeline rebuild. Lane order is emission order (deterministic).
+/// without a pipeline rebuild. Lane order is emission order (deterministic).
 #[derive(Default)]
 pub(crate) struct DynNums {
     /// (expr, lanes) in allocation order; a slot's base lane is the sum of
@@ -702,7 +702,7 @@ pub fn transpile_sdf(ir: &ShaderIr, ck: &Checked, slot: usize) -> Result<Compile
     };
 
     w.line(format!("fn flsl_shape{slot}_d(p: vec3<f32>) -> f32 {{"), None);
-    // The bounding sphere both skips distant evaluation AND is a valid
+    // The bounding sphere both skips distant evaluation and is a valid
     // conservative distance for the march (a lower bound of the true field).
     w.line(format!(
         "    let bound = length(p - G.shape_pos[{slot}].xyz) - G.shape_aux[{slot}].x;"
@@ -846,7 +846,7 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     }
     w.line("};".into(), None);
     w.line("@group(2) @binding(0) var<uniform> P: FlslUiParams;".into(), None);
-    // The backdrop: the (blurred) composited scene BEHIND this UI layer, always
+    // The backdrop: the (blurred) composited scene behind this UI layer, always
     // bound at group(3) (a 1×1 clear texture when no capture is active) so every
     // UI pipeline shares one layout. `backdrop()` reads it for frosted glass.
     w.line("@group(3) @binding(0) var flsl_backdrop: texture_2d<f32>;".into(), None);
@@ -891,7 +891,7 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     w.line("        let cd = sd_round_rect(in.px - ccenter, chalf, cr);".into(), None);
     w.line("        cmask = clamp(0.5 - cd, 0.0, 1.0);".into(), None);
     w.line("    }".into(), None);
-    // Clip the shader to the element's OWN rounded rect too, so effects (gloss,
+    // Clip the shader to the element's own rounded rect too, so effects (gloss,
     // gradient, glow) never spill past a rounded panel's corners. `params.x` is the
     // element's corner radius in px (the draw list forwards the shape's radius to
     // the shader quad); radius 0 = a plain rectangle, unchanged.
@@ -1017,7 +1017,7 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
 /// The post pass's module preamble — bind groups, the full-screen vertex stage,
 /// and the `sceneColor`/`sceneDepth`/`sceneNormal`/`screenTexel` helpers.
 ///
-/// This is the REAL source, not a mirror: `PostStack` builds every custom post
+/// This is the real source, not a mirror: `PostStack` builds every custom post
 /// pipeline from `POST_PRELUDE + POST_FIELD_SHIM + SUPPORT + chunk` and the
 /// editor validates against the same text, so there is no second copy to drift.
 /// (`TEST_PRELUDE` and `UI_TEST_PRELUDE` are mirrors only because the raster and
@@ -1083,7 +1083,7 @@ pub fn validate(prelude: &str, chunk: &str) -> Result<(), WgslDiag> {
     }
 }
 
-/// Validate an ALREADY-ASSEMBLED WGSL module (the renderer's spliced pass
+/// Validate an already-assembled WGSL module (the renderer's spliced pass
 /// sources) with naga — parse + full validation, 1-based error line included.
 pub fn validate_module(src: &str) -> Result<(), WgslDiag> {
     let module = match naga::front::wgsl::parse_str(src) {
@@ -1109,7 +1109,7 @@ pub fn validate_module(src: &str) -> Result<(), WgslDiag> {
 }
 
 /// A minimal stand-in for the raster pass module, declaring exactly the
-/// symbols a generated fragment chunk may reference. This IS the seam
+/// symbols a generated fragment chunk may reference. This is the seam
 /// contract: if raster.wgsl / field.wgsl rename or reshape any of these, this
 /// prelude (and the emitter) must follow. Used by headless validation/tests;
 /// the renderer validates against its real sources instead.

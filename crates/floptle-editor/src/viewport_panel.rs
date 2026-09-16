@@ -245,7 +245,7 @@ pub(crate) fn show(
     // Applied after the draw: the closure holds `&mut` borrows of half the
     // editor, so the state it changes is collected and written here.
     if drag != egui::Vec2::ZERO {
-        // Measured from where the panel ACTUALLY drew, not from where it was
+        // Measured from where the panel actually drew, not from where it was
         // asked to draw, so a drag that runs into an edge picks up again from
         // the edge instead of from an off-screen position it never had.
         let base = rect.min - view.min + drag;
@@ -284,7 +284,7 @@ mod tests {
     }
 
     /// The bug this module exists for: a panel docked top-right belongs to the
-    /// top-right of the VIEW. Anchored to the window it lands in the far corner
+    /// top-right of the view. Anchored to the window it lands in the far corner
     /// of the screen, over whatever panel owns that corner.
     #[test]
     fn a_docked_panel_sits_in_the_view_not_in_the_window() {

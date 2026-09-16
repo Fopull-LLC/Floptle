@@ -10,7 +10,7 @@
 //!
 //! The card asked to measure before committing to a shape, so:
 //!
-//! * **The things being indexed MOVE.** These are physics bodies, queried by
+//! * **The things being indexed move.** These are physics bodies, queried by
 //!   gameplay every frame. A BVH would need a refit per frame, and a refit over
 //!   moving leaves costs more than rebuilding a grid — which is one pass, no
 //!   comparisons, no tree.

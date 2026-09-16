@@ -215,7 +215,7 @@ fn visible_window(
     let baseline = baseline_frame(ed, cam, host, SIZE, SIZE)?;
     let (mut first, mut last) = (None, None);
     for i in 0..PROBES {
-        // Skipping `t = 0`: the sim fires a burst on its FIRST step, so the
+        // Skipping `t = 0`: the sim fires a burst on its first step, so the
         // zeroth probe is empty for every effect there is and would only ever
         // be the one that fails.
         let t = ceiling * (i + 1) as f32 / PROBES as f32;
@@ -539,7 +539,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     let total: f32 = weight_at.iter().sum();
     if total <= 0.0 {
         // Only reachable through `--at`: a spread is measured off the moments
-        // something IS visible, so it cannot land entirely in the gaps.
+        // something is visible, so it cannot land entirely in the gaps.
         floptle_say::say_err!(
             "{effect} shows nothing at any of the {} moment(s) asked for — the pictures would \
              all be an empty stage. Drop --at and it will find the moments the effect is \
@@ -910,7 +910,7 @@ mod tests {
         assert_eq!(spread(0.0, 1.0, 1), vec![0.5]);
         assert!(spread(0.0, 1.0, 0).is_empty());
         // **It starts where the effect does, not at zero.** `t = 0` is always
-        // empty — the sim fires a burst on its FIRST step, not before it — so a
+        // empty — the sim fires a burst on its first step, not before it — so a
         // spread anchored there spends its "start" frame on a picture of nothing.
         let s = spread(0.1, 0.5, 3);
         assert!(s[0] > 0.0, "the first frame must be a moment the effect is alive at: {s:?}");
@@ -1074,7 +1074,7 @@ mod tests {
         let fwd = (cam.rotation * Vec3::NEG_Z).normalize();
         let to_target = (-cam.world_position).as_vec3().normalize();
         assert!(fwd.dot(to_target) > 0.999, "it is not pointing at the effect: {fwd} vs {to_target}");
-        // …the right way up. Flipping the basis the OTHER way keeps the
+        // …the right way up. Flipping the basis the other way keeps the
         // determinant at +1 and rolls the picture 180°: the effect is all there,
         // upside down, and nothing about a symmetrical burst would say so.
         let cam_up = cam.rotation * Vec3::Y;

@@ -364,12 +364,12 @@ impl VoiceChat {
         }
     }
 
-    /// THE HARNESS MICROPHONE: a WAV played in as though a peer were speaking.
+    /// the HARNESS MICROPHONE: a WAV played in as though a peer were speaking.
     ///
     /// Voice is the one feature that normally needs two machines, two people
     /// and a microphone to try at all, which makes it the one most likely to
     /// ship broken. This gives it back to one desk: the clip is encoded and fed
-    /// through the REAL path — the server's forwarding rules, the jitter
+    /// through the real path — the server's forwarding rules, the jitter
     /// buffer, the spatial voice — so what it proves is the routing a live
     /// session would do, not a shortcut around it.
     pub fn set_test_speaker(&mut self, peer: u64, clip: floptle_audio::ClipRef) {

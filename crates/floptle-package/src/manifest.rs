@@ -43,7 +43,7 @@ pub struct Dependency {
 }
 
 /// An optional extra shipped alongside the package — example scenes, a demo
-/// project, art nobody needs unless they asked. Samples are NOT loaded; they are
+/// project, art nobody needs unless they asked. Samples are not loaded; they are
 /// copied into the project on request, so a package can carry a hundred
 /// megabytes of demo without costing every project that installs it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -283,7 +283,7 @@ pub struct Manifest {
     /// the catalogue has somewhere to put those rather than hiding them.
     #[serde(default)]
     pub categories: Vec<Category>,
-    /// The square image that IS this package in a grid — in the editor's browser
+    /// The square image that is this package in a grid — in the editor's browser
     /// and on the site both. Package-relative, or an absolute URL. It has to
     /// survive being drawn at 128px.
     #[serde(default)]
@@ -753,7 +753,7 @@ mod tests {
         }
     }
 
-    // ---- what an art package needs to say about itself (0134) --------------
+    // ---- what an art package needs to say about itself ---------------------
 
     #[test]
     fn an_art_package_declares_its_shelves_and_its_pictures() {

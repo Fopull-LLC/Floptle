@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 /// `eye` — everything else is round the back, hidden by the mesh's own front
 /// surface.
 ///
-/// `eye` is in the mesh's OWN object space; put the camera through the parent
+/// `eye` is in the mesh's own object space; put the camera through the parent
 /// chain's inverse rather than transforming every normal, so a rotated or
 /// non-uniformly scaled node needs no inverse-transpose fix-up.
 ///
@@ -42,7 +42,7 @@ pub fn front_facing(mesh: &MapMesh, eye: Vec3) -> (Vec<bool>, HashSet<(u32, u32)
             edges.insert(key(a, b));
         }
     }
-    // Nothing facing you means nothing is IN THE WAY, so the cue has no
+    // Nothing facing you means nothing is in the WAY, so the cue has no
     // meaning and everything draws normally. Two cases that matter, and both
     // are ordinary map editing rather than curiosities:
     //
@@ -117,7 +117,7 @@ mod depth_cue_tests {
         assert_eq!(m.verts[hidden[0]], Vec3::splat(-1.0));
     }
 
-    /// Inside a room, EVERYTHING reads as visible.
+    /// Inside a room, everything reads as visible.
     ///
     /// Standing inside a box is the commonest position in map editing, and
     /// every face is turned away from you there. The literal answer — "all of
@@ -246,7 +246,7 @@ pub fn connected_faces(mesh: &MapMesh, faces: &[u32]) -> Vec<u32> {
 }
 
 /// Flood-fill from the selection across shared edges, keeping only faces whose
-/// normal stays within `tol_deg` of the face it spread from AND which lie in
+/// normal stays within `tol_deg` of the face it spread from and which lie in
 /// the same plane (so a blockout's whole floor selects, but not the wall it
 /// meets, and not a parallel floor one storey up).
 pub fn coplanar_faces(mesh: &MapMesh, faces: &[u32], tol_deg: f32) -> Vec<u32> {
@@ -303,7 +303,7 @@ pub fn faces_with_slot(mesh: &MapMesh, slot: u16) -> Vec<u32> {
 }
 
 /// The quad edge loop through `edge`: walk both ways, at each vertex continuing
-/// onto the edge that belongs to NEITHER face of the edge we arrived on (the
+/// onto the edge that belongs to neither face of the edge we arrived on (the
 /// standard rule — it only continues through 4-valence quad junctions, so it
 /// stops cleanly at a triangle fan, a pole, or an open border).
 pub fn edge_loop(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
@@ -359,7 +359,7 @@ pub fn edge_loop(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
 /// in on.
 ///
 /// Not to be confused with [`edge_loop`], which is the chain of edges running
-/// END TO END. The two are perpendicular to each other and both are called a
+/// end to end. The two are perpendicular to each other and both are called a
 /// "loop" in casual speech; the ring is the one a loop CUT needs, because the
 /// cut runs across every edge in it.
 ///
@@ -395,7 +395,7 @@ pub fn edge_ring(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
                 break;
             }
             out.push(next);
-            // Step to the OTHER face of the edge we just crossed onto.
+            // Step to the other face of the edge we just crossed onto.
             let Some(fs) = adj.get(&next) else { break };
             let Some(&nf) = fs.iter().find(|&&x| x != face) else { break };
             face = nf;

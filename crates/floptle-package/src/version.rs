@@ -80,7 +80,7 @@ impl Ord for Version {
         if core != Ordering::Equal {
             return core;
         }
-        // A pre-release sorts BEFORE the release it leads up to (1.0.0-rc < 1.0.0).
+        // A pre-release sorts before the release it leads up to (1.0.0-rc < 1.0.0).
         match (self.pre.is_empty(), other.pre.is_empty()) {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Greater,
@@ -117,7 +117,7 @@ impl FromStr for Version {
         if s.is_empty() {
             return Err("a version cannot be empty".into());
         }
-        // Build metadata is accepted and discarded — `1.0.0+sha` IS `1.0.0`.
+        // Build metadata is accepted and discarded — `1.0.0+sha` is `1.0.0`.
         let s = s.split('+').next().unwrap_or(s);
         let (core, pre) = match s.split_once('-') {
             Some((c, p)) => (c, p),
@@ -180,7 +180,7 @@ struct Comparator {
 impl Comparator {
     fn matches(&self, v: &Version) -> bool {
         // A pre-release only ever satisfies a bound that is itself a
-        // pre-release of the SAME major.minor.patch. Without this rule
+        // pre-release of the same major.minor.patch. Without this rule
         // `>=1.0.0` accepts `2.0.0-alpha1`, and an unreleased package installs
         // itself into a project that asked for a stable one.
         if v.is_pre() {
@@ -245,7 +245,7 @@ impl VersionReq {
         self.parts.iter().all(|c| c.matches(v))
     }
 
-    /// Does this requirement accept the ENGINE the player is running?
+    /// Does this requirement accept the engine the player is running?
     ///
     /// The same test as [`matches`](Self::matches) with one difference, and it
     /// is deliberate: a pre-release **engine** counts as the release it leads
@@ -259,7 +259,7 @@ impl VersionReq {
     /// player's hands. Under the strict rule, shipping any beta of the engine
     /// silently breaks **every** package that declares an `engine` bound —
     /// which is exactly what a beta channel would do to everyone who switched
-    /// to it. Found by cutting 0.85.0-rc1, 2026-09-05.
+    /// to it. Found by cutting 0.85.0-rc1.
     pub fn matches_engine(&self, v: &Version) -> bool {
         let released = Version { pre: Vec::new(), ..v.clone() };
         if self.parts.is_empty() {
@@ -363,7 +363,7 @@ impl<'de> serde::Deserialize<'de> for VersionReq {
 #[cfg(test)]
 mod tests {
 
-    /// **A beta of the ENGINE must not break every package that names one.**
+    /// **A beta of the engine must not break every package that names one.**
     /// Semver says a pre-release satisfies only a pre-release bound of the
     /// same version — right for a package being chosen, wrong for the engine
     /// in the player's hands. Cutting 0.85.0-rc1 turned every
@@ -490,7 +490,7 @@ mod tests {
     }
 
     /// The rule that keeps an unreleased package out of a project that asked
-    /// for a stable one — `>=1.0.0` must NOT accept `2.0.0-alpha`.
+    /// for a stable one — `>=1.0.0` must not accept `2.0.0-alpha`.
     #[test]
     fn a_pre_release_only_satisfies_a_pre_release_bound() {
         assert!(!r(">=1.0.0").matches(&v("2.0.0-alpha")));

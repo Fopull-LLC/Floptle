@@ -110,7 +110,7 @@ pub(crate) fn install_scatter_api(
                 Some("world") | Some("up") => Align::World,
                 _ => Align::Surface,
             };
-            // `density`: a rule evaluated ONCE, here, and kept as its answer.
+            // `density`: a rule evaluated once, here, and kept as its answer.
             // A function is sampled over the region; a flat array is taken as
             // given. Either way nothing calls back into Lua while chunks build,
             // which is what keeps placement a pure function of the seed.
@@ -124,7 +124,7 @@ pub(crate) fn install_scatter_api(
                         for c in 0..cols {
                             let u = c as f64 / (cols.max(2) - 1) as f64;
                             let v = r as f64 / (rows.max(2) - 1) as f64;
-                            // The point the game is being asked about, in WORLD
+                            // The point the game is being asked about, in world
                             // space — a climate model is written against places,
                             // not against grid indices.
                             let p = match region {
@@ -197,7 +197,7 @@ pub(crate) fn install_scatter_api(
                     .filter(|s| !s.is_empty()),
                 frame: Default::default(),
             };
-            // Say what this costs, HERE, while the two numbers that decided it
+            // Say what this costs, here, while the two numbers that decided it
             // are still on screen (`floptle/0071`). The alternative is what
             // happened: a day of "the engine is slow", and a clamp written in
             // Lua from reading engine source.
@@ -261,7 +261,7 @@ pub(crate) fn install_scatter_api(
         }
     }
 
-    // scatter.remove(sourceId, instanceId) — ONE prop, permanently.
+    // scatter.remove(sourceId, instanceId) — one prop, permanently.
     //
     // By id rather than by position, which is what makes it survive a
     // stream-out and back in: an id is derived from (seed, chunk, index), and a
@@ -299,7 +299,7 @@ pub(crate) fn install_scatter_api(
     }
 
     // scatter.removed(sourceId) → the ids this source has lost. A game that
-    // wants permanence stores THIS (a handful of numbers), not every plant it
+    // wants permanence stores this (a handful of numbers), not every plant it
     // ever saw — `save.*` values are capped at about a kilobyte each, which is
     // what made "every plant you ever cut" unstorable in the first place.
     {
@@ -350,7 +350,7 @@ pub(crate) fn install_scatter_api(
             let out = lua.create_table()?;
             let vols = s.borrow();
             let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(out) };
-            // The caller asks in WORLD space; the region lives in its anchor's
+            // The caller asks in world space; the region lives in its anchor's
             // frame (`floptle/0073`). Convert once, query locally, and hand back
             // world positions — a game should never have to know the difference.
             let pl = src.frame.to_local(p);
@@ -408,7 +408,7 @@ mod tests {
         (lua, sources, logs)
     }
 
-    /// A field whose cost is not obvious says so AT DECLARE TIME, while the two
+    /// A field whose cost is not obvious says so at DECLARE TIME, while the two
     /// numbers that decided it are still on screen (`floptle/0071`).
     ///
     /// The configuration below is the one that shipped and froze a game. Its
@@ -509,7 +509,7 @@ mod tests {
         );
     }
 
-    /// …and every key it DOES list still works, so the check cannot quietly
+    /// …and every key it does list still works, so the check cannot quietly
     /// become "refuse everything".
     #[test]
     fn every_option_the_list_names_is_accepted() {

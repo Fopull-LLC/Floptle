@@ -200,7 +200,7 @@ impl<T: Transport> Transport for Impaired<T> {
     fn stats(&self, peer: PeerId) -> LinkStats {
         let mut s = self.inner.stats(peer);
         let imp = self.knob.get();
-        // Report what the session is ACTUALLY experiencing. Lag compensation
+        // Report what the session is actually experiencing. Lag compensation
         // and the auto input lead both read this, and telling them the
         // unimpaired truth would have them tuning for a link that isn't there.
         s.rtt_ms += imp.rtt_ms() as f32;

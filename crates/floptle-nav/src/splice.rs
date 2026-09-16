@@ -239,7 +239,7 @@ impl NavMesh {
                 if !touched {
                     continue;
                 }
-                // …and two polygons INSIDE the incoming mesh were linked by its
+                // …and two polygons inside the incoming mesh were linked by its
                 // own bake in step 3.
                 if fresh_range.contains(&a) && fresh_range.contains(&b) {
                     continue;
@@ -463,7 +463,7 @@ mod tests {
     }
 
     /// A splice becomes the bake, so a carve outstanding at the time survives it
-    /// — and removing that carve gives back the NEW ground, not the old.
+    /// — and removing that carve gives back the new ground, not the old.
     #[test]
     fn a_carve_survives_a_splice_and_still_lets_go() {
         let mut mesh = bake(&quad(0.0, 24.0, 0.0, 8.0, 0.0), &settings()).expect("bakes");

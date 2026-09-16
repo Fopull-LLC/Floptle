@@ -89,7 +89,7 @@ fn no_dependency_smuggles_a_second_script_vm_into_the_graph() {
 /// **Rule 2** — every carrier defaults to `vm-luau`, and the LuaJIT half is
 /// gone for good.
 ///
-/// The default has to be the SAME on every carrier. They are separate
+/// The default has to be the same on every carrier. They are separate
 /// manifests with no shared switch, so a carrier that quietly stops
 /// defaulting to a VM leaves anything depending on it with no Lua — reported
 /// by `mlua-sys` as a message naming neither feature. And `vm-luajit` was the

@@ -13,8 +13,8 @@ pub trait CollisionShape {
     fn distance(&self, p: Vec3) -> f32;
     /// Outward unit surface normal at `p` (direction of increasing distance).
     fn normal(&self, p: Vec3) -> Vec3;
-    /// The outward normal ONLY where it's reliable — `None` when the field
-    /// cannot resolve a direction here (a point DEEP inside a saturated SDF
+    /// The outward normal only where it's reliable — `None` when the field
+    /// cannot resolve a direction here (a point deep inside a saturated SDF
     /// interior, where the gradient is zero). `normal()` masks that with a
     /// `Vec3::Y` fallback, which silently misreads a fast, deeply-tunneled
     /// impact's closing speed as its +Y component (≈ 0 for a side/vertical
@@ -34,7 +34,7 @@ pub trait CollisionShape {
     /// always-candidates (`floptle/0076`), so a shape that does not answer this
     /// behaves exactly as it did before: the narrow phase still tests it.
     ///
-    /// Returning a bound that is too SMALL would silently drop contacts, so the
+    /// Returning a bound that is too small would silently drop contacts, so the
     /// implementations below are the ones where the bound is exact.
     fn bounds(&self) -> Option<(Vec3, f32)> {
         None
@@ -242,7 +242,7 @@ impl BoxShape {
 
 impl CollisionShape for BoxShape {
     fn bounds(&self) -> Option<(Vec3, f32)> {
-        // The box's own diagonal, so ANY rotation is covered without asking
+        // The box's own diagonal, so any rotation is covered without asking
         // which one this is.
         Some((self.center, self.half.length()))
     }
@@ -331,7 +331,7 @@ struct Surface {
 
 /// One drawn triangle: its corners and the field-gradient normal at each.
 ///
-/// The normals are what decide INSIDE from OUTSIDE. They are the same normals
+/// The normals are what decide inside from outside. They are the same normals
 /// the renderer shades with — sampled from the field's gradient at each vertex
 /// (`mesher.rs`, "the one choice that matters") — interpolated across the
 /// face, so the side test is smooth across a curved surface and agrees with
@@ -366,7 +366,7 @@ struct SurfaceTri {
 /// **The sign cannot come from the field.** The first cut of this took the
 /// magnitude from the triangles and the side from the field's own sign, on the
 /// reasoning that unsigned triangle distance cannot tell a cave from a cliff.
-/// That is true and it is also a collider whose ZERO CROSSING is still the
+/// That is true and it is also a collider whose zero CROSSING is still the
 /// field's — the sign flips where the field flips, the mesh only reshapes the
 /// magnitude around that, and a body settles on exactly the surface it settled
 /// on before. Measured on a real project at a 1.5 voxel scaled ×5, physics
@@ -382,7 +382,7 @@ struct SurfaceTri {
 /// unbounded.
 pub struct ChunkTerrain {
     pub field: floptle_field::ChunkField,
-    /// The terrain NODE's world rotation — queries rotate into the field's local
+    /// The terrain node's world rotation — queries rotate into the field's local
     /// frame, so a tilted terrain collides exactly where it draws.
     pub rot: Quat,
     /// The node's UNIFORM scale (x drives; an SDF can't stretch non-uniformly
@@ -438,7 +438,7 @@ impl ChunkTerrain {
     /// Bucket size for the triangle grid — **one voxel**, which is about one
     /// triangle.
     ///
-    /// Deliberately NOT the reach. Sizing the buckets to how far a query may
+    /// Deliberately not the reach. Sizing the buckets to how far a query may
     /// look puts every triangle within the whole band into the bucket the point
     /// is standing in, so the first and commonest lookup — a body resting on
     /// flat ground — walks hundreds of triangles to find the one under its
@@ -482,7 +482,7 @@ impl ChunkTerrain {
                 }
                 // The mesher's normals are unit gradients; a degenerate one
                 // (deep in uniform solid, which never meshes) falls back to
-                // the face so the side test always has SOMETHING to compare
+                // the face so the side test always has something to compare
                 // against rather than a zero.
                 let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
                 let nrm = |i: u32| {
@@ -573,7 +573,7 @@ impl ChunkTerrain {
     }
 }
 
-/// The triangles of one chunk AS DRAWN: stride 1, no skirt — the LOD-0
+/// The triangles of one chunk AS drawn: stride 1, no skirt — the LOD-0
 /// extraction, which is what the renderer draws up close (`skirt: lod > 0` in
 /// the remesh queue). A skirt is a curtain hung over the crack between two
 /// LODs; as collision it would be an invisible wall around every chunk.
@@ -624,7 +624,7 @@ impl CollisionShape for ChunkTerrain {
         let local = self.to_local(p);
         let scale = self.scale.max(1e-6);
         match self.closest_surface(local) {
-            // Magnitude AND side from the drawn surface: which way of the
+            // Magnitude and side from the drawn surface: which way of the
             // closest point the point lies, judged by the surface's own
             // normal there. Exactly on the surface both are zero, and the
             // sign of a zero does not matter.
@@ -641,8 +641,8 @@ impl CollisionShape for ChunkTerrain {
     }
     fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
         let local = self.to_local(p);
-        // Away from the closest point on the DRAWN surface — flipped when the
-        // point is inside, so a body pushed out is pushed OUT — so the
+        // Away from the closest point on the drawn surface — flipped when the
+        // point is inside, so a body pushed out is pushed out — so the
         // direction a body is pushed matches the face it is resting on. A
         // point exactly on the surface has no direction of its own and takes
         // the surface's.
@@ -733,7 +733,7 @@ pub struct TriMeshCollider {
     /// A sphere around every triangle, for the world's broadphase.
     ///
     /// Without it a mesh was filed with an infinite radius and offered to
-    /// EVERY query — and answering one costs a 5×5×5 walk of this mesh's own
+    /// every query — and answering one costs a 5×5×5 walk of this mesh's own
     /// cell grid whether the probe is touching the mesh or on the other side
     /// of the level. A level of a couple of hundred meshes paid that walk a
     /// couple of hundred times per body per tick, almost all of it for meshes
@@ -773,7 +773,7 @@ impl TriMeshCollider {
         Self::labelled(verts, indices, &[], Vec::new())
     }
 
-    /// The same collider, carrying one label per SOURCE triangle.
+    /// The same collider, carrying one label per source triangle.
     ///
     /// `tri_label[i]` is the label of the triangle at `indices[i*3..]`, and
     /// indexes `labels`. A short or empty `tri_label` simply leaves those
@@ -804,7 +804,7 @@ impl TriMeshCollider {
             let ti = tris.len() as u32;
             tris.push([a, b, c]);
             if labelled {
-                // Pushed HERE, beside the triangle it belongs to, so dropping a
+                // Pushed here, beside the triangle it belongs to, so dropping a
                 // degenerate one cannot shift every label after it.
                 kept_label.push(tri_label.get(src).copied().unwrap_or(u16::MAX));
             }
@@ -858,7 +858,7 @@ impl TriMeshCollider {
     /// * Cells outside this mesh's own extent hold nothing, so they are clamped
     ///   away before the hash is asked. A 40 m floor queried at its middle used
     ///   to pay 125 lookups to find triangles in a handful of them.
-    /// * A cell EVERY point of which is farther than the best found so far can
+    /// * A cell every point of which is farther than the best found so far can
     ///   contain no closest point that beats it — and, because the test is
     ///   strictly farther, cannot tie it either. So skipping it leaves `best`
     ///   bit-identical to the full scan, triangle index included, which is what
@@ -872,7 +872,7 @@ impl TriMeshCollider {
         let c = cell_coord(p, self.cell);
         let s = Self::SEARCH;
         let mut best: Option<(Vec3, f32, u32)> = None;
-        // A bound to skip against, established BEFORE the ordered walk starts —
+        // A bound to skip against, established before the ordered walk starts —
         // otherwise the walk begins at the far corner of the block and has to
         // work its way inward before it knows anything, which is the worst case
         // for skipping and the common case for a body standing on a surface.
@@ -955,7 +955,7 @@ mod poly_tests {
     use super::*;
 
     /// The right triangle a 45° slope tile is: the hypotenuse runs from the
-    /// bottom-left to the top-right, so the space ABOVE it is empty.
+    /// bottom-left to the top-right, so the space above it is empty.
     fn ramp() -> PolyPrismShape {
         let pts = [Vec2::new(-0.5, -0.5), Vec2::new(0.5, -0.5), Vec2::new(0.5, 0.5)];
         PolyPrismShape::new(Vec3::ZERO, &pts, 0.5, Quat::IDENTITY).expect("a triangle is a polygon")
@@ -1304,7 +1304,7 @@ mod drawn_surface_tests {
         );
     }
 
-    /// Every face of the mesh the renderer draws is ON the collider's surface.
+    /// Every face of the mesh the renderer draws is on the collider's surface.
     ///
     /// This is the whole feature in one assertion, and it is stated against the
     /// TRIANGLES rather than against a number, because the number is the thing
@@ -1326,7 +1326,7 @@ mod drawn_surface_tests {
     /// magnitude better (0.008 mean / 0.014 worst), which is why the fixture is
     /// deliberately the rough one: sculpting detail near the voxel size is
     /// where surface nets chords hardest, and it is also what a landscape is.
-    /// The SAME ground at a coarse voxel — 1.5, what a real project used, and
+    /// The same ground at a coarse voxel — 1.5, what a real project used, and
     /// the case that made this matter. The mesh-vs-field gap scales with the
     /// voxel, so a fixture at 0.5 has a gap the side test can step clean over
     /// in either design and tells you nothing; at 1.5 the gap is a quarter of
@@ -1384,7 +1384,7 @@ mod drawn_surface_tests {
             worst_field = worst_field.max(f.d(*p).abs());
             // **The side, not just the size.** A step off the face along its
             // normal must read as outside, and a step against it as inside —
-            // this is what the field-vs-mesh disagreement actually IS, and the
+            // this is what the field-vs-mesh disagreement actually is, and the
             // half a `.abs()` cannot see. The first cut of this collider took
             // its magnitude from the triangles and its SIGN from the field,
             // and this assertion written with `.abs()` alone passed on it
@@ -1437,7 +1437,7 @@ mod drawn_surface_tests {
     ///
     /// Cast straight down from well above the ground, in the sim's own world
     /// frame (rotated, scaled ×5 like the project this came from), and compare
-    /// the hit against the FIRST drawn triangle on that line — found by an
+    /// the hit against the first drawn triangle on that line — found by an
     /// independent ray/triangle intersection over the extracted mesh, so the
     /// collider is not being asked to grade itself. The trace stops within 0.02
     /// of the surface from above, so that is the tolerance, plus a little for
@@ -1445,7 +1445,7 @@ mod drawn_surface_tests {
     /// The wireframe the editor draws for "the collision surface" is built
     /// from `drawn_surface`; the collider meshes chunk by chunk. They share
     /// one extraction, and this holds them to it: every drawn triangle's
-    /// centre reads as ON the collider, and the field disagrees with most of
+    /// centre reads as on the collider, and the field disagrees with most of
     /// them — so a wireframe that lies on the picture is proof the collider
     /// does, and a collider quietly switched back to the field would light
     /// this up.
@@ -1469,7 +1469,7 @@ mod drawn_surface_tests {
             "the field must disagree with most drawn triangles or this proves nothing: {off_field} of {}",
             tris.len()
         );
-        // And the switch: the same terrain set to the FIELD is the field.
+        // And the switch: the same terrain set to the field is the field.
         let mut f = ChunkTerrain::new(field.clone());
         f.mesh_accurate = false;
         let c = (tris[0][0] + tris[0][1] + tris[0][2]) / 3.0;
@@ -1587,7 +1587,7 @@ mod drawn_surface_tests {
     /// it, invalidate, dig, measure — this proves nothing at all, because the
     /// invalidation happened *before* the edit and the "stale" reading was
     /// freshly meshed. So the order here is deliberate: warm, dig with the cache
-    /// left alone, and assert the answer is WRONG; then invalidate and assert it
+    /// left alone, and assert the answer is wrong; then invalidate and assert it
     /// comes right. The first assertion is what makes the second one mean
     /// something.
     ///

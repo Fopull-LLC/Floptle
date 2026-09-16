@@ -27,7 +27,7 @@
 //!
 //! ## Two kinds of collider come out
 //!
-//! [`collision_shapes`] answers boxes AND outlines, in one struct, because a
+//! [`collision_shapes`] answers boxes and outlines, in one struct, because a
 //! caller that only asked for boxes would silently walk through every slope in
 //! the level. There is deliberately no "just the boxes" entry point for the same
 //! reason: the way to get half the colliders should not be to call the shorter
@@ -35,7 +35,7 @@
 //!
 //! ## The output frame
 //!
-//! Boxes come back in the tilemap node's LOCAL space: the same centred, +Y-up,
+//! Boxes come back in the tilemap node's local space: the same centred, +Y-up,
 //! Z = 0 frame the mesh is built in ([`floptle_render::mesh::tilemap`]), so the
 //! node's own transform places them and a rotated or scaled tilemap collides
 //! where it draws with no second opinion about where its middle is.
@@ -114,7 +114,7 @@ pub fn collision_shapes(
     // (col, row), where the sub-rect is measured from the tile's BOTTOM-LEFT.
     let place = |col: u32, row: u32, rx: f32, ry: f32, rw: f32, rh: f32| {
         let x0 = col as f32 * tile - w + rx * tile;
-        // Row 0 is the TOP of the map, so the tile's bottom edge is the lower y
+        // Row 0 is the top of the map, so the tile's bottom edge is the lower y
         // of the two — same expression the mesh uses.
         let y0 = h - (row + 1) as f32 * tile + ry * tile;
         TileBox {
@@ -156,7 +156,7 @@ pub fn collision_shapes(
                     partial.push(place(col, row, lo_x, lo_y, hi_x - lo_x, hi_y - lo_y));
                 }
                 TileShape::Poly(pts) => {
-                    // Every point through the SAME orientation map the rect
+                    // Every point through the same orientation map the rect
                     // corners use, so a flipped slope faces the other way rather
                     // than staying put — which is how one drawn ramp serves all
                     // four diagonals.
@@ -182,13 +182,13 @@ pub fn collision_shapes(
     }
 
     // Pass 2: the greedy merge. Walk row-major; at each unclaimed solid square,
-    // run right as far as the row allows, then run DOWN as far as every column of
+    // run right as far as the row allows, then run down as far as every column of
     // that width allows, and claim the block.
     //
     // Greedy is chosen over the optimal rectangular decomposition on purpose: the
     // optimal one is a maximum-matching problem, and the difference on real
     // levels is a few percent of boxes for a large amount of code that would have
-    // to stay correct. What matters is that a rectangular room is ONE box, and
+    // to stay correct. What matters is that a rectangular room is one box, and
     // greedy gets that exactly right.
     let mut out = Vec::new();
     let mut used = vec![false; full.len()];
@@ -273,7 +273,7 @@ mod tests {
         assert!(collision_boxes(4, 4, 1.0, &[3; 16], &set).is_empty());
     }
 
-    /// The headline: a solid rectangle is ONE box, not one per square. This is
+    /// The headline: a solid rectangle is one box, not one per square. This is
     /// the property the whole module exists for.
     #[test]
     fn a_solid_rectangle_becomes_exactly_one_box() {
@@ -344,7 +344,7 @@ mod tests {
 
     /// A partial collider turns with its square. This is why the side is stored
     /// rather than a rect: "the bottom half" of a tile rotated a quarter-turn
-    /// clockwise is its LEFT half.
+    /// clockwise is its left half.
     #[test]
     fn a_half_tile_collider_rotates_with_the_tile() {
         let mut set = TileSet { sheet_cols: 4, sheet_rows: 4, ..Default::default() };
@@ -356,7 +356,7 @@ mod tests {
         assert!((b[0].cy - -0.5).abs() < 1e-5, "bottom half sits below centre, got {}", b[0].cy);
         assert!((b[0].hx - 1.0).abs() < 1e-5 && (b[0].hy - 0.5).abs() < 1e-5);
 
-        // A quarter-turn clockwise moves the bottom to the LEFT.
+        // A quarter-turn clockwise moves the bottom to the left.
         let turned = tile_pack(1, TileXform::new(1, false));
         let b = collision_boxes(1, 1, 2.0, &[turned], &set);
         assert_eq!(b.len(), 1);
@@ -411,7 +411,7 @@ mod tests {
         assert!((boxes[0].hx - 1.0).abs() < 1e-5, "two squares wide");
     }
 
-    /// A body dropped onto a painted floor lands ON it — the whole point, checked
+    /// A body dropped onto a painted floor lands on it — the whole point, checked
     /// against the real sim rather than inferred from box coordinates.
     ///
     /// This is the test that would have caught a sign error in the row-to-Y

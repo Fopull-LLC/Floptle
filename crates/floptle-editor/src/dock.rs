@@ -189,7 +189,7 @@ pub(crate) fn tab_is_front(dock: &egui_dock::DockState<EditorTab>, tab: EditorTa
         .any(|n| n.get_leaf().and_then(|l| l.tabs.get(l.active.0)) == Some(&tab))
 }
 
-/// True when BOTH the Scene and Game tabs are visible at once (split into separate
+/// True when both the Scene and Game tabs are visible at once (split into separate
 /// leaves), so they must render independent camera views rather than sharing one.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bool {

@@ -16,7 +16,7 @@
 //! end
 //!
 //! function update(node, dt)
-//!   -- The number worth watching is the WORST recent frame, not the mean: a 40 ms
+//!   -- The number worth watching is the worst recent frame, not the mean: a 40 ms
 //!   -- hitch once a second is under a millisecond of average.
 //!   if perf.worstMs("scripts") > 6 then
 //!     log("slow pass — " .. perf.slowestScript())
@@ -81,7 +81,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
     )?;
 
     // perf.scriptMs(kind) / perf.scriptWorstMs(kind) — one script's own cost, by
-    // FILE NAME. "Which of my scripts is doing this" is the question; a total for
+    // file name. "Which of my scripts is doing this" is the question; a total for
     // "scripts" does not answer it.
     let p = profile.clone();
     t.set(
@@ -235,7 +235,7 @@ fn require_on(
     )))
 }
 
-/// The calls that answer while collection is OFF, because they are meaningful
+/// The calls that answer while collection is off, because they are meaningful
 /// then: the switch itself, whether it is on, the bucket names, and the counts
 /// (which are free to keep and obviously not a measurement when zero).
 ///
@@ -273,7 +273,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("perf.enable(true)"), "no remedy in: {msg}");
         assert!(msg.contains("on no data"), "does not say why not zero: {msg}");
-        // EVERY getter refuses, enumerated from the `perf` table itself rather
+        // every getter refuses, enumerated from the `perf` table itself rather
         // than a hand-kept list — so a call added later cannot quietly default
         // to answering zero, which is the one thing this whole design is about.
         let names: Vec<String> = lua
@@ -345,7 +345,7 @@ mod tests {
         );
         assert!(lua.load("return perf.scriptWorstMs('vessel_controller')").eval::<f64>().unwrap() > 4.0);
         assert!(lua.load("return perf.worstMs('render')").eval::<f64>().unwrap() > 2.0);
-        // The scripts bucket is the WHOLE pass — more than the rows under it,
+        // The scripts bucket is the whole pass — more than the rows under it,
         // which are hook time. A reader that saw 5.25 here would be reading the
         // rows added up, which is what this stopped being.
         let scripts = lua.load("return perf.worstMs('scripts')").eval::<f64>().unwrap();

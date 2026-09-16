@@ -18,7 +18,7 @@ use crate::{anim, Editor};
 /// Line of sight against the level, for interest management
 /// (`net.host{ interestOcclusion = "Level" }`, floptle/0182).
 ///
-/// The ray stops a hair short of the target: a node standing ON the floor, or
+/// The ray stops a hair short of the target: a node standing on the floor, or
 /// with a collider of its own, would otherwise be blocked by the very surface
 /// it is sitting on and never be relevant to anybody.
 struct LevelSight<'a> {
@@ -78,7 +78,7 @@ fn build_rewind_scope(
     floptle_script::RewindScope { peer: sender, poses, synced }
 }
 
-/// The hidden authoritative SERVER behind "Test as remote player": a full
+/// The hidden authoritative server behind "Test as remote player": a full
 /// second simulation (world + physics + its own Lua host) consuming the play
 /// world's replayed inputs, exactly like a dedicated server would
 /// (`docs/multiplayer.md` §6/§12 2c).
@@ -90,7 +90,7 @@ pub(crate) struct HiddenServer {
     /// The play-world client's peer id on this server.
     pub peer: floptle_net::PeerId,
     /// The next server tick to simulate. The server chases a target of
-    /// `client_tick − (latency + 1)` computed LIVE from the slider: raising
+    /// `client_tick − (latency + 1)` computed live from the slider: raising
     /// latency makes it pause while the input pipeline refills; lowering makes
     /// it catch up — so inputs labeled T always arrive before the server
     /// simulates tick T, and mid-session slider drags don't cause repeat-last
@@ -100,7 +100,7 @@ pub(crate) struct HiddenServer {
     /// of authoritative poses + synced vars, per networked node — what
     /// `net.rewind` re-poses combat queries to.
     pub history: floptle_net::LagHistory,
-    /// The server's OWN animator runtimes: server scripts' `anim:play(...)`
+    /// The server's own animator runtimes: server scripts' `anim:play(...)`
     /// drives real controllers here (state machines + scene-binding transform
     /// writes + gameplay events — hit windows are server-authoritative), and
     /// their (state, time) per layer is what replicates to clients.
@@ -128,7 +128,7 @@ pub(crate) fn second_session_reason(hosting: bool, is_client: bool) -> Option<&'
 
 /// The address half of `net.join`, with the scheme off if it was spelled.
 ///
-/// **`quic://host:port` AND `host:port`, because both are spelled in public.**
+/// **`quic://host:port` and `host:port`, because both are spelled in public.**
 /// `net.join` takes the URL form and strips the scheme before it gets here;
 /// `floptle run --join` hands its argument straight in, and the help text and
 /// every error message use the URL form. So a person who copied the spelling out
@@ -172,7 +172,7 @@ impl Editor {
                 let addr = self.net_relay_hosting.clone().unwrap_or_default();
                 match (&self.net_lobby_code, &now) {
                     // Gone: say it as a WARNING, because unlike a game filling
-                    // up this one IS broken — nobody can join until it is back.
+                    // up this one is broken — nobody can join until it is back.
                     (Some(_), None) => self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!(
@@ -221,7 +221,7 @@ impl Editor {
                     deny: deny_ids,
                     ..
                 } => {
-                    // Recorded BEFORE the session comes up: `net_rollback_host_setup`
+                    // Recorded before the session comes up: `net_rollback_host_setup`
                     // runs inside the host call and reads it (floptle/0049).
                     self.net_input_delay = input_delay;
                     match (relay, port) {
@@ -230,7 +230,7 @@ impl Editor {
                         // Resolved here rather than in the transport so the
                         // Console carries the reason when it cannot be.
                         (Some(addr), _) if addr.trim_start().starts_with("cloud") => {
-                            // **A missing game key is answered HERE, before a
+                            // **A missing game key is answered here, before a
                             // packet leaves** (`floptle/0196`). A managed relay
                             // refuses a keyless host with good words, but only
                             // if it can be reached — so on a plane, behind a
@@ -351,7 +351,7 @@ impl Editor {
                 NetCmd::SetInputDelay { ticks } => {
                     let n = ticks.min(floptle_net::MAX_DELAY);
                     self.net_input_delay = Some(n);
-                    // Deliberately NOT applied to a match in flight: the delay
+                    // Deliberately not applied to a match in flight: the delay
                     // is fixed for a session because changing it changes how
                     // the game feels while you are playing it. It takes effect
                     // at the next `RollbackStart`, which is the roster
@@ -382,7 +382,7 @@ impl Editor {
                     self.net_join_timeout = timeout_s;
                     self.net_join_local()
                 }
-                // `net.join("cloud://UABCDE")` — the code's FIRST LETTER names
+                // `net.join("cloud://UABCDE")` — the code's first LETTER names
                 // the region, and the region list is already on disk, so this
                 // resolves without asking fopull.com anything. That is the
                 // whole reason the join path never depends on the control
@@ -502,7 +502,7 @@ impl Editor {
                             continue;
                         }
                         // Whoever drives it changed: a Predicted node handed to
-                        // a peer runs on THEIR replayed input from now on, and
+                        // a peer runs on their replayed input from now on, and
                         // one released stops being replayed at all.
                         self.net_remote_predicted.retain(|(re, _)| *re != e);
                         if let Some(rep) = self.world.get::<floptle_core::Replicated>(e)
@@ -529,9 +529,9 @@ impl Editor {
         // --- server: synced collection → tick → dispatch received RPC/events ---
         let hosting = self.net_server.is_some();
         let (rpcs, events) = if hosting {
-            // EXACT post-tick poses first: the frame-end writeback renders
+            // exact post-tick poses first: the frame-end writeback renders
             // partway into a tick (alpha < 1), so the Transforms still hold
-            // LAST frame's render pose — 1–2 ticks stale. Snapshots and the
+            // last frame's render pose — 1–2 ticks stale. Snapshots and the
             // lag-comp history read Transforms; shipping the stale pose makes
             // every moving owner mispredict by ~a tick of motion and scoot at
             // the snapshot cadence. The hidden-server harness always did this
@@ -570,7 +570,7 @@ impl Editor {
                 .collect();
             // Live body states ride the snapshots (velocity + grounded) — a
             // predicted node's owner reconciles against them; without this,
-            // every correction restores ZERO velocity + airborne (dead jumps,
+            // every correction restores zero velocity + airborne (dead jumps,
             // ground-sticking stutter).
             let bstates: floptle_net::BodyStates = self
                 .sim
@@ -643,7 +643,7 @@ impl Editor {
                         // **A dedicated server hands out a slot here.** Nobody
                         // is at this keyboard, so the authored slots start
                         // unowned; the first one nobody has taken goes to this
-                        // peer BEFORE `playerJoined` runs, because a script
+                        // peer before `playerJoined` runs, because a script
                         // that asks what the joiner drives must not be answered
                         // "nothing". A game that assigns its own (net.setOwner,
                         // net.spawn{owner=…}) has already claimed one, and this
@@ -697,9 +697,9 @@ impl Editor {
                             self.net_apply_host_filters();
                         }
                         // The other half of the same rule, and it is deliberately
-                        // NOT the same half. A rig the game spawned FOR a player
+                        // not the same half. A rig the game spawned FOR a player
                         // belongs to that player and left with them, just above.
-                        // An authored slot belongs to the SCENE: it stays in the
+                        // An authored slot belongs to the scene: it stays in the
                         // world and becomes free, so the next joiner can have it
                         // instead of the lobby shrinking by one every time
                         // somebody's wifi drops.
@@ -755,7 +755,7 @@ impl Editor {
         self.net_mirror_server_state();
     }
 
-    /// Mirror the SERVER session's state into Lua — `net.role()`, `net.peers()`,
+    /// Mirror the server session's state into Lua — `net.role()`, `net.peers()`,
     /// `net.ping()`, `net.isMine()`, the lobby code.
     ///
     /// **Called when the session comes up as well as at the end of every tick**,
@@ -765,7 +765,7 @@ impl Editor {
     /// of the mirror at the bottom of it. `net.role()` still said `offline`
     /// there, so every server-only call the handler made (`net.spawn`,
     /// `net.kick`, `net.setOwner`, `net.setRelevant`) was refused with "only
-    /// the server does this — ignored". The FIRST player to join a session got
+    /// the server does this — ignored". The first player to join a session got
     /// no avatar and no moderation; the second onwards were fine, which is
     /// exactly the shape that reads as a flaky network rather than a bug.
     pub(crate) fn net_mirror_server_state(&mut self) {
@@ -828,7 +828,7 @@ impl Editor {
         }
         let hub = floptle_net::MemoryHub::new();
         // **Impairment reaches the loopback harness too** (`floptle/0193`).
-        // `net_impair_wrap` was applied at the two REAL tails — QUIC and the
+        // `net_impair_wrap` was applied at the two real tails — QUIC and the
         // relay — so `FLOPTLE_NET_IMPAIR` did nothing at all to an in-process
         // session. That was invisible while the harness was only reachable from
         // the 🌐 panel beside a live link; now that `run --ghosts` makes it the
@@ -882,17 +882,17 @@ impl Editor {
 /// What [`Editor::net_client_side_setup`] decided, before any of it is
 /// applied — split out so the join seam can be tested without an `Editor`.
 /// The bugs this shape exists to prevent are both invisible from inside a
-/// single call: they only appear when this runs a SECOND time, mid-match,
+/// single call: they only appear when this runs a second time, mid-match,
 /// on the next replicated spawn.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientSidePlan {
     /// Entities whose scripts sit out every pass.
     pub skip: std::collections::HashSet<u32>,
-    /// Entities that sit out the PER-FRAME pass, or `None` to leave the
+    /// Entities that sit out the per-frame pass, or `None` to leave the
     /// frame filter exactly as it was (no local avatar, no driver — the
     /// pure-`Authority` client, whose behaviour must not change).
     pub fskip: Option<std::collections::HashSet<u32>>,
-    /// Entities whose TICKS the rollback driver owns. Kept OUT of `skip`: that
+    /// Entities whose ticks the rollback driver owns. Kept out of `skip`: that
     /// set gates every pass including `lateUpdate`, which no driver replays,
     /// so folding them in here silently killed their cosmetic pass in net play
     /// only. floptle/0042.
@@ -934,7 +934,7 @@ pub(crate) fn plan_client_side(
         // fighter writing its model yaw there silently stopped in net play
         // (floptle/0042).
         //
-        // Its body is NOT parked either: `step_body` early-returns on an
+        // Its body is not parked either: `step_body` early-returns on an
         // inactive body, so parking would leave the fighter inert on every
         // client — and because this runs again on each replicated spawn, it
         // would freeze one mid-match. Before the driver engages the node parks
@@ -946,11 +946,11 @@ pub(crate) fn plan_client_side(
         plan.skip.insert(e.index());
         plan.park.push(e.index());
     }
-    // The driver's nodes go in their OWN set: they leave `fixedUpdate` and
+    // The driver's nodes go in their own set: they leave `fixedUpdate` and
     // `update` (the driver replays those) but keep `lateUpdate`, which nothing
     // else runs.
     plan.dskip = rollback.clone();
-    // The predicted node's `update` moves to the TICK clock (the server
+    // The predicted node's `update` moves to the tick clock (the server
     // integrates it per tick — the client must match or they fight). `None`
     // leaves the frame filter exactly as it was.
     plan.fskip = plan.predicted.map(|pe| std::collections::HashSet::from([pe.index()]));
@@ -1023,8 +1023,8 @@ impl Editor {
     }
 
     /// The session ownership convention, applied identically on every machine
-    /// at session start: scene-authored Predicted nodes, in NODE order, belong
-    /// to — #1 the HOST (owner None: it runs under the host's live input),
+    /// at session start: scene-authored Predicted nodes, in node order, belong
+    /// to — #1 the host (owner None: it runs under the host's live input),
     /// #2 the first joiner (peer 1), #3 the second (peer 2), and so on. No
     /// negotiation needed; registration, snapshot routing, and input routing
     /// all agree. Runtime avatars carry explicit owners via `net.spawn`.
@@ -1054,7 +1054,7 @@ impl Editor {
                     (false, 0) => None,
                     (false, i) => Some(i as u64),
                 };
-                // Prediction needs vel+grounded in snapshots on BOTH ends.
+                // Prediction needs vel+grounded in snapshots on both ends.
                 if !r.physics {
                     r.physics = true;
                 }
@@ -1078,7 +1078,7 @@ impl Editor {
         let Some(path) = paths.first() else { return };
         match floptle_audio::load_clip(path) {
             Ok(clip) => {
-                // Whoever is NOT us: a test voice attributed to our own peer id
+                // Whoever is not us: a test voice attributed to our own peer id
                 // would be filtered out as our own microphone coming back.
                 let peer = self
                     .net_server
@@ -1159,7 +1159,7 @@ impl Editor {
     /// voice commands.
     ///
     /// **A rule, not a sound**, which is why it lives here rather than in
-    /// `voice.rs`: it is the SERVER's decision and it has to be applied on a
+    /// `voice.rs`: it is the server's decision and it has to be applied on a
     /// dedicated server, which has no audio device, no microphone, and no
     /// `voice` module compiled into it at all. Attenuating a stream every
     /// client already received is not proximity voice — it is a volume slider a
@@ -1320,7 +1320,7 @@ impl Editor {
         self.net_apply_host_filters();
     }
 
-    /// (Re)apply the HOST's script filters from the remote-owned Predicted
+    /// (Re)apply the host's script filters from the remote-owned Predicted
     /// set: those nodes leave the global passes (they run per tick with their
     /// owner's replayed input) — everything else runs under the host normally.
     pub(crate) fn net_apply_host_filters(&mut self) {
@@ -1349,7 +1349,7 @@ impl Editor {
                 fskip.insert(eid);
             }
         }
-        // Same split as the client side: the driver's nodes run their TICKS
+        // Same split as the client side: the driver's nodes run their ticks
         // under it, so they leave both global tick passes — but their
         // `lateUpdate` has no substitute anywhere and stays here.
         self.script_host.set_driver_filter(self.rollback_filter_eids());
@@ -1403,7 +1403,7 @@ impl Editor {
     /// RPC). Runs at the top of a frame, never mid-frame under the scripts.
     pub(crate) fn perform_scene_request(&mut self, req: &floptle_script::SceneRequest) {
         use floptle_script::SceneRequest;
-        // Additive loads and unloads are LOCAL: they add or remove scenery on
+        // Additive loads and unloads are local: they add or remove scenery on
         // top of the scene everyone agreed on, and the session's identity (its
         // announced scene, its NetIds, its slot order) is untouched. A client
         // may do them; a swap is still the server's alone.
@@ -1435,13 +1435,13 @@ impl Editor {
         // stop having them.
         self.script_host.cancel_web_requests();
         // Leaving a scene with a save slot active (exit-to-menu): the slot's
-        // terrain edits must be on disk BEFORE the world unloads — the flush a
+        // terrain edits must be on disk before the world unloads — the flush a
         // script queued this same frame hasn't run yet, and the background
         // pipeline may be mid-encode. Synchronous, settles the in-flight job.
         self.flush_slot_terrains_sync();
         let Some(rel) = self.switch_scene_during_play(req) else { return };
         // The new scene's input model is its own business — release any cursor
-        // grab the OLD scene earned (game trap / script mouse lock), or a
+        // grab the old scene earned (game trap / script mouse lock), or a
         // cursor-driven scene (a main menu) arrives with the mouse frozen.
         // Its scripts re-lock via input.setMouseLocked if they want free-look.
         if self.game_trap || self.script_mouse_lock {
@@ -1524,10 +1524,10 @@ impl Editor {
         true
     }
 
-    /// Host a REAL session on a UDP port (QUIC): other machines running the
+    /// Host a real session on a UDP port (QUIC): other machines running the
     /// same project join with `net.join("quic://<ip>:port")`. The play world
     /// is the authoritative server — and scene-authored Predicted nodes belong
-    /// to the FIRST joining peer, whose replayed inputs drive them in the tick
+    /// to the first joining peer, whose replayed inputs drive them in the tick
     /// loop (the one-script model, server side).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_host_quic(&mut self, port: u16) {
@@ -1578,7 +1578,7 @@ impl Editor {
         );
     }
 
-    /// Host a REAL session through a rendezvous RELAY: nobody port-forwards —
+    /// Host a real session through a rendezvous RELAY: nobody port-forwards —
     /// the relay hands out a lobby code and friends join with it from
     /// anywhere that can reach the relay. Self-host `floptle-relay`, or use a
     /// managed one (Floptle Cloud).
@@ -1595,7 +1595,7 @@ impl Editor {
         if self.refuse_second_session(&format!("net.host{{ relay = \"{relay_addr}\" }}")) {
             return;
         }
-        // Drop any previous code BEFORE trying, so a failed host can never
+        // Drop any previous code before trying, so a failed host can never
         // leave the last session's code on screen looking live. A player would
         // read those five letters out and their friend would get "no such
         // lobby" — with the game insisting it is hosting.
@@ -1712,7 +1712,7 @@ impl Editor {
         Self::net_assign_scene_owners(&mut self.world, self.dedicated);
         // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
         // global script passes, run per-tick with their owner's replayed
-        // input instead. Slot #1 (owner None) is the HOST's — it stays in the
+        // input instead. Slot #1 (owner None) is the host's — it stays in the
         // global passes under the host's live keyboard. On a DEDICATED server
         // there is no host, so nothing is pre-assigned and this starts empty:
         // the slots are handed out as peers arrive.
@@ -1752,7 +1752,7 @@ impl Editor {
         self.console.push(floptle_script::LogLevel::Debug, who, None);
     }
 
-    /// Join a REAL session at `host:port` (QUIC). The play world becomes a
+    /// Join a real session at `host:port` (QUIC). The play world becomes a
     /// predicting client of a server on another machine — same machinery as
     /// "Test as remote player", minus the hidden server.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1849,7 +1849,7 @@ impl Editor {
         );
     }
 
-    /// "Test as remote player" (2c): the PLAY world becomes a predicted CLIENT
+    /// "Test as remote player" (2c): the PLAY world becomes a predicted client
     /// and a hidden authoritative server (full second sim + Lua host) runs
     /// behind the simulated link. Your character predicts locally, the server
     /// re-runs your inputs, divergences rewind-replay — the real netcode feel,
@@ -1871,7 +1871,7 @@ impl Editor {
         let mut sworld = World::default();
         floptle_scene::spawn_into(&doc, &mut sworld);
         // Harness convenience: every Predicted node belongs to the one joining
-        // client (peer 1) — on BOTH sides, so registration + routing agree.
+        // client (peer 1) — on both sides, so registration + routing agree.
         let assign_owner = |w: &mut World| {
             let preds: Vec<Entity> = w
                 .query::<floptle_core::Replicated>()
@@ -1887,7 +1887,7 @@ impl Editor {
         assign_owner(&mut sworld);
         assign_owner(&mut self.world);
         // The hidden server's physics: same terrain anchors (identical scene),
-        // its own bodies/static colliders from ITS world. SAME sim origin as
+        // its own bodies/static colliders from its world. same sim origin as
         // the client's — different origins mean different f32 quantization and
         // the two sims drift apart at the bit level.
         let origin = self.sim.as_ref().map(|s| s.world.origin).unwrap_or_else(|| self.sim_origin_hint());
@@ -1898,7 +1898,7 @@ impl Editor {
             floptle_physics::Sim::build_layered(&sworld, &terrain_vols, gravity, origin, layers);
         drop(terrain_vols);
         self.add_static_colliders_for_world(&sworld, &mut ssim);
-        // Seed the server bodies with the client's LIVE dynamic state (the doc
+        // Seed the server bodies with the client's live dynamic state (the doc
         // only carries transforms): the session starts mid-play, and a
         // vel-zero server character instantly disagrees with a moving client.
         if let Some(csim) = self.sim.as_ref() {
@@ -1920,7 +1920,7 @@ impl Editor {
             }
             ssim.writeback_interpolated(&mut sworld, 1.0);
         }
-        // Sessions over the simulated link; skew frozen from the CURRENT slider.
+        // Sessions over the simulated link; skew frozen from the current slider.
         let hub = floptle_net::MemoryHub::new();
         hub.set_conditions(self.net_latency_ticks, self.net_loss);
         let mut server = NetSession::server(Box::new(hub.server_endpoint()), self.input_map_hash());
@@ -1930,7 +1930,7 @@ impl Editor {
         let predicted = self.net_client_side_setup(Some(1), true);
         if let Some(pe) = predicted {
             // The harness's hidden server needs physics sync force-enabled on
-            // ITS copy of the predicted node too (the setup did the play
+            // its copy of the predicted node too (the setup did the play
             // world's). Same node = same position in Replicated node order.
             let spred: Option<Entity> = {
                 let mine: Vec<Entity> = self
@@ -1955,14 +1955,14 @@ impl Editor {
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
-        // The hidden server runs the SAME controller scripts, so it needs the
-        // SAME action map — its own ScriptHost starts with an empty one, and an
+        // The hidden server runs the same controller scripts, so it needs the
+        // same action map — its own ScriptHost starts with an empty one, and an
         // empty map resolves every `input.action(...)` to false. The server
         // would then compute a motionless character while the client predicted
         // a moving one: a total desync that looks like rubber-banding.
         host.set_input_map(self.script_host.input_system().borrow().map().clone());
         server.set_tick_dt(self.game_tick.step);
-        // The hidden server runs REAL animators (state machines, no rendering):
+        // The hidden server runs real animators (state machines, no rendering):
         // same clip/controller registries as the editor, its own instances.
         let sanim = {
             let mut a = crate::anim::AnimSystem::default();
@@ -1992,7 +1992,7 @@ impl Editor {
     }
 
     /// Run the hidden server up to its target tick (`client_tick − latency − 1`,
-    /// tracked LIVE from the slider): consume the client's replayed input, run
+    /// tracked live from the slider): consume the client's replayed input, run
     /// the full authoritative sim (scripts + physics), snapshot back. Raising
     /// the latency slider pauses the server briefly (pipeline refill); lowering
     /// it catches up (≤ 4 ticks per editor tick).
@@ -2017,7 +2017,7 @@ impl Editor {
         let Some(hs) = self.net_hidden.as_mut() else { return };
         let step = self.game_tick.step;
         hs.session.pump_server(&hs.world, st);
-        // The one-script model: the server's `input.*` IS the client's
+        // The one-script model: the server's `input.*` is the client's
         // replayed input for this tick (single-client harness).
         let inp = hs.session.input_for(hs.peer, st);
         crate::input_actions::apply_net_input_to(&hs.host, &inp);
@@ -2048,7 +2048,7 @@ impl Editor {
             .set_colliders(std::mem::take(&mut hs.sim.world.colliders), hs.sim.world.origin);
         hs.host.set_hulls(hs.sim.body_hulls(&hs.world));
         // Dispatch the client intents that arrived by tick start (the pump
-        // above), BEFORE this tick's scripts — with lag compensation: an rpc
+        // above), before this tick's scripts — with lag compensation: an rpc
         // stamped `{withInput = true}` gets a rewind scope holding every
         // networked node's pose + synced vars at the tick its sender PERCEIVED
         // (their stamp minus that node's interp delay, clamped to the rewind
@@ -2071,7 +2071,7 @@ impl Editor {
         // Animation runs server-side for real (scripts → anim → physics, the
         // same order as the play loop): `anim:play` transitions actual
         // controllers, scene-binding clips move actual transforms (they
-        // replicate as transforms), and clip events fire into SERVER scripts —
+        // replicate as transforms), and clip events fire into server scripts —
         // hit windows are server-authoritative. Poses aren't rendered; the
         // (state, time) per layer replicates and every client samples locally.
         let anim_cmds = hs.host.take_anim_commands();
@@ -2113,7 +2113,7 @@ impl Editor {
         }
         hs.sim.step_tick(step, None);
         hs.sim.writeback_interpolated(&mut hs.world, 1.0);
-        // Server-side session commands from ITS scripts (rpc/spawn/despawn).
+        // Server-side session commands from its scripts (rpc/spawn/despawn).
         let mut spawns: Vec<(String, Option<[f64; 3]>, Option<u64>)> = Vec::new();
         for cmd in hs.host.take_net_commands() {
             match cmd {
@@ -2181,7 +2181,7 @@ impl Editor {
         hs.session
             .update_anim_states(anim::collect_net_states(&hs.world, &self.mesh_registry, &hs.anim));
         hs.session.tick_server(&hs.world, st);
-        // Received events dispatch into the SERVER's scripts. (RPCs are NOT
+        // Received events dispatch into the server's scripts. (RPCs are not
         // dispatched here — they wait for the next tick's start, where the
         // colliders are lent and the lag-comp rewind scope can be staged.)
         let events = hs.session.take_events();
@@ -2197,7 +2197,7 @@ impl Editor {
             }
         }
         // The hidden server renders nothing: drain its cosmetic queues so they
-        // don't grow unboundedly. (Animator commands are REAL now — consumed
+        // don't grow unboundedly. (Animator commands are real now — consumed
         // by the advance above, not drained.)
         let _ = hs.host.take_vfx_commands();
         let _ = hs.host.take_gizmos();
@@ -2243,14 +2243,14 @@ impl Editor {
         }
     }
 
-    /// The play world's CLIENT tick: ship input, record the prediction, apply
+    /// The play world's client tick: ship input, record the prediction, apply
     /// snapshots (others interpolate; our node reconciles + rewind-replays).
     fn net_client_tick(&mut self, tick: u64) {
         let step = self.game_tick.step;
         if self.net_play_client.is_none() {
             return;
         }
-        // Read the tick's actions BEFORE borrowing the session mutably.
+        // Read the tick's actions before borrowing the session mutably.
         let ni = self.current_net_input();
         let Some(cs) = self.net_play_client.as_mut() else { return };
         // A rollback session ships its own inputs, at their APPLIED tick and
@@ -2298,7 +2298,7 @@ impl Editor {
         let anim_updates = cs.take_anim_updates();
         anim::apply_net_states(&mut self.anim, &mut self.world, &self.mesh_registry, anim_updates);
         // Reconcile our own node against authoritative states. On a real link
-        // the server ticks in ITS OWN clock domain: translate each state's
+        // the server ticks in its own clock domain: translate each state's
         // tick back through the exact stamp→local map (correct even across
         // auto-lead nudges), falling back to offset arithmetic (harness: 0).
         let stamp_off = cs.input_stamp_offset();
@@ -2328,7 +2328,7 @@ impl Editor {
             );
         }
         // Replicated spawns/despawns materialize live: bodies register or go,
-        // and ownership re-evaluates — a spawn owned by US becomes the
+        // and ownership re-evaluates — a spawn owned by us becomes the
         // predicted avatar (the net.spawn player-avatar flow), everyone
         // else's becomes snapshot-driven. A `net.setOwner` re-runs the same
         // evaluation: being handed a node mid-session is the reconnecting
@@ -2405,14 +2405,14 @@ impl Editor {
                 tr.translation = floptle_core::math::DVec3::from_array(state.pos);
                 tr.rotation = floptle_core::math::Quat::from_array(state.rot);
             }
-            // …and replay the unacknowledged inputs through the SAME script —
-            // BOTH hooks, exactly as the tick originally ran (update rides the
+            // …and replay the unacknowledged inputs through the same script —
+            // both hooks, exactly as the tick originally ran (update rides the
             // tick clock for a predicted node), including component writes
             // (e.g. a controller's rig.friction toggle) reaching the body.
             for (rtick, rinput) in replay {
                 let rt = rtick as f32 * step;
                 crate::input_actions::apply_net_input_to(&self.script_host, &rinput);
-                // Body state for the replayed tick: the body's CURRENT
+                // Body state for the replayed tick: the body's current
                 // (being-replayed) state, so node.grounded/vx reads are right.
                 if let Some(sim) = self.sim.as_ref()
                     && let Some(bs) = sim.body_snapshot(eid)
@@ -2443,7 +2443,7 @@ impl Editor {
                     );
                 }
                 // Hulls too — the live tick saw them, so the replay must
-                // (other bodies at their CURRENT pose: the standard tradeoff).
+                // (other bodies at their current pose: the standard tradeoff).
                 if let Some(sim) = self.sim.as_ref() {
                     self.script_host.set_hulls(sim.body_hulls(&self.world));
                 }
@@ -2507,7 +2507,7 @@ impl Editor {
                     // our input stamps into the server's domain, leading it by
                     // the RTT plus a small margin so inputs labeled T arrive
                     // before the server simulates T. The harness's hidden
-                    // server slaves to OUR clock instead — offset stays 0.
+                    // server slaves to our clock instead — offset stays 0.
                     if self.net_hub.is_none() {
                         let mut my_peer = None;
                         if let Some(cs) = self.net_play_client.as_mut() {
@@ -2523,8 +2523,8 @@ impl Editor {
                                 // keep the lead tuned from server margin
                                 // feedback instead of trusting it forever.
                                 //
-                                // NOT in a rollback session: there the fixed
-                                // input delay IS the lead, and an adaptive
+                                // not in a rollback session: there the fixed
+                                // input delay is the lead, and an adaptive
                                 // mechanism shifting stamps underneath it
                                 // fights the thing it is meant to help. The
                                 // margin stays as a measurement only (§0.5.1).
@@ -2541,7 +2541,7 @@ impl Editor {
                                 );
                             }
                         }
-                        // Deferred avatar bind: the Welcome told us WHO we are
+                        // Deferred avatar bind: the Welcome told us who we are
                         // — claim the Predicted node in our slot (peer p owns
                         // scene Predicted node #p+1; #1 is the host's).
                         if let Some(p) = my_peer {
@@ -2571,7 +2571,7 @@ impl Editor {
                     Some(&reason),
                 ),
                 // A kick is a disconnect the player is owed an explanation for.
-                // `net.on("kicked", …)` fires FIRST, so a game can put the
+                // `net.on("kicked", …)` fires first, so a game can put the
                 // words on screen before its own teardown runs.
                 NetEvent::Kicked(reason) => {
                     self.console.push(
@@ -2598,7 +2598,7 @@ impl Editor {
             sim.world.colliders = self.script_host.take_colliders();
         }
         // The server put the session in a scene (a mid-session switch, or the
-        // Welcome naming one we're not in): load it from OUR project, rebind
+        // Welcome naming one we're not in): load it from our project, rebind
         // NetIds against it, and re-bind our avatar/prediction. Until the
         // rebind, the session drops scene-scoped traffic — nothing from the
         // new scene can land on the old world's entities.
@@ -2656,7 +2656,7 @@ impl Editor {
             role: NetRoleState::Client,
             // A client is somebody's machine, always.
             dedicated: false,
-            // The relay's word to the HOST; a client is not one.
+            // The relay's word to the host; a client is not one.
             notice: None,
             peers: Vec::new(),
             rtt_ms: rtt,
@@ -2666,7 +2666,7 @@ impl Editor {
             // A joiner already knows the code — they typed it. It is the host's
             // to publish, so this stays None rather than echoing it back.
             lobby_code: None,
-            // Identity is the SERVER's conclusion about a peer, so a client
+            // Identity is the server's conclusion about a peer, so a client
             // holds none. `net.identity` answers `verified = false` here rather
             // than repeating whatever the client would like to be true.
             identities: HashMap::new(),
@@ -2723,7 +2723,7 @@ impl Editor {
                 Some(Matter::MapMesh { id }) => {
                     let Some(mesh) = self.maps.meshes.get(id) else { continue };
                     let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
-                    // Through the SAME builder the play sim uses, per-face
+                    // Through the same builder the play sim uses, per-face
                     // material slots included — a hit's `material` has to mean
                     // the same thing on the server as it does offline.
                     let (verts, indices, tri_slot, slots) =
@@ -2734,7 +2734,7 @@ impl Editor {
                         );
                     }
                 }
-                // Tilemaps: the SAME merged boxes the play sim builds, through the
+                // Tilemaps: the same merged boxes the play sim builds, through the
                 // same function — server truth matches what the client walks on.
                 Some(m @ Matter::Tilemap { .. }) => {
                     crate::tile_edit::add_tilemap_colliders(sim, &self.tiles, &wt, m, layer);
@@ -2820,7 +2820,7 @@ impl Editor {
         );
     }
 
-    /// `net.spawn(path, {...})`: load a scene asset, spawn its FIRST node as a
+    /// `net.spawn(path, {...})`: load a scene asset, spawn its first node as a
     /// replicated runtime object (position/owner overrides applied).
     fn net_spawn_path(&mut self, path: &str, pos: Option<[f64; 3]>, owner: Option<u64>) {
         if self.net_server.is_none() {
@@ -3025,7 +3025,7 @@ mod tests {
     /// fighter never moves), and the filter was assigned rather than unioned,
     /// so whichever of this and the rollback start ran last erased the other.
     /// Neither is visible in a headless driver test, and both surface on the
-    /// FIRST real two-machine match.
+    /// first real two-machine match.
     fn scene() -> (Vec<(Entity, Replicated)>, Vec<Entity>) {
         let mut w = World::default();
         let mk = |w: &mut World| w.spawn();
@@ -3075,7 +3075,7 @@ mod tests {
             plan.dskip.contains(&es[1].index()) && plan.dskip.contains(&es[2].index()),
             "the driver's fighters run their TICKS under it, not under the global pass"
         );
-        // floptle/0042: NOT in `skip`. That set gates every pass including
+        // floptle/0042: not in `skip`. That set gates every pass including
         // `lateUpdate`, which no driver replays — so a fighter that wrote its
         // model yaw there silently stopped, in net play only, with no error.
         assert!(

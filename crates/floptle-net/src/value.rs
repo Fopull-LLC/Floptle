@@ -49,7 +49,7 @@ impl std::fmt::Display for ValueError {
 
 impl NetValue {
     /// Validate the guardrails: depth and encoded size. Call after building a
-    /// value from Lua and BEFORE queuing it — an invalid value is dropped whole
+    /// value from Lua and before queuing it — an invalid value is dropped whole
     /// (never silently truncated).
     pub fn validate(&self) -> Result<(), ValueError> {
         if self.depth() > MAX_VALUE_DEPTH {

@@ -69,7 +69,7 @@ pub(crate) struct NavStatus {
     /// The bake no longer matches the node's settings.
     pub stale: bool,
     /// How many nodes the filter currently selects, and their triangles. Shown
-    /// BEFORE baking, because "0 nodes" and "a bake that came back empty" are
+    /// before baking, because "0 nodes" and "a bake that came back empty" are
     /// the same screen otherwise, and only one of them is about the filter.
     pub sources: usize,
     pub triangles: usize,
@@ -117,7 +117,7 @@ pub(crate) struct NavStatus {
 
 /// What the Inspector should say about the navmesh this frame.
 ///
-/// Runs every frame, so it counts the nodes a bake WOULD see without building
+/// Runs every frame, so it counts the nodes a bake would see without building
 /// any of their triangles — gathering geometry means importing models off disk,
 /// and doing that per frame to fill in a label would be a stall nobody could
 /// account for. The triangle count comes from the last bake instead.
@@ -152,7 +152,7 @@ pub(crate) fn nav_status(
         use floptle_nav::LinkKind;
         st.polys = b.polys.len();
         // One cached read rather than three walks of every polygon. This runs
-        // EVERY FRAME to fill in two labels, and on a real level that is
+        // every frame to fill in two labels, and on a real level that is
         // seventy thousand polygons — see `NavMesh::summary`.
         //
         // **Islands, not regions.** A region is where the walking surface
@@ -408,7 +408,7 @@ fn push_sphere(out: &mut Vec<Tri>, centre: Vec3, r: f32) {
 /// Gather the triangles a bake should see.
 ///
 /// `origin` is the world position everything is measured from — the navmesh
-/// node's own translation. Geometry is baked RELATIVE to it in `f32`, the same
+/// node's own translation. Geometry is baked relative to it in `f32`, the same
 /// trade the physics sim makes (ADR-0015): residuals stay small and exact no
 /// matter how far out the level sits.
 pub(crate) fn gather(
@@ -635,7 +635,7 @@ pub(crate) fn gather_areas(
                 }
                 Err(()) => {
                     // More kinds of ground than a filter can name (32). The
-                    // volume paints NOTHING rather than aliasing another
+                    // volume paints nothing rather than aliasing another
                     // area's id — and the bake says so, because silently
                     // merging it would look exactly like a volume in the
                     // wrong place.
@@ -657,7 +657,7 @@ pub(crate) fn gather_areas(
     (volumes, areas, warnings)
 }
 
-/// The one place an area NAME becomes an id: find it case-insensitively, or
+/// The one place an area name becomes an id: find it case-insensitively, or
 /// register it (`Err` = the bake is out of area slots). Volumes and links both
 /// go through here, so a link can name an area no volume painted and a filter
 /// still finds it.
@@ -1135,7 +1135,7 @@ impl crate::Editor {
         // session, for months, with the `.fnav` sitting beside the scene the
         // entire time.
         //
-        // AFTER the heal block, not before it: a load made here sets `nav_heal`,
+        // after the heal block, not before it: a load made here sets `nav_heal`,
         // and the flag is deliberately acted on a frame later — once the scene
         // it describes has finished arriving.
         if self.bakes_loaded_scene.as_deref() != Some(self.scene_path().as_path()) {
@@ -1159,9 +1159,9 @@ impl crate::Editor {
         // happened) came back in a different shape.
         //
         // Real time is what a drag, or a stream, actually respects: a wall
-        // dragged for two seconds is still ONE bake, however many revisions it
+        // dragged for two seconds is still one bake, however many revisions it
         // passed through, because this only samples the world once per
-        // interval. Two consecutive samples agreeing IS 0.4s of the level
+        // interval. Two consecutive samples agreeing is 0.4s of the level
         // holding still, which is what "settled" always meant — it no longer
         // needs its own accumulator to say so.
         self.nav_watch_elapsed += dt;
@@ -1169,7 +1169,7 @@ impl crate::Editor {
             return;
         }
         self.nav_watch_elapsed = 0.0;
-        // Cheap early-out for the idle editor — but ONLY once we already know
+        // Cheap early-out for the idle editor — but only once we already know
         // this shape is settled (baked, or a confirmed-empty gather). While
         // still waiting to confirm settlement, a real edit bumps the revision
         // exactly once and then never again for as long as the level stays
@@ -1235,7 +1235,7 @@ impl crate::Editor {
     ) -> Result<usize, String> {
         // A fully streamed level has nothing to hand-bake — there is no
         // edit-time geometry to press the Bake button on — so a first splice
-        // with nothing to splice INTO used to refuse outright, which locked
+        // with nothing to splice into used to refuse outright, which locked
         // such a level out of ever getting a navmesh at all (`floptle/0142`).
         // Bootstrap an empty host from the Nav Mesh node's own settings,
         // anchored at the node, and let the ordinary splice path below fill
@@ -1406,7 +1406,7 @@ impl crate::Editor {
                     None,
                 );
             }
-            // Recorded regardless of `quiet`: an empty gather IS a result for
+            // Recorded regardless of `quiet`: an empty gather is a result for
             // this exact level shape, not a non-answer — `tick_nav_autobake`
             // reads this to stop retrying a gather that can only fail again
             // until the level itself changes.
@@ -1416,7 +1416,7 @@ impl crate::Editor {
         let triangles = g.tris.len();
 
         // Auto bounds: measure what was found, put the node in the middle of it
-        // and size the box to fit. Moving the node is deliberate — the box IS
+        // and size the box to fit. Moving the node is deliberate — the box is
         // the node, and a volume that claims to fit the level while sitting
         // somewhere else would be lying about the one thing it is for.
         let (tris, half, shift) = if auto_bounds {
@@ -1450,7 +1450,7 @@ impl crate::Editor {
             (moved, half, Some(centre))
         } else {
             let half = Vec3::from(half_extents);
-            // Measured BEFORE the cut, because afterwards there is nothing left
+            // Measured before the cut, because afterwards there is nothing left
             // to compare against — and "the box is smaller than the level" is
             // invisible from the result. What comes back is a perfectly good
             // navmesh of one corner of the map.
@@ -1461,7 +1461,7 @@ impl crate::Editor {
             (clip(g.tris, half), half, None)
         };
 
-        // The bake is measured around where the node ENDS UP — auto bounds may
+        // The bake is measured around where the node ENDS up — auto bounds may
         // have just moved it — so a world-space question can be turned into a
         // mesh-space one later without anybody having to remember the offset.
         let anchor = match shift {
@@ -1620,7 +1620,7 @@ impl crate::Editor {
         let drops = mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Drop).count();
         let jumps = mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Jump).count();
         let crossings = mesh.off_links.len() - lost.len() - lost_generated;
-        // Islands AFTER the links, which is the number somebody can act on: it
+        // Islands after the links, which is the number somebody can act on: it
         // is what a character can actually reach, not what the walking surface
         // happened to flood into. Counted here, while the mesh is still in hand.
         // …and how lopsided they are, because a count on its own is not
@@ -1906,7 +1906,7 @@ mod tests {
         let g = gather(&world, DVec3::ZERO, &[], &maps, &terrains, None, std::path::Path::new("."));
 
         // Twelve triangles, and — the part that matters — they came from the
-        // BODY. The asset path does not exist, so a gather that still reached
+        // body. The asset path does not exist, so a gather that still reached
         // for the model would produce nothing at all.
         assert_eq!(g.tris.len(), 12, "a box is twelve triangles");
         assert_eq!(g.sources, 1);
@@ -1953,7 +1953,7 @@ mod tests {
         world.insert(a, Collidable);
         assert!(super::static_body_shape(&world, a).is_none());
 
-        // A marker AND a static body: the body, because `add_static_colliders`
+        // A marker and a static body: the body, because `add_static_colliders`
         // skips every node with a RigidBody and `Sim::build` ignores the marker.
         let b = mesh(&mut world);
         world.insert(b, MeshCollider);
@@ -1995,7 +1995,7 @@ mod tests {
         ed.load_nav();
         assert!(!ed.nav_heal, "a scene with no bake must not be baked behind your back");
 
-        // A bake from an older engine — the one that cost Ty a rebake every time
+        // A bake from an older engine — the one that cost a rebake every time
         // he opened the project.
         floptle_vfs::write(ed.nav_path(1), b"postcard bytes from before the header").unwrap();
         ed.load_nav();
@@ -2164,7 +2164,7 @@ mod tests {
         assert!(polys > 0);
         assert!(ed.save_scene());
 
-        // Now switch to that project — no `open_scene_file` anywhere. (NOT what
+        // Now switch to that project — no `open_scene_file` anywhere. (not what
         // booting does: startup assigns `project_root` directly and never calls
         // `open_project` at all, which is why fixing only this one left the Hub's
         // editor still coming up unbaked. See the test below.)
@@ -2248,7 +2248,7 @@ mod tests {
              is the rebake-every-session bug, and no entry point can be trusted to prevent it"
         );
 
-        // And it is loaded ONCE. A reload every frame would drop a bake that
+        // And it is loaded once. A reload every frame would drop a bake that
         // had just been made and take an O(scene) file read with it.
         fresh.nav_baked = None;
         fresh.tick_nav_autobake(1.0 / 60.0);
@@ -2258,7 +2258,7 @@ mod tests {
              the bakes for"
         );
 
-        // A different scene IS a reason to look again.
+        // A different scene is a reason to look again.
         fresh.set_scene_file(&dir.join("scenes/first.ron"));
         fresh.bakes_loaded_scene = Some(dir.join("scenes/other.ron"));
         fresh.tick_nav_autobake(1.0 / 60.0);
@@ -2450,7 +2450,7 @@ mod tests {
     }
 
     /// Defect 2: an automatic (quiet) bake that gathers nothing must say so
-    /// once and then go quiet for the SAME level shape, not retry the gather
+    /// once and then go quiet for the same level shape, not retry the gather
     /// and re-log every settle cycle forever.
     #[test]
     fn an_empty_gather_says_so_once_and_then_stays_quiet_until_the_level_changes() {
@@ -2529,7 +2529,7 @@ mod tests {
         // of simulated time, matching `TICKS × DT / NAV_WATCH_INTERVAL`). The
         // bound sits well below the old number and with headroom above the
         // new one for a shared runner, per this repo's ratio-guard
-        // convention (the engine handoff notes § The gates) — it is the SHAPE
+        // convention (the engine handoff notes § The gates) — it is the shape
         // (bounded vs unbounded in stream length) that this pins, not a
         // specific multiple.
         assert!(
@@ -2540,7 +2540,7 @@ mod tests {
         );
     }
 
-    /// The revision early-out is only a fast-path for the ALREADY-settled
+    /// The revision early-out is only a fast-path for the already-settled
     /// editor — it must never be the reason settlement is never confirmed in
     /// the first place. A single edit followed by a truly idle level moves
     /// `World::revision()` once and then never again, so the second (and

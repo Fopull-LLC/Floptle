@@ -7,7 +7,7 @@
 //! * **lit** — one warm 2D light near the middle. The map must be brighter where
 //!   the light is and darker at the edges, and the falloff must actually reach
 //!   zero rather than trailing off across the whole frame.
-//! * **masked** — the same light, restricted to a sorting layer the map is NOT
+//! * **masked** — the same light, restricted to a sorting layer the map is not
 //!   on. The map must come out at ambient: this is the "a torch passes over the
 //!   background without lighting it" case, and it is the one thing a 2D artist
 //!   asks for that nothing else in the engine does.
@@ -124,7 +124,7 @@ fn main() {
         mid[1],
         edge[1]
     );
-    // …and it must reach ZERO by the edge, not merely be dimmer there. Past the
+    // …and it must reach zero by the edge, not merely be dimmer there. Past the
     // range the pixel is pure ambient, which is what `masked` also is.
     assert!(
         (edge[1] - edge[2]).abs() < 0.02,
@@ -178,7 +178,7 @@ fn main() {
     //
     // Reported as "I put a light in my scene with just a tileset and the tileset
     // is no longer visible". The base used to be white while no 2D light existed
-    // and the 3D ambient the moment one did, so placing a FIRST light dropped a
+    // and the 3D ambient the moment one did, so placing a first light dropped a
     // whole level to 12% brightness. Adding a light has to add light.
     let mut only_light = lit;
     only_light.ambient = [1.0, 1.0, 1.0, 0.0]; // the default 2D base
@@ -197,7 +197,7 @@ fn main() {
 
     // ---- an authored alpha is the alpha that reaches the screen ------------
     //
-    // `floptle/0121`. The composite used to write `albedo × light` OVER the
+    // `floptle/0121`. The composite used to write `albedo × light` over the
     // frame at the surface's own alpha — but the raster pass had already blended
     // that same sprite in, so a translucent one arrived twice and landed at an
     // effective `1 - (1-a)²`. 0.5 drew at 0.75; 0.72 drew at 0.92. In every 2D
@@ -267,7 +267,7 @@ fn main() {
         // 0. The compositing law this probe grades against has to be the one the
         //    frame actually obeys, or every assertion below is measuring the
         //    probe. The render with no 2D lighting at all is pure raster
-        //    blending, so it is the control: if `over` cannot predict THAT, the
+        //    blending, so it is the control: if `over` cannot predict that, the
         //    colour space is wrong and the rest means nothing.
         for (c, &got) in o.iter().enumerate().take(3) {
             let want = over(c_off, a)[c];
@@ -291,7 +291,7 @@ fn main() {
             );
         }
 
-        // 2. With a light on it, the surface composites at ITS OWN alpha with
+        // 2. With a light on it, the surface composites at its own alpha with
         //    its lit colour: `C·light` over `B` at `a`, not at `1-(1-a)²`.
         for (c, &got) in l.iter().enumerate().take(3) {
             let want = over(c_lit, a)[c];
@@ -308,7 +308,7 @@ fn main() {
     // ---- one cell of a spritesheet, lit ------------------------------------
     //
     // The G-buffer samples the albedo texture itself, so it has to sample it
-    // through the SAME UV window the colour pass used. A sprite on a sheet is
+    // through the same UV window the colour pass used. A sprite on a sheet is
     // nothing but that window, and when it was missing the deferred pass wrote
     // every cell of the sheet squashed across the one quad — so the delta
     // composite laid a stretched copy of the whole sheet over the sprite while
@@ -335,7 +335,7 @@ fn main() {
         // to come from the material, exactly as a `Matter::Sprite` gets it.
         let qd = mesh::tilemap(1, 1, ORTHO_HEIGHT * 0.5, 1, 1, [0.0, 0.0], &[0]);
         let quad = raster.register(&gpu, &qd, None);
-        // The REAL window, through the same call the editor's sprite draw makes.
+        // The real window, through the same call the editor's sprite draw makes.
         // Restating the offset convention here would grade the probe's opinion of
         // it rather than the pass.
         let sheet_mat = floptle_core::Material {
@@ -451,7 +451,7 @@ const BG: [f32; 3] = [0.02, 0.02, 0.04];
 /// `c` composited over the background at alpha `a`, in the frame's own colour
 /// space.
 ///
-/// Blending happens in LINEAR space even on an sRGB target (the hardware decodes
+/// Blending happens in linear space even on an sRGB target (the hardware decodes
 /// the destination, blends, re-encodes), so the mix has to be done there too —
 /// doing it on the stored bytes would predict a different number and quietly
 /// grade the renderer against the wrong law.

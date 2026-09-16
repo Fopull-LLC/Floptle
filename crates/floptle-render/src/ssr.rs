@@ -7,7 +7,7 @@
 //! colour" to sample, and the choice is between a deferred renderer — a G-buffer
 //! written by every one of the raster pass's pipeline variants, and the specular
 //! term moved out of the forward shader entirely — and reflecting the frame that
-//! HAS finished. This is the second. What it costs is one frame of lag on the
+//! has finished. This is the second. What it costs is one frame of lag on the
 //! contents of a reflection, which is invisible on anything but a mirror bolted
 //! to a whip-panning camera; what it saves is the entire deferred rewrite.
 //!
@@ -15,7 +15,7 @@
 //! linear HDR with the raymarched world, the raster meshes, the palette quantise
 //! and the 2D light pass already in it — but no tonemap, no bloom, no grade.
 //! That is the correct thing to reflect: a reflection is part of the scene and
-//! must go through the tonemap WITH it, not arrive pre-tonemapped and get
+//! must go through the tonemap with it, not arrive pre-tonemapped and get
 //! mapped a second time.
 //!
 //! **The mip chain is what makes a rough reflection cheap.** Roughness picks a
@@ -377,14 +377,14 @@ mod tests {
     use super::*;
 
     /// The correction that makes a reflection stay put when the camera moves.
-    /// A point standing still in the WORLD must land on the same place in the
+    /// A point standing still in the world must land on the same place in the
     /// stored picture no matter where the camera has walked to since.
     #[test]
     fn a_still_point_lands_where_it_was_however_far_the_camera_moved() {
         let proj = Mat4::perspective_rh(1.0, 1.6, 0.1, 1000.0);
         // Frame A: camera a long way from the origin (large-world), looking down
         // -Z. The view matrix carries no translation (ADR-0015), so with an
-        // identity rotation the view-projection IS the projection.
+        // identity rotation the view-projection is the projection.
         let cam_a = DVec3::new(1.0e6, 20.0, -3.0e5);
         let vp_a = proj;
         // A rock 10 units in front of the camera in frame A.
@@ -403,7 +403,7 @@ mod tests {
             "the rock moved in the stored picture: {a:?} vs {b:?} — reflections would slide",
         );
 
-        // And the guard: WITHOUT the correction it does move, so this test is
+        // And the guard: without the correction it does move, so this test is
         // measuring the fix and not an identity that would pass either way.
         let naive = ndc(vp_a * in_b.extend(1.0));
         assert!((a - naive).length() > 1e-3, "the uncorrected matrix must be visibly wrong");
@@ -418,7 +418,7 @@ mod tests {
         let at = DVec3::new(-4.0e5, 7.0, 12.0);
         assert_eq!(reproject(vp, at, at), vp);
 
-        // …and the sign: a camera that moved FORWARD must find a still point
+        // …and the sign: a camera that moved forward must find a still point
         // further away in the old picture, never nearer.
         let p_world = at + DVec3::new(0.0, 0.0, -10.0);
         let moved = at + DVec3::new(0.0, 0.0, -4.0);

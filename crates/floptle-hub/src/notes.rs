@@ -354,7 +354,7 @@ account.signIn()
 ";
         let blocks = parse(md);
         assert_eq!(blocks[0], Block::Heading(1, "Floptle v0.9.0".into()));
-        // A wrapped paragraph is ONE paragraph — joined, not two lines with a break.
+        // A wrapped paragraph is one paragraph — joined, not two lines with a break.
         assert_eq!(blocks[1], Block::Para("An opening line that wraps.".into()));
         assert_eq!(blocks[2], Block::Heading(2, "A heading".into()));
         assert_eq!(blocks[3], Block::Bullet("a bullet continued on the next line".into()));

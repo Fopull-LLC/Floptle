@@ -1,16 +1,7 @@
-# The gate. Every push and every pull request runs the whole suite and the whole
-# lint pass, so a broken commit is caught where it was made rather than at a tag.
-#
-# Until this existed, both were enforced only by whoever was at the keyboard
-# remembering to run them — 1,500 tests and a zero-warning clippy policy resting
-# on human memory. That is a bad bet on its own, and a worse one because a green
-# local run is not always evidence: a full disk makes `cargo test` exit with NO
-# output at all, which through a summarising pipe reads exactly like a pass.
-#
-# Linux only, on purpose. It is the cheapest runner and nothing here is
-# platform-specific; the release workflow builds and links all four platforms, so
-# a portability break still cannot reach a published bundle. See release.yml,
-# which runs this same gate as a hard precondition of publishing.
+# Every push and pull request runs the full test suite and the zero-warning
+# lint pass, plus the build configurations the workspace build does not cover
+# (player, server, browser, aarch64). release.yml runs this same workflow as a
+# precondition of publishing.
 name: ci
 
 on:
@@ -58,33 +49,17 @@ jobs:
   gate:
     name: test + clippy
     runs-on: ubuntu-latest
-    # Generous on purpose. A warm run on `main` is ~10 minutes and a cold one is
-    # ~25, but the cache is scoped to the branch that wrote it: `Swatinem/rust-cache`
-    # saves under `refs/heads/main`, so **a tag run always builds cold** — every
-    # cache this repo holds for a tag ref belongs to the bundle jobs, not to this
-    # one. That leaves the release gate's runtime entirely at the mercy of which
-    # runner it lands on, and at 45 minutes a slow one does not fail the build,
-    # it CANCELS it: the run reads `cancelled`, the bundles show `skipped`, and
-    # nothing anywhere says "timeout". v0.69.2 died that way at 45m31s having
-    # passed the identical suite on `main` in 24 minutes.
-    #
-    # So this is not a performance budget and should not be tightened into one.
-    # It is a runaway guard, and the thing it guards against (a hung test, an
-    # infinite loop) will still be running at 90 minutes.
+    # A runaway guard, not a budget: a tag run builds cold (the cache is keyed
+    # to the branch) and a slow runner has hit 45 minutes.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      # Same set the release bundle needs: windowing/GPU headers for wgpu + winit,
-      # ALSA for the audio backend, and udev for the gamepad backend — gilrs's
-      # libudev-sys build script does an unconditional find_library().unwrap()
-      # and PANICS without the .pc file.
+      # Windowing/GPU headers for wgpu + winit, ALSA for audio, udev for gamepads.
       - name: Linux build deps
         run: |
-          # `|| true`: the runner image carries third-party repos (Chrome,
-          # Microsoft) nothing here installs from, and a hash-sum mismatch on
-          # one of them exits 100 with every Ubuntu index already fetched —
-          # twice in a row on 2026-09-09. The install below is the real check.
+          # The runner image carries third-party apt repos that occasionally
+          # fail their index fetch; the install below is the real check.
           sudo apt-get update || true
           sudo apt-get install -y \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
@@ -95,41 +70,24 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      # Lint first: it compiles the same crates the tests need, and a warning is
-      # cheaper to read than a test failure caused by the same mistake.
       - name: clippy (zero warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
         run: cargo test --workspace --all-targets
 
-      # **The configuration an export actually ships.** `floptle-player` builds
-      # the engine WITHOUT `editor-ui`, so egui, the dock, the Inspector, the
-      # file pickers and the command line are not compiled into a game at all.
-      # Nothing above this line covers it: the workspace build turns the feature
-      # ON, so a change that quietly reaches for the authoring half from the
-      # engine half passes every other gate here and fails at release time,
-      # which is the one place it costs a tag.
-      #
-      # `--all-targets`, so the tests are held to the same line as the code. The
-      # editor-only test modules carry `#[cfg(feature = "editor-ui")]` for
-      # exactly this reason.
+      # The configuration an exported game ships: the engine without `editor-ui`.
+      # The workspace build always has the feature on, so this is the only
+      # place a stray dependency on the editor half shows up before a release.
       - name: player build (no editor-ui)
         run: |
           cargo clippy -p floptle-editor -p floptle-player \
             --no-default-features --features floptle-editor/vm-luau,floptle-editor/devices \
             --all-targets -- -D warnings
 
-      # **The configuration a SERVER ships**, which is the player's minus the
-      # machine's audio device and its gamepads. Its own step because it is its
-      # own risk: `cpal` links `libasound.so.2` and `gilrs` links
-      # `libudev.so.1`, both at LINK time, and `libasound2` is not on a minimal
-      # Linux server image — so a server built with them does not fail to find a
-      # sound card, it fails to start, before `main`, with a loader error about
-      # audio on a box where nobody was ever going to hear anything.
-      #
-      # The `ldd` line below is the actual guarantee. Everything else here is a
-      # compile check; that one is the deployment.
+      # The configuration a dedicated server ships: the player's minus audio and
+      # gamepad devices. `cpal` and `gilrs` link libasound/libudev at link time,
+      # which a minimal server image does not have, so `ldd` is the real check.
       - name: server build (no devices)
         run: |
           cargo clippy -p floptle-editor -p floptle-server \
@@ -145,24 +103,9 @@ jobs:
           echo "floptle-server needs only:"
           ldd target/debug/floptle-server
 
-      # **The browser target.** The engine library builds for
-      # `wasm32-unknown-unknown` with every platform-specific dependency (QUIC,
-      # the OS keyring, blocking HTTP, the FBX importer, the dedicated server,
-      # the clipboard, the file manager) behind a target gate with a browser
-      # answer or a refusal that says why — and, since the web export shipped,
-      # with its files coming from `floptle-vfs`, its clock from
-      # `floptle_core::time`, and its background work through `worker::spawn`.
-      #
-      # A type-check cannot see any of that rot back: `std::fs::read` compiles
-      # for wasm and fails at runtime, `Instant::now()` compiles and panics,
-      # `thread::spawn` compiles and panics. So this is clippy under
-      # `tools/web/clippy.toml`, which makes each of those a lint ERROR on this
-      # target only. A `std::fs` call added anywhere in the engine half fails
-      # here, by name, rather than in a player's tab.
-      #
-      # The WASI SDK is what compiles Luau's C++ for the target (the build
-      # script runs under `clippy` as under `check`); `tools/web/env.sh`
-      # fetches and pins it.
+      # The browser target. `std::fs`, `Instant::now()` and `thread::spawn` all
+      # compile for wasm and fail at runtime, so `tools/web/clippy.toml` makes
+      # each a lint error on this target. The WASI SDK compiles Luau's C++.
       - name: wasm32 lint (engine library only)
         run: |
           rustup target add wasm32-unknown-unknown
@@ -171,27 +114,18 @@ jobs:
             --features vm-luau --target wasm32-unknown-unknown \
             -- -D warnings -D clippy::disallowed-methods -D clippy::disallowed-types
 
-      # `--all-targets` skips doc-tests entirely, which is easy to forget and
-      # means a broken example in a doc comment ships.
+      # `--all-targets` skips doc-tests.
       - name: doc tests
         run: cargo test --workspace --doc
 
-      # The self-asserting render probes. `--all-targets` COMPILES every example
-      # and runs none of them, so until this step the visual regressions each of
-      # these was written for were guarded only by someone remembering to run it
-      # — the exact bet this whole workflow exists to stop making.
-      #
-      # Only probes whose assertion is backend-INDEPENDENT belong here. Each of
-      # these compares two renders from the same device (before/after, CPU/GPU,
-      # frame/frame) or reads a flat colour, so a software rasteriser answers
-      # them the same way a real card does. A probe that asserts an exact shade
-      # or a frame time is a probe for a human to look at, and stays out.
+      # The self-asserting render probes (`--all-targets` compiles examples but
+      # runs none). Only probes whose assertion is backend-independent belong
+      # here — a comparison of two renders from the same device, or a flat
+      # colour — so a software rasteriser answers them the same way a card does.
       - name: software Vulkan (lavapipe)
         run: sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
-      # Each probe's argument follows its own convention — a directory, a file, or
-      # a filename prefix — so they are listed with their argument rather than
-      # looped over blindly. `$P` is a directory that exists; anything deeper is
-      # the probe's to create.
+      # Each probe takes its output argument in its own form (directory, file,
+      # or prefix), so they are listed rather than looped.
       - name: render probes
         env:
           WGPU_BACKEND: vulkan
@@ -233,9 +167,7 @@ jobs:
           run glass_layers_probe        glass_layers_probe        -- "$P"
           run fog_noise_probe           fog_noise_probe           -- "$P"
 
-      # On a failure the PNGs are the evidence — these probes exist because the
-      # bugs they catch are visual, and a red X with no image to look at makes
-      # the next person reproduce it locally before they can even start.
+      # The PNGs are the evidence when a probe fails.
       - name: keep the probe images
         if: always()
         uses: actions/upload-artifact@v4
@@ -245,14 +177,9 @@ jobs:
           if-no-files-found: warn
 
   steam-gate:
-    # The main `gate` job above never turns the `steam` feature on, so
-    # floptle-steam's Steamworks-backed path (the Steam integration plan)
-    # would otherwise go unbuilt and untested by anything. This job is that
-    # coverage, scoped to just the two Steam-plan crates — nothing else in the
-    # workspace depends on `steam` yet. `steamworks-sys` builds clean off
-    # crates.io with no Steamworks SDK present (verified locally against
-    # v0.13.1); that only covers compiling and unit-testing the Rust binding
-    # surface, not exercising a live Steam client, which no phase does yet.
+    # `gate` never turns the `steam` feature on. `steamworks-sys` builds with
+    # no Steamworks SDK present; this covers the binding surface, not a live
+    # Steam client.
     name: steam feature (services + steam crates)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -270,40 +197,18 @@ jobs:
         run: cargo test -p floptle-services -p floptle-steam --features floptle-steam/steam
 
   fleet:
-    # **The aarch64 artifacts, proven on every push rather than at a tag.**
-    #
-    # Floptle Cloud's region box is an Oracle A1 — 64-bit ARM Linux — and
-    # `floptle_dist::PLATFORMS` deliberately does not list `linux-aarch64`,
-    # because putting it there would offer it in the Hub's install list and the
-    # export dialog. So the fleet agent and the engine it runs are published by
-    # `release.yml` as bare binaries, and NOTHING ELSE in this repository builds
-    # for that target.
-    #
-    # That is exactly the shape the wasm lint job exists for: a target nothing
-    # compiles is a target that rots, and here it would rot invisibly until a
-    # release — where the publish job depends on it, so the failure costs a tag
-    # rather than a red tick. Checking it here means the ARM runner label, the
-    # arm64 build dependencies and the two binaries are all known-good before
-    # anybody types `git tag`.
-    #
-    # `--all-targets` so the agent's own tests compile too; they run on x86 in
-    # `gate` and nothing about them is architecture-specific.
+    # The fleet agent and server ship as bare aarch64 binaries from release.yml
+    # (the region boxes are ARM); nothing else builds for that target, so it is
+    # checked on every push rather than discovered at a tag.
     name: aarch64 (fleet agent + server)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      # `floptle-server` is a shim over the editor library, so it needs the same
-      # headers the main gate does even though the binary links none of them at
-      # run time — wgpu and winit dlopen, and the ALSA and udev -sys build
-      # scripts panic without a .pc file to find.
+      # The same headers as `gate`: the server is a shim over the editor library.
       - name: Linux build deps
         run: |
-          # `|| true`: the runner image carries third-party repos (Chrome,
-          # Microsoft) nothing here installs from, and a hash-sum mismatch on
-          # one of them exits 100 with every Ubuntu index already fetched —
-          # twice in a row on 2026-09-09. The install below is the real check.
           sudo apt-get update || true
           sudo apt-get install -y \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
@@ -322,31 +227,18 @@ jobs:
           set -euo pipefail
           cargo build --release -p floptle-fleet
           file target/release/floptle-fleet
-          # `--help` exits 0 and prints a table. This is how an operator tells a
-          # current binary from one already on a box, and it is the one thing
-          # about the agent that a box's owner touches before anything works.
           ./target/release/floptle-fleet --help > fleet-help.txt
           head -3 fleet-help.txt
-          # And it refuses to start with no token rather than polling an
-          # endpoint that will turn it away every ten seconds forever.
+          # It must refuse to start with no token rather than poll forever.
           if ./target/release/floptle-fleet --region us-east --once; then
             echo "::error::the agent started with no box token"
             exit 1
           fi
 
   web:
-    # The browser build compiles and LINKS on every push (docs/web-export.md
-    # step 4). Not run — there is no WebGPU on a runner — but a link is the
-    # step that fails when the C++ side drifts: Luau's exceptions through the
-    # WASI SDK's runtime, the WASI shims in `floptle-web/src/wasi.rs` naming
-    # exactly the imports libc reaches for, and `__wasm_call_ctors` referenced
-    # so the linker does not wrap every export in the constructors. The ladder
-    # itself runs on a machine with a browser: `tools/web/build.sh` then
-    # `tools/web/shot.py --display`.
-    #
-    # The SDK is 130 MB and downloaded per run; `tools/web/env.sh` does it and
-    # pins the version. wasm-bindgen is NOT installed here on purpose — the
-    # link is the gate, the JS glue is a formality it would add minutes for.
+    # The browser build compiles and links on every push (there is no WebGPU on
+    # a runner to run it). The link is what fails when the C++ side drifts;
+    # see docs/web-export.md. wasm-bindgen is deliberately not installed.
     name: browser build (compile + link)
     runs-on: ubuntu-latest
     timeout-minutes: 45

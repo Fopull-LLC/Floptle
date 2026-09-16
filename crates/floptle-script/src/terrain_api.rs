@@ -18,7 +18,7 @@ use std::rc::Rc;
 use floptle_core::math::Vec3;
 use mlua::{Lua, Table};
 
-/// One queued terrain write, in WORLD coordinates (scripts speak world; the editor
+/// One queued terrain write, in world coordinates (scripts speak world; the editor
 /// converts into each terrain's local frame when applying).
 #[derive(Clone, Debug)]
 pub struct TerrainOp {
@@ -34,7 +34,7 @@ pub struct TerrainOp {
 }
 
 impl TerrainOp {
-    /// True if this op moves the SURFACE rather than only its colour.
+    /// True if this op moves the surface rather than only its colour.
     ///
     /// Anything standing on the ground — a scattered tree, a placed building —
     /// only has to be re-settled when the ground itself moved. Repainting a
@@ -54,7 +54,7 @@ pub(crate) struct TerrainReceipts {
     pub next_op_id: Rc<std::cell::Cell<u64>>,
 }
 
-/// What one applied op actually moved, in WORLD cubic units.
+/// What one applied op actually moved, in world cubic units.
 #[derive(Clone, Debug, Default)]
 pub struct TerrainYield {
     pub id: u64,
@@ -89,7 +89,7 @@ pub(crate) struct TerrainStreamShared {
     pub flush: Rc<RefCell<bool>>,
     /// Mirror of "the background terrain worker has something to do" — a field
     /// being generated, or one streaming in. Published so a game that creates
-    /// worlds ON DEMAND can wait its turn.
+    /// worlds on DEMAND can wait its turn.
     pub busy: Rc<std::cell::Cell<bool>>,
     /// Project root — `terrain.deleteSaveDir` resolves its (validated,
     /// relative) path against this.
@@ -146,7 +146,7 @@ pub(crate) fn install_terrain_api(
                     removed += 1;
                 }
             }
-            // Tidy up: the dir if now empty, then ITS parent if that emptied too
+            // Tidy up: the dir if now empty, then its parent if that emptied too
             // (a game's saves/<slot>/terrain layout leaves saves/<slot> behind).
             if floptle_vfs::remove_dir(&dir).is_ok()
                 && let Some(parent) = dir.parent()
@@ -159,7 +159,7 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.flush() — write every EDITED resident field to the save slot NOW
+    // terrain.flush() — write every EDITED resident field to the save slot now
     // (terrain.saveDir must be set). Call at checkpoints and on exit-to-menu so
     // a slot always reloads from fast files instead of regenerating; streaming
     // already flushes on its own when bodies stream out.
@@ -199,7 +199,7 @@ pub(crate) fn install_terrain_api(
     // standing on. Asking first is how on-demand generation stays smooth: build
     // one thing, wait until this goes quiet, build the next.
     //
-    // True while any field is generating OR streaming in.
+    // True while any field is generating or streaming in.
     {
         let b = busy.clone();
         if let Ok(f) = lua.create_function(move |_, ()| Ok(b.get())) {
@@ -210,7 +210,7 @@ pub(crate) fn install_terrain_api(
     // terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's
     // SAVE-SLOT directory for player-edited terrain (relative to the project
     // root, e.g. "saves/slot1/terrain"). While set, the streaming system loads
-    // a body's field from here FIRST (before the project file or its genspec)
+    // a body's field from here first (before the project file or its genspec)
     // and writes edited fields back here on evict/stop — so a player's digs
     // persist per save slot without ever touching the authored project data.
     // Pass "" to clear. G2 galaxy streaming (docs/subsystems/large-world-space.md).
@@ -220,7 +220,7 @@ pub(crate) fn install_terrain_api(
             match path {
                 Some(p) => {
                     // The same rule as `deleteSaveDir`, for the same reason:
-                    // edited fields are WRITTEN here, and a directory outside
+                    // edited fields are written here, and a directory outside
                     // the project is not a save slot.
                     if !p.is_empty() && floptle_vfs::contain(std::path::Path::new(""), &p).is_none() {
                         return Err(mlua::Error::RuntimeError(format!(
@@ -472,7 +472,7 @@ pub(crate) fn install_terrain_api(
             for c in cols.borrow().iter() {
                 let Some(t) = c.shape.chunk_terrain() else { continue };
                 // Through the node's full frame (rotation + uniform scale), and
-                // back to WORLD distance by the scale.
+                // back to world distance by the scale.
                 let s = t.scale.max(1e-6);
                 let local = (t.rot.inverse()
                     * Vec3::new(
@@ -510,7 +510,7 @@ pub(crate) fn install_terrain_api(
                 let inv = t.rot.inverse();
                 let down = (inv * Vec3::NEG_Y).normalize_or_zero();
                 // Farthest content point from the anchor bounds the start height:
-                // above THAT is above everything, no matter how the node is rotated.
+                // above that is above everything, no matter how the node is rotated.
                 let bound_r = Vec3::new(
                     lo.x.abs().max(hi.x.abs()),
                     lo.y.abs().max(hi.y.abs()),
@@ -539,7 +539,7 @@ pub(crate) fn install_terrain_api(
 }
 
 /// Parse the Lua `generatePlanet`/`setTerrainGen` opts table into a
-/// [`floptle_field::procgen::PlanetFill`] — one parser for BOTH the immediate
+/// [`floptle_field::procgen::PlanetFill`] — one parser for both the immediate
 /// generation queue and the on-node genspec (G2), so their vocabularies can
 /// never drift apart. Every field optional; camelCase keys.
 /// Every key a planet-generation options table reads (`floptle/0082`). The seven
@@ -563,8 +563,8 @@ pub(crate) fn planet_fill_from_table(
 ) -> mlua::Result<floptle_field::procgen::PlanetFill> {
     use crate::opts::check_keys;
     use floptle_field::procgen::{GlowPockets, LayerPaint, PlanetFill, SeamSpec};
-    // A planet is generated ONCE, on a background thread, and cached to disk.
-    // A misspelled `relif` therefore produces a world that is wrong and STAYS
+    // A planet is generated once, on a background thread, and cached to disk.
+    // A misspelled `relif` therefore produces a world that is wrong and stays
     // wrong across restarts, with nothing anywhere saying which key did it.
     const CALL: &str = "terrain.generatePlanet";
     let mut fill = PlanetFill::default();

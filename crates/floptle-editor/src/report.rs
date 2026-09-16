@@ -3,7 +3,7 @@
 //! **A crash is the moment a bug report is worth most and is hardest to ask for.** The
 //! window is gone, whatever was on screen went with it, and the only trace is a
 //! backtrace in a terminal the user probably never opened. So the panic hook writes what
-//! it knows to a file, and the NEXT launch notices that file and offers — once — to open
+//! it knows to a file, and the next launch notices that file and offers — once — to open
 //! the tracker with the details already filled in.
 //!
 //! Nothing is sent anywhere. The file is local, the user chooses whether to open a
@@ -35,7 +35,7 @@ fn environment() -> String {
 /// backtrace are still worth having) and additionally leaves a note on disk.
 pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
-    // Only the FIRST panic of a run gets written down.
+    // Only the first panic of a run gets written down.
     //
     // A graphics panic rarely arrives alone: it unwinds, a device object is
     // dropped mid-flight, its destructor panics too, and the run ends on

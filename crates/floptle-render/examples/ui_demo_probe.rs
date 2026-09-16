@@ -395,7 +395,7 @@ fn main() {
         save_png(&px, w, h, out);
         println!("  {out}: {} quads, {} texts", dl.quads.len(), dl.texts.len());
 
-        // Checks on the FIRST shot only; the others are for the eye.
+        // Checks on the first shot only; the others are for the eye.
         if !checked {
             checked = true;
             let shot = Shot { px, w, h };
@@ -424,9 +424,9 @@ fn main() {
                 ]) > 150.0,
                 "the focused button should be lit by its style's focus block"
             );
-            // WHERE YOU CLICK IS WHERE IT LOOKS. The hit test solves its own
+            // where you CLICK is where it looks. The hit test solves its own
             // copy of the tree, so this checks the two agree: every button's
-            // solved centre must land on painted pixels, and the SAME solve
+            // solved centre must land on painted pixels, and the same solve
             // without styles must not — otherwise this proves nothing, because
             // the shipped bug was the hit test using the unstyled rects.
             let mut worst = 0.0f32;

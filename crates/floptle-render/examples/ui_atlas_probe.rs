@@ -1,4 +1,4 @@
-//! Overflow the glyph atlas on purpose, and LOOK at what the player gets.
+//! Overflow the glyph atlas on purpose, and look at what the player gets.
 //!
 //! The bug this exists for (floptle/0033) was not a crash or a stutter — it was
 //! text quietly losing letters, forever, in a build nobody was watching a log

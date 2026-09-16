@@ -28,7 +28,7 @@ impl ShapeKind {
 }
 
 /// How a mesh was generated — carried on the [`MapMesh`] for as long as the
-/// mesh still IS that shape, so the editor can re-generate it with different
+/// mesh still is that shape, so the editor can re-generate it with different
 /// parameters (more stair steps, more cylinder sides) instead of making you
 /// delete and redraw.
 ///
@@ -37,7 +37,7 @@ impl ShapeKind {
 /// primitive and silently regenerating would throw your edit away.
 ///
 /// `#[serde(default)]` at the container: a spec stored by an older build is
-/// missing whatever fields have been added since, and losing the WHOLE mesh to
+/// missing whatever fields have been added since, and losing the whole mesh to
 /// a parse error over one absent knob would be a terrible trade.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -126,7 +126,7 @@ impl Builder {
         // `-0.0` and `0.0` are different bit patterns but the same point — a
         // trig-generated ring produces both (cos of an obtuse angle times a
         // zero radius), and treating them as separate verts silently tears the
-        // mesh open at the poles. Normalize before keying AND before storing.
+        // mesh open at the poles. Normalize before keying and before storing.
         let p = p + Vec3::ZERO;
         let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
         *self.ids.entry(key).or_insert_with(|| {
@@ -205,7 +205,7 @@ pub fn sphere(radius: f32, segments: u32, rings: u32) -> MapMesh {
     let n = segments.clamp(3, 128) as usize;
     let m = rings.clamp(2, 128) as usize;
     let at = |ri: usize, si: usize| {
-        // The poles are placed EXACTLY (sin(PI) is 8.7e-8, not 0 — trusting it
+        // The poles are placed exactly (sin(PI) is 8.7e-8, not 0 — trusting it
         // would leave a hair-thin ring instead of a single shared vertex).
         if ri == 0 {
             return Vec3::new(0.0, radius, 0.0);
@@ -277,7 +277,7 @@ pub fn cylinder(radius: f32, half_height: f32, sides: u32) -> MapMesh {
 /// level. That looks redundant until you drag a face: without them the side of
 /// the staircase would have vertices sitting in the middle of the back wall's
 /// edge (a T-junction), and pulling the back wall would tear it off the sides
-/// instead of stretching them. Every vertex on a face's edge IS a corner of
+/// instead of stretching them. Every vertex on a face's edge is a corner of
 /// that face — see `assert_no_t_junctions`.
 pub fn stairs(size: Vec3, steps: u32) -> MapMesh {
     let n = steps.clamp(1, 256) as usize;
@@ -355,7 +355,7 @@ pub fn stairs(size: Vec3, steps: u32) -> MapMesh {
 /// semicircle of the opening's half-width, approximated with `segments`
 /// spans. Two solid legs + a lintel whose underside follows the arc.
 ///
-/// The opening is sized in the SHAPE's units rather than as a bare radius, so
+/// The opening is sized in the shape's units rather than as a bare radius, so
 /// a tall archway reads as a doorway instead of a mouse hole: `opening.y`
 /// spans jamb + arc, and an opening shorter than its own half-width degrades
 /// to a plain semicircle.
@@ -367,7 +367,7 @@ pub fn stairs(size: Vec3, steps: u32) -> MapMesh {
 pub fn arch(half: Vec3, opening: Vec2, segments: u32) -> MapMesh {
     let (hx, hy, hz) = (half.x.max(0.1), half.y.max(0.1), half.z.max(0.05));
     // Order matters: the arc is a semicircle of the opening's half-width, so a
-    // WIDE, LOW arch has to give up width or the cap wouldn't fit under the
+    // WIDE, low arch has to give up width or the cap wouldn't fit under the
     // ceiling. Capping `w` first also keeps the `h` clamp's bounds ordered —
     // `f32::clamp` panics outright when min > max, which is how a broad, short
     // arch used to take the whole editor down with it.
@@ -406,10 +406,10 @@ pub fn arch(half: Vec3, opening: Vec2, segments: u32) -> MapMesh {
             Vec2::new(w * a.cos(), spring + w * a.sin())
         })
         .collect();
-    // Lintel: per-segment front/back spandrel + arc soffit + TOP (per segment
+    // Lintel: per-segment front/back spandrel + arc soffit + top (per segment
     // too — one big top quad would leave every arc vertex stranded on its
     // edge, which is what used to tear the mesh apart on a face drag).
-    // (the arc runs LEFT to RIGHT, so a1 is the +X end of each span)
+    // (the arc runs left to right, so a1 is the +X end of each span)
     for pair in arc.windows(2) {
         let (a0, a1) = (pair[0], pair[1]);
         // Front spandrel (+Z) and back spandrel (-Z).
@@ -474,7 +474,7 @@ mod tests {
     /// A T-junction looks harmless in a render (the seam is watertight enough)
     /// and is anything but in an editor: the two faces along that seam share
     /// only the end vertices, so dragging one leaves the other behind and the
-    /// shape tears open. Ty hit exactly this on the arch's lintel, whose top
+    /// shape tears open. A playtest hit exactly this on the arch's lintel, whose top
     /// used to be a single quad against a segmented row of spandrels.
     fn assert_no_t_junctions(name: &str, m: &MapMesh) {
         for (fi, f) in m.faces.iter().enumerate() {
@@ -721,7 +721,7 @@ mod tests {
             && f.verts.iter().all(|&v| m.verts[v as usize].y > -2.0 + 1.0)));
     }
 
-    /// The opening is sized in the SHAPE's units: a doorway 3 units tall in a
+    /// The opening is sized in the shape's units: a doorway 3 units tall in a
     /// 4-unit-tall arch really is 3 units tall, jamb plus arc — the old
     /// radius-only arch put a mouse hole at the foot of anything big.
     #[test]

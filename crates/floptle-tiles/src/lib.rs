@@ -21,11 +21,11 @@
 //! * [`grid`] — [`TileGrid`] and the tools: brush, rectangle, line, bucket,
 //!   stamp, move, re-orient, resize, retile.
 //! * [`collide`] — the greedy rectangle merge that makes a 100×100 solid floor
-//!   ONE box instead of ten thousand.
+//!   one box instead of ten thousand.
 //!
 //! ## What is deliberately not here
 //!
-//! **Layers.** A tilemap layer is a `Matter::Tilemap` NODE — it already has a
+//! **Layers.** A tilemap layer is a `Matter::Tilemap` node — it already has a
 //! transform, a material, a visibility flag, a name and a place in the hierarchy.
 //! A second layer concept inside the component would duplicate all five and then
 //! disagree with them: a layer you could hide in the Tiles tab but not in the

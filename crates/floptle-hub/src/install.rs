@@ -101,10 +101,10 @@ mod tests {
         tar.into_inner().unwrap().finish().unwrap();
     }
 
-    /// The whole install flow against a LOCAL bundle (the LocalBuilds / dev path): a
+    /// The whole install flow against a local bundle (the LocalBuilds / dev path): a
     /// local-file artifact URL is copied, checksum-verified, and unpacked into
     /// versions/<v>/ — no network. (Download/verify/unpack themselves are tested in
-    /// `floptle-dist`; what is tested HERE is the staging-and-commit around them.)
+    /// `floptle-dist`; what is tested here is the staging-and-commit around them.)
     #[test]
     fn install_from_local_bundle_end_to_end() {
         let tmp = tempfile::tempdir().unwrap();

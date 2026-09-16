@@ -17,9 +17,9 @@ use crate::ide::{LUA_API_WORDS, LUA_KEYWORDS};
 /// one and it changes everywhere in the editor — and then tell the site, or the
 /// two drift and "the same green" stops being the same green.
 ///
-/// Deliberately NOT theme-derived. A rating being good and a package asking for
+/// Deliberately not theme-derived. A rating being good and a package asking for
 /// the network are facts about the thing, not about the chrome around it, and
-/// they have to keep meaning the same under every theme. Everything that IS
+/// they have to keep meaning the same under every theme. Everything that is
 /// about the chrome — panel fills, text, hairlines — must still come from
 /// `ui.visuals()`.
 ///

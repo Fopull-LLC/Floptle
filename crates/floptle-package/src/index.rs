@@ -119,7 +119,7 @@ pub struct Listing {
     /// the same reason as unknown categories.
     #[serde(default, deserialize_with = "lenient_facets", skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<Facet>,
-    /// The square image that IS this row in a grid. An absolute URL here — the
+    /// The square image that is this row in a grid. An absolute URL here — the
     /// catalogue is read by things that cannot clone the repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<String>,
@@ -464,7 +464,7 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
 /// `Some(vec![])` (declares none), so it cannot just be `lenient_list` behind
 /// `#[serde(default)]`: that would collapse both onto an empty `Vec`. `#[serde(default)]`
 /// on the field already gives `None` for an ABSENT key without this function
-/// running at all; this only has to cover a key that IS present — `null`
+/// running at all; this only has to cover a key that is present — `null`
 /// reads the same as absent, an array keeps whatever entries this build
 /// recognises (unlike `lenient_list`, one bad entry does not need to be able
 /// to sink the array — there simply are so few permission kinds that a
@@ -476,11 +476,11 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
 /// what this asked for" into the safest possible answer defeats that
 /// (`floptle/0137`, found by an adversarial review re-reading this card
 /// before it shipped). So a value that is present but not an array at all,
-/// or an array where EVERY entry failed to parse (a genuinely empty array is
+/// or an array where every entry failed to parse (a genuinely empty array is
 /// still a clean, explicit "declares none" and is left alone), reads as
 /// [`Permission::ALL`] instead of `None` — assume the maximum until this
 /// catalogue entry is fixed, the same "err toward the alarming answer, not
-/// the quiet one" call this session already made for a body's sleep state.
+/// the quiet one" call already made for a body's sleep state.
 fn lenient_permissions<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Vec<Permission>>, D::Error> {
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(Index::parse(&text).unwrap(), idx);
     }
 
-    // ---- the catalogue an art package needs (0134) -------------------------
+    // ---- the catalogue an art package needs --------------------------------
 
     const RICH: &str = r#"{"packages":[
         {"id":"com.fopull.brutalist","name":"Brutalist Kit","author":"Fopull",
@@ -845,7 +845,7 @@ mod tests {
         };
         // One shelf.
         assert_eq!(idx.query(&q(vec![Category::Art3D], vec![])).len(), 1);
-        // Two shelves means BOTH, which only the tool is on.
+        // Two shelves means both, which only the tool is on.
         let both = idx.query(&q(vec![Category::EditorTool, Category::Scripts], vec![]));
         assert_eq!(both.len(), 1);
         assert_eq!(both[0].id, "com.third.tool");
@@ -978,11 +978,11 @@ mod tests {
         assert!(!bare.contains("permissions"), "{bare}");
     }
 
-    // ---- permissions (0137) -------------------------------------------------
+    // ---- permissions --------------------------------------------------------
 
     /// The same "absent is not zero" rule `rating`/`downloads` follow, with one
     /// more state: an author who ran the publisher and asks for nothing gets to
-    /// SAY so (`Some(vec![])`), which reads differently from a registry that
+    /// say so (`Some(vec![])`), which reads differently from a registry that
     /// simply never mentioned the field (`None`).
     #[test]
     fn permissions_absent_is_none_and_declaring_none_is_some_empty() {

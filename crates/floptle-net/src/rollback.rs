@@ -117,7 +117,7 @@ pub struct Rollback {
     newest_real: HashMap<PeerId, u64>,
     /// The newest tick the driver has simulated (0 = nothing yet).
     current: u64,
-    /// Newest tick where EVERY peer's real input is known.
+    /// Newest tick where every peer's real input is known.
     confirmed: u64,
     /// Rollback depth beyond which the driver should stall rather than
     /// re-simulate. See [`Rollback::should_stall`].
@@ -174,7 +174,7 @@ impl Rollback {
     }
 
     /// A peer joined or left. Their inputs are kept (harmless) but the confirmed
-    /// frontier is recomputed, since it depends on WHO must be heard from.
+    /// frontier is recomputed, since it depends on who must be heard from.
     pub fn set_peers(&mut self, peers: Vec<PeerId>) {
         self.peers = peers;
         self.recompute_confirmed();
@@ -185,7 +185,7 @@ impl Rollback {
         sampled + self.delay as u64
     }
 
-    /// Record the LOCAL peer's input, sampled on tick `sampled` and therefore
+    /// Record the local peer's input, sampled on tick `sampled` and therefore
     /// applied on `sampled + delay`. Returns the applied tick, which is what the
     /// driver sends to peers — they must never have to know our delay.
     pub fn add_local(&mut self, sampled: u64, input: NetInput) -> u64 {
@@ -225,7 +225,7 @@ impl Rollback {
         self.insert_logged(peer, applied, input)
     }
 
-    /// Record a real input for ANY peer — the local one included — at an
+    /// Record a real input for any peer — the local one included — at an
     /// already-shifted applied tick.
     ///
     /// What a replay and the referee do: every peer's input is already in the
@@ -314,7 +314,7 @@ impl Rollback {
                 None => ResolvedInput {
                     peer,
                     // Prefer what the original pass used: re-deriving repeat-last
-                    // now could pick a DIFFERENT source input (one that has since
+                    // now could pick a different source input (one that has since
                     // arrived for an earlier tick), making a replay disagree with
                     // the pass it is supposed to reproduce.
                     input: self
@@ -421,7 +421,7 @@ fn sustain(i: &NetInput) -> NetInput {
 
 #[cfg(test)]
 mod tests {
-    /// floptle/0045: two peers whose script state differs by ONE value must be
+    /// floptle/0045: two peers whose script state differs by one value must be
     /// told which value, on which node, in which script.
     ///
     /// The cross-platform failure that motivated this was a single Lua number —
@@ -452,7 +452,7 @@ mod tests {
         assert!(diff_details(&[(0, linux.clone()), (1, linux.clone())]).is_empty());
 
         // One peer missing a value entirely is also a divergence: the two
-        // snapshots are a different SHAPE, which is worth naming.
+        // snapshots are a different shape, which is worth naming.
         let short: Vec<(String, u64)> = linux[..3].to_vec();
         let out = diff_details(&[(0, linux), (1, short)]);
         assert_eq!(out.len(), 1);
@@ -482,10 +482,10 @@ mod tests {
         Rollback::new(P1, vec![P1, P2], delay)
     }
 
-    /// FIELD REGRESSION (floptle/0049): the input delay has to be choosable,
+    /// field regression (floptle/0049): the input delay has to be choosable,
     /// because the constant 2 is right only for peers in the same building.
     ///
-    /// Both sides of this run the SAME inputs over the same link — one-way
+    /// Both sides of this run the same inputs over the same link — one-way
     /// latency of four ticks, which is the 112 ms RTT two players in different
     /// houses actually measured. The only difference is the delay. At 2 the
     /// opponent's input lands two ticks after the tick that needed it, on
@@ -696,7 +696,7 @@ mod tests {
         let c = r.add_remote(P2, 2, held(0b1)).expect("correct");
         assert_eq!(c.tick, 2);
         // Replaying tick 2 uses the real input; tick 3 still has none, and must
-        // reuse the ORIGINAL guess rather than re-deriving from the new tick 2.
+        // reuse the original guess rather than re-deriving from the new tick 2.
         let t2 = r.replay_inputs_for(2);
         assert_eq!(t2.iter().find(|g| g.peer == P2).unwrap().input.actions, 0b1);
         let t3 = r.replay_inputs_for(3);
@@ -705,7 +705,7 @@ mod tests {
         assert!(!p2.real);
     }
 
-    /// After a replay records what it used, a SECOND correction for the same
+    /// After a replay records what it used, a second correction for the same
     /// tick is judged against the replay — not against the original pass, which
     /// no longer describes any state that exists.
     #[test]
@@ -722,7 +722,7 @@ mod tests {
             r.record_replay(t, &resolved);
         }
         // Tick 3's real input now arrives. The replay guessed 0b100 for it
-        // (carried from the original pass), so 0b100 must NOT correct again…
+        // (carried from the original pass), so 0b100 must not correct again…
         assert_eq!(r.add_remote(P2, 3, held(0b100)), None, "matches what the replay ran");
         // …while something else must.
         let mut r2 = rb(0);

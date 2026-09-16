@@ -32,7 +32,7 @@ const ROLLBACK_AUDIT_EVERY: u64 = 30;
 use crate::rollback::{Ctx, RollbackDriver};
 use crate::Editor;
 
-/// Which `Rollback` nodes are being run by NOTHING — not the driver, and not
+/// Which `Rollback` nodes are being run by nothing — not the driver, and not
 /// the global script passes.
 ///
 /// `reps` is `(entity, is_a_rollback_node)` for every `Replicated` entity,
@@ -56,7 +56,7 @@ pub(crate) fn orphaned_rollback_nodes(
         .collect()
 }
 
-/// The sibling fault the orphan check cannot see: a node the driver DOES own,
+/// The sibling fault the orphan check cannot see: a node the driver does own,
 /// but which also sits in the snapshot filter that gates every pass.
 ///
 /// The orphan check asks "does somebody run your ticks". This asks "does
@@ -112,13 +112,13 @@ impl Editor {
         delay: u8,
         seed: u64,
     ) {
-        // **Tick 0 is NOW, not now plus whatever the last frame owed.**
+        // **Tick 0 is now, not now plus whatever the last frame owed.**
         //
         // The fixed-step clock banks real time and spends it as ticks. A joiner
         // reaches this line at the end of a scene load — it receives `Scene`
         // and `RollbackStart` back to back, and loading the arena takes 100–200
         // ms — with that whole load banked and unspent. Left alone, those ticks
-        // are spent immediately AFTER the restart, as a burst, and the joiner's
+        // are spent immediately after the restart, as a burst, and the joiner's
         // tick 0 is really the host's tick 6, 7 or 8. The bank is clamped at
         // eight ticks, which is exactly the six-to-eight skew measured
         // (`floptle/0206`).
@@ -162,7 +162,7 @@ impl Editor {
         if d.nodes().is_empty() {
             // Nothing to drive; the session is an ordinary one. Not silent —
             // the host announced a match, so a scene with no Rollback nodes on
-            // THIS machine means the two projects disagree about the scene.
+            // this machine means the two projects disagree about the scene.
             for f in d.faults.drain(..) {
                 self.console.push(floptle_script::LogLevel::Warn, f, None);
             }
@@ -179,18 +179,18 @@ impl Editor {
             );
             return;
         }
-        // The driver runs these nodes' TICKS itself, in its own order — so they
+        // The driver runs these nodes' ticks itself, in its own order — so they
         // leave the global `fixedUpdate` and `update` passes. Their `lateUpdate`
         // stays on the global pass: no driver replays it, and a rollback frame
         // runs many ticks, so replaying it would fire it N times (floptle/0042).
         // `run_*_for` bypasses every filter, which is the same arrangement the
-        // host already uses for remote-owned Predicted nodes. ADDED to the
+        // host already uses for remote-owned Predicted nodes. added to the
         // driver filter, never assigned over the session's own: on a client the
         // session is already skipping every authority-driven node.
         //
-        // …but FIRST take them out of the session's sets. On a client,
+        // …but first take them out of the session's sets. On a client,
         // `net_client_side_setup` ran at join time and again at Welcome, and
-        // both of those are structurally BEFORE this moment — so
+        // both of those are structurally before this moment — so
         // `rollback_filter_eids()` was empty for them and every fighter landed
         // in `script_skip`. That set gates every pass INCLUDING `lateUpdate`,
         // which no driver replays, and nothing else ever removes them. The
@@ -207,7 +207,7 @@ impl Editor {
         // A new match: both once-per-session diagnostics arm again.
         self.net_flow_reported = 0;
         self.net_rollback_orphans_checked = false;
-        // The warm-up ticks nobody sampled: seeded locally AND shipped, or the
+        // The warm-up ticks nobody sampled: seeded locally and shipped, or the
         // confirmed frontier could never leave zero and every peer would stall
         // a few ticks into the match with nothing to wait for.
         for (applied, input) in d.net.prime_warmup() {
@@ -244,7 +244,7 @@ impl Editor {
         on && self.game_tick_no.is_multiple_of(ROLLBACK_AUDIT_EVERY)
     }
 
-    /// Report an audit's findings — LOCAL, and deliberately not a desync.
+    /// Report an audit's findings — local, and deliberately not a desync.
     ///
     /// Nothing has gone wrong between the peers yet: this machine is about to
     /// be wrong on its own. Ending the match to say so would be the desync
@@ -393,7 +393,7 @@ impl Editor {
             return;
         }
         let delay = self.net_choose_input_delay();
-        // The seed is drawn ONCE, here, from the wall clock — the only place in
+        // The seed is drawn once, here, from the wall clock — the only place in
         // the whole feature where a clock is allowed near the simulation. From
         // this moment it is replicated state like any other, and every draw
         // comes from (seed, tick, index).
@@ -502,7 +502,7 @@ impl Editor {
         // The other verdict, and the one that used to end matches: the referee
         // against the field. A cheat changes one machine; a referee fault
         // changes only the referee, so everybody disagreeing with it and
-        // nobody disagreeing with each other means IT is wrong. The match keeps
+        // nobody disagreeing with each other means it is wrong. The match keeps
         // going and this says why (floptle/0041).
         let outliers =
             self.net_server.as_mut().map(|s| s.take_referee_outliers()).unwrap_or_default();
@@ -521,7 +521,7 @@ impl Editor {
         }
     }
 
-    /// Write the match's input log out as a replay. Inputs and the seed ARE the
+    /// Write the match's input log out as a replay. Inputs and the seed are the
     /// match, so this is kilobytes for a full set and playback is not playback —
     /// it is running the match again.
     fn net_save_replay(&mut self) {
@@ -649,7 +649,7 @@ impl Editor {
         let Some(mut d) = self.net_rollback.take() else { return };
         // Take back exactly the half of the filters the driver added. `net_stop`
         // clears both wholesale afterwards and would not have needed this, but a
-        // scene switch does NOT — and an entity index left behind here is one
+        // scene switch does not — and an entity index left behind here is one
         // the allocator hands to an unrelated node in the next scene, whose
         // scripts would then quietly never run.
         self.script_host.shrink_filters(d.eids());
@@ -685,7 +685,7 @@ impl Editor {
         let driven = self.rollback_filter_eids();
         self.net_publish_driven(&driven);
         self.net_report_driven_drops();
-        // 0. Hosting: pull whatever arrived since the last tick BEFORE draining,
+        // 0. Hosting: pull whatever arrived since the last tick before draining,
         //    the same tick-start pump the remote-Predicted path does. Without
         //    it an input that landed during the frame waits a whole tick, and
         //    every tick it waits is one more tick to re-simulate when it turns
@@ -722,7 +722,7 @@ impl Editor {
             // The DEVICE slot, not the roster slot — see
             // `RollbackDriver::local_device_slot`. The input is applied to the
             // roster slot on every machine (the driver does that from `local`),
-            // but it is READ from this machine's own player-one hardware and
+            // but it is read from this machine's own player-one hardware and
             // bindings. Sampling by roster slot handed a joiner the couch's
             // player-two layout, and a joiner on a gamepad nothing whatsoever.
             let slot = self
@@ -740,7 +740,7 @@ impl Editor {
 
         // 3. Advance — resolving any banked correction first.
         //
-        // ⚠ From this `take` to the restore at the bottom there is NO early
+        // ⚠ From this `take` to the restore at the bottom there is no early
         // return, deliberately. An exit that skips the restore DROPS the driver
         // — and a dropped driver leaves its fighters in the script filters with
         // nothing running them, for the rest of the match, with no error. That
@@ -815,7 +815,7 @@ impl Editor {
         self.net_rollback_check_orphans();
     }
 
-    /// Every `Rollback` node must be run by SOMETHING each tick: the driver, or
+    /// Every `Rollback` node must be run by something each tick: the driver, or
     /// the global script passes. Say so loudly when neither can.
     ///
     /// The failure this guards is invisible from Lua and invisible on screen:
@@ -855,7 +855,7 @@ impl Editor {
                 .map(|n| n.0.clone())
                 .unwrap_or_else(|| format!("#{}", e.index()))
         };
-        // The pass-level sibling: owned by the driver, but ALSO in the filter
+        // The pass-level sibling: owned by the driver, but also in the filter
         // that gates every pass — so its `lateUpdate` runs nowhere.
         let starved: Vec<String> =
             late_starved_rollback_nodes(&reps, &driven, |eid| {
@@ -900,7 +900,7 @@ impl Editor {
 
     /// Name the value the peers disagreed about, once their breakdowns arrive.
     ///
-    /// The breakdown crosses the wire AFTER the desync, so this runs on later
+    /// The breakdown crosses the wire after the desync, so this runs on later
     /// frames until the reports are in. What it prints is the thing the ticket
     /// asked for and the checksum always knew:
     ///
@@ -1048,7 +1048,7 @@ impl Editor {
                 ),
                 None,
             );
-            // Post-mortem: publish OUR breakdown of the offending tick so the
+            // Post-mortem: publish our breakdown of the offending tick so the
             // host can name the value that actually diverged. Costs nothing in
             // a healthy session — it only ever runs once the match is lost.
             let names: std::collections::HashMap<u32, String> = self
@@ -1095,7 +1095,7 @@ pub(crate) struct RollbackStats {
     pub checksum_tick: u64,
     pub desynced: bool,
     /// This peer's own confirmed frontier, and how far the local simulation has
-    /// run past it. `current − confirmed` IS the stall: at the depth cap the
+    /// run past it. `current − confirmed` is the stall: at the depth cap the
     /// driver stops rather than guess further.
     pub confirmed: u64,
     pub current: u64,
@@ -1159,8 +1159,8 @@ mod tests {
     use super::{late_starved_rollback_nodes, orphaned_rollback_nodes};
     use std::collections::HashSet;
 
-    /// FIELD REGRESSION (floptle/0042): the pass-level sibling of the orphan
-    /// check. A node the driver owns is NOT an orphan — somebody runs its ticks
+    /// field regression (floptle/0042): the pass-level sibling of the orphan
+    /// check. A node the driver owns is not an orphan — somebody runs its ticks
     /// — so the orphan check is blind to it. But if it is also in the snapshot
     /// filter, its `lateUpdate` runs nowhere: the driver replays `fixedUpdate`
     /// and `update`, and nothing replays the late pass.
@@ -1184,7 +1184,7 @@ mod tests {
             world.query::<Replicated>().map(|(e, r)| (e, r.mode.is_rollback())).collect();
         let driven: HashSet<u32> = fighters.iter().map(|e| e.index()).collect();
 
-        // The fix: driven, and NOT in the all-passes filter.
+        // The fix: driven, and not in the all-passes filter.
         assert!(
             late_starved_rollback_nodes(&reps, &driven, |_| false).is_empty(),
             "a driver-owned node outside the snapshot filter keeps its late pass"
@@ -1208,7 +1208,7 @@ mod tests {
         );
     }
 
-    /// FIELD REGRESSION (floptle/0049): a delay derived from the link, not a
+    /// field regression (floptle/0049): a delay derived from the link, not a
     /// constant. The constant was 2 — right for a LAN, and wrong for anyone
     /// playing across a country, which is most matches.
     #[test]
@@ -1225,14 +1225,14 @@ mod tests {
         const { assert!(floptle_net::MAX_DELAY >= floptle_net::DEFAULT_INPUT_DELAY) };
     }
 
-    /// FIELD REGRESSION (floptle/0040): the client's join sequence must never
+    /// field regression (floptle/0040): the client's join sequence must never
     /// leave a `Rollback` node filtered with no driver holding it.
     ///
     /// The sequence spans three steps that each own part of the answer, and the
     /// middle one runs while the driver does not exist:
     ///
     /// 1. scene switch → `net_rollback_stop()` — the old driver goes
-    /// 2. `net_client_side_setup` → `plan_client_side` with an EMPTY rollback
+    /// 2. `net_client_side_setup` → `plan_client_side` with an empty rollback
     ///    set, which classifies the fighters as ordinary synced nodes and
     ///    filters them
     /// 3. `net_rollback_start` → `rebind` + `extend_filters` — the new driver
@@ -1240,7 +1240,7 @@ mod tests {
     ///
     /// Step 2 is a genuine "filtered with no driver" window. It is fine because
     /// step 3 closes it in the same frame — but only if step 3 actually runs
-    /// AND the driver it installs survives. It stopped surviving, and this is
+    /// and the driver it installs survives. It stopped surviving, and this is
     /// the shape that catches it.
     #[test]
     fn the_client_join_sequence_leaves_no_rollback_node_unrun() {
@@ -1262,7 +1262,7 @@ mod tests {
         let all: Vec<(floptle_core::Entity, Replicated)> =
             world.query::<Replicated>().map(|(e, r)| (e, *r)).collect();
 
-        // Step 2, with no driver: the fighters ARE filtered and nothing drives
+        // Step 2, with no driver: the fighters are filtered and nothing drives
         // them. The window is real — assert it, so the test is honest about
         // what it is checking rather than accidentally passing.
         let plan = crate::net::plan_client_side(&all, None, &HashSet::new());
@@ -1333,7 +1333,7 @@ mod tests {
 
     /// Player-facing sentences must not carry a flattened line continuation.
     ///
-    /// A multi-line string in Rust keeps the newline AND the source indentation
+    /// A multi-line string in Rust keeps the newline and the source indentation
     /// unless the line ends in `\`. Drop the backslash — or re-wrap a string
     /// that had one — and the message still compiles, still reads correctly in
     /// the source, and reaches the Console with a twenty-space hole punched

@@ -58,7 +58,7 @@ pub(crate) fn component_header(
     let mut copy = false;
     let mut paste = false;
     let mut remove = false;
-    // Right-to-left: the … menu is laid out FIRST, so it's pinned to the
+    // Right-to-left: the … menu is laid out first, so it's pinned to the
     // visible right edge no matter how long the title is — the title takes
     // whatever is left and truncates. (Title-first would push the menu past
     // the panel edge the moment the title outgrows the row.)
@@ -427,7 +427,7 @@ fn script_tunables_ui(
     changed
 }
 
-/// The script's declared value, when the scene is holding a DIFFERENT one —
+/// The script's declared value, when the scene is holding a different one —
 /// `None` when they agree, or when the script declares nothing comparable.
 ///
 /// Compared as text on purpose: what a person wants to see is the literal they
@@ -698,17 +698,17 @@ pub(crate) fn material_props_ui(
     texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
-    // Every picker in here is identified RELATIVE to the Ui it was drawn in.
+    // Every picker in here is identified relative to the Ui it was drawn in.
     // Absolute ids (`Id::new("mat_tex")`) made two material editors on screen at
     // once — the Inspector's and the Map tab's per-slot one, which live in
     // different dock panels and so are both visible — share one popup: opening
     // either one drew two popups under the same id, and each counted the click
-    // that opened it as a click OUTSIDE the other, so the dropdown shut on the
+    // that opened it as a click outside the other, so the dropdown shut on the
     // frame it opened and the texture could never be picked. One salt per call
     // site is what makes them independent.
     let salt = ui.id();
 
-    // The base texture's spritesheet grid comes from the TEXTURE's asset settings
+    // The base texture's spritesheet grid comes from the texture's asset settings
     // (slice the .png once, every material using it inherits the same cells), so
     // re-slicing an asset re-slices its materials. A cell that no longer exists
     // falls back into range instead of drawing off the end of the sheet.
@@ -858,7 +858,7 @@ pub(crate) fn material_props_ui(
             r.changed = true;
         }
         // Straight to the graph. Everywhere a shader can be PICKED it can now be
-        // OPENED, because the alternative is finding it again in the Assets
+        // opened, because the alternative is finding it again in the Assets
         // panel every time you want to change a line of it.
         if let Some(path) = m.shader.clone()
             && ui
@@ -999,7 +999,7 @@ pub(crate) fn material_props_ui(
         }
     }
 
-    // ---- the SURFACE MAPS. The answer to "where do I put a normal map".
+    // ---- the surface MAPS. The answer to "where do I put a normal map".
     //
     // Above the lighting model on purpose: a normal map and an occlusion map
     // describe the surface itself and apply under either model, so they must not
@@ -1299,7 +1299,7 @@ pub(crate) fn material_props_ui(
         });
     });
 
-    // Rim, ambient and opacity are NOT part of either lighting model — a rim
+    // Rim, ambient and opacity are not part of either lighting model — a rim
     // glow is art direction and opacity is opacity — so they stay live whichever
     // model is selected.
     ui.add_enabled_ui(!m.unlit, |ui| {
@@ -1349,7 +1349,7 @@ pub(crate) fn material_props_ui(
 }
 impl EditorTabViewer<'_> {
     /// The Inspector for a selected armature bone: shows which mesh it belongs to and
-    /// edits its LOCAL transform. Editing auto-keys the bone into the open animator clip
+    /// edits its local transform. Editing auto-keys the bone into the open animator clip
     /// at the playhead — so posing a bone and animating it are one act — and the
     /// Animating-tab preview shows it live. Numeric for now (a bone isn't an ECS entity,
     /// so the move gizmo doesn't target it yet), mirroring the BoneAttach offset editor.
@@ -1547,7 +1547,7 @@ impl EditorTabViewer<'_> {
         }
 
         // Auto-key into the open clip at the playhead — but only when the Animating tab is
-        // targeting THIS mesh with a clip open (bone channels are name-bound to this
+        // targeting this mesh with a clip open (bone channels are name-bound to this
         // skeleton, so writing into another mesh's clip would be wrong).
         ui.separator();
         let can_key = self.anim_ui.target == Some(mesh) && self.anim_ui.clip_doc.is_some();
@@ -1692,7 +1692,7 @@ impl EditorTabViewer<'_> {
         // moment a node or asset is also selected, so no stale-selection
         // clearing needed.
         //
-        // …except under a HELD selection, where the model stays selected on
+        // …except under a held selection, where the model stays selected on
         // purpose — the lock has to have something to hold, and the rig is only
         // drawn for a mesh that is selected. So a bone of the held model still
         // takes the panel; `bone_inspector_ui` draws the release for it.
@@ -1981,7 +1981,7 @@ impl EditorTabViewer<'_> {
                             }
                             ui.small("only shadows what is ON SCREEN — nothing off the edge of the frame casts one");
                         });
-                        // Reflections of the SCENE. Sits with the shadow knobs
+                        // Reflections of the scene. Sits with the shadow knobs
                         // rather than with fog because it is the same kind of
                         // thing: a scene-wide switch that costs a march, reads
                         // the depth buffer, and only sees what is on screen.
@@ -2031,7 +2031,7 @@ impl EditorTabViewer<'_> {
                         ui.small("off screen, a reflection falls back to the SKY — place a ◍ Reflection Probe to give a room something else to show");
                         // Glass, in the same place as reflections and for the
                         // same reason: it is what a surface shows of the scene
-                        // when the light goes THROUGH it rather than off it, and
+                        // when the light goes through it rather than off it, and
                         // it is a scene-wide cost rather than a material one.
                         ui.separator();
                         let mut layers = l.refraction_layers as i32;
@@ -2207,8 +2207,8 @@ impl EditorTabViewer<'_> {
                 // name row, one click, always visible. It was reachable only
                 // from a right-click menu, which is fine for something you do
                 // once and wrong for something you do while trying things out —
-                // and a node you cannot SEE the state of is a node you forget is
-                // off. The checkbox reads the node's OWN flag; if an ancestor is
+                // and a node you cannot see the state of is a node you forget is
+                // off. The checkbox reads the node's own flag; if an ancestor is
                 // what switched it off, the line under it says so, because
                 // ticking this one would then change nothing visible.
                 let off_self = world.get::<floptle_core::Disabled>(e).is_some();
@@ -2224,7 +2224,7 @@ impl EditorTabViewer<'_> {
                         .changed()
                     {
                         // The whole selection, so switching six things off is one
-                        // gesture — and the TARGET state is decided here, once,
+                        // gesture — and the target state is decided here, once,
                         // rather than each node flipping its own way.
                         let targets: Vec<floptle_core::Entity> = if self.selection.contains(&e) {
                             self.selection.clone()
@@ -2242,7 +2242,7 @@ impl EditorTabViewer<'_> {
                     // drawn for the selected node — which is what guarantees the
                     // switch is on screen whenever the lock is on.
                     //
-                    // The state IS the alpha: opaque = held, faded = free. One
+                    // The state is the alpha: opaque = held, faded = free. One
                     // thing to look at, no second label saying which.
                     let locked = self.selection_locked;
                     let tint = {
@@ -2283,7 +2283,7 @@ impl EditorTabViewer<'_> {
                 // Project Settings → Layers). Tags: free-form chips scripts find
                 // with `findTagged` / compare with `node:hasTag`.
                 ui.horizontal_wrapped(|ui| {
-                    // "collision layer", not "layer". A node has TWO things
+                    // "collision layer", not "layer". A node has two things
                     // called a layer — this one, which answers "does this hit
                     // that", and the sorting layer below, which answers "which
                     // draws in front" — and they are deliberately independent: a
@@ -2353,7 +2353,7 @@ impl EditorTabViewer<'_> {
                 });
                 // What draws in front of what, for a flat scene.
                 //
-                // Offered on anything FLAT, whether or not the project has named
+                // Offered on anything flat, whether or not the project has named
                 // a second sorting layer. Gating it on a second layer hid the
                 // whole of Y-sorting from every new project — and Y-sorting is
                 // the one thing here that needs no layers at all: a top-down
@@ -2402,7 +2402,7 @@ impl EditorTabViewer<'_> {
                                 "which sorting layer this draws in — later layers draw in \
                                  front. Project Settings names them.",
                             );
-                        // How the place WITHIN the layer is decided. Offered
+                        // How the place within the layer is decided. Offered
                         // beside the layer rather than hidden behind it, because
                         // "by Y" is the answer for a whole genre and a developer
                         // who does not know it exists will write it in Lua.
@@ -2430,7 +2430,7 @@ impl EditorTabViewer<'_> {
                                 cmd.set_sort_mode = Some((e, m));
                             }
                         }
-                        // `order` stays live under BOTH modes. Y is a tiebreak
+                        // `order` stays live under both modes. Y is a tiebreak
                         // inside an order, not a replacement for it, and hiding
                         // the field would teach the wrong model — the one where
                         // turning Y-sorting on throws away the layering you
@@ -2692,7 +2692,7 @@ impl EditorTabViewer<'_> {
                                 );
                             }
                             Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
-                                // `ppu` measures the TEXTURE, so with no texture
+                                // `ppu` measures the texture, so with no texture
                                 // there is nothing to measure and the sprite
                                 // falls back to `size` — a field this mode hides.
                                 // Silently, that is a headline control that does
@@ -3168,7 +3168,7 @@ impl EditorTabViewer<'_> {
                                     .changed()
                                 {
                                     // Turning it off parks the angle at omni and
-                                    // KEEPS the softness, so switching a spot off
+                                    // keeps the softness, so switching a spot off
                                     // and on again gives back the same cone
                                     // rather than the default one.
                                     *spot_angle =
@@ -4497,7 +4497,7 @@ impl EditorTabViewer<'_> {
                                 // One collapsing section per effect, each with
                                 // its own reset, because a grade you cannot get
                                 // back to neutral is a grade you stop touching.
-                                // Every heading says what OFF is, so "is this
+                                // Every heading says what off is, so "is this
                                 // doing anything" is answerable at a glance.
                                 let acc = egui::Color32::from_rgb(255, 200, 80);
 
@@ -4557,7 +4557,7 @@ impl EditorTabViewer<'_> {
                                 // ---- the scene's own screen shaders ---------
                                 //
                                 // Placed after the tonemap and before the grade
-                                // because that is where they RUN, and a panel
+                                // because that is where they run, and a panel
                                 // that lists effects in an order the frame does
                                 // not follow is a panel that teaches the wrong
                                 // thing.
@@ -4850,7 +4850,7 @@ impl EditorTabViewer<'_> {
                                             "focus distance")
                                     .on_hover_text("world units from the camera that are sharp. 0 = off.")
                                     .changed();
-                                // Focus on a NODE instead of a number: the focus
+                                // Focus on a node instead of a number: the focus
                                 // distance becomes the camera's distance to it,
                                 // every frame. This is what a rack focus is made
                                 // of, and by hand it means a script measuring a
@@ -5149,7 +5149,7 @@ impl EditorTabViewer<'_> {
                         cmd.remove_material = Some(e);
                     }
                     ui.indent("material_props", |ui| {
-                        // **On a ▫ Sprite the NODE owns the cell, not the
+                        // **On a ▫ Sprite the node owns the cell, not the
                         // material.** The picker below edits `Material::cell`,
                         // which a Sprite node's draw does not read — so clicking
                         // a frame in the grid changed a number and nothing on
@@ -5194,7 +5194,7 @@ impl EditorTabViewer<'_> {
                     });
                 }
 
-                // ===== The model's OWN materials =====
+                // ===== The model's own materials =====
                 //
                 // An imported model arrives with a material per part, and until
                 // now the only way to see them was to select the model in the
@@ -5267,7 +5267,7 @@ impl EditorTabViewer<'_> {
                                 );
                             // Written straight into the world and marked
                             // `inspector_changed`, like every other property row
-                            // here — that is what coalesces a drag into ONE undo
+                            // here — that is what coalesces a drag into one undo
                             // step. Going through a command would call `record()`
                             // per changed frame, so dragging the swatch for a
                             // second would push sixty snapshots of the scene and
@@ -5305,7 +5305,7 @@ impl EditorTabViewer<'_> {
                                 cmd.inspector_changed = true;
                             }
                         });
-                        // **The two lanes that ADD light.** A multiply can only
+                        // **The two lanes that add light.** A multiply can only
                         // take light away, which is why a team colour on a
                         // mid-toned model reads as a slightly warm grey and why
                         // this component kept losing the job to a Material. See
@@ -5382,7 +5382,7 @@ impl EditorTabViewer<'_> {
                         });
                     }
                     // One row per sub-object, because that is what an override is
-                    // keyed by. A flattened prop's object name IS its material
+                    // keyed by. A flattened prop's object name is its material
                     // name, so the two read the same there.
                     // Which part is SELECTED right now — the object picked in the
                     // viewport or in Objects & Rig. When that changes, this list
@@ -5391,7 +5391,7 @@ impl EditorTabViewer<'_> {
                     // past eleven open material editors to reach the one you are
                     // looking at, which is the opposite of what clicking it meant.
                     //
-                    // Forced only on the frame the selection CHANGES (`open(None)`
+                    // Forced only on the frame the selection changes (`open(None)`
                     // every other frame), so opening a second part to compare, or
                     // closing the one you are on, still works and still sticks.
                     let sel_part: Option<String> = cur_bone
@@ -5408,7 +5408,7 @@ impl EditorTabViewer<'_> {
                                 d.insert_temp(id, sel_part.clone());
                             }
                             // Never on the first frame this node is inspected:
-                            // there is no selection to have moved TO yet, and
+                            // there is no selection to have moved to yet, and
                             // slamming every part shut on arrival would look like
                             // the panel losing its place.
                             moved && prev.is_some()
@@ -5457,7 +5457,7 @@ impl EditorTabViewer<'_> {
                         });
                         if make {
                             // Seeded with what the part already looks like — its
-                            // imported colour AND its texture, extracted from
+                            // imported colour and its texture, extracted from
                             // the model on the spot if it has one. An override
                             // is a whole material, so without the texture
                             // "override this part" would mean "make this part
@@ -5772,7 +5772,7 @@ impl EditorTabViewer<'_> {
                     ui.indent("rb_props", |ui| {
                         if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
                             use floptle_core::{BodyKind, BodyMode};
-                            // The ONE dropdown that replaces hand-freezing axes +
+                            // The one dropdown that replaces hand-freezing axes +
                             // disabling gravity. Structural (a Static body is a
                             // baked collider, not a body) — rebuild the live sim.
                             ui.horizontal_wrapped(|ui| {
@@ -5987,7 +5987,7 @@ impl EditorTabViewer<'_> {
                             });
                         }
                     });
-                    // Trigger: the BODY becomes a sensor — it never blocks or gets
+                    // Trigger: the body becomes a sensor — it never blocks or gets
                     // blocked (and rays skip it), but overlap fires the trigger
                     // hooks. Moving pickups, sweeping zones, pass-through projectiles.
                     let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
@@ -7124,7 +7124,7 @@ fn lighting_2d_row(
             );
         }
         // The shape of the falloff (`floptle/0126`). An art control: a hard pool
-        // with a defined edge, or a soft glow that reaches. It was ALSO sold as
+        // with a defined edge, or a soft glow that reaches. It was also sold as
         // the way to dodge posterize banding, and that is withdrawn — the light
         // is never quantised now (`floptle/0127`).
         let range = match world.get::<Matter>(e) {
@@ -7398,7 +7398,7 @@ fn node_has_component(
 /// was invisible — naming the sixteen in a hover was the half that does not
 /// help, because "twelve, plus whatever the room has" is exactly the arithmetic
 /// that crosses it. So the assertion worth being able to make is "does this
-/// actually carry the LIVE count, and does its tone change when something was
+/// actually carry the live count, and does its tone change when something was
 /// cut", and that is what this shape allows.
 fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
     if dropped > 0 {
@@ -7417,7 +7417,7 @@ mod tests {
 
     /// **A cap the scene can see** (`floptle/0116`).
     ///
-    /// The load-bearing assertion is that the LIVE count is in the string. The
+    /// The load-bearing assertion is that the live count is in the string. The
     /// original state of this was a hover naming sixteen and nothing else, which
     /// is a number nobody reads at the moment it matters — so a version of this
     /// that only said "16" would be the bug, and asserting on the live number is
@@ -7430,7 +7430,7 @@ mod tests {
         assert!(msg.contains("16"), "…and the cap is the other half: {msg}");
         assert!(!warn, "nothing was cut, so nothing is being warned about");
 
-        // Over it: the tone changes AND the number that was cut is named.
+        // Over it: the tone changes and the number that was cut is named.
         let (msg, warn) = light_slot_line((16, 3));
         assert!(warn, "a cut look must not be reported in the same voice as a fine one");
         assert!(msg.contains('3'), "how many were cut is the actionable number: {msg}");
@@ -7517,7 +7517,7 @@ mod tests {
              \x20 debugScale = 1.0,\n\
              }\n",
         );
-        // Values as the editor would have seeded them (deliberately NOT in
+        // Values as the editor would have seeded them (deliberately not in
         // declaration order, and alphabetically wrong, to prove the order comes
         // from the source).
         let mut inst = floptle_core::ScriptInst {
@@ -7571,7 +7571,7 @@ mod tests {
         assert!(pos("sas") < pos("Audio") && pos("Audio") < pos("clip"), "sections stay grouped");
     }
 
-    /// The hand-off the whole feature stands on: slice the TEXTURE once, and a
+    /// The hand-off the whole feature stands on: slice the texture once, and a
     /// material using it inherits the grid, shows the cell picker, and hides the
     /// tiling rows (a sheet draws one cell, so tiling would sample its
     /// neighbours). Without the grid, the section is exactly what it always was.
@@ -7703,7 +7703,7 @@ mod tests {
         assert!(painted.contains("nothing to cast from"), "the reason is missing:\n{painted}");
 
         // Switch its collision on and it casts, with no second authoring step —
-        // a level's collision IS its light occlusion.
+        // a level's collision is its light occlusion.
         let mut world = world;
         world.insert(e, floptle_core::Collidable);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
@@ -7786,7 +7786,7 @@ mod tests {
     /// on screen cannot overflow and a guard that only sees the closed state
     /// proves nothing about the open one.
     ///
-    /// **And with the texture settings a sheet needs.** This passed an EMPTY
+    /// **And with the texture settings a sheet needs.** This passed an empty
     /// settings map, so `sheet_of` answered 1×1 and the spritesheet cell picker
     /// — the widest geometry in the component, a full-width grid of one button
     /// per cell — was never constructed by the guard at all. A guard that is

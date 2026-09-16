@@ -1,4 +1,4 @@
-//! Contact shadows: does a mesh that casts NOTHING through the field cast a
+//! Contact shadows: does a mesh that casts nothing through the field cast a
 //! shadow where it touches the floor.
 //!
 //! That framing is the point. A moving mesh is not in the SDF field, so it casts
@@ -27,7 +27,7 @@ const H: u32 = 320;
 /// shadow it should cast runs a long way across the floor beside it — long
 /// enough that the trace's REACH is what decides where it stops.
 const SLAB: Vec3 = Vec3::new(0.0, 0.9, 0.0);
-/// Toward the sun — low and to the right, so the shadow falls to the LEFT.
+/// Toward the sun — low and to the right, so the shadow falls to the left.
 const SUN: Vec3 = Vec3::new(0.72, 0.60, 0.35);
 
 fn main() {
@@ -188,7 +188,7 @@ fn render(gpu: &Gpu, c: Contact, label: &str) -> Vec<[u8; 4]> {
     );
     raymarch.set_depth_prime(gpu, raster.prepass_view());
 
-    // The field globals: no volumes, no blobs, NO PROXIES. The marched shadow
+    // The field globals: no volumes, no blobs, no PROXIES. The marched shadow
     // has nothing to hit, so whatever appears on the floor is the screen trace.
     raymarch.upload_globals(gpu, RaymarchGlobals {
         view_proj: vp.to_cols_array_2d(),

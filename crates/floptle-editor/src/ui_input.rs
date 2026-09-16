@@ -82,7 +82,7 @@ fn drag_step(
                 ev.push((t, "dropped"));
                 ev.push((d.source, "dropped"));
             }
-            // A drop outside every target is STILL a drop as far as the source
+            // A drop outside every target is still a drop as far as the source
             // is concerned: it has to hear something, or a half-finished
             // gesture leaves an item stuck to the cursor forever.
             None => ev.push((d.source, "dragCancel")),
@@ -207,7 +207,7 @@ impl Editor {
         let Some(mut state) = self.ui_edit else {
             // Nothing focused: the editing keys are dropped rather than banked
             // (clicking into a field would otherwise replay everything typed at
-            // the menu before it), and `input_typed` is LEFT ALONE so it
+            // the menu before it), and `input_typed` is left ALONE so it
             // reaches `input.typed()`. A focused field consumes typing; without
             // one, the game gets it. That is the whole suppression rule.
             self.ui_text_ops.clear();
@@ -314,7 +314,7 @@ impl Editor {
     /// Advance a drag. `items` is this frame's interactive elements with the
     /// pointer already in their layer's design units.
     ///
-    /// Hooks fire on BOTH ends, because both ends have something to say: the
+    /// Hooks fire on both ends, because both ends have something to say: the
     /// source knows what is being carried, the target knows whether it will
     /// take it. `dropped` reaches the target with the source's name, and the
     /// source hears `dropped` too so it can remove the item it gave away.

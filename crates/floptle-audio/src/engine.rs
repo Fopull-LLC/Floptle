@@ -211,7 +211,7 @@ impl AudioEngine {
         id
     }
 
-    /// Start a voice fed by a LIVE stream — a remote player's microphone
+    /// Start a voice fed by a live stream — a remote player's microphone
     /// (`floptle/0180`). Identical to [`Self::play`] in every other way: it is
     /// spatialised, routed through a mixer track, and retuned with
     /// [`Self::update_params`], because it really is an ordinary voice.

@@ -53,7 +53,7 @@ fn main() {
         terrain.paint([0.0, 0.0, 0.0], 4.0, 1.0, [0.45, 0.32, 0.2], floptle_field::BrushProfile::default());
         terrain.paint([6.0, 1.5, -6.0], 2.4, 1.0, [0.6, 0.6, 0.62], floptle_field::BrushProfile::default());
     }
-    // Paint a TEXTURE (palette slot 1) onto the big hill.
+    // Paint a texture (palette slot 1) onto the big hill.
     terrain.paint_texture([-5.0, 0.5, -3.0], 5.0, 1);
 
     let mut raymarch = Raymarch::new(&gpu);

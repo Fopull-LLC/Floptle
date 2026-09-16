@@ -1,4 +1,4 @@
-//! Reproduce the runtime dig path headlessly and LOOK at the crater — chasing
+//! Reproduce the runtime dig path headlessly and look at the crater — chasing
 //! "digging carves massive squares, not spheres" on the generated planetoid.
 //!
 //! Applies the exact `terrain.dig` pipeline (Brush::Lower, dab spacing like
@@ -120,7 +120,7 @@ fn main() {
     let pristine = ChunkField::from_bytes(&bytes).expect("parse cfield");
     for (name, f) in [("dig_before", &pristine), ("dig_after", &field)] {
         // Terrain-splat instances sample their palette textures through the raymarch
-        // FIELD bind group — without it the surface draws black (solar_probe does this).
+        // field bind group — without it the surface draws black (solar_probe does this).
         let shadow = f.to_dense(96).expect("shadow proxy");
         let mut raymarch = Raymarch::new(&gpu);
         raymarch.set_terrain_textures(&gpu, &[TextureData {

@@ -45,7 +45,7 @@ pub(crate) enum PaintSource {
 impl PaintSource {
     /// The `mesh_registry`/paint-cache key. Map meshes reuse the same `@map/<id>`
     /// key they render under, so the brush and the renderer agree on which
-    /// geometry a node IS.
+    /// geometry a node is.
     pub(crate) fn key(&self) -> String {
         match self {
             PaintSource::Asset(p) => p.clone(),
@@ -106,7 +106,7 @@ impl Editor {
         }
     }
 
-    /// The mesh-asset key a node paints against. Primitives share ONE `MeshId`
+    /// The mesh-asset key a node paints against. Primitives share one `MeshId`
     /// per shape, so they key by shape name — the paint still lands per-node
     /// because the block is per-node, not per-mesh.
     pub(crate) fn paint_key(&self, e: Entity) -> Option<(String, bool)> {
@@ -140,7 +140,7 @@ impl Editor {
                 .unwrap_or_default(),
             PaintSource::Asset(_) => {
                 // The editor keeps no CPU geometry (MeshAsset holds only MeshIds), so the
-                // brush re-imports ONCE here and caches — never per dab.
+                // brush re-imports once here and caches — never per dab.
                 let path = self.resolve_asset_path(&key);
                 match floptle_assets::import(&path) {
                     Ok(m) => m.parts.into_iter().map(|p| p.mesh).collect(),
@@ -191,7 +191,7 @@ impl Editor {
             return Some((vp.id, b.clone()));
         }
 
-        // Everything read off `self` happens BEFORE the raster borrow below: once
+        // Everything read off `self` happens before the raster borrow below: once
         // `raster` is mutably borrowed, no `&self` method may be called.
         let id = self.next_paint_id();
         let src = existing.and_then(|vp| self.paint_data.get(&vp.id).cloned());
@@ -224,7 +224,7 @@ impl Editor {
         Some((id, blocks))
     }
 
-    /// True when the paint tool may run at all. Play is a HARD gate, not a courtesy:
+    /// True when the paint tool may run at all. Play is a hard gate, not a courtesy:
     /// `push_history` no-ops while playing (history.rs:17-29), and Stop does not revert
     /// paint — so a Play-time stroke would persist while being un-undoable. Terrain
     /// merely tolerates that; paint refuses.
@@ -250,7 +250,7 @@ impl Editor {
         let rd = (far.truncate() / far.w - ro_rel).normalize();
 
         // Nearest paintable node under the cursor. Every candidate is tested in its own
-        // LOCAL space (the mesh cache stores object-space geometry), so the ray is
+        // local space (the mesh cache stores object-space geometry), so the ray is
         // pushed through each node's inverse world transform rather than the geometry
         // being transformed — one matrix inverse beats N vertex transforms.
         let candidates: Vec<Entity> = self
@@ -362,12 +362,12 @@ impl Editor {
         self.last_dab_pos = Some(hit_world);
         self.last_dab_time = Some(now);
 
-        // TEXTURE target: the dab is a world-space SPHERE, and it paints EVERY paintable
+        // texture target: the dab is a world-space SPHERE, and it paints every paintable
         // surface it touches — all parts, all nodes — not just the ray hit. That is what
         // makes corner shading work: a stroke along a wall-floor seam shades both surfaces
         // in one pass, darkest at the seam (painted ambient occlusion, the retro baked
-        // look). Texture paint doesn't touch the vertex blocks below. The FIRST time a
-        // stroke touches each node, its pre-stroke images are banked for the stroke's ONE
+        // look). Texture paint doesn't touch the vertex blocks below. The first time a
+        // stroke touches each node, its pre-stroke images are banked for the stroke's one
         // undo step (`None` = that node had no paint yet, so undo removes it).
         if self.vertex_brush.target == crate::paint_ui::PaintTarget::Texture {
             // The brush centre in camera-relative world space — what every node's model
@@ -433,7 +433,7 @@ impl Editor {
         if near.is_empty() {
             return;
         }
-        // View direction in LOCAL space, for the backface test.
+        // View direction in local space, for the backface test.
         let view_l = (model.inverse() * Vec4::new(-rd.x, -rd.y, -rd.z, 0.0)).truncate();
         // Pre-resolve each candidate's facing so the loop needn't touch the mesh cache.
         let facing: Vec<bool> = near
@@ -454,8 +454,8 @@ impl Editor {
             return;
         };
 
-        // Lazily snapshot the pre-stroke colors ONCE per stroke — lazily because until
-        // the ray lands we don't know WHICH node is being painted. Banked on LMB-up.
+        // Lazily snapshot the pre-stroke colors once per stroke — lazily because until
+        // the ray lands we don't know which node is being painted. Banked on LMB-up.
         let snapshot = snap_needed.then(|| {
             let per_part: Vec<Vec<[u8; 4]>> =
                 block_list.iter().map(|&(b, c)| raster.paint_block(b, c)).collect();
@@ -508,7 +508,7 @@ impl Editor {
                 if !brush.channels[ch] {
                     continue; // masked-off channels keep whatever was already there
                 }
-                // Blend picks the full-strength TARGET; the brush weight then lerps
+                // Blend picks the full-strength target; the brush weight then lerps
                 // toward it — so every mode answers to strength/falloff identically.
                 // Smooth averages and Erase restores, so both mix regardless of blend.
                 let target = match brush.mode {
@@ -615,18 +615,18 @@ impl Editor {
             self.push_history(Snapshot::VertexPaint(vp.id, snap));
             self.vpaint_epoch += 1;
             // The component stays: the block is already allocated, and dropping it would
-            // strand that range in the store. Mid-grey IS unpainted, visually (2× neutral).
+            // strand that range in the store. Mid-grey is unpainted, visually (2× neutral).
         }
     }
 
-    /// Bank the finished stroke as ONE undo step (called on LMB-up).
+    /// Bank the finished stroke as one undo step (called on LMB-up).
     pub(crate) fn end_paint_stroke(&mut self) {
         if let Some((id, snap)) = self.paint_stroke_snapshot.take()
             && self.paint_stroke_dabbed
         {
             self.push_history(Snapshot::VertexPaint(id, snap));
         }
-        // Texture stroke: ONE undo step carrying every touched node's pre-stroke images
+        // Texture stroke: one undo step carrying every touched node's pre-stroke images
         // (`None` = that node had no paint before, so undo removes it) — the sphere brush
         // can cross several nodes in a stroke, and Ctrl+Z must take the whole stroke back.
         if !self.tex_stroke_snapshot.is_empty() {

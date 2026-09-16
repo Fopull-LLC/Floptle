@@ -98,8 +98,8 @@ pub fn collect_billboards(
 }
 
 /// One camera-facing ribbon segment as a particle-quad instance — the trick that
-/// lets trails and beams ride the existing billboard pass with NO new pipeline: the
-/// quad's up axis IS the segment vector `b - a` (with `size.y = 1` it spans the
+/// lets trails and beams ride the existing billboard pass with no new pipeline: the
+/// quad's up axis is the segment vector `b - a` (with `size.y = 1` it spans the
 /// full segment around the midpoint), its right axis faces the camera via
 /// `cross(view_dir, segment_dir)` (falling back to `cam_right` when the segment
 /// points at the camera), and the flipbook UV-rect lanes carry the ribbon's
@@ -140,9 +140,9 @@ fn ribbon_segment(
 /// Pack every trailed billboard track of `inst` as connected ribbon segments,
 /// appending one [`BillboardDraw`] per non-empty track. Each live particle with ≥ 2
 /// polyline points (its recorded history plus its current position as the head)
-/// contributes `points − 1` quads, colored with the particle's CURRENT color; when
+/// contributes `points − 1` quads, colored with the particle's current color; when
 /// the trail fades, width and alpha taper to zero at the tail. Segments are pushed
-/// tail→head and deliberately NOT depth-sorted — a ribbon must keep its connected
+/// tail→head and deliberately not depth-sorted — a ribbon must keep its connected
 /// order even under an order-dependent blend.
 pub fn collect_trails(
     inst: &EffectInstance,
@@ -193,7 +193,7 @@ pub fn collect_trails(
             }
             for k in 0..pts.len() - 1 {
                 let (r0, r1) = (cum[k] / total, cum[k + 1] / total);
-                // Fade tapers width AND alpha by the segment's mid ribbon-coord
+                // Fade tapers width and alpha by the segment's mid ribbon-coord
                 // (0 at the tail → 1 at the head).
                 let taper = if trail.fade { 0.5 * (r0 + r1) } else { 1.0 };
                 let mut color = s.color;
@@ -632,7 +632,7 @@ mod tests {
     }
 
     /// Reconstruct a ribbon segment's endpoints from its packed instance: the up
-    /// basis IS the segment vector (size.y = 1), the position its midpoint.
+    /// basis is the segment vector (size.y = 1), the position its midpoint.
     fn segment_ends(p: &ParticleInstance) -> (Vec3, Vec3) {
         let mid = Vec3::new(p.pos_rot[0], p.pos_rot[1], p.pos_rot[2]);
         let seg = Vec3::new(p.basis_up[0], p.basis_up[1], p.basis_up[2]);

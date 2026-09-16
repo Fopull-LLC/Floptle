@@ -169,7 +169,7 @@ impl Editor {
             .world
             .get::<floptle_core::Sorting>(e)
             .map(|s| (s.layer.clone(), s.order));
-        // …and its sort MODE with it. A duplicated Y-sorted character that came
+        // …and its sort mode with it. A duplicated Y-sorted character that came
         // back on plain `order` would draw at a fixed depth while its original
         // kept following the player around, which reads as the copy being
         // broken rather than as a setting having been dropped.
@@ -260,7 +260,7 @@ impl Editor {
     ///
     /// Split out of [`Self::spawn_node`] so that writing a document to a node
     /// that already exists — which is what `scene.set` from a package does —
-    /// goes through the SAME code that loading a scene does, rather than a
+    /// goes through the same code that loading a scene does, rather than a
     /// second copy of it that agrees today ([[two-gathers-must-agree]]).
     ///
     /// **Adds only.** A field the document leaves out is left alone, not
@@ -271,7 +271,7 @@ impl Editor {
         self.world.insert(e, Name(node.name.clone()));
         self.world.insert(e, node.matter.to_matter());
         // Inline map geometry (prefab instance / paste / duplicate): give this
-        // node its OWN id in this scene's store. Without it the doc's id would
+        // node its own id in this scene's store. Without it the doc's id would
         // key into whatever that id happens to mean here — an empty node in a
         // fresh scene, or somebody else's wall in a busy one.
         if let MatterDoc::MapMesh { geo: Some(geo), .. } = &node.matter {
@@ -280,7 +280,7 @@ impl Editor {
             self.maps.dirty.insert(id);
             self.world.insert(e, floptle_core::Matter::MapMesh { id });
         }
-        // The same rule for the OTHER id-bearing nodes: an id is identity, not
+        // The same rule for the other id-bearing nodes: an id is identity, not
         // data to copy. A Nav Link's id is how a script names it and how a bake
         // matches routes back; a Nav Mesh's id keys its bake file. A copy
         // arriving with a taken id (duplicate, paste, prefab instance) — or
@@ -758,7 +758,7 @@ impl Editor {
             return;
         }
         self.record();
-        // Deleting a node deletes its WHOLE subtree — children don't silently
+        // Deleting a node deletes its whole subtree — children don't silently
         // become orphaned roots. (PostProcess stays even if it's a descendant.)
         let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
             std::collections::HashMap::new();
@@ -796,10 +796,10 @@ impl Editor {
         v
     }
 
-    /// Serialize `roots` — each with its WHOLE subtree — into the flat node-list
+    /// Serialize `roots` — each with its whole subtree — into the flat node-list
     /// format shared by the clipboard and prefab files: `parent` is an index into
     /// the returned list (`None` = a root). Children keep their local transforms
-    /// (and bone attachments); roots bake their WORLD transform, since whatever
+    /// (and bone attachments); roots bake their world transform, since whatever
     /// they were parented to isn't coming along. Selecting both a parent and its
     /// child captures the child once (inside the parent's subtree).
     pub(crate) fn subtree_docs(&self, roots: &[Entity]) -> Vec<NodeDoc> {
@@ -1027,7 +1027,7 @@ impl Editor {
         let mut queue: std::collections::VecDeque<Entity> = roots.iter().copied().collect();
         while let Some(e) = queue.pop_front() {
             for &c in kids.get(&e).map(Vec::as_slice).unwrap_or(&[]) {
-                // `seen` starts as the roots, so a child that is ALSO selected
+                // `seen` starts as the roots, so a child that is also selected
                 // is never reported as its own parent's extra — otherwise
                 // selecting a parent and its child would offer to change the
                 // child twice and count it as an unselected extra.
@@ -1055,7 +1055,7 @@ impl Editor {
     }
 
     /// Re-parent every node in `children` under `parent` (or make them roots if
-    /// `None`) as ONE undo step, preserving each node's world placement. Filters
+    /// `None`) as one undo step, preserving each node's world placement. Filters
     /// out the target itself, cycles (can't parent under your own descendant),
     /// and any node whose ancestor is also moving (the ancestor's move carries it).
     pub(crate) fn reparent_many(&mut self, children: &[Entity], parent: Option<Entity>) {
@@ -1159,7 +1159,7 @@ mod subtree_tests {
         assert!(ed.layer_children_confirm.is_none(), "nothing to ask about");
         assert_eq!(layer(&ed, lone).as_deref(), Some("Enemy"));
 
-        // A node WITH children asks, and changes nothing until it is answered.
+        // A node with children asks, and changes nothing until it is answered.
         pick(&mut ed, vec![root]);
         let prompt = ed.layer_children_confirm.clone().expect("it has a child, so it asks");
         assert_eq!(prompt.children, vec![child]);
@@ -1210,7 +1210,7 @@ mod subtree_tests {
             );
         }
 
-        // …and back to Default REMOVES the component, rather than storing a
+        // …and back to Default removes the component, rather than storing a
         // layer name that means "no layer".
         ed.apply_layer(&nodes, floptle_core::layers::DEFAULT_LAYER);
         for &e in &nodes {
@@ -1218,7 +1218,7 @@ mod subtree_tests {
         }
     }
 
-    /// The whole set is ONE undo step, not one per node.
+    /// The whole set is one undo step, not one per node.
     ///
     /// Counted across the world rather than by entity handle: undo restores the
     /// scene by respawning it, so the handles afterwards are not the handles
@@ -1276,7 +1276,7 @@ mod subtree_tests {
         assert!(!kids.contains(&root), "a root is not its own child");
         assert!(!kids.contains(&stranger));
 
-        // Selecting a parent AND its child must not report the child as an
+        // Selecting a parent and its child must not report the child as an
         // extra the user has not already chosen — otherwise the prompt offers
         // to change nodes that are in the selection anyway, and the count lies.
         let kids = ed.descendants_of(&[root, child]);
@@ -1289,8 +1289,8 @@ mod subtree_tests {
     /// The clipboard/duplicate/prefab capture format: a parent → child →
     /// grandchild chain round-trips through `subtree_docs` → `spawn_docs` with
     /// hierarchy, local transforms, and per-node components intact; selecting
-    /// a parent AND its child captures the child once; and deleting the parent
-    /// removes the WHOLE subtree (no orphaned roots).
+    /// a parent and its child captures the child once; and deleting the parent
+    /// removes the whole subtree (no orphaned roots).
     #[test]
     fn subtrees_round_trip_and_delete_removes_children() {
         let mut ed = Editor::default();

@@ -13,7 +13,7 @@ use floptle_core::frames::Kepler;
 use glam::DVec3;
 use mlua::Lua;
 
-/// One body in this tick's snapshot, WORLD coordinates.
+/// One body in this tick's snapshot, world coordinates.
 #[derive(Clone, Debug, Default)]
 pub struct SpaceBodyInfo {
     pub name: String,
@@ -145,7 +145,7 @@ pub(crate) fn install_space_api(
             let _ = t.set("gravity", f);
         }
     }
-    // space.elements(x,y,z, vx,vy,vz) → the conic you're ON around the dominant
+    // space.elements(x,y,z, vx,vy,vz) → the conic you're on around the dominant
     // body: { body, a, e, period, apoapsis, periapsis } (period/apoapsis nil on
     // an escape). Feed it your ship's position + velocity; the map/HUD draw it.
     // The velocity is taken AS the dominant-frame velocity — which is exactly
@@ -181,10 +181,10 @@ pub(crate) fn install_space_api(
 
     // space.propagate(px,py,pz, vx,vy,vz, mu, dt) → the state vector
     // (px,py,pz, vx,vy,vz) advanced `dt` seconds on the two-body conic about a
-    // point mass `mu`. THE generic celestial-mechanics primitive the map's
+    // point mass `mu`. the generic celestial-mechanics primitive the map's
     // maneuver nodes + patched-conic encounter walk are built from (game-side,
     // in Lua): convert a state to its orbit and evaluate it at any future time,
-    // exactly and stably — elliptic AND hyperbolic (the tested `frames::Kepler`,
+    // exactly and stably — elliptic and hyperbolic (the tested `frames::Kepler`,
     // no per-step integration drift). The state is in whatever frame you pass;
     // the caller composes parent frames (add the attractor's own motion).
     // Degenerate inputs (µ ≤ 0, non-finite state/result) pass through unchanged.

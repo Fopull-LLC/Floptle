@@ -6,10 +6,10 @@ use floptle_core::{Matter, Shape};
 use floptle_render::MeshData;
 use floptle_scene::{MatterDoc, ShapeDoc};
 
-/// The CPU geometry behind each built-in primitive — the ONE definition.
+/// The CPU geometry behind each built-in primitive — the one definition.
 ///
 /// The renderer registers these at startup (`Editor::init`, mapping `Shape as usize`
-/// → `MeshId`) and the vertex-paint brush caches them for raycasting. Both MUST get
+/// → `MeshId`) and the vertex-paint brush caches them for raycasting. Both must get
 /// byte-identical geometry: paint is indexed by `vertex_index`, so if these two ever
 /// disagreed on vertex count or order, the brush would paint the wrong vertices.
 /// Hence one function, called twice — never two copies of the parameters.
@@ -177,12 +177,12 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             spot_softness: 0.25,
         }),
         // The same component, aimed. Two entries rather than two node types
-        // because a spot IS a point light with a cone — it takes the same
+        // because a spot is a point light with a cone — it takes the same
         // emitter shapes, the same range, the same local shadows and the same
         // slot in the sixteen — and somebody looking for "spot light" in a menu
         // should not have to know that.
         //
-        // Shadows ON by default here, unlike the point light. A spot is aimed at
+        // Shadows on by default here, unlike the point light. A spot is aimed at
         // something, which means somebody placed it to light one thing and not
         // its neighbours, and a spot that shines through the wall it is pointed
         // at is the first thing they would file.
@@ -470,7 +470,7 @@ pub(crate) const NEW_CATALOG: &[NewGroup] = &[
     },
 ];
 
-/// The two entries that stay at the TOP level rather than going in a group.
+/// The two entries that stay at the top level rather than going in a group.
 ///
 /// A group is worth its extra click when it holds things you reach for while
 /// already thinking about that system. These two are not that: a Camera is
@@ -641,7 +641,7 @@ mod new_menu_tests {
             let end = rest.find("\n}").expect("end of MatterDoc");
             &rest[..end]
         };
-        // Variant names sit at ONE indent level (four spaces) and start with a
+        // Variant names sit at one indent level (four spaces) and start with a
         // capital; the name is the leading identifier, whatever follows it on
         // the line (`Mesh { asset_path: String },` is one line, `Camera {` is
         // another). Attributes and doc comments do not start with a capital.
@@ -788,9 +788,9 @@ mod new_menu_tests {
                 other => matter_variant(other).to_string(),
             }
         }
-        // A type can wear more than one glyph on purpose — Spot Light IS a point
+        // A type can wear more than one glyph on purpose — Spot Light is a point
         // light, aimed, and the menu says so with its own arrow — so a type maps
-        // to a SET. What must not happen is one glyph meaning two types.
+        // to a set. What must not happen is one glyph meaning two types.
         let mut icons_of: std::collections::BTreeMap<String, BTreeSet<&str>> = Default::default();
         for (label, m) in type_catalog() {
             let set = icons_of.entry(key(&m)).or_default();

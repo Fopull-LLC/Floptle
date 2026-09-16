@@ -59,7 +59,7 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     if let Some(v) = num("maxDistance") {
         p.max_distance = v as f32;
     }
-    // Each of these calls the SAME parser the engine acts on, and offers that
+    // Each of these calls the same parser the engine acts on, and offers that
     // parser's own ACCEPTS list — so the message cannot describe a behaviour the
     // code does not have (`floptle/0072`'s shape).
     if let Ok(s) = t.raw_get::<String>("mode") {

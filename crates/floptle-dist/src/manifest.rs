@@ -34,7 +34,7 @@ pub struct ReleaseInfo {
     /// and a network connection to read notes for an engine already on the disk. One fetch
     /// at startup buys the whole history offline. It grows — a few KB per release against a
     /// manifest that is already the gate on a 12 MB download — and if that ever stops being
-    /// true, the fix is to trim OLD entries here, not to make the common case slower.
+    /// true, the fix is to trim old entries here, not to make the common case slower.
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -64,7 +64,7 @@ pub struct ReleaseInfo {
 }
 
 impl ReleaseInfo {
-    /// The artifact for THIS host's platform, if this release ships one.
+    /// The artifact for this host's platform, if this release ships one.
     pub fn artifact_here(&self) -> Option<&Artifact> {
         self.artifacts.get(super::platform_target().as_str())
     }
@@ -181,7 +181,7 @@ fn default_channel() -> String {
 }
 
 /// One dot-separated pre-release identifier. Per semver, an all-digit identifier compares
-/// numerically and sorts BEFORE an alphanumeric one — the derived `Ord` gives `Num < Text`.
+/// numerically and sorts before an alphanumeric one — the derived `Ord` gives `Num < Text`.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub enum PreId {
     Num(u64),
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(r030.artifacts["linux-x86_64"].sha256, "abc");
     }
 
-    /// An export template asks for a platform that is NOT the host — the whole
+    /// An export template asks for a platform that is not the host — the whole
     /// point of the feature, so it gets its own lookup and its own test.
     #[test]
     fn a_release_yields_an_artifact_for_any_platform_not_just_the_host() {
@@ -281,7 +281,7 @@ mod tests {
         assert!(hub_only.changes_hub());
         assert!(hub_only.is_hub_only());
 
-        // Unknown is BOTH, so the whole back catalogue keeps behaving as it always has.
+        // Unknown is both, so the whole back catalogue keeps behaving as it always has.
         let old = m.release("0.21.2").unwrap();
         assert!(old.changes_engine() && old.changes_hub());
         assert!(!old.is_hub_only(), "unknown is not a claim that the engine held still");

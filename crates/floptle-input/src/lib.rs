@@ -87,7 +87,7 @@ impl std::error::Error for LoadError {}
 ///
 /// A **missing** file is not an error — it yields `Ok(None)`, so a project that
 /// predates the input system (or has simply never opened the Input settings)
-/// keeps working on raw keys. A file that exists but won't parse IS an error:
+/// keeps working on raw keys. A file that exists but won't parse is an error:
 /// silently substituting an empty map there would unbind the whole game and
 /// look to the developer like a hardware fault.
 pub fn load_map(project_root: &Path) -> Result<Option<InputMap>, LoadError> {

@@ -47,10 +47,10 @@ pub const DEFAULT_EPSILON: f64 = 1e-3;
 pub const SNAP_LIMIT: f64 = 3.0;
 
 pub struct Predictor {
-    /// (tick, the input that produced it, the state at END of that tick).
+    /// (tick, the input that produced it, the state at end of that tick).
     ring: VecDeque<(u64, NetInput, PredictedState)>,
     /// Rendered-position error introduced by the last correction (world
-    /// metres), decayed toward zero each tick and ADDED to the rendered
+    /// metres), decayed toward zero each tick and added to the rendered
     /// transform so the correction is smoothed instead of snapping.
     pub error_offset: [f64; 3],
     /// Per-tick decay factor for `error_offset` (0.85 ≈ 86% absorbed in
@@ -105,7 +105,7 @@ impl Predictor {
 
     /// An authoritative state arrived for `tick`. Returns `None` when the
     /// prediction matched (within `eps` metres — confirmed, nothing to do), or
-    /// the `(tick, input)` list to replay IN ORDER after the driver restores
+    /// the `(tick, input)` list to replay in order after the driver restores
     /// the body to `server`'s state. Also drops ring entries `<= tick`
     /// (confirmed history) and accrues the visual error offset from the
     /// correction (old predicted position − server position at `tick`).

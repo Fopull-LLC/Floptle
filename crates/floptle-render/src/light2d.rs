@@ -7,7 +7,7 @@
 //!
 //! Forward accumulation would have been cheaper to build and would have inherited
 //! every view for free, because it *is* the existing path. Deferred was chosen
-//! (Ty, 2026-08-05) because its cost is screen pixels × lights rather than pixels
+//! because its cost is screen pixels × lights rather than pixels
 //! *drawn* × lights, so a deep parallax stack with many lights does not multiply
 //! the work.
 //!
@@ -443,7 +443,7 @@ impl Light2d {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: Gpu::DEPTH_FORMAT,
-                    // The composite must not WRITE depth: it re-emits the flat
+                    // The composite must not write depth: it re-emits the flat
                     // surface's own depth only so that anything already in front
                     // of it wins. Writing would re-prime depth the main pass has
                     // already settled.
@@ -705,7 +705,7 @@ mod tests {
     /// A `Matter::Sprite` on a spritesheet is drawn through a UV window — the
     /// material's tiling lanes are how one cell of a sheet becomes one quad.
     /// `from_raster` took the model and the tint and left the window behind, so
-    /// the deferred pass sampled the WHOLE image across the quad and the delta
+    /// the deferred pass sampled the whole image across the quad and the delta
     /// composite laid a squashed copy of every frame of the animation over the
     /// sprite. The raster pass had the cell right the entire time, which is what
     /// made it read as a glitch rather than as a wrong frame.

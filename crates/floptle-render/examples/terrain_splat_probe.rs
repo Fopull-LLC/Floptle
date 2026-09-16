@@ -47,7 +47,7 @@ fn main() {
     });
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Flat ground; then paint the RIGHT half with slot 1 (palette layer 0 = the checker).
+    // Flat ground; then paint the right half with slot 1 (palette layer 0 = the checker).
     let mut t = Terrain::flat([96, 40, 96], [0.0; 3], [16.0, 6.0, 16.0], 0.0, [0.7, 0.7, 0.7]);
     for _ in 0..30 {
         t.sculpt(Brush::Raise, [0.0, 0.6, 0.0], 10.0, 1.0, BrushProfile::default());

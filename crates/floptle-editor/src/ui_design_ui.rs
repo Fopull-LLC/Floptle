@@ -374,7 +374,7 @@ impl EditorTabViewer<'_> {
                         self.selection.push(row.entity);
                     }
                 }
-                // Drop ABOVE this row (= in front of it, since we draw reversed).
+                // Drop above this row (= in front of it, since we draw reversed).
                 if let Some(payload) = resp.dnd_release_payload::<u32>() {
                     dragged = Some(*payload);
                     let sibs: Vec<&Row> =
@@ -667,7 +667,7 @@ impl EditorTabViewer<'_> {
     /// Draw the navigation graph: a dot on every focusable element, and an
     /// arrow from the selected one to wherever each direction leads.
     ///
-    /// This runs the SAME geometry the game runs (`floptle_ui::nav`), including
+    /// This runs the same geometry the game runs (`floptle_ui::nav`), including
     /// the per-element name overrides and the layer's wrap setting — a preview
     /// that approximated it would be worse than none.
     #[allow(clippy::too_many_arguments)]
@@ -1127,7 +1127,7 @@ impl EditorTabViewer<'_> {
             match hot {
                 Some(id) => {
                     // Grabbing an unselected element selects it, so any element
-                    // can be moved in ONE gesture.
+                    // can be moved in one gesture.
                     if let Some(e) = ent_of.get(&id)
                         && !self.selection.contains(e)
                     {
@@ -1329,7 +1329,7 @@ impl EditorTabViewer<'_> {
                 None
             },
             lines,
-            // A fixed number of SCREEN points, so snapping feels the same at
+            // A fixed number of screen points, so snapping feels the same at
             // every zoom instead of getting stickier as you zoom out.
             radius: 6.0 / ppd.max(0.0001),
         }

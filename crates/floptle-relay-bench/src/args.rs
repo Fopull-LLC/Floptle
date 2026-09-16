@@ -228,7 +228,7 @@ mod tests {
 
     /// ⚠ **Every flag the parser takes is in the help text.**
     ///
-    /// The list comes off this file's OWN match arms, so adding a flag and not
+    /// The list comes off this file's own match arms, so adding a flag and not
     /// documenting it fails here — W has to run this without E present, and an
     /// undocumented flag may as well not exist.
     /// `--verify` is a mode, not a run: it needs the relay and nothing else,

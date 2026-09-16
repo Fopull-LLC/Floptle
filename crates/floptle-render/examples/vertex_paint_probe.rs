@@ -1,6 +1,6 @@
 //! Headless probe for vertex painting (docs/subsystems/materials-and-textures.md phase 1).
 //!
-//! This exists to catch ONE specific bug the design is built around. `params.z` packs
+//! This exists to catch one specific bug the design is built around. `params.z` packs
 //! the paint base beside the `unlit` bit, but `fs` reads that lane as `> 0.5` — a
 //! THRESHOLD, not a bit test. Decode it in the fragment shader (or forget to decode it
 //! at all) and every painted node silently renders unlit: the paint looks perfect, and
@@ -195,7 +195,7 @@ fn render_modulate(gpu: &Gpu, paint: [u8; 4], modulate: bool) -> [f32; 3] {
     center(&px)
 }
 
-/// Two instances of ONE mesh, given DIFFERENT paint blocks. This is the whole point of
+/// Two instances of one mesh, given different paint blocks. This is the whole point of
 /// per-node paint: every primitive of a shape shares a single `MeshId`, so if paint were
 /// keyed by mesh these two cubes could not differ. Returns their sampled colors.
 fn render_two_painted_instances(gpu: &Gpu) -> ([f32; 3], [f32; 3]) {
@@ -247,7 +247,7 @@ fn render_two_painted_instances(gpu: &Gpu) -> ([f32; 3], [f32; 3]) {
         mp.paint_base = base;
         instance_of_mat(Mat4::from_translation(Vec3::new(x, 0.0, 0.0) - eye), &mp)
     };
-    // Same MeshId for both → they land in ONE instanced batch, differing only in params.z.
+    // Same MeshId for both → they land in one instanced batch, differing only in params.z.
     let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
         vec![(mesh, None, mk(-1.2, red)), (mesh, None, mk(1.2, blue))];
 
@@ -307,7 +307,7 @@ fn main() {
         "painted+unlit cube should be RED, got {c_pu:?} — paint never reached the shader"
     );
 
-    // 2. THE TRAP. A painted cube with unlit=false must still be LIT. If the params.z
+    // 2. the TRAP. A painted cube with unlit=false must still be LIT. If the params.z
     //    packing leaks into the fragment stage, `in.params.z > 0.5` is true for every
     //    painted instance and this render becomes byte-identical to the unlit one.
     assert!(
@@ -328,7 +328,7 @@ fn main() {
          reading the paint store when it should be returning identity white"
     );
 
-    // 4. PER-NODE paint: two instances of ONE mesh, two blocks, two colors — in a
+    // 4. per-node paint: two instances of one mesh, two blocks, two colors — in a
     //    single instanced batch. If paint were mesh-keyed (or if params.z didn't carry
     //    a per-instance base) these would be identical.
     let (left, right) = render_two_painted_instances(&gpu);
@@ -353,7 +353,7 @@ fn main() {
         "modulate: grey(neutral) {grey_mod:?}  white {white_mod:?}  white-no-modulate {white_plain:?}  black {black_mod:?}"
     );
     // White paint under modulate BRIGHTENS the mid-grey surface well past the plain
-    // multiply (which can only ever hold it AT grey — the "nothing shows up" bug).
+    // multiply (which can only ever hold it at grey — the "nothing shows up" bug).
     assert!(
         white_mod[0] > white_plain[0] + 30.0,
         "white paint must BRIGHTEN under modulate ({white_mod:?}) vs the darken-only \

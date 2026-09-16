@@ -180,8 +180,8 @@ impl Palette {
         // (grow-only) scratch, so frame pixel (0,0) is scratch texel (0,0) and
         // the integer reads line up whatever size it has grown to.
         pass(&mut encoder, &self.quantize_pipeline, &src, &scratch.view, Some((w, h)), CLEAR);
-        // …and back, with NO viewport: the shader discards past the frame rect
-        // instead, which is safe in BOTH directions a reported size can be wrong.
+        // …and back, with no viewport: the shader discards past the frame rect
+        // instead, which is safe in both directions a reported size can be wrong.
         // See `fs_copy`. It loads rather than clears for the same reason —
         // `LoadOp::Clear` applies to the whole attachment, not to a viewport.
         pass(&mut encoder, &self.copy_pipeline, &scratch.bind, color, None, wgpu::LoadOp::Load);

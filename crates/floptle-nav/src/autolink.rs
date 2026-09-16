@@ -123,7 +123,7 @@ pub fn generate(
         return (Vec::new(), found);
     }
 
-    // How far across a drop is allowed to be. Erosion has already pulled BOTH
+    // How far across a drop is allowed to be. Erosion has already pulled both
     // mouths back by the agent's radius, so even a sheer drop off a wall has the
     // agent's own width twice over between its ends — measuring a drop as if it
     // were vertical would find none of them.
@@ -179,7 +179,7 @@ pub fn generate(
             }
             taken.insert(mine);
             if kind == LinkKind::Jump {
-                // A jump is two-way, so the far side looking back at us is THIS
+                // A jump is two-way, so the far side looking back at us is this
                 // crossing and not another one. Without this a chasm gets every
                 // hop twice — once from each bank — and the router pays for
                 // both on every query for the rest of the game.
@@ -301,13 +301,13 @@ fn crosses_a_carve(volumes: &[AreaVolume], from: [f32; 3], to: [f32; 3]) -> bool
 }
 
 /// Whether there is a floor between a ledge and the ground below it — the thing
-/// a character would have to fall THROUGH to make this drop.
+/// a character would have to fall through to make this drop.
 ///
 /// **This is the difference between a ledge and a skirting board.** A ledge is
 /// any cell the flood fill stopped at, and erosion makes one of those out of
 /// every wall, every doorframe and every armchair in the level: the cell beside
 /// it is not walkable because the agent's radius does not fit there, not
-/// because the floor ends. Look one column further out and there IS ground —
+/// because the floor ends. Look one column further out and there is ground —
 /// the room below — and without this the bake calls that a drop and hands the
 /// router a hole through the ceiling. One two-storey house baked 3,170 drops,
 /// 1,980 of them a single cell across and up to ten metres straight down: a
@@ -340,7 +340,7 @@ fn floored(
     let Some(col) = field.column(nx as usize, nz as usize) else {
         return false;
     };
-    // Ground has no thickness, so a floor's `base` IS its top: the test on the
+    // Ground has no thickness, so a floor's `base` is its top: the test on the
     // foot has to be inclusive or the commonest case in the level — the ledge's
     // own floor, at exactly the ledge's height — reads as being above it.
     const EPS: f32 = 1e-3;

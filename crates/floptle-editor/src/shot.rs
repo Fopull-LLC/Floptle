@@ -154,11 +154,11 @@ pub(crate) struct Args<'a> {
     pub(crate) out: &'a Path,
     pub(crate) json: bool,
     pub(crate) timing: bool,
-    /// `--after`: play the project for this many seconds BEFORE drawing.
+    /// `--after`: play the project for this many seconds before drawing.
     ///
     /// `None` is the authored frame — nothing has moved and no `start` has run,
     /// which is the right answer to "what did my edit do". `Some` is the frame a
-    /// player would be looking at, which for a game that BUILDS ITS WORLD AT
+    /// player would be looking at, which for a game that builds its world at
     /// RUNTIME is the only one worth photographing: the solar project's scene
     /// file holds a generator, a camera and some UI, so every shot of it was a
     /// bare sphere under a black sky — a true picture of the file and a picture
@@ -192,7 +192,7 @@ pub(crate) fn run(args: Args) -> i32 {
     }
     let (w, h) = (size.0.max(1), size.1.max(1));
 
-    // The GPU FIRST, then the project. The windowed editor loads the scene
+    // The GPU first, then the project. The windowed editor loads the scene
     // before it has a device and adopts the GPU-side halves afterwards; here
     // there is no such ordering to satisfy, and doing it this way round means
     // `open_project`'s own model import and paint adoption find a device
@@ -285,7 +285,7 @@ pub(crate) fn run(args: Args) -> i32 {
         if let Some(seed) = seed {
             ed.script_host.set_seed(seed);
         }
-        // Anchored on the camera the FILE names, which is the only presence
+        // Anchored on the camera the file names, which is the only presence
         // the world has before anything has run.
         let anchor = find_camera(&ed, camera)
             .map(|(e, ..)| floptle_core::world_transform(&ed.world, e).translation)
@@ -302,7 +302,7 @@ pub(crate) fn run(args: Args) -> i32 {
     }
 
     // **After the play span, deliberately.** A game that switches its own active
-    // camera during play must be photographed through the one the GAME chose,
+    // camera during play must be photographed through the one the game chose,
     // not the one the file did — for a runtime-built world that is the whole
     // point, since the camera that takes over does so on the first frame.
     // `--camera` still names one and still wins.
@@ -549,7 +549,7 @@ pub(crate) fn render_frame_pixels(
         t.poll();
         t.begin();
     }
-    // The depth TEXTURE is handed over, not just its view: that is what lets the
+    // The depth texture is handed over, not just its view: that is what lets the
     // opaque prepass run, and without it contact shadows, shoreline foam,
     // screen-space reflections and lamp shadows all quietly draw nothing. A
     // picture missing four effects still looks like a picture, which is exactly
@@ -892,7 +892,7 @@ mod tests {
             "the world a script builds must exist by the time the picture is taken"
         );
 
-        // The camera the GAME chose, not the one the file did.
+        // The camera the game chose, not the one the file did.
         let (chosen, ..) = find_camera(&ed, None).expect("a camera after play");
         assert_ne!(
             chosen, authored,
@@ -961,7 +961,7 @@ mod tests {
         let gpu = Gpu::headless_hdr(64, 64);
         // Same skip-gracefully idiom `retro_exempt_water_does_not_share_the_
         // projects_dithered_neutral_entry` uses: a device that cannot build the
-        // raster pipeline has nothing to say about whether THIS test's box drew.
+        // raster pipeline has nothing to say about whether this test's box drew.
         let failed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = failed.clone();
         gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {

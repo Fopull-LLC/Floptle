@@ -10,7 +10,7 @@
 //! vessel_controller.lua:3669: function at line 2864 has more than 60 upvalues
 //! ```
 //!
-//! which names a line the author did not touch (the END of the offending
+//! which names a line the author did not touch (the end of the offending
 //! function, not the reference that tipped it over), does not say that a limit
 //! exists, and never mentions the word that would let anyone search for it.
 //!

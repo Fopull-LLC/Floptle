@@ -1,4 +1,4 @@
-//! Compound rigid bodies: one dynamic body built from MANY oriented shapes
+//! Compound rigid bodies: one dynamic body built from many oriented shapes
 //! (spheres / capsules / boxes), with composed mass, center of mass and inertia,
 //! full 6-DOF motion (translation + rotation), per-shape contact attribution,
 //! and runtime **split** — the physics half of assemblies that come apart:
@@ -68,13 +68,13 @@ pub struct CompoundShape {
     /// Shape orientation in the body frame (a capsule's axis is its local Y).
     pub rot: Quat,
     pub mass: f32,
-    /// Stable identifier for attribution — which PART took a contact, which
+    /// Stable identifier for attribution — which part took a contact, which
     /// shapes to detach on a split. The engine never interprets it (games use
     /// entity indices, part ids…).
     pub id: u64,
 }
 
-/// A contact a compound resolved this step — attributed to the SHAPE that took
+/// A contact a compound resolved this step — attributed to the shape that took
 /// it, with the normal impulse magnitude applied (the raw material for damage
 /// and structural-stress systems).
 #[derive(Clone, Copy, Debug)]
@@ -112,7 +112,7 @@ pub struct CompoundContact {
 }
 
 /// A compound rigid body. Positions/velocities are sim-frame (origin-relative,
-/// ADR-0015) like every other body; `pos` is the CENTER OF MASS — the frame
+/// ADR-0015) like every other body; `pos` is the CENTER of MASS — the frame
 /// rigid dynamics integrates in. The assembly origin the caller authored
 /// shapes around sits at `local_origin` in the body frame ([`Self::origin`]
 /// maps it back to sim space for transform writeback).
@@ -268,7 +268,7 @@ impl Compound {
         self.ang_vel += self.world_inv_inertia() * (at - self.pos).cross(imp);
     }
 
-    /// Detach every shape whose id is in `ids` into a NEW compound, leaving
+    /// Detach every shape whose id is in `ids` into a new compound, leaving
     /// the rest in `self` — a decoupler firing, a link snapping. Both halves
     /// keep their world pose and exchange momentum correctly: each new CoM
     /// inherits the velocity that body-fixed point had (`v + ω×r`), and both
@@ -288,7 +288,7 @@ impl Compound {
         }
         // Re-express both halves' shapes in WORLD-authored frames and rebuild,
         // so each recomputes its own CoM/inertia. Offsets are currently about
-        // the OLD CoM; that old CoM (sim-frame `self.pos`) is the shared
+        // the old CoM; that old CoM (sim-frame `self.pos`) is the shared
         // assembly origin both rebuilds use.
         let old_pos = self.pos;
         let old_orient = self.orient;
@@ -304,12 +304,12 @@ impl Compound {
             c
         };
         let mut kept = rebuilt(std::mem::take(&mut self.shapes));
-        // The kept half keeps tracking the ORIGINAL assembly origin (its node):
+        // The kept half keeps tracking the original assembly origin (its node):
         // that point sat at `old_origin` in the old CoM frame, and the new CoM
         // frame is shifted from it by the body-frame CoM delta.
         kept.local_origin = old_origin - old_orient.inverse() * (kept.pos - old_pos);
         let mut detached = rebuilt(detached_shapes);
-        // The detached half is a NEW assembly: its origin is its own CoM (the
+        // The detached half is a new assembly: its origin is its own CoM (the
         // game layer roots a fresh node there via `origin()`).
         detached.local_origin = Vec3::ZERO;
         detached.restitution = self.restitution;
@@ -326,11 +326,11 @@ impl Compound {
         Some(detached)
     }
 
-    /// Absorb `other` INTO self — the exact inverse of [`Self::split`]: two
-    /// assemblies become ONE rigid body. A docking latch closing, a crane
+    /// Absorb `other` into self — the exact inverse of [`Self::split`]: two
+    /// assemblies become one rigid body. A docking latch closing, a crane
     /// grabbing its load, an in-space construction weld, a magnet picking up
     /// scrap. `other`'s shapes are re-expressed in self's body frame from both
-    /// bodies' CURRENT poses, so the merged body keeps exactly the geometry you
+    /// bodies' current poses, so the merged body keeps exactly the geometry you
     /// can see — callers snap the two into alignment first (or don't, and get a
     /// crooked weld, honestly).
     ///
@@ -345,7 +345,7 @@ impl Compound {
     /// Self keeps tracking its own assembly origin (its root node stays the
     /// merged vessel's root); `other`'s root is the caller's to retire.
     pub fn merge(&mut self, other: &Compound) {
-        // Authored frame for the rebuild = self's CURRENT (CoM, orientation);
+        // Authored frame for the rebuild = self's current (CoM, orientation);
         // self's offsets are already about that point.
         let p0 = self.pos;
         let r0 = self.orient;
@@ -362,7 +362,7 @@ impl Compound {
                 id: s.id,
             });
         }
-        // Pre-merge momentum, gathered about the OLD centers of mass.
+        // Pre-merge momentum, gathered about the old centers of mass.
         let (m1, m2) = (self.mass, other.mass);
         let (c1, c2) = (self.pos, other.pos);
         let (v1, v2) = (self.vel, other.vel);
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn lander_settles_on_its_legs() {
         // A hull box + four leg spheres below its corners: the assembly rests
-        // ON THE LEGS (hull held above the ground), upright — the multi-shape
+        // on the LEGS (hull held above the ground), upright — the multi-shape
         // ground contact a rocket needs.
         let mut legs = vec![boxs(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.5, 0.8, 0.5), 6.0, 100)];
         for (i, (sx, sz)) in [(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)].iter().enumerate() {
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn offset_thrust_torques_the_assembly() {
-        // Free space: a constant force applied off-center must accelerate AND
+        // Free space: a constant force applied off-center must accelerate and
         // spin the compound — the honest CoT-vs-CoM physics ships fly by.
         let mut w = PhysicsWorld::new(GravityField::default());
         let ci = w.add_compound(Compound::new(
@@ -639,7 +639,7 @@ mod tests {
         assert!(c.vel.length() > 1.0, "thrust accelerates, vel={:?}", c.vel);
         // Off-center +Y push at +X lever arm → torque about −Z... r×F = (0.4,−1,0)×(0,20,0) = (0·0−0·20, 0−0, 0.4·20−0) = (0,0,8) initially → +Z spin.
         assert!(c.ang_vel.length() > 0.5, "offset thrust must spin it, ω={:?}", c.ang_vel);
-        // A centered force must NOT spin it.
+        // A centered force must not spin it.
         let mut w2 = PhysicsWorld::new(GravityField::default());
         let c2 = w2.add_compound(Compound::new(
             Vec3::ZERO,
@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn merge_is_the_inverse_of_split() {
         // Split a spinning dumbbell, then dock the halves straight back
-        // together: geometry, mass, CoM, origin AND motion must come back
+        // together: geometry, mass, CoM, origin and motion must come back
         // exactly — a split immediately followed by a merge is a no-op.
         let make = || {
             let mut c = Compound::new(
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn merge_conserves_momentum_on_an_off_center_dock() {
         // A lander closing on one side of a stationary station: the pair must
-        // end up with the combined linear momentum AND pick up the spin the
+        // end up with the combined linear momentum and pick up the spin the
         // off-center impact implies (angular momentum about the joint CoM).
         // Nothing may be created — a soft dock only ever absorbs energy.
         let mut station = Compound::new(
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn anchored_compound_holds_until_released() {
-        // Launch clamps: an anchored compound ignores gravity AND applied
+        // Launch clamps: an anchored compound ignores gravity and applied
         // forces, reads zero velocity, and resumes normal dynamics from rest
         // the moment it's released — no banked impulse from the clamped span.
         let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn deep_spawn_unburies_without_catapulting() {
-        // An assembly spawned mostly INSIDE a thick static box (a mis-placed
+        // An assembly spawned mostly inside a thick static box (a mis-placed
         // vessel spawn on curved terrain) must climb out over a few steps and
         // settle — never explode off at escape velocity. The per-resolve
         // positional caps in step_compound are what guarantee this.

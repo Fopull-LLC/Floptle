@@ -238,8 +238,8 @@ mod tests {
     fn the_arc_falls_for_a_drop_bows_for_a_jump_and_is_straight_for_a_ladder() {
         let (high, low) = ([0.0, 4.0, 0.0], [2.0, 0.0, 0.0]);
 
-        // A drop hangs on at the lip and accelerates down: halfway ACROSS is
-        // still well above halfway DOWN. A straight line would be exactly 2.0,
+        // A drop hangs on at the lip and accelerates down: halfway across is
+        // still well above halfway down. A straight line would be exactly 2.0,
         // and that is the invisible ramp this replaced.
         let mid = arc_point(LinkKind::Drop, high, low, 0.5);
         assert!(mid[1] > 2.5, "halfway across a drop is not halfway down: {}", mid[1]);

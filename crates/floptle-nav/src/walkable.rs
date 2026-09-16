@@ -707,7 +707,7 @@ mod tests {
             min_region_area: 50.0,
             ..Default::default()
         };
-        // Two patches, BOTH under the floor — which is the case that can leave
+        // Two patches, both under the floor — which is the case that can leave
         // a level with no navmesh at all if the rule is applied literally.
         let mut tris = slab(0.0, 0.0, 2.0, 2.0, 0.0); // 4 m²
         tris.extend(slab(20.0, 0.0, 1.0, 1.0, 0.0)); // 1 m², and further from it

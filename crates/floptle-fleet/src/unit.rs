@@ -361,7 +361,7 @@ mod tests {
     /// **The game key never reaches the command line.**
     ///
     /// It is a credential for somebody else's game, and an `ExecStart` is
-    /// readable by every `ps` on the box AND echoed into the journal by
+    /// readable by every `ps` on the box and echoed into the journal by
     /// systemd — which this agent ships to the control plane as `last_lines`
     /// and W renders on a public page. Three ways out of the box for one
     /// mistake, so this is asserted rather than reviewed.

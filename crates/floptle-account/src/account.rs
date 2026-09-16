@@ -282,7 +282,7 @@ impl Account {
         let now = unix_now();
         let Some(session) = self.session().filter(|s| s.needs_refresh(now)) else { return };
         match crate::web_auth::browser::refresh(client, &session).await {
-            // Persist BEFORE anything else can call: the old refresh token died
+            // Persist before anything else can call: the old refresh token died
             // the moment this succeeded, so a crash between here and the save
             // costs the session.
             Ok(fresh) => self.adopt(fresh),
@@ -648,12 +648,12 @@ mod tests {
     ///
     /// Two halves, and the second is the one worth having. The first says an
     /// unreachable endpoint no longer writes down `"free"`. The second says that
-    /// a client which was TOLD `"studio"` an hour ago keeps saying `"studio"` —
+    /// a client which was told `"studio"` an hour ago keeps saying `"studio"` —
     /// "your plan as of last time" is a better answer than "free" for every
     /// purpose a client has, and the stored session already holds it.
     #[test]
     fn an_unreachable_plan_endpoint_is_not_a_downgrade() {
-        // Nothing on record: the plan is unknown, and NOT free.
+        // Nothing on record: the plan is unknown, and not free.
         let store = Arc::new(MemStore::default());
         let a = account_no_entitlements(store.clone());
         a.sign_in();
@@ -663,7 +663,7 @@ mod tests {
         assert_ne!(s.tier, "free", "an outage must not read as a free account");
         assert_eq!(s.effective_tier(), "free", "…and it still fails soft");
 
-        // Now with a plan on record for the SAME account. It is carried forward.
+        // Now with a plan on record for the same account. It is carried forward.
         let store = Arc::new(MemStore::default());
         store
             .save(&Session {
@@ -834,7 +834,7 @@ mod tests {
     ///
     /// Only the half a machine can do alone — asking for a device code. It
     /// proves the endpoint, the PKCE challenge, the scope and the response
-    /// shape; the approval needs a person and a browser, which is what Ty's
+    /// shape; the approval needs a person and a browser, which is what the
     /// run through Fofighter is for.
     #[test]
     #[ignore = "hits the live fopull.com provider"]

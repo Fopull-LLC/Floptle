@@ -152,7 +152,7 @@ mod integration {
         // The sample stays: it was copied into the project and is the
         // project's now.
         assert!(dest.join("field.ron").exists());
-        // The folder it was installed FROM is untouched.
+        // The folder it was installed from is untouched.
         assert!(src.join("package.ron").exists());
 
         let _ = std::fs::remove_dir_all(&base);

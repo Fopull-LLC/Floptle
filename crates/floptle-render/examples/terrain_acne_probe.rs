@@ -38,7 +38,7 @@ fn main() {
     });
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Gently rolling ground — NOT flat. A perfectly flat field hides acne; real
+    // Gently rolling ground — not flat. A perfectly flat field hides acne; real
     // sculpted terrain has exactly the low-amplitude noise that trips it.
     let mut t = Terrain::flat([128, 48, 128], [0.0; 3], [16.0, 6.0, 16.0], 0.0, [0.5, 0.55, 0.45]);
     // Low, broad swells spread over the far half — the near ground stays open so the
@@ -59,7 +59,7 @@ fn main() {
     raymarch.set_terrain_textures(&gpu, &[white256()]);
     assert_eq!(raymarch.set_volumes(&gpu, &[&t.baked]), 1);
 
-    // Camera LOW and close, looking across the ground — the "up close / certain
+    // Camera low and close, looking across the ground — the "up close / certain
     // angles" half of the report.
     let cam_pos = DVec3::new(0.0, 2.2, 13.0);
     let target = Vec3::new(0.0, 0.0, -1.0);
@@ -130,8 +130,8 @@ fn main() {
             vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16]; a[0] = [16.0, 6.0, 16.0, 0.1]; a },
             terrain_tint: [1.0, 1.0, 1.0, 0.0],
             terrain_params: [16.0, 0.0, 0.0, 1.0],
-            // shadows ON, k = 12, strength 1, 150u march. Quantize and dither OFF —
-            // so any banding here is the FIELD, not the retro posterize.
+            // shadows on, k = 12, strength 1, 150u march. Quantize and dither off —
+            // so any banding here is the field, not the retro posterize.
             shadow_params: [1.0, 12.0, 1.0, 150.0],
             shadow_tint: [0.0, 0.0, 0.0, 0.0],
             shadow_extra: [0.0; 4],

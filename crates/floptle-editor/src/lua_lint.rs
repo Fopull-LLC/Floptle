@@ -173,7 +173,7 @@ fn idents(code: &str) -> Vec<(String, char, char)> {
 /// How much this line changes open-bracket nesting (`{`, `(`, `[` vs their
 /// closers), counted on code only.
 ///
-/// This is what tells a statement from a table FIELD. A multi-line constructor —
+/// This is what tells a statement from a table field. A multi-line constructor —
 ///
 /// ```lua
 /// local o = {
@@ -208,7 +208,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     //
     // `locals` are what the unused-local lint looks at: `local x`, parameters,
     // loop variables. `known` is everything a later assignment may legitimately
-    // name, which ALSO includes globals the script publishes on purpose —
+    // name, which also includes globals the script publishes on purpose —
     // `piloting = false` at file scope, read by other scripts through a script
     // handle (docs/scripting.md §14). That convention is the reason this lint
     // can't simply flag every bare assignment: in the real projects those
@@ -216,8 +216,8 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     // `fuel = 0` is a lint everyone turns off.
     let mut declared: Vec<(String, usize)> = Vec::new();
     // Parameters, kept apart: they are declarations (assigning to one is not a
-    // global) but they are NOT candidates for the unused lint. A lifecycle
-    // hook's signature belongs to the ENGINE — `function update(node, dt)`
+    // global) but they are not candidates for the unused lint. A lifecycle
+    // hook's signature belongs to the engine — `function update(node, dt)`
     // with an unused `dt` is correct code, and every second script has one, so
     // reporting them is how a warnings strip becomes something people switch
     // off. The same goes for a callback that ignores an argument it is handed.
@@ -262,7 +262,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                     param_decls.push((p.to_string(), n + 1));
                 }
             }
-            // THE NODE COMES FIRST, ALWAYS. A hook declared `update(dt)` gets
+            // the node comes first, always. A hook declared `update(dt)` gets
             // the node bound to `dt`; nothing complains until the first sum,
             // and then it raises every frame. Read from the outside that is a
             // script which does nothing at all — no panel, no movement, no
@@ -297,7 +297,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 }
             }
         }
-        // A bare `name = …` at FILE SCOPE publishes a global deliberately —
+        // A bare `name = …` at file SCOPE publishes a global deliberately —
         // unless we're inside an open bracket, where it's a table field.
         if depth == 0
             && open_before == 0
@@ -351,7 +351,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
         let t = code.trim();
         let open_before = bracket;
         bracket = (bracket + bracket_delta(&code)).max(0);
-        // Inside an open bracket this is a table FIELD or a named argument, not a
+        // Inside an open bracket this is a table field or a named argument, not a
         // statement — see `bracket_delta`.
         if open_before > 0 {
             continue;
@@ -416,7 +416,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
             .count();
         // The declaring line can use the name too — `local a = a + 1`, and the
         // one-liner `for k, v in pairs(t) do print(k, v) end`, where the loop
-        // variables are declared and consumed on the same line. A SECOND
+        // variables are declared and consumed on the same line. A second
         // occurrence on that line is a use.
         let self_line_use = src
             .lines()
@@ -534,7 +534,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
         }
         // Pass 7: a top-level export a `findScript` handle answers itself
         // (`floptle/0085`). The host reports this at load too, but only once the
-        // scene runs — and the failure it prevents is silent AND delayed: the
+        // scene runs — and the failure it prevents is silent and delayed: the
         // handle resolves, the field is present, the type is wrong, and nothing
         // raises until something calls it.
         //
@@ -656,7 +656,7 @@ end
         assert!(hits[0].message.contains("did you mean `speed`?"), "{}", hits[0].message);
     }
 
-    /// What must NOT fire, or the lint is worse than nothing: locals, hooks,
+    /// What must not fire, or the lint is worse than nothing: locals, hooks,
     /// engine API, table fields, indexes, comparisons, and strings.
     #[test]
     fn it_stays_quiet_on_everything_legitimate() {

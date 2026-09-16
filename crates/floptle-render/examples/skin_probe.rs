@@ -2,7 +2,7 @@
 //!
 //! A skinning bug is invisible in a timing number and obvious in a picture: one
 //! joint's weight landing on the wrong vertex still runs at exactly the frame
-//! rate you were hoping for. So this renders the SAME posed mesh twice —
+//! rate you were hoping for. So this renders the same posed mesh twice —
 //!
 //!   * deformed on the CPU — `cpu_skin_part`'s arithmetic, baked into the vertex
 //!     buffer and drawn through the ordinary pipeline;
@@ -13,7 +13,7 @@
 //! skinning store is full, and a game must not look different depending on which
 //! it got.
 //!
-//! It also checks the pose actually MOVED anything: a `vs_skin` that quietly fell
+//! It also checks the pose actually moved anything: a `vs_skin` that quietly fell
 //! through to the bind pose would match a CPU path that did the same, and two
 //! identically-wrong renders agree perfectly.
 //!
@@ -131,7 +131,7 @@ enum How {
     /// Draw the bind pose through `vs_skin` with the palette.
     Gpu,
     /// Draw the bind pose through the ordinary pipeline — no deform at all. The
-    /// control: if either path above matches THIS, the pose never applied.
+    /// control: if either path above matches this, the pose never applied.
     Bind,
 }
 
@@ -265,7 +265,7 @@ fn main() {
         vs_bind * 100.0
     );
 
-    // 2. THE ONE THAT MATTERS. The two paths are one behaviour: a character must
+    // 2. the one that matters. The two paths are one behaviour: a character must
     //    not look different depending on whether its part made it into the
     //    skinning store.
     assert!(

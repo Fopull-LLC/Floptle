@@ -176,7 +176,7 @@ struct HubState {
     /// xorshift64 state — deterministic loss decisions.
     rng: u64,
     seq: u64,
-    /// Inbox per endpoint (SERVER or a client id).
+    /// Inbox per endpoint (server or a client id).
     inbox: HashMap<PeerId, VecDeque<Queued>>,
     /// Newest delivered seq per (destination, source, channel) — sequenced drop.
     delivered: HashMap<(PeerId, PeerId, Channel), u64>,
@@ -281,7 +281,7 @@ impl MemoryHub {
         }
     }
 
-    /// Set the simulated link: one-way latency in TICKS and unreliable-drop
+    /// Set the simulated link: one-way latency in ticks and unreliable-drop
     /// probability. Live-tunable (the harness sliders).
     pub fn set_conditions(&self, latency_ticks: u64, loss: f32) {
         let mut s = self.state.lock().unwrap();
@@ -347,7 +347,7 @@ impl Transport for MemoryTransport {
         // reason and then hangs up, and wiping the mail on the way out would
         // deliver the hangup and drop the explanation — which is the exact
         // failure a kick with a reason exists to remove. (The harness's own
-        // leave button still clears it: a client discarding its OWN mail on the
+        // leave button still clears it: a client discarding its own mail on the
         // way out is a different act from a server hanging up on it.)
         self.state.lock().unwrap().pending_leaves.push_back(peer);
     }

@@ -22,7 +22,7 @@
 use crate::learn::{Check, Level, Step, Tutorial};
 
 // The Lua every tutorial writes, named so that a starter template can ship the
-// EXACT same file. One source, two consumers — a template whose scripts had
+// exact same file. One source, two consumers — a template whose scripts had
 // quietly drifted from the tutorial that teaches them would be worse than no
 // template at all.
 

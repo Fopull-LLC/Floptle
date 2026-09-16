@@ -416,8 +416,8 @@ fn action_row(
                 ui.label(egui::RichText::new(icons::UNUSED).weak())
                     .on_hover_text("no script reads this action");
             }
-            // There is only ever ONE keyboard. In a local-multiplayer project an
-            // unscoped key binding therefore fires this action for EVERY player at
+            // There is only ever one keyboard. In a local-multiplayer project an
+            // unscoped key binding therefore fires this action for every player at
             // once — both characters jump off one press. A pad binding has no such
             // problem (`Any` resolves per slot), so only flag the keyboard half.
             if multiplayer
@@ -676,14 +676,14 @@ fn binding_chips(
             None => b.chip(),
         };
         // **Break the line before a chip that will not fit on it.** A wrapped
-        // layout only breaks BETWEEN widgets it can size, and a button sizes
+        // layout only breaks between widgets it can size, and a button sizes
         // itself from its own text: past the edge egui wraps the label inside
         // the chip and draws the chip over the border anyway. Measuring first is
         // what turns "nearly fits" into "next line", and the chips are exactly
         // the widgets whose width the panel cannot be sized for — "◉ R-Trigger"
         // is three times "◉ A".
         //
-        // Measured on THIS ui and not inside the `push_id` below: a child ui
+        // Measured on this ui and not inside the `push_id` below: a child ui
         // reports the whole panel as available. And measured with
         // `usable_width`, not `available_width` — in a wrapped horizontal layout
         // the latter answers with the row's whole width however far along the

@@ -14,7 +14,7 @@
 //!
 //! ⚠ **A renewal that cannot be loaded changes nothing.** A torn file, a key
 //! that belongs to a different certificate, a path that vanished mid-rotation:
-//! each is said ONCE on the relay's log, and the relay goes on presenting the
+//! each is said once on the relay's log, and the relay goes on presenting the
 //! certificate it had. It is retried the next time the files change, which
 //! is what a completed write looks like. The alternative — presenting nothing,
 //! or refusing every handshake until an operator notices — is the outage this
@@ -30,7 +30,7 @@ use floptle_net::ServerCertificate;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What a file looked like the last time it was read: modification time and
-/// size, following symlinks — certbot's `live/` entries ARE symlinks, and a
+/// size, following symlinks — certbot's `live/` entries are symlinks, and a
 /// renewal is the link moving to a new file in `archive/`. `None` is a path
 /// that could not be stat'd.
 type Stamp = Option<(SystemTime, u64)>;
@@ -59,7 +59,7 @@ pub struct CertWatch {
 pub enum Reload {
     /// The files changed and loaded: present this from now on.
     Loaded(ServerCertificate),
-    /// The files changed and did NOT load; the relay keeps what it has. Said
+    /// The files changed and did not load; the relay keeps what it has. Said
     /// once per failing state of the files.
     Failed(String),
 }

@@ -2,7 +2,7 @@
 //! §10.2). The first box-and-wire canvas in the editor.
 //!
 //! One source of truth: the graph renders `floptle_shader::graph::build_view`
-//! of the parsed file, and EVERY edit is an IR mutation that re-prints the
+//! of the parsed file, and every edit is an IR mutation that re-prints the
 //! `.flsl` to disk — so the Scripting tab, VSCode and the hot-reload pipeline
 //! all see the same shader, and an external text edit re-syncs the graph on
 //! its next frame (mtime watch, the house pattern).
@@ -11,7 +11,7 @@
 //! pointer, middle-drag pans, left-drag on empty canvas box-selects,
 //! left-drag on a node moves the whole selection, right-click adds nodes.
 //!
-//! Nodes NEVER move on their own: `//@layout` wins, and every auto-laid-out
+//! Nodes never move on their own: `//@layout` wins, and every auto-laid-out
 //! position is frozen in a session cache keyed by reparse-stable identities
 //! (`graph::stable_keys`) the moment it's first computed.
 //!
@@ -64,7 +64,7 @@ pub(crate) struct ShaderGraphState {
     src: String,
     pub(crate) ir: Option<ShaderIr>,
     /// Bumped every time the IR changes. The preview driver keys its compile
-    /// off this: re-checking and re-transpiling the whole graph EVERY frame
+    /// off this: re-checking and re-transpiling the whole graph every frame
     /// (which is what it used to do) is real work on a hundred-node sky, and
     /// on an idle frame it can't produce a different answer.
     pub(crate) ir_rev: u64,
@@ -95,7 +95,7 @@ pub(crate) struct ShaderGraphState {
     palette: Option<Palette>,
     undo: Vec<String>,
     redo: Vec<String>,
-    /// The pre-edit source backing the NEXT undo push (set when an edit
+    /// The pre-edit source backing the next undo push (set when an edit
     /// stream begins, consumed at flush).
     pending_undo: Option<String>,
     /// The in-memory IR differs from disk (flushed when the pointer is up).
@@ -112,7 +112,7 @@ pub(crate) struct ShaderGraphState {
     /// own component scan.
     mat_slots: std::collections::BTreeMap<String, String>,
     /// The node the focus panel is watching — the last single node clicked.
-    /// `None` watches the output, so the panel always shows SOMETHING.
+    /// `None` watches the output, so the panel always shows something.
     focus: Option<NodeKey>,
     /// The focus panel is open (▣ in the header).
     focus_open: bool,
@@ -159,7 +159,7 @@ impl Default for ShaderGraphState {
     }
 }
 
-/// Which nodes carry a live preview thumbnail — MUST mirror
+/// Which nodes carry a live preview thumbnail — must mirror
 /// [`floptle_shader::preview::preview_targets`]'s skip rule (uniforms and
 /// constants already show their value as widgets).
 fn previewable(n: &GNode) -> bool {
@@ -633,7 +633,7 @@ impl ShaderGraphState {
                 }
             }
             Act::Copy(keys) => {
-                // The clipboard is the shader's SOURCE plus the picked names —
+                // The clipboard is the shader's source plus the picked names —
                 // text, so it survives a reparse, a file switch, and this
                 // shader being edited (or closed) before the paste.
                 let named = keys.iter().filter(|k| matches!(k, NodeKey::Let(_))).count();
@@ -992,7 +992,7 @@ impl EditorTabViewer<'_> {
         });
     }
 
-    /// Tidy-up for a hand-placed selection: ⇅ Arrange re-lays out EVERYTHING,
+    /// Tidy-up for a hand-placed selection: ⇅ Arrange re-lays out everything,
     /// which is the wrong tool once a graph has a shape you like. These move
     /// only what you picked.
     fn shader_graph_align_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
@@ -1038,7 +1038,7 @@ impl EditorTabViewer<'_> {
 
     /// The selected node, big: its preview at panel width, what it is, what
     /// type it carries, and — the part a beginner actually needs — how that
-    /// type is being DRAWN, since a float and a vec3 become pictures by very
+    /// type is being drawn, since a float and a vec3 become pictures by very
     /// different rules. Falls back to the output, so the panel is never blank
     /// and the finished shader is always one glance away.
     fn shader_graph_focus_panel(&mut self, ui: &mut egui::Ui) {
@@ -1159,7 +1159,7 @@ impl EditorTabViewer<'_> {
                 && !mods.shift
                 && let Some(ptr) = ptr
             {
-                // Consume it the way ScrollArea does, so the Scene can't ALSO
+                // Consume it the way ScrollArea does, so the Scene can't also
                 // pan with the same wheel motion.
                 ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                 let r = &mut self.shader_graph.scene_rect;
@@ -1408,7 +1408,7 @@ impl EditorTabViewer<'_> {
             });
         }
         self.shader_graph_palette(ui, stage, acts);
-        // Keys reach the canvas only while it has the pointer AND nothing is
+        // Keys reach the canvas only while it has the pointer and nothing is
         // taking text — otherwise `f` in the palette's search box would frame
         // the graph and Delete would eat a node mid-rename.
         let typing = self.shader_graph.field_buf.is_some()
@@ -1519,7 +1519,7 @@ impl EditorTabViewer<'_> {
     }
 
     /// The canvas palette: one floating list serving both ways of asking for a
-    /// node (right-click, or a wire let go over empty canvas), drawn in SCREEN
+    /// node (right-click, or a wire let go over empty canvas), drawn in screen
     /// space so it stays readable at any zoom. Closes on pick, Escape, or a
     /// click outside — never on the very gesture that opened it.
     fn shader_graph_palette(&mut self, ui: &mut egui::Ui, stage: Stage, acts: &mut Vec<Act>) {
@@ -1577,7 +1577,7 @@ impl EditorTabViewer<'_> {
         let id = ui.id().with(("sg-node", &n.key));
         let selected = sel.contains(&n.key);
         let toggle_mod = ui.input(|i| i.modifiers.command || i.modifiers.shift);
-        // The whole node selects on click — registered FIRST so the header,
+        // The whole node selects on click — registered first so the header,
         // rows, dots and widgets all take precedence over it.
         let body_resp = ui.interact(r, id.with("bodyclick"), Sense::click());
         if body_resp.clicked() {
@@ -1904,7 +1904,7 @@ impl EditorTabViewer<'_> {
             _ => {}
         }
 
-        // ---- the live preview thumbnail (what this node LOOKS like) ----
+        // ---- the live preview thumbnail (what this node looks like) ----
         if self.shader_preview.enabled
             && previewable(n)
             && !self.shader_graph.pv_hidden.contains(&n.key)
@@ -2013,7 +2013,7 @@ impl EditorTabViewer<'_> {
     }
 
     /// The uniform node's body: name, type, default value, range — the
-    /// declaration IS the Inspector schema, edited right on the node.
+    /// declaration is the Inspector schema, edited right on the node.
     fn uniform_body(
         &mut self,
         ui: &mut egui::Ui,

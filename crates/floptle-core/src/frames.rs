@@ -224,7 +224,7 @@ impl System {
         self.body_pos_vel(idx, t).0
     }
 
-    /// System-frame position AND velocity of body `idx` at `t` (velocity sums
+    /// System-frame position and velocity of body `idx` at `t` (velocity sums
     /// down the parent chain — a moon moves with its planet).
     pub fn body_pos_vel(&self, idx: usize, t: f64) -> (DVec3, DVec3) {
         let b = &self.bodies[idx];
@@ -262,7 +262,7 @@ impl System {
     }
 
     /// Inverse-square acceleration a ship at `pos` feels from its dominant
-    /// body — THE gravity of the space game (patched conics: one attractor).
+    /// body — the gravity of the space game (patched conics: one attractor).
     pub fn gravity(&self, pos: DVec3, t: f64) -> DVec3 {
         let dom = self.dominant(pos, t);
         let d = self.body_pos(dom, t) - pos;
@@ -391,7 +391,7 @@ mod tests {
         let planet = sys.body_pos(1, t);
         let moon = sys.body_pos(2, t);
         // Deep space → the sun; near the planet → the planet; near the moon →
-        // the moon (whose SOI sits INSIDE the planet's and must shadow it).
+        // the moon (whose SOI sits inside the planet's and must shadow it).
         assert_eq!(sys.dominant(planet * 3.0, t), 0);
         assert_eq!(sys.dominant(planet + DVec3::new(500.0, 0.0, 0.0), t), 1);
         assert_eq!(sys.dominant(moon + DVec3::new(30.0, 0.0, 0.0), t), 2);
@@ -400,7 +400,7 @@ mod tests {
         let g = sys.gravity(p, t);
         assert!(g.normalize().dot((planet - p).normalize()) > 0.999);
         assert!((g.length() - sys.bodies[1].mu / (400.0f64 * 400.0)).abs() < 1e-9);
-        // A moon's velocity includes its planet's (it travels WITH it).
+        // A moon's velocity includes its planet's (it travels with it).
         let (_, moon_v) = sys.body_pos_vel(2, t);
         let (_, planet_v) = sys.body_pos_vel(1, t);
         assert!((moon_v - planet_v).length() < moon_v.length());

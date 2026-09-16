@@ -185,7 +185,7 @@ fn parts_len(mesh: &ufbx::Mesh) -> usize {
 ///
 /// The rule is narrow on purpose: this exact exporter, which ufbx identifies by
 /// name, at file versions below 7000. It is not a guess about the geometry, and
-/// it is pinned by a test that converts the SAME model exported both ways and
+/// it is pinned by a test that converts the same model exported both ways and
 /// requires the two to come out the same size — which is the property that
 /// actually matters and the one that would catch this coming back.
 fn unit_scale(scene: &ufbx::Scene, report: &mut Report) -> f64 {
@@ -236,7 +236,7 @@ fn normal_matrix(m: &ufbx::Matrix) -> [[f64; 3]; 3] {
         return a;
     }
     let inv = 1.0 / det;
-    // cofactor(a) / det, which IS transpose(inverse(a)). Written out rather
+    // cofactor(a) / det, which is transpose(inverse(a)). Written out rather
     // than composed from an inverse and a transpose because getting one of the
     // two the wrong way round produces a matrix that is correct for every
     // rigid transform and wrong for every scaled one — which passes any test

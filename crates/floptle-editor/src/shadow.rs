@@ -58,7 +58,7 @@ pub struct ShadowSim {
     /// The newest tick actually simulated here.
     at: u64,
     /// Entries already handed to the driver. A `(peer, tick)` set rather than a
-    /// high-water mark: a late input lands BELOW the frontier by definition —
+    /// high-water mark: a late input lands below the frontier by definition —
     /// that is what makes it late — and a watermark would step straight over
     /// the one case the referee exists to handle.
     fed: std::collections::HashSet<(PeerId, u64)>,
@@ -96,7 +96,7 @@ impl ShadowSim {
 
     /// [`Self::build`], with the caller supplying the physics.
     ///
-    /// **The referee and the replay MUST use this**, handing over the same `Sim`
+    /// **The referee and the replay must use this**, handing over the same `Sim`
     /// the live session builds. The shadow's whole claim is that it agrees with
     /// the live simulation *by construction*; a `Sim` built differently breaks
     /// that at the first tick, and the state checksum hashes body position and
@@ -127,7 +127,7 @@ impl ShadowSim {
         let mut sim = make_sim(&world);
         let mut host = ScriptHost::new();
         host.set_input_map(input_map);
-        // Filter the fighters out BEFORE the build pass, because that is what
+        // Filter the fighters out before the build pass, because that is what
         // the live session does.
         //
         // `run` publishes every environment in pass 1 and runs `start`/`update`
@@ -209,7 +209,7 @@ impl ShadowSim {
 
     /// Hand the driver every logged input at or below `tick` it hasn't seen.
     ///
-    /// Fed for EVERY peer including the one this instance stands in for. In a
+    /// Fed for every peer including the one this instance stands in for. In a
     /// live session the local peer's input is sampled and `add_local` shifts it
     /// by the delay; here it is already an applied tick straight out of the log,
     /// so shifting it again would replay the match a couple of ticks skewed.
@@ -343,7 +343,7 @@ end\n";
     /// ⚠ **`Matter` is not decoration here.** `floptle_scene::to_doc` iterates
     /// `query::<Matter>()`, so an entity without one is not serialized at all.
     /// This fixture had no `Matter` for the whole life of the feature, which
-    /// made every document it produced EMPTY — so every shadow bound zero
+    /// made every document it produced empty — so every shadow bound zero
     /// nodes, `fingerprint` returned `""`, and every test in this module
     /// compared one empty string to another and passed. Two real referee faults
     /// shipped through that hole (floptle/0039's build pass and 0041's
@@ -438,7 +438,7 @@ end\n";
         out
     }
 
-    /// FIELD REGRESSION (floptle/0041): the referee must agree with a LIVE
+    /// field regression (floptle/0041): the referee must agree with a live
     /// driver, and it only does if it is running the same physics.
     ///
     /// `ShadowSim::build`'s default `Sim` had no gravity, no static colliders
@@ -462,12 +462,12 @@ end\n";
 
         let (doc, dir) = (ring(true), script_dir("gravity"));
         let log = recorded_match(vec![SERVER, 1]);
-        // The physics BOTH sides get. Non-trivial on purpose: with zero gravity
+        // The physics both sides get. Non-trivial on purpose: with zero gravity
         // the bug under test is invisible, which is exactly how it shipped.
         let physics =
             |w: &World| Sim::build(w, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), floptle_core::math::DVec3::ZERO);
 
-        // The LIVE side: a driver fed the same log through the same hooks the
+        // The live side: a driver fed the same log through the same hooks the
         // editor's tick uses.
         let mut world = World::default();
         floptle_scene::spawn_into(&doc, &mut world);
@@ -510,7 +510,7 @@ end\n";
         );
 
         // And the negative control, so the test cannot pass by the physics not
-        // mattering: a referee on DIFFERENT physics must disagree. This is the
+        // mattering: a referee on different physics must disagree. This is the
         // assertion that fails on the shipped code.
         let mut wrong = ShadowSim::build(&doc, &dir, fighter_map(), r.log.clone(), SERVER, STEP);
         wrong.advance(Horizon::WholeLog, 10_000);
@@ -522,7 +522,7 @@ end\n";
         );
     }
 
-    /// THE property both features rest on: the inputs and the seed are the
+    /// the property both features rest on: the inputs and the seed are the
     /// match. Two fresh worlds fed the same log must end up in bit-identical
     /// states — otherwise a replay is a re-enactment, and a referee's verdict
     /// is just a second opinion.
@@ -541,7 +541,7 @@ end\n";
         assert_eq!(fingerprint(&mut a), fingerprint(&mut b), "a replay is the match, run again");
     }
 
-    /// A replay taken from the OTHER peer's seat is the same match. Nothing in
+    /// A replay taken from the other peer's seat is the same match. Nothing in
     /// a shadow is ever sampled, so whose seat it sits in cannot matter — and
     /// if it ever did, replays would disagree with the referee.
     #[test]

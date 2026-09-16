@@ -9,7 +9,7 @@
 pub struct Name(pub String);
 
 /// The named collision/query **layer** a node is on. Layers are project-defined
-/// (Project Settings, up to 32) and referenced BY NAME everywhere — scene files,
+/// (Project Settings, up to 32) and referenced by name everywhere — scene files,
 /// scripts (`node.layer`), the Inspector — so reordering the project's layer
 /// list never silently re-layers a scene. A node with no `Layer` component is
 /// on `"Default"`. Resolved to a bit index once per Play by
@@ -38,7 +38,7 @@ pub struct Layer(pub String);
 /// supposed to move anything.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sorting {
-    /// The project sorting layer's NAME. Empty = the default layer.
+    /// The project sorting layer's name. Empty = the default layer.
     pub layer: String,
     /// Position within the layer. Higher is nearer the camera. Consulted under
     /// **both** modes — [`SortMode::Y`] breaks ties *inside* an order rather
@@ -315,7 +315,7 @@ pub struct Lit2DFacts {
 ///   otherwise, which is what makes mixing the two deliberate rather than
 ///   something you discover.
 ///
-/// Deliberately NOT part of it: how near the node is to the camera plane, and
+/// Deliberately not part of it: how near the node is to the camera plane, and
 /// whether the project has named sorting layers. Both are true of scenes that
 /// want nothing to do with 2D lighting, and an inference that is *usually*
 /// right is worse than none — it fails in the scenes least able to explain it.
@@ -505,7 +505,7 @@ impl Tags {
     }
 }
 
-/// The cell value that leaves a tilemap square EMPTY.
+/// The cell value that leaves a tilemap square empty.
 ///
 /// Not `0`: zero is a perfectly good first cell of a sheet, and a grid that
 /// cannot express "nothing here" without giving up its first tile is a grid
@@ -514,7 +514,7 @@ pub const EMPTY_TILE: u32 = u32::MAX;
 
 /// One sprite in a [`Matter::SpriteBatch`].
 ///
-/// Positions are LOCAL to the batch node, so the node's transform still places
+/// Positions are local to the batch node, so the node's transform still places
 /// and orients the whole thing — a batch is a node like any other, it just draws
 /// more than one quad.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -599,7 +599,7 @@ pub struct Parent(pub crate::ecs::Entity);
 /// weapon, emitter, or pickup follows a character's hand/arm — including under
 /// animation. Lives ALONGSIDE [`Parent`]`(target)` (which keeps the node in the
 /// hierarchy and serializable): `Parent` says *under which mesh*, `BoneAttach` says
-/// *which bone under it*. Each frame `resolve_attachments` sets this node's LOCAL
+/// *which bone under it*. Each frame `resolve_attachments` sets this node's local
 /// transform to `bone_local · offset` (both in the mesh's model space), and the
 /// ordinary [`world_transform`] parent-walk re-applies the mesh's f64 world — so the
 /// attachment stays jitter-free far from the origin and every consumer (render,
@@ -608,10 +608,10 @@ pub struct Parent(pub crate::ecs::Entity);
 pub struct BoneAttach {
     /// The rigged Mesh entity this rides (kept equal to `Parent(target)`).
     pub target: crate::ecs::Entity,
-    /// The skeleton node NAME (portable across re-import; resolved to an index each
+    /// The skeleton node name (portable across re-import; resolved to an index each
     /// frame via `Skeleton::index_of`, like animation clips).
     pub bone: String,
-    /// The child's transform IN THE BONE'S LOCAL SPACE — seeded on attach so the node
+    /// The child's transform in the BONE'S local SPACE — seeded on attach so the node
     /// doesn't jump, then editable to position it on the bone.
     pub offset: crate::transform::Transform,
 }
@@ -622,7 +622,7 @@ pub enum Shape {
     Cube,
     Sphere,
     Capsule,
-    // Keep new shapes LAST: the renderer indexes meshes by `shape as usize`,
+    // Keep new shapes last: the renderer indexes meshes by `shape as usize`,
     // so appending preserves the existing 0/1/2 discriminants.
     Plane,
 }
@@ -669,7 +669,7 @@ pub enum BodyMode {
     #[default]
     Dynamic,
     /// TRANSFORM-DRIVEN: never falls or gets pushed — scripts/animation move
-    /// the node and the body follows. Dynamic bodies collide WITH it (moving
+    /// the node and the body follows. Dynamic bodies collide with it (moving
     /// platforms, elevators, doors that shove the player), raycasts hit it,
     /// and touch events fire. Costs almost nothing per tick (no integration).
     Kinematic,
@@ -680,14 +680,14 @@ pub enum BodyMode {
     Static,
 }
 
-/// Puts a node ON RAILS as a celestial body (solar demo S2, `frames` module):
+/// Puts a node on RAILS as a celestial body (solar demo S2, `frames` module):
 /// during Play the engine assembles all `CelestialBody` nodes into a
-/// [`crate::frames::System`], advances space time each tick, and WRITES this
+/// [`crate::frames::System`], advances space time each tick, and writes this
 /// node's translation from its Kepler elements — exact analytic orbits, stable
 /// at any time-warp. The node also becomes an inverse-square gravity source
 /// (µ/r²) with patched-conic SOI dominance.
 ///
-/// `parent` names another CelestialBody NODE; empty = the system root (which
+/// `parent` names another CelestialBody node; empty = the system root (which
 /// stays where the scene put it). Angles are radians; `soi = 0` auto-derives
 /// the Laplace radius from the parent's µ.
 #[derive(Clone, Debug, PartialEq)]
@@ -698,7 +698,7 @@ pub struct CelestialBody {
     pub body_radius: f64,
     /// Sphere-of-influence radius; 0 = auto (Laplace) from the parent.
     pub soi: f64,
-    /// Name of the parent body's NODE (empty = system root).
+    /// Name of the parent body's node (empty = system root).
     pub parent: String,
     /// Kepler elements around the parent: semi-major axis (negative =
     /// hyperbolic), eccentricity, inclination, longitude of ascending node,
@@ -727,7 +727,7 @@ pub struct CelestialBody {
     /// geometry is guaranteed never to pierce (a planet's core below its
     /// deepest cave). When > 0, the renderer skips terrain chunks fully hidden
     /// behind it — the far side of a planet stops costing draw calls. 0 = off.
-    /// Conservative by contract: set it BELOW anything diggable/carvable.
+    /// Conservative by contract: set it below anything diggable/carvable.
     pub occluder_radius: f64,
 }
 
@@ -800,7 +800,7 @@ pub struct RigidBody {
     /// engine.
     ///
     /// It composes with [`Self::lock_pos`] / [`Self::lock_rot`] rather than
-    /// replacing them — see [`Self::locks_pos`]. Ticking it can only ever ADD a
+    /// replacing them — see [`Self::locks_pos`]. Ticking it can only ever add a
     /// freeze, so a body that was already locking something keeps doing it, and
     /// unticking it cannot silently release an axis the author locked by hand.
     ///
@@ -809,7 +809,7 @@ pub struct RigidBody {
     /// it a mode would have meant no 2D kinematic platforms and no 2D static
     /// props, which is most of a platformer.
     pub two_d: bool,
-    /// Rotate the NODE so its local +Y tracks the body's up (−gravity) — characters
+    /// Rotate the node so its local +Y tracks the body's up (−gravity) — characters
     /// walking a radial-gravity planet stand on it visually, and their children
     /// (cameras, held items) inherit the tilt. Smoothed; visual-only (the physics
     /// capsule already follows −gravity regardless). Overrides `lock_rot` when set.
@@ -819,13 +819,13 @@ pub struct RigidBody {
     /// inside an [`Self::assembly`] compound, where composed mass/CoM/inertia
     /// are what make off-center thrust and contacts behave.
     pub mass: f32,
-    /// This node is the ROOT of a COMPOUND ASSEMBLY: one 6-DOF rigid body
+    /// This node is the root of a COMPOUND ASSEMBLY: one 6-DOF rigid body
     /// built from every descendant node that carries a `RigidBody` (each
     /// becomes an oriented shape at its offset, weighted by its `mass` —
     /// the root's own shape fields are ignored). Multi-part vehicles,
     /// decoupling rockets, breakable structures. Requires `Dynamic` mode.
     pub assembly: bool,
-    /// **PUSHBOX ONLY** — the solver never resolves this body's contacts. It
+    /// **pushbox only** — the solver never resolves this body's contacts. It
     /// integrates its velocity and nothing else: no gravity, no depenetration
     /// against colliders or terrain, no ground detection, no position locks.
     /// It still exists for raycasts, hulls and overlap queries, which is the
@@ -841,7 +841,7 @@ pub struct RigidBody {
     /// controller script, which is both exact and the genre's actual design.
     ///
     /// The script therefore owns separation. Pair it with
-    /// `node.tickX/tickY/tickZ/tickPos` — a position channel that is NOT the
+    /// `node.tickX/tickY/tickZ/tickPos` — a position channel that is not the
     /// interpolated render transform.
     pub pushbox_only: bool,
 }
@@ -894,7 +894,7 @@ impl RigidBody {
     }
 }
 
-/// Marks a node (and everything under it) as SWITCHED OFF: it doesn't draw, doesn't
+/// Marks a node (and everything under it) as SWITCHED off: it doesn't draw, doesn't
 /// collide, and its scripts don't run.
 ///
 /// A marker rather than an `enabled: bool` field, so the common case — every node in
@@ -908,7 +908,7 @@ pub struct Disabled;
 
 /// Marks a node (and everything under it) as surviving a scene swap — the
 /// DontDestroyOnLoad equivalent. A persistent node keeps its entity, its
-/// components, its physics body AND its running scripts: `start` does not
+/// components, its physics body and its running scripts: `start` does not
 /// re-fire, because the node never stopped existing.
 ///
 /// A marker for the same reason [`Disabled`] is one: presence = persistent, and
@@ -937,10 +937,10 @@ pub struct SceneTag(pub String);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MeshCollider;
 
-/// Marks ANY node as a STATIC collider auto-shaped from its geometry — the "collidable"
+/// Marks any node as a STATIC collider auto-shaped from its geometry — the "collidable"
 /// switch. At Play the editor builds the matching static collision shape sized to the
 /// node's `Matter` + world transform (Cube → box, Sphere → sphere, Capsule → capsule,
-/// Mesh → triangle mesh), so a primitive is collidable WITHOUT a dynamic rigidbody (just
+/// Mesh → triangle mesh), so a primitive is collidable without a dynamic rigidbody (just
 /// like a mesh collider). Resize/reshape it by scaling/rotating the node — the collider
 /// tracks the geometry. Presence = collidable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -990,14 +990,14 @@ pub struct Trigger;
 ///
 /// This is an ADDITIVE component rather than a `Matter` field on purpose. Paint is
 /// orthogonal to what a node *is* (a Mesh and a Primitive are both paintable), and
-/// every primitive of a shape shares ONE `MeshId` — so paint cannot live on the
+/// every primitive of a shape shares one `MeshId` — so paint cannot live on the
 /// geometry. See `docs/subsystems/materials-and-textures.md` §3.1/§9.1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexPaint {
     pub id: u32,
 }
 
-/// TEXTURE painting: this node carries a hand-painted texture (per-part paint images on a
+/// texture painting: this node carries a hand-painted texture (per-part paint images on a
 /// unique per-triangle atlas — see the editor's `paint_tex`). A stable id (not `Entity`,
 /// which `restore()` invalidates) keys the editor's image store, exactly like
 /// [`VertexPaint`] — so undo survives a World rebuild.
@@ -1049,7 +1049,7 @@ impl Default for Visible {
 /// them into the frame's light. `direction` need not be unit — the renderer
 /// normalizes it.
 ///
-/// `stars` switches the key light to STARS MODE: the directional light turns
+/// `stars` switches the key light to STARS mode: the directional light turns
 /// off and every [`CelestialBody`] with `luminosity > 0` becomes a real point
 /// light source — light radiates from each star's world position with
 /// inverse-square falloff, so terminators wrap planets, shadow directions
@@ -1059,7 +1059,7 @@ impl Default for Visible {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub direction: [f32; 3],
-    /// Stars mode: luminous celestial bodies ARE the key lights.
+    /// Stars mode: luminous celestial bodies are the key lights.
     pub stars: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
@@ -1125,7 +1125,7 @@ pub struct Light {
     ///
     /// Off by default, and deliberately: it costs a march per reflective pixel
     /// and a copy of the frame, and a scene that never wanted mirrors should not
-    /// pay for them. What it CANNOT do is show anything the camera cannot —
+    /// pay for them. What it cannot do is show anything the camera cannot —
     /// whatever is off-screen, behind the viewer or hidden behind something
     /// nearer falls back to the sky, which is why this is a complement to the
     /// environment map and not a replacement for it.
@@ -1139,7 +1139,7 @@ pub struct Light {
     /// Samples along that ray (quality against cost).
     pub reflection_steps: u32,
     /// How thick the surfaces in the depth buffer are assumed to be, in world
-    /// units. The depth buffer records where each surface IS and says nothing
+    /// units. The depth buffer records where each surface is and says nothing
     /// about how solid it is, so this is the window in which a ray that has gone
     /// behind a surface counts as having HIT it rather than having passed by
     /// somewhere behind it. Too small and reflections come out speckled with
@@ -1212,7 +1212,7 @@ pub struct Light {
     /// the fog by the sun, the point lights and the baked bounce; past 1
     /// exaggerates rather than blending further.
     pub fog_light: f32,
-    /// Scattering anisotropy (-0.9..0.9). Positive scatters FORWARD, so the media
+    /// Scattering anisotropy (-0.9..0.9). Positive scatters forward, so the media
     /// blooms toward the light and shafts read; 0 is an even glow. A mote of fog
     /// has no normal — this is the knob that does the job `N·L` does elsewhere.
     pub fog_anisotropy: f32,
@@ -1221,7 +1221,7 @@ pub struct Light {
     /// March the sun shadow at every fog step. This is what turns lit fog into
     /// actual beams, and it is essentially the entire cost of lit fog.
     pub fog_shafts: bool,
-    /// FLAT RAMP only — how much of the fog the **sky** takes at the horizon
+    /// flat RAMP only — how much of the fog the **sky** takes at the horizon
     /// (0..1), weighted so the zenith keeps whatever is painted there.
     ///
     /// Fog that tints surfaces and stops reads as fog only while its colour is
@@ -1336,7 +1336,7 @@ pub enum LightShape {
 
 /// The cone angle at and above which a lamp is not a spot at all.
 ///
-/// 180° rather than 360°, because the angle is the FULL cone: a 180° cone is
+/// 180° rather than 360°, because the angle is the full cone: a 180° cone is
 /// already a whole hemisphere, and past that the "cone" contains every direction
 /// a surface in front of the lamp could be. Anything at or over this is packed
 /// as an ordinary omnidirectional light and costs the shader nothing.
@@ -1420,7 +1420,7 @@ pub enum Matter {
     Empty,
     /// An editable map-building polygon mesh (blockout shapes, per-face
     /// materials, vertex/edge/face modeling — docs/map-tools.md).
-    /// Like `Terrain`, the geometry does NOT live on the component: `id` is a
+    /// Like `Terrain`, the geometry does not live on the component: `id` is a
     /// stable per-mesh key into the editor's map store, persisted to a
     /// per-scene sidecar (`maps/<scene>.map.ron`), because Entity indices die
     /// on undo/reload and big data can't ride the per-frame scene snapshot.
@@ -1436,7 +1436,7 @@ pub enum Matter {
     /// field of view in radians. One camera holds play-mode authority at a time
     /// (`active`); the gameplay view renders from it, switchable for cutscenes.
     ///
-    /// A non-empty `target` turns the camera into a RENDER TARGET (A1): every
+    /// A non-empty `target` turns the camera into a RENDER target (A1): every
     /// frame it renders the world into a live texture addressable as
     /// `rt:<target>` from any material or UI image — cockpit screens, security
     /// monitors, mirrors. `cull_mask` is a bitmask over the project's layers
@@ -1458,7 +1458,7 @@ pub enum Matter {
     /// two tilemaps at different Z cannot line up. It is also what a strategy or
     /// isometric camera wants, and what a technical shot wants.
     ///
-    /// The height is the FULL height, not a half-extent — the same number
+    /// The height is the full height, not a half-extent — the same number
     /// [`floptle_render::Projection::Orthographic`] takes, so there is no factor
     /// of two hiding at the boundary. Width follows from the viewport's aspect.
     Camera {
@@ -1491,7 +1491,7 @@ pub enum Matter {
         /// it has nothing to be blocked by. The ones that do are the ones a
         /// player can walk around: a torch on a wall, a lamp in a doorway.
         ///
-        /// It shadows from what is ON SCREEN. An occluder the camera cannot see
+        /// It shadows from what is on screen. An occluder the camera cannot see
         /// cannot cast, so a wall shadows correctly while it is in frame and
         /// stops when you look away from it. The scene-wide quality and darkness
         /// are on the Lighting node, not here.
@@ -1562,8 +1562,8 @@ pub enum Matter {
         visibility: f32,
     },
     /// An authored SDF shape (ADR-0007 Sdf stage): its Material's `.flsl`
-    /// shader IS the geometry, raymarched as part of the scene field (up to 4
-    /// per scene). `radius` bounds the shape in LOCAL units — the march,
+    /// shader is the geometry, raymarched as part of the scene field (up to 4
+    /// per scene). `radius` bounds the shape in local units — the march,
     /// shadows and spans all key off it, so keep it snug. Visual only for now
     /// (no collision until the CPU field evaluator lands — proposal §7.3).
     FieldShape { radius: f32 },
@@ -1589,7 +1589,7 @@ pub enum Matter {
     /// `data` is row-major, `rows * cols` long, from the top-left.
     /// [`EMPTY_TILE`] leaves a hole rather than drawing cell 0.
     /// `tileset` names the project-relative `.tileset.ron` that says what each
-    /// cell of the sheet MEANS — whether it collides, what it is tagged, which
+    /// cell of the sheet means — whether it collides, what it is tagged, which
     /// autotile group it belongs to, whether it animates. Empty = none, and the
     /// tilemap is then art only.
     ///
@@ -1642,7 +1642,7 @@ pub enum Matter {
     /// It carries the two things a Plane genuinely cannot express:
     ///
     /// * **A size in pixels.** `ppu` is pixels per world unit measured against
-    ///   ONE CELL of the sheet, so a 32×32 cell at `ppu = 32` is one unit across
+    ///   one cell of the sheet, so a 32×32 cell at `ppu = 32` is one unit across
     ///   however the sheet is sliced — re-slicing it finer does not resize every
     ///   sprite on it. That is the number a pixel artist already has; world
     ///   units are a number they would have to work out.
@@ -1731,7 +1731,7 @@ pub enum Matter {
 
         // ---- the look chain -------------------------------------------------
         //
-        // Everything below is OFF at its default, and each is skipped by the
+        // Everything below is off at its default, and each is skipped by the
         // renderer when it is: a scene that touches none of it renders exactly
         // the frames it rendered before. See `floptle_render::PostSettings` for
         // the pass order and why it is that order.
@@ -1743,7 +1743,7 @@ pub enum Matter {
         /// an enum here because `Matter` carries no renderer types; the renderer
         /// reads it through `floptle_render::Tonemap`.
         tonemap: u32,
-        /// Colour grade — exposure in STOPS (0 = unchanged, +1 = twice the light).
+        /// Colour grade — exposure in stops (0 = unchanged, +1 = twice the light).
         exposure: f32,
         /// Contrast about 18% grey. 1 = unchanged.
         contrast: f32,
@@ -1783,9 +1783,9 @@ pub enum Matter {
         /// Depth of field: the distance from the camera, in world units, that is
         /// in focus. 0 = off.
         dof_focus: f32,
-        /// How far BEYOND `dof_focus` stays sharp, in world units.
+        /// How far beyond `dof_focus` stays sharp, in world units.
         dof_range: f32,
-        /// How far IN FRONT of `dof_focus` stays sharp. 0 = half of `dof_range`,
+        /// How far in front of `dof_focus` stays sharp. 0 = half of `dof_range`,
         /// which is what the effect always did and what a lens roughly does —
         /// the near side goes soft much sooner than the far side.
         ///
@@ -1826,7 +1826,7 @@ pub enum Matter {
         /// tuning aid: the focus band is otherwise something you infer from a
         /// picture, and inferring it is how an hour goes.
         dof_show_focus: bool,
-        /// Focus on a NODE by name instead of at a fixed distance: the focus
+        /// Focus on a node by name instead of at a fixed distance: the focus
         /// distance becomes the camera's distance to it, every frame. Empty =
         /// use `dof_focus`.
         ///
@@ -2426,7 +2426,7 @@ pub enum GravityMode {
 /// their own transform. The walk is bounded to guard against accidental cycles.
 /// Is this node switched off — either itself, or because something above it is?
 ///
-/// [`Disabled`] is inherited, and it is inherited HERE rather than pushed down into
+/// [`Disabled`] is inherited, and it is inherited here rather than pushed down into
 /// children on toggle: a node that stored its own resolved state would need every
 /// re-parent, spawn and paste to remember to recompute it, and the one that forgot
 /// would leave an invisible node nobody could turn back on. Walking up is cheap
@@ -2621,7 +2621,7 @@ mod lighting_2d_tests {
         Lit2DFacts { emits: false, flat_matter: false, flat_camera }
     }
 
-    /// The requirement Ty stated: *"if I'm developing a 3D scene I shouldn't be
+    /// The requirement: *"if I'm developing a 3D scene I shouldn't be
     /// worried about accidentally setting something as 2D because of an
     /// incorrect engine inference."* Nothing in an ordinary 3D scene infers 2D.
     #[test]
@@ -2676,7 +2676,7 @@ mod lighting_2d_tests {
         }
     }
 
-    /// Naming layers restricts it to those, and the empty name IS the default
+    /// Naming layers restricts it to those, and the empty name is the default
     /// The shaping lane, and the two values in it that a slider or a script can
     /// reach and that would break the shader if they arrived unclamped: an inner
     /// radius at or past the range divides by zero and lights the whole disc
@@ -2718,7 +2718,7 @@ mod lighting_2d_tests {
     }
 
     /// Under `Auto` a tilemap casts from the collision it already has, so a
-    /// level's collision IS its light occlusion and the two cannot drift.
+    /// level's collision is its light occlusion and the two cannot drift.
     #[test]
     fn a_solid_tilemap_casts_without_a_second_authoring_step() {
         assert!(resolve_shadow_2d(Cast2D::Auto, true, true).0);

@@ -16,7 +16,7 @@ use floptle_net::{
 
 /// A claim carrying a `proof` nobody can check — which is the shape that
 /// matters. A claim with no proof at all is obviously unverified; the trap is a
-/// credential that LOOKS like one and was never validated against anything.
+/// credential that looks like one and was never validated against anything.
 fn claim(id: &str) -> IdentityClaim {
     IdentityClaim {
         id: id.into(),

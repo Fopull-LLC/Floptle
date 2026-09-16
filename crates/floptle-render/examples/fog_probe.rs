@@ -59,7 +59,7 @@ fn main() {
 // With a constant in-scattered radiance the marched sum telescopes: every slab
 // contributes `T·(1-e^-σdt)` of the same colour, so the total is
 // `C·(1-T_final)` and `T_final = e^(-σ·t)` exactly, independent of the step
-// count and of the per-pixel jitter. That means there IS a closed form to check
+// count and of the per-pixel jitter. That means there is a closed form to check
 // against, and checking against it is the only way to know the rewrite did not
 // quietly change every scene that already had volumetric fog on.
 // ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ fn unlit_fog_is_exactly_the_fog_it_replaced(gpu: &Gpu, rm: &Raymarch, dir: &str)
 }
 
 // ---------------------------------------------------------------------------
-// 2. Turning the amount up puts the SCENE'S light in the air.
+// 2. Turning the amount up puts the scene'S light in the air.
 //
 // The control is the frame above: the same fog, same density, same colour, with
 // nothing but the amount changed. If lit fog were secretly still painting the
@@ -124,7 +124,7 @@ fn the_media_takes_the_scene_s_light(gpu: &Gpu, rm: &Raymarch, dir: &str) {
         flat[1]
     );
 
-    // A cold sun in warm fog: the result must carry BOTH, because the fog colour
+    // A cold sun in warm fog: the result must carry both, because the fog colour
     // is the media's albedo once light is injected and albedo multiplies.
     let cold = centre(&render(
         gpu,
@@ -146,7 +146,7 @@ fn the_media_takes_the_scene_s_light(gpu: &Gpu, rm: &Raymarch, dir: &str) {
 // A mote of fog has no normal, so anisotropy is what stands in for `N·L`
 // everywhere else in the renderer — and it is checked against the arithmetic,
 // not against a picture. Henyey-Greenstein at g, normalised so isotropic is 1,
-// is (1-g²)/(1+g²-2g·cosθ)^1.5; the ratio between looking INTO the light and
+// is (1-g²)/(1+g²-2g·cosθ)^1.5; the ratio between looking into the light and
 // away from it is a number this file can compute.
 // ---------------------------------------------------------------------------
 fn the_phase_function_points_the_light(gpu: &Gpu, rm: &Raymarch) {
@@ -186,8 +186,8 @@ fn the_phase_function_points_the_light(gpu: &Gpu, rm: &Raymarch) {
 // that is never drawn, only marched — is laid over the camera's whole view. The
 // air under it must go dark.
 //
-// The second pair is the one that matters: with shafts OFF the very same box
-// must change NOTHING. Fog dimming for any other reason (the box occluding the
+// The second pair is the one that matters: with shafts off the very same box
+// must change nothing. Fog dimming for any other reason (the box occluding the
 // sky, an unrelated shading path) would survive the first assertion and die on
 // this one.
 // ---------------------------------------------------------------------------
@@ -396,7 +396,7 @@ fn target(gpu: &Gpu, label: &str) -> (wgpu::Texture, wgpu::TextureView) {
     (tex, view)
 }
 
-/// The pixel at fractional position `(fx, fy)`, in LINEAR light — the target is
+/// The pixel at fractional position `(fx, fy)`, in linear light — the target is
 /// 8-bit sRGB, and comparing those bytes to a linear expectation is a 2.2-power
 /// error that reads as "the fog is uniformly too thick".
 fn at(px: &[[u8; 4]], fx: f32, fy: f32) -> [f32; 3] {

@@ -339,7 +339,7 @@ fn usage_row(s: &UsageSample) -> serde_json::Value {
 
 /// The `box` object, built by hand so the omission rule is visible in one place.
 ///
-/// ⚠ **A measurement that was not taken is left OUT of the object**, never sent
+/// ⚠ **A measurement that was not taken is left out of the object**, never sent
 /// as `0`. This is the fleet agent's rule and its shape (`floptle/0215`), so one
 /// code path on the control plane reads both — but the reason is sharper here:
 /// `rx_drops: 0` from a relay that is keeping up is the best news it has, and
@@ -504,7 +504,7 @@ pub enum ControlError {
     /// token means this relay can never authorize or report anything, so a
     /// relay that has not managed a single successful pull is not a degraded
     /// managed relay — it is an untracked open one wearing the flags, which is
-    /// exactly what Ty's rule exists to prevent.
+    /// exactly what the rule exists to prevent.
     Denied(String),
     /// It answered, and the answer was not something this relay can use.
     Malformed(String),
@@ -737,7 +737,7 @@ mod shape_tests {
         assert_eq!(row.tier, "indie");
         assert!(row.account_over_limit, "`over_limit`, not `account_over_limit`");
 
-        // And the same body is NOT a snapshot row — if it ever becomes one,
+        // And the same body is not a snapshot row — if it ever becomes one,
         // this file has two names for one thing again.
         assert!(
             serde_json::from_str::<KeyRow>(body).is_err(),
@@ -747,7 +747,7 @@ mod shape_tests {
 
     /// The refusal form: a bad key is a 200 with a status, never a 4xx —
     /// because a 4xx would be indistinguishable from "the control plane is
-    /// broken", and the relay fails OPEN on the second.
+    /// broken", and the relay fails open on the second.
     #[test]
     fn a_refusal_is_a_status_rather_than_an_error_code() {
         for (body, want) in [

@@ -57,7 +57,7 @@ pub struct VfxCurveDoc {
     pub extrapolate: VfxExtrapolateDoc,
 }
 
-/// A property: one constant, a per-particle random between two bounds, OR a drawn
+/// A property: one constant, a per-particle random between two bounds, or a drawn
 /// curve — the value-or-curve union.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum VfxPropDoc {
@@ -134,7 +134,7 @@ pub struct VfxTrailDoc {
     /// Ribbon width in world units (at the head; the tail tapers when `fade`).
     #[serde(default = "trail_width_f32")]
     pub width: f32,
-    /// Taper width AND alpha to zero at the tail (default on).
+    /// Taper width and alpha to zero at the tail (default on).
     #[serde(default = "true_bool")]
     pub fade: bool,
     /// Ribbon texture (`None` = the track's own texture, or a soft untextured strip).
@@ -297,7 +297,7 @@ pub struct VfxLaneDoc {
     pub curve: VfxCurveDoc,
 }
 
-/// One visual layer AND its timeline lane.
+/// One visual layer and its timeline lane.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct VfxTrackDoc {
     pub name: String,
@@ -325,7 +325,7 @@ pub struct VfxTrackDoc {
     /// Beam tracks only: how many quads the origin→`beam_end` ribbon subdivides into.
     #[serde(default = "twelve_u32", skip_serializing_if = "is_twelve_u32")]
     pub segments: u32,
-    /// Beam tracks only: the ribbon's endpoint as a LOCAL offset from the effect origin.
+    /// Beam tracks only: the ribbon's endpoint as a local offset from the effect origin.
     #[serde(default = "default_beam_end", skip_serializing_if = "is_default_beam_end")]
     pub beam_end: [f32; 3],
     /// Beam tracks only: sine-ripple amplitude across the segment chain (0 = straight).

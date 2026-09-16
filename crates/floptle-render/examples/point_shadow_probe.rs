@@ -6,7 +6,7 @@
 //! behind the door as brightly as the one it was in, which is the single most
 //! conspicuous way local lighting can be wrong.
 //!
-//! The scene is a floor, a wall standing on it, and a lamp on ONE side of that
+//! The scene is a floor, a wall standing on it, and a lamp on one side of that
 //! wall. The floor is plain and unlit by anything else — no sun, no ambient, no
 //! sky — so every photon on it came from the lamp, and the wall's shadow is the
 //! only thing that can take it away.
@@ -47,7 +47,7 @@ fn main() {
     // BOTTOM of the frame; distance runs upward, so the floor beyond the wall is
     // the top band and the wall itself is the dark line between them. Both
     // rectangles stay clear of that line — a sample that catches the wall reads
-    // the wall's own albedo in BOTH renders and reports no difference, which is
+    // the wall's own albedo in both renders and reports no difference, which is
     // exactly how the first cut of this probe managed to fail.
     // `PROFILE=1` prints the vertical profile these came from.
     let near_on = mean_lum(&casting, 0.35, 0.65, 0.60, 0.85);
@@ -126,7 +126,7 @@ fn shot(
     let floor = Mat4::from_translation(Vec3::new(0.0, -8.0, -5.0))
         * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
         * Mat4::from_scale(Vec3::splat(40.0));
-    // A wall standing on the floor, across the view — LOW, so the camera sees
+    // A wall standing on the floor, across the view — low, so the camera sees
     // over it to the floor beyond. That floor is the whole measurement, and a
     // wall tall enough to hide it would leave nothing to look at.
     let wall = Mat4::from_translation(Vec3::new(0.0, -7.5, -5.5))
@@ -140,7 +140,7 @@ fn shot(
     ];
 
     // The lamp: on the NEAR side of the wall, just above the floor.
-    // BELOW the top of the wall, so everything behind it at floor level is in
+    // below the top of the wall, so everything behind it at floor level is in
     // shadow — a big unambiguous region rather than a thin band whose edge the
     // sampling rectangles would have to chase.
     let lamp = Vec3::new(0.0, -7.2, -3.5);

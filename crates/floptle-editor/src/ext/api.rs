@@ -345,7 +345,7 @@ fn tile_cell_of_world(
     let local = floptle_core::math::Vec2::new(rel.x / s3.x, rel.y / s3.y);
     let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
     let fx = (local.x + w) / m.tile;
-    // Row 0 is the top, so the row index counts DOWN from +h — matches the
+    // Row 0 is the top, so the row index counts down from +h — matches the
     // mesh builder and the game API exactly.
     let fy = (h - local.y) / m.tile;
     if fx < 0.0 || fy < 0.0 {
@@ -390,7 +390,7 @@ fn tile_world_of_cell(
 /// No permission gates it. It reads geometry the same package can already see
 /// the bounding box of and can already draw — and a model's triangles are not a
 /// secret from a tool the author installed into their own editor. Reading a
-/// FILE outside the package still needs `Files`; this reads what is in the
+/// file outside the package still needs `Files`; this reads what is in the
 /// scene, by node.
 /// How many node documents one `scene.docs` call serves.
 ///
@@ -832,7 +832,7 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
     }
 
     // ---- doing things ------------------------------------------------------
-    // `ed.undo()` marks the edits that follow as ONE undo step. It takes no
+    // `ed.undo()` marks the edits that follow as one undo step. It takes no
     // label because the editor's history has none — a name here would be a
     // promise the Ctrl+Z that follows could not keep.
     cmd_fn(lua, &t, shared, "undo", |_: ()| ExtCmd::Undo)?;
@@ -1240,7 +1240,7 @@ impl FileScope {
             .ok_or_else(|| format!("`{rel}` reaches outside the project, which is never allowed"))
     }
 
-    /// Resolve a path for reading that may ALSO be one the user picked.
+    /// Resolve a path for reading that may also be one the user picked.
     ///
     /// Everything `read_path` allows, plus any absolute path `ed.pickFile`
     /// handed this package during this session. **The picker is the grant**: a
@@ -1541,7 +1541,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
                         None => Value::Nil,
                     },
                 )?;
-                // `ui` is present only on a node that IS one, so `if n.ui`
+                // `ui` is present only on a node that is one, so `if n.ui`
                 // is the test a package writes — a table of defaults on every
                 // node would make every folder look like a panel.
                 if let Some(u) = &n.ui {
@@ -1705,7 +1705,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
             })?,
         )?;
     }
-    // `scene.docs(ids, done)` reads the documents of ANY nodes, however many,
+    // `scene.docs(ids, done)` reads the documents of any nodes, however many,
     // without touching the selection.
     //
     // The selection rule above is right for the mirror and wrong as the only
@@ -2044,7 +2044,7 @@ fn json_table(lua: &Lua) -> mlua::Result<Table> {
     // `json.null` — a value that encodes to JSON `null`.
     //
     // Nil cannot do this job. `t.field = nil` does not put a null in the table,
-    // it REMOVES the key, so the encoder never sees it and the field simply is
+    // it removes the key, so the encoder never sees it and the field simply is
     // not in the output. That difference matters to any API that reads an
     // absent field as "leave this alone" and an explicit null as "clear it" —
     // without a sentinel, a package can set such a field and never unset it.

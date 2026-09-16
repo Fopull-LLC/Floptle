@@ -73,7 +73,7 @@ impl TransformTRS {
     /// Rotation/scale about `pivot`, anchored against the node's `rest` pose.
     ///
     /// The pivot is a point in the node's own local (mesh) space, so where it sits
-    /// in PARENT space depends on the rest rotation/scale that map local → parent:
+    /// in parent space depends on the rest rotation/scale that map local → parent:
     /// `anchor = rest.r · (rest.s * pivot)`. Pivoting there gives
     /// `T(t + anchor)·R·S·T(-pivot)`, which has the two properties the feature
     /// promises:
@@ -106,18 +106,18 @@ pub struct SkelNode {
     pub rest: TransformTRS,
     /// The point (this node's local space) that rotation/scale pivot around — the
     /// object's "joint". `ZERO` = the node origin (the default for rigged bones,
-    /// whose origin already IS the joint). Editor-authored for baked object models
+    /// whose origin already is the joint). Editor-authored for baked object models
     /// (see the `.rig.ron` pivot overrides); ignored by clips (it only reshapes how
     /// a pose composes, never what's keyed).
     pub pivot: Vec3,
 }
 
 impl SkelNode {
-    /// The pivot expressed in PARENT space, relative to the node's translation:
+    /// The pivot expressed in parent space, relative to the node's translation:
     /// `rest.r · (rest.s * pivot)`. This is the offset [`TransformTRS::matrix_about_rest`]
     /// adds to the pose translation, so anything that reverses that composition —
     /// the gizmo turning a dragged world transform back into a local pose — must
-    /// subtract THIS, not the raw pivot. Identity rest rotation/scale → the two
+    /// subtract this, not the raw pivot. Identity rest rotation/scale → the two
     /// are the same vector.
     pub fn pivot_anchor(&self) -> Vec3 {
         self.rest.r * (self.rest.s * self.pivot)
@@ -477,7 +477,7 @@ pub struct State {
     pub clip: Clip,
     pub speed: f32,
     pub looped: bool,
-    /// Overrides the fade of EVERY transition into this state (seconds).
+    /// Overrides the fade of every transition into this state (seconds).
     /// `Some(0.0)` = always snap; `None` = use the transition table / default.
     pub fade_in: Option<f32>,
     /// Stepped-playback override for this state (frames/sec); `None` falls
@@ -883,7 +883,7 @@ impl Controller {
     /// Apply a replicated [`NetAnimState`] (a remote peer's authoritative
     /// animator) onto this controller:
     ///
-    /// - a **state change** transitions through the SAME fade rules a local
+    /// - a **state change** transitions through the same fade rules a local
     ///   `play()` would use, then lands mid-clip at the replicated time with
     ///   the fade preserved — a late joiner sees a walk loop blend in at the
     ///   right phase, not snap;
@@ -1223,7 +1223,7 @@ mod tests {
         // The point one unit +X of the pivot (3,0,0) swings to +Y of the pivot (2,1,0).
         let swung = m.transform_point3(Vec3::new(3.0, 0.0, 0.0));
         assert!((swung - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-5, "expected (2,1,0), got {swung}");
-        // pivot = ZERO must be identical to plain matrix().
+        // pivot = zero must be identical to plain matrix().
         let plain = TransformTRS { t: Vec3::new(1.0, 2.0, 3.0), ..trs };
         assert_eq!(plain.matrix_about(Vec3::ZERO), plain.matrix());
     }
@@ -1272,7 +1272,7 @@ mod tests {
     /// The mode belongs to the key the playhead is LEAVING — the segment after
     /// it — which is the convention every keyframe editor uses and the only one
     /// under which a single hold can be authored without touching the key on the
-    /// far side of it. Sampling INSIDE both segments is what pins that down: a
+    /// far side of it. Sampling inside both segments is what pins that down: a
     /// version that read the arriving key's mode instead would hold the second
     /// segment and ease the first, and every assertion about the endpoints alone
     /// would still pass.
@@ -1284,7 +1284,7 @@ mod tests {
             interp: Interp::Linear,
             key_interp: vec![Interp::Step, Interp::Linear, Interp::Linear],
         };
-        // Segment 0→1 HOLDS: anywhere inside it reads the key it left.
+        // Segment 0→1 holds: anywhere inside it reads the key it left.
         assert_eq!(tr.sample(0.25), Some(0.0));
         assert_eq!(tr.sample(0.99), Some(0.0));
         // …and arrives exactly on the next key.
@@ -1820,7 +1820,7 @@ mod tests {
     // ---- animator networking (net_state / apply_net_state) -----------------
 
     fn net_pair() -> (Controller, Controller) {
-        // "Server" and "client" load the SAME controller asset.
+        // "Server" and "client" load the same controller asset.
         let mk = || {
             one_layer_ctl(
                 vec![

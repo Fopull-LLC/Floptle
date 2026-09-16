@@ -1,5 +1,5 @@
-//! Dark-side / cave lighting probe on the REAL solar planetoid field — reproduces
-//! Ty's 2026-07-20 report: pale light blobs on the night side, leaked-light discs on
+//! Dark-side / cave lighting probe on the real solar planetoid field — reproduces
+//! The report: pale light blobs on the night side, leaked-light discs on
 //! cave walls, rigid banded shading at the terminator. Renders with the IN-GAME
 //! lighting path (stars mode: inverse-square luminous body + marched shadows against
 //! the coarse `to_dense(192)` shadow proxy, ambient 0.014 like solar's Lighting node).

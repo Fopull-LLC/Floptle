@@ -1,5 +1,5 @@
 //! Alpha-cutout probe: a plane with a transparent-background texture must show the
-//! background THROUGH the transparent texels, not composite them as black.
+//! background through the transparent texels, not composite them as black.
 //!
 //! The bug: the opaque pass doesn't blend, so a transparent PNG's see-through pixels
 //! (usually black RGB, alpha 0) were written straight to the target as solid black. The
@@ -31,8 +31,8 @@ fn main() {
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut raster = Raster::new(&gpu);
-    // A texture that is opaque RED on its LEFT half and fully TRANSPARENT (black RGB,
-    // alpha 0 — a typical PNG background) on its RIGHT half.
+    // A texture that is opaque RED on its left half and fully TRANSPARENT (black RGB,
+    // alpha 0 — a typical PNG background) on its right half.
     let mut pixels = Vec::with_capacity((64 * 64 * 4) as usize);
     for _y in 0..64 {
         for x in 0..64 {
@@ -64,7 +64,7 @@ fn main() {
         view_proj: cam.view_proj(1.0).to_cols_array_2d(),
         ..Default::default()
     };
-    // BLUE background: the transparent half must reveal THIS, not black.
+    // BLUE background: the transparent half must reveal this, not black.
     raster.draw_scene(
         &gpu,
         &color_view,

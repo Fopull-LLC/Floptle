@@ -1,7 +1,7 @@
 //! The value-or-curve affordance and the drawn-curve editor — phase 3 of the
 //! particle system (`docs/subsystems/particles-vfx.md` §6.3–6.4).
 //!
-//! A property is a constant OR a curve over a normalized domain (`[0,1]` — the
+//! A property is a constant or a curve over a normalized domain (`[0,1]` — the
 //! particle's life, or effect time for automation lanes). Constants edit inline;
 //! a `📈` promotes to a curve, which shows a sparkline that expands into the graph
 //! editor: draggable keys, per-key interpolation (constant / linear / bezier with
@@ -292,7 +292,7 @@ pub(crate) fn curve_editor(
             *sel_key = None;
             changed = true;
         }
-        // Re-fitting is something you ASK for. It used to happen every time the
+        // Re-fitting is something you ask for. It used to happen every time the
         // pointer lifted, which is why the same curve kept being drawn at a
         // different scale.
         if ui
@@ -572,7 +572,7 @@ impl Ease {
                 }
                 _ => {
                     k.interp = VfxInterpDoc::Bezier;
-                    // A flat tangent is what "slow here" IS: the curve leaves or
+                    // A flat tangent is what "slow here" is: the curve leaves or
                     // arrives with zero slope. Which end goes flat is the whole
                     // difference between the three.
                     let flat_out = matches!(self, Ease::In | Ease::InOut) && !last;
@@ -585,7 +585,7 @@ impl Ease {
     }
 }
 
-/// Give `dst` the SHAPE of `src` — its key times and interpolation — while
+/// Give `dst` the shape of `src` — its key times and interpolation — while
 /// keeping its own values' range.
 ///
 /// Copying the values too would make this "replace this curve", which is not
@@ -597,7 +597,7 @@ fn paste_shape(dst: &mut VfxCurveDoc, src: &VfxCurveDoc) {
     }
     let rt = curve_from_doc(src);
     let chans = channels_of(&dst.keys[0].v).len();
-    // The destination's own range, so the shape lands at ITS magnitude.
+    // The destination's own range, so the shape lands at its magnitude.
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     for k in &dst.keys {
         for &v in channels_of(&k.v).iter().take(chans) {
@@ -793,7 +793,7 @@ mod tests {
     }
 
     /// The reported bug: a curve that has never been negative got no zero line,
-    /// so you crossed zero with no landmark and the line appeared AFTER the
+    /// so you crossed zero with no landmark and the line appeared after the
     /// mistake. Zero is in frame while the curve is anywhere near it.
     #[test]
     fn zero_is_in_frame_before_a_curve_goes_negative() {
@@ -885,7 +885,7 @@ mod tests {
         assert!(hold.keys.iter().all(|k| k.interp == VfxInterpDoc::Constant));
     }
 
-    /// A shape reused on another property keeps THAT property's magnitude — a
+    /// A shape reused on another property keeps that property's magnitude — a
     /// size curve and a speed curve can want the same ramp at wildly different
     /// values, and copying the numbers across would be "replace", not "reuse".
     #[test]

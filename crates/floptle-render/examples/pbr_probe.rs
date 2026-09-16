@@ -33,7 +33,7 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// 0. A surface with NO normal map is shaded by its own geometry.
+// 0. A surface with no normal map is shaded by its own geometry.
 //
 // Asserted against arithmetic rather than against a control, because there is no
 // control to have: every material in the engine takes this path, so a wrong
@@ -59,7 +59,7 @@ fn the_default_normal_map_is_the_identity(gpu: &Gpu) {
 
     let (color, view) = target(gpu, "flat-normal");
     let eye = Vec3::new(0.0, 0.0, 3.0);
-    // The light AT the camera: L is the view direction, so the front face's N·L
+    // The light at the camera: L is the view direction, so the front face's N·L
     // is 1 and nothing about the geometry is in question.
     const RANGE: f32 = 100.0;
     const INTENSITY: f32 = 0.6;
@@ -117,7 +117,7 @@ fn srgb_to_linear(b: u8) -> f32 {
 // ---------------------------------------------------------------------------
 // 1. A normal map tilts the light.
 //
-// One flat plane, dead-on to the camera, lit from the LEFT. A normal map whose
+// One flat plane, dead-on to the camera, lit from the left. A normal map whose
 // left half tilts toward the light and right half tilts away must produce two
 // visibly different halves. The control is the same plane with no normal map:
 // being flat and uniformly lit, its halves must match.
@@ -168,10 +168,10 @@ fn normal_map_tilts_the_light(gpu: &Gpu, dir: &str) {
 
     let (color, view) = target(gpu, "normal-map");
     let eye = Vec3::new(0.0, 0.0, 3.5);
-    // Light in front and to the LEFT, so a leftward tilt catches it and a
+    // Light in front and to the left, so a leftward tilt catches it and a
     // rightward tilt loses it.
     let globals = lit_globals(eye, Vec3::new(-6.0, 0.0, 6.0), 1.6);
-    // Two cubes side by side in ONE pass: mapped on the left, unmapped control
+    // Two cubes side by side in one pass: mapped on the left, unmapped control
     // on the right. Same light, same frame, same everything else.
     let left = instance_of_mat(Mat4::from_translation(Vec3::new(-0.75, 0.0, 0.0) - eye), &mat);
     let right = instance_of_mat(Mat4::from_translation(Vec3::new(0.75, 0.0, 0.0) - eye), &mat);
@@ -219,7 +219,7 @@ fn normal_map_tilts_the_light(gpu: &Gpu, dir: &str) {
 //
 // Two identical spheres, one fairly smooth and one rough, lit from beside the
 // camera so each highlight sits in the middle of its own disc. Asserted on the
-// SHAPE of the lobe, not its brightness: the same light concentrated into fewer,
+// shape of the lobe, not its brightness: the same light concentrated into fewer,
 // brighter pixels. Peak brightness alone would pass against a shader that merely
 // multiplied everything by roughness, so the width is the half that matters.
 // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ fn roughness_widens_the_highlight(gpu: &Gpu, dir: &str) {
 
     let px = read_rgba(gpu, &color);
     // Peak, and how many pixels are within half of it — the lobe's width,
-    // measured against that surface's OWN peak so the number says nothing about
+    // measured against that surface's own peak so the number says nothing about
     // how bright the lamp happens to be.
     let lobe = |x0: u32, x1: u32| -> (f32, usize) {
         let ls: Vec<f32> =
@@ -296,7 +296,7 @@ fn roughness_widens_the_highlight(gpu: &Gpu, dir: &str) {
 // metallic lane gets wrong: same red albedo, same light, and only the metal's
 // highlight should be red.
 //
-// Measured over the middle of each disc, NOT at the brightest pixel anywhere.
+// Measured over the middle of each disc, not at the brightest pixel anywhere.
 // Fresnel drives every surface to a white reflection at grazing angles, so the
 // brightest pixel on either sphere is a white rim pixel and the two would come
 // out identical — which is exactly what this probe did before the window was
@@ -353,10 +353,10 @@ fn metal_takes_the_surface_colour(gpu: &Gpu, dir: &str) {
     };
     let m = centre(0.26);
     let p = centre(0.74);
-    // How much of the reflection is NOT the surface's red. A white highlight
+    // How much of the reflection is not the surface's red. A white highlight
     // scores near 1; a red one scores near 0.
     //
-    // In LINEAR light, not in the sRGB bytes. A ratio of two encoded values is
+    // In linear light, not in the sRGB bytes. A ratio of two encoded values is
     // not the ratio of the two values, and the encoding squashes exactly the
     // dark end where this measurement lives — which flattered the metal and
     // penalised the dielectric until the two were only 1.3× apart in a
@@ -390,7 +390,7 @@ fn metal_takes_the_surface_colour(gpu: &Gpu, dir: &str) {
 // Two of them, chosen because each has an unambiguous signature:
 //   - dither alpha punches HOLES (background pixels inside the silhouette),
 //     where blending would leave the silhouette solid;
-//   - vertex jitter MOVES the silhouette (its edge lands on different pixels).
+//   - vertex jitter moves the silhouette (its edge lands on different pixels).
 // The control for both is the identical draw with the flag off.
 // ---------------------------------------------------------------------------
 fn retro_flags_change_the_picture(gpu: &Gpu, dir: &str) {

@@ -202,7 +202,7 @@ impl InputSystem {
     }
 
     pub fn resolve_frame(&mut self, raw: &RawInput, dt: f32) {
-        // Snapshot the devices so a SCRIPT can ask "is there a controller here"
+        // Snapshot the devices so a script can ask "is there a controller here"
         // — the action API can only ever answer the resolved question, so
         // "not bound" and "not plugged in" are indistinguishable through it.
         // floptle/0047.
@@ -233,7 +233,7 @@ impl InputSystem {
         }
     }
 
-    /// Resolve one player's devices for the wire WITHOUT touching the tick
+    /// Resolve one player's devices for the wire without touching the tick
     /// domain — the local-input sample a rollback session ships to its peers
     /// (`docs/multiplayer.md` §2.2).
     ///
@@ -254,7 +254,7 @@ impl InputSystem {
         }
     }
 
-    /// The whole TICK domain, captured for a rollback.
+    /// The whole tick domain, captured for a rollback.
     ///
     /// This is the part of rollback that is easy to forget and impossible to
     /// skip. `buffered`, `consume` and every motion answer read a per-tick ring
@@ -265,7 +265,7 @@ impl InputSystem {
     /// to match on the replay. Neither shows up as an error; both show up as a
     /// desync.
     ///
-    /// The FRAME domain is deliberately excluded. It advances per rendered
+    /// The frame domain is deliberately excluded. It advances per rendered
     /// frame, is not part of the simulation, and must not be rewound by one.
     pub fn snapshot_tick(&self) -> TickSnapshot {
         TickSnapshot {
@@ -548,7 +548,7 @@ mod tests {
         let raw =
             RawInput { pads: vec![pad, crate::raw::PadState::default()], ..Default::default() };
 
-        // ONE pad, `Any`: the fallback rescues it. This case was never broken,
+        // one pad, `Any`: the fallback rescues it. This case was never broken,
         // whatever slot it was sampled at — asserted so nobody removes the
         // fallback while tidying up.
         let any = map_with(PadId::Any);
@@ -572,7 +572,7 @@ mod tests {
             );
         }
 
-        // The REAL couch shape, and the one Fofighter actually ships: each
+        // The real couch shape, and the one Fofighter actually ships: each
         // seat's pad is pinned, P1 to pad 0 and P2 to pad 1. `Slot(n)` never
         // consults the resolving slot — but the BINDING SCOPE does, and that is
         // enough. Sampled at roster slot 1, only player-two's bindings serve,
@@ -614,7 +614,7 @@ mod tests {
              player two's bindings, which name a pad that isn't plugged in"
         );
 
-        // The case that IS wrong: a joiner with TWO pads connected. `Any`
+        // The case that is wrong: a joiner with two pads connected. `Any`
         // prefers the resolving slot's own pad, so roster slot 1 reads their
         // second controller and their first — the one in their hands — does
         // nothing.
@@ -683,7 +683,7 @@ mod tests {
         assert!(sys.motion(0, "qcf", None), "still inside the window when the button lands");
     }
 
-    /// Two local players on ONE keyboard, each with their own quarter-circle. This is
+    /// Two local players on one keyboard, each with their own quarter-circle. This is
     /// the end of floptle/0028: the motion recogniser reads the map-level `Move` axis,
     /// and before per-player bindings that axis was player 1's for everyone — so P2's
     /// `dir()` and every motion answered with P1's stick, silently.
@@ -769,7 +769,7 @@ mod tests {
         assert!(!sys.motion(0, "qcf", None), "window long gone");
 
         // Roll back to the saved tick: everything comes back, including the fact
-        // that the press had NOT yet been consumed.
+        // that the press had not yet been consumed.
         assert!(sys.restore_tick(&saved));
         assert!(sys.buffered(0, "Punch", 4), "the press is unspent again");
         assert!(sys.motion(0, "qcf", None), "and the motion still matches");
@@ -801,7 +801,7 @@ mod tests {
         let again = sys.sample_tick(&down, 0, 0.016);
         assert!(again.is_held(0) && !again.is_just_pressed(0));
 
-        // The driver then writes the applied tick, and THAT is what history and
+        // The driver then writes the applied tick, and that is what history and
         // the script-facing queries see — exactly once.
         sys.set_tick_state(0, sampled);
         assert!(sys.action(Domain::Tick, 0, "Punch"));

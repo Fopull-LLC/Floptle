@@ -73,7 +73,7 @@ fn a_package_registers_a_dock_tab_and_its_key_survives_a_reload() {
     assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
     assert_eq!(host.tabs.len(), 1);
     assert_eq!(host.tabs[0].title, "Settings");
-    // A tab arrives CLOSED. One that opened itself would rearrange the user's
+    // A tab arrives closed. One that opened itself would rearrange the user's
     // dock every time the project opened.
     assert_eq!(host.shared.open_state.borrow().get(&host.tabs[0].id).copied(), Some(false));
 
@@ -249,7 +249,7 @@ fn a_package_reads_the_scenes_real_gravity() {
         host.take_log().first().map(|l| l.msg.clone()).unwrap_or_default()
     };
 
-    // No GravityVolume: a space level. ZERO, and the engine default would lie.
+    // No GravityVolume: a space level. zero, and the engine default would lie.
     let empty = floptle_core::World::new();
     assert_eq!(
         read(&mut host, &empty),
@@ -565,7 +565,7 @@ fn a_package_can_require_its_own_files_and_nothing_else() {
 }
 
 /// `editor/` is scanned recursively, so `lib/helper.lua` under it would run as
-/// a top-level file too. Keeping required files OUT of `editor/` is the
+/// a top-level file too. Keeping required files out of `editor/` is the
 /// author's job — but a file that both runs and is required must not run twice.
 #[test]
 fn requiring_the_same_file_twice_runs_it_once() {
@@ -824,7 +824,7 @@ fn draw_once(host: &mut ExtHost, which: usize) {
 ///
 /// The width is the whole point: a spacer that claims the room that is left has
 /// nothing to overflow until there is a definite edge to overflow past.
-/// ONE context across all the frames, as the editor has. A fresh context per
+/// one context across all the frames, as the editor has. A fresh context per
 /// frame is a fresh memory, which quietly hides anything that spans frames —
 /// and a ratchet is precisely a thing that spans frames.
 fn draw_bounded(host: &mut ExtHost, which: usize, width: f32, frames: usize) -> Vec<f32> {
@@ -1076,7 +1076,7 @@ fn draw_with_pointer(host: &mut ExtHost, which: usize, width: f32, at: egui::Pos
 /// **A painted control has to be hit-testable before it is drawn.**
 ///
 /// `mouse().inside` used to answer against `min_rect` — the widgets already
-/// added — so a package asking about a control it was ABOUT to paint was asking
+/// added — so a package asking about a control it was about to paint was asking
 /// about a region that did not exist yet, and got `false` exactly where the
 /// control was. A red ✖ at the right-hand end of a row was unclickable for that
 /// reason and no other: the geometry was right and the gate in front of it was
@@ -1181,7 +1181,7 @@ fn painted_text_can_be_measured_before_it_is_drawn() {
     //
     // The `W` versus `i` one is the whole point — a proportional face is not a
     // grid, and an assumed character width cannot tell them apart. That
-    // difference IS the drift this call exists to remove.
+    // difference is the drift this call exists to remove.
     assert_eq!(
         log,
         vec!["true\ttrue\ttrue\ttrue\ttrue\ttrue".to_string()],
@@ -2300,7 +2300,7 @@ fn a_declared_face_egui_has_not_been_given_yet_draws_instead_of_panicking() {
     let mut host = host_for(&proj);
     assert_eq!(host.fonts.len(), 1, "declared and read");
     let _ = host.take_log();
-    // Deliberately NOT `draw_once`: a bare context, exactly as the editor's is
+    // Deliberately not `draw_once`: a bare context, exactly as the editor's is
     // between the package load and the `set_fonts` that follows it.
     let ctx = egui::Context::default();
     let _ = ctx.run_ui(egui::RawInput::default(), |ui| host.draw_window(0, ui));

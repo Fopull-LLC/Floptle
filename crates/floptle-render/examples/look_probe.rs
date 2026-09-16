@@ -1,4 +1,4 @@
-//! Headless probe for the LOOK CHAIN — grade, lens, sharpen, denoise, grain and
+//! Headless probe for the look CHAIN — grade, lens, sharpen, denoise, grain and
 //! depth of field (`floptle/0130`).
 //!
 //! Renders one scene into the post input and then runs it through each effect on
@@ -151,7 +151,7 @@ fn main() {
     // Several per depth, spread across the frame: the detail measures below are
     // means over whole columns, and three spheres on a flat background give so
     // little local contrast that the numbers are mostly measuring the
-    // background. Near ones on the LEFT third, far ones on the RIGHT third, so
+    // background. Near ones on the left third, far ones on the right third, so
     // depth of field has a side to soften and a side to leave alone.
     let mut setup: Vec<(f64, f64, f64, [f32; 3])> = Vec::new();
     for i in 0..4 {
@@ -175,7 +175,7 @@ fn main() {
         .collect();
 
     // One render, reused for every effect: each `post.run` reads the same input
-    // target, so the ONLY difference between shots is the settings.
+    // target, so the only difference between shots is the settings.
     let redraw = |raster: &mut Raster| {
         raster.draw_scene(
             &gpu,
@@ -211,7 +211,7 @@ fn main() {
     println!("plain:    luma {l0:.2}  chroma {c0:.2}  detail {d0:.2}  corners {k0:.2}");
 
     // ---- grade --------------------------------------------------------------
-    // Exposure is in STOPS, so -1 must be visibly darker and +1 brighter. The
+    // Exposure is in stops, so -1 must be visibly darker and +1 brighter. The
     // pair is the point: a pass that clamped everything to black would pass the
     // first assertion on its own.
     let dark = shot(&mut raster, "grade_dark", &PostSettings { exposure: -1.0, ..base });
@@ -269,7 +269,7 @@ fn main() {
 
     // ---- grain ---------------------------------------------------------------
     // Grain adds high-frequency detail; a static image gains local contrast. The
-    // control that matters is that it is NOT a global brightness change.
+    // control that matters is that it is not a global brightness change.
     let grainy =
         shot(&mut raster, "grain", &PostSettings { grain: 0.6, grain_size: 2.0, time: 1.0, ..base });
     let dg = local_contrast(&grainy, W, H);
@@ -284,7 +284,7 @@ fn main() {
     // ---- depth of field ------------------------------------------------------
     // The scene's near cluster sits at view depth 5 and its far cluster at 24
     // (camera at z = +8; spheres at z = +3 and z = -16). Focus on 24: the near
-    // cluster must lose its detail and the far cluster must keep it. BOTH halves
+    // cluster must lose its detail and the far cluster must keep it. both halves
     // are asserted, because a pass that simply blurred the whole frame would
     // satisfy the first one on its own.
     let dof = shot(

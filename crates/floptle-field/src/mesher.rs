@@ -4,7 +4,7 @@
 //! # Why surface nets, and not the alternatives
 //!
 //! * **vs marching cubes** — MC emits 2-5× the triangles for the same field and carries
-//!   a 256-entry table as permanent maintenance. Surface nets places ONE vertex per
+//!   a 256-entry table as permanent maintenance. Surface nets places one vertex per
 //!   surface cell and joins them into quads: smooth, low-poly output that suits both
 //!   sculpted-organic terrain and a retro triangle budget.
 //! * **vs dual contouring** — DC's QEF solve buys *sharp feature* reconstruction.
@@ -13,7 +13,7 @@
 //!
 //! # The one choice that matters
 //!
-//! **Vertex normals come from the FIELD GRADIENT, not from the triangles.** Face normals
+//! **Vertex normals come from the field GRADIENT, not from the triangles.** Face normals
 //! (or their averages) would reintroduce exactly the faceting this whole effort exists to
 //! kill. `ChunkField::grad` samples the f32 field and the rasterizer interpolates the
 //! result across each triangle — which is what makes terrain shade like every imported
@@ -92,7 +92,7 @@ impl MeshScratch {
         // whole STRIDE below the chunk, not one voxel. Gradients then need ±1 voxel around
         // a vertex and trilinear the cell around that, so add 2 more.
         //
-        // The margin MUST scale with stride. Fixed at 2, LOD strides ≥ 2 read their -1
+        // The margin must scale with stride. Fixed at 2, LOD strides ≥ 2 read their -1
         // layer from outside the gathered box, where `at` reports open air — coarse chunks
         // grew vertices tens of units off the surface (caught by
         // `lod_strides_shed_triangles_and_still_hold_the_surface`).
@@ -109,7 +109,7 @@ impl MeshScratch {
         Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride }
     }
 
-    /// Flat scratch index for a global voxel, WITHOUT bounds checks.
+    /// Flat scratch index for a global voxel, without bounds checks.
     ///
     /// Sound by construction: the scratch box is `[base-stride-2, base+CHUNK+stride+2]`
     /// and every cell corner the mesher touches lies in `[base-stride, base+CHUNK]`. The
@@ -175,7 +175,7 @@ impl MeshScratch {
         l(l(x00, x10, f.y), l(x01, x11, f.y), f.z)
     }
 
-    /// The vertex normal: the FIELD's gradient, in f32, once per vertex — not a face
+    /// The vertex normal: the field's gradient, in f32, once per vertex — not a face
     /// normal. This is the line that retires the up-close faceting.
     fn grad(&self, p: Vec3) -> Vec3 {
         let h = self.voxel;
@@ -233,7 +233,7 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     // those holes showed the solid's inside face; the raymarch had never revealed them
     // because it hit the field, not the triangles.
     //
-    // Each chunk emits exactly the edges whose min corner is ITS OWN voxel, so every edge
+    // Each chunk emits exactly the edges whose min corner is its own voxel, so every edge
     // in the field is emitted once and only once — no duplicate triangles at seams. The
     // -1 layer's vertices duplicate the neighbour's, which is free: border-transparent
     // sampling makes them bit-identical (T3), so they weld invisibly.
@@ -321,7 +321,7 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
 
     // ---- pass 2: quads. For each axis edge at a cell's min corner, if the field
     // changes sign across it, the 4 cells around that edge each own a vertex — join
-    // them. Winding follows the sign direction so faces point OUT of solid: CCW seen
+    // them. Winding follows the sign direction so faces point out of solid: CCW seen
     // from outside, which is what `front_face: Ccw` + `@builtin(front_facing)` read.
     // Asserted by `triangles_wind_outward` — this was inverted for both orders until the
     // P2 render swap made a consumer of it and the whole terrain rendered inside-out.
@@ -389,7 +389,7 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
 /// Drop the rim vertices downward into a skirt so a coarser neighbour's slightly
 /// different surface can't show a crack of background through the seam.
 fn add_skirt(m: &mut ChunkMesh, vert_at: &[u32], grid: usize, cells: usize, drop: f32) {
-    // Same +1 offset as `cell_idx`; the rim is the chunk's OWN cells (0..cells-1), never
+    // Same +1 offset as `cell_idx`; the rim is the chunk's own cells (0..cells-1), never
     // the borrowed -1 layer, which belongs to the neighbour and gets its own skirt.
     let idx = |x: usize, y: usize, z: usize| (((z + 1) * grid) + (y + 1)) * grid + (x + 1);
     let mut rim: Vec<u32> = Vec::new();
@@ -494,10 +494,10 @@ mod tests {
         assert!(pct > 99.0, "only {pct:.1}% of {total} triangles wind outward");
     }
 
-    /// The WHOLE field's mesh — every chunk welded together by world position — must have
+    /// The whole field's mesh — every chunk welded together by world position — must have
     /// no boundary edges at all. A closed sphere is a closed surface.
     ///
-    /// `sphere_mesh_is_watertight` cannot see this: it inspects ONE chunk, where the cut
+    /// `sphere_mesh_is_watertight` cannot see this: it inspects one chunk, where the cut
     /// against neighbours legitimately leaves boundary edges, so it has to tolerate them
     /// (<30%). Holes therefore hid in plain sight. They matter now that terrain is
     /// rasterized: a hole in the near surface exposes the solid's inside face, which the
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(boundary, 0, "{boundary}/{} edges are HOLES in a closed sphere", edges.len());
     }
 
-    /// Every vertex must sit ON the surface it claims to represent.
+    /// Every vertex must sit on the surface it claims to represent.
     #[test]
     fn sphere_vertices_land_on_the_true_surface() {
         let (voxel, radius) = (1.0f32, 8.0f32);
@@ -560,7 +560,7 @@ mod tests {
         assert!(worst < 0.3 * voxel, "worst vertex off the sphere by {worst:.3} (> 0.3 voxel)");
     }
 
-    /// Normals must come from the FIELD, not the triangles — this is the property that
+    /// Normals must come from the field, not the triangles — this is the property that
     /// retires the up-close faceting the whole redesign exists to kill.
     #[test]
     fn sphere_normals_match_the_analytic_normal() {
@@ -608,7 +608,7 @@ mod tests {
         );
     }
 
-    /// Two adjacent chunks must agree EXACTLY on their shared boundary, or seams shade
+    /// Two adjacent chunks must agree exactly on their shared boundary, or seams shade
     /// visibly (trap T3). This is the payoff of addressing the field by global voxel
     /// index rather than chunk-local arrays.
     #[test]
@@ -646,7 +646,7 @@ mod tests {
                     continue;
                 }
                 // The neighbour must have a vertex within a voxel with a matching normal:
-                // both chunks sampled the SAME field voxels to build it.
+                // both chunks sampled the same field voxels to build it.
                 let best = other
                     .iter()
                     .filter(|(q, _)| (*q - *p).length() < f.voxel() * 1.5)
@@ -676,7 +676,7 @@ mod tests {
     /// bound high enough to survive a loaded shared runner is also high enough to let a
     /// 3× regression through.
     ///
-    /// So the measurement is a ratio of two timings taken in the SAME run, which makes
+    /// So the measurement is a ratio of two timings taken in the same run, which makes
     /// runner speed cancel exactly.
     ///
     /// ## What the two timings are
@@ -716,7 +716,7 @@ mod tests {
         let tris_of = |c: [i32; 3]| mesh_chunk(&f, c, 1, false).tri_count();
         // The busiest chunk, not the average — the average would flatter us.
         let busiest = coords.iter().copied().max_by_key(|c| tris_of(*c)).unwrap();
-        // …and an EMPTY one: same voxel count, no vertices. A sculpted slab always has
+        // …and an empty one: same voxel count, no vertices. A sculpted slab always has
         // chunks entirely above or below the surface; if it somehow did not, there is
         // nothing to subtract and the ratio would be meaningless, so say so.
         let empty = coords.iter().copied().find(|c| tris_of(*c) == 0);

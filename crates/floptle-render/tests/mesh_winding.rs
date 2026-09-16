@@ -11,7 +11,7 @@
 //! `cylinder` inverted in part, so one shape lit from both sides at once.
 //!
 //! `orient_faces` fixes it from the data at build time. This is the test that
-//! keeps it fixed, and that a NEW shape arrives correct.
+//! keeps it fixed, and that a new shape arrives correct.
 
 use floptle_render::mesh::*;
 use glam::Vec3;

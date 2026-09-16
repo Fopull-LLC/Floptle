@@ -453,7 +453,7 @@ mod tests {
         assert!(steeper.normal()[1].abs() < s.walkable_dot());
     }
 
-    /// A radius that rounds DOWN puts a shoulder in a wall. Rounding up costs a
+    /// A radius that rounds down puts a shoulder in a wall. Rounding up costs a
     /// path that goes slightly wide, which is the failure worth having.
     #[test]
     fn the_agent_radius_rounds_up_to_whole_cells() {

@@ -28,7 +28,7 @@ use crate::terrain_ui::{NewTerrainCfg};
 use crate::viz::{TerrainViz, project};
 use crate::{Editor};
 
-/// One editable terrain (Terrain 2.0 / P3): the sparse unbounded [`ChunkField`] is THE
+/// One editable terrain (Terrain 2.0 / P3): the sparse unbounded [`ChunkField`] is the
 /// authority — brushes write it, physics collides it, saves serialize it, the mesher
 /// extracts the drawn surface from it. The dense `shadow` proxy is DERIVED from it at a
 /// capped resolution purely to feed the GPU shadow/AO atlas (until the P5 clipmap).
@@ -74,7 +74,7 @@ pub(crate) struct TerrainRender {
     /// keyed by chunk coord so a sculpt can re-mesh just the chunks it touched and
     /// free the ones that emptied.
     pub slots: HashMap<[i32; 3], (MeshId, u8)>,
-    /// When each chunk FIRST became resident, in seconds on the editor's clock —
+    /// When each chunk first became resident, in seconds on the editor's clock —
     /// what [`chunk_fade`] measures the dissolve-in against (`floptle/0067`).
     ///
     /// A separate map rather than a third tuple field so that re-meshing an
@@ -87,7 +87,7 @@ pub(crate) struct TerrainRender {
     /// result is applied only if its (lod, epoch) still matches — anything else is
     /// stale (the chunk was re-dirtied, re-ringed, or the scene changed) and drops.
     pub pending: HashMap<[i32; 3], (u8, u64)>,
-    /// Data chunks whose last mesh came out EMPTY (a band remnant with no zero
+    /// Data chunks whose last mesh came out empty (a band remnant with no zero
     /// crossing). Without this the coverage scan would re-queue them every frame
     /// forever; a brush dirtying the chunk clears its entry.
     pub empty: std::collections::HashSet<[i32; 3]>,
@@ -106,7 +106,7 @@ pub(crate) struct TerrainRender {
 /// ≈ 48 units at the default 1.5-unit voxel.
 ///
 /// These are the radii for a world big enough that "24 chunks away" is over the
-/// horizon. On a SMALL body they are not — see [`rings_for_body`].
+/// horizon. On a small body they are not — see [`rings_for_body`].
 const LOD_RINGS: [i32; 3] = [4, 10, 24];
 
 /// What fraction of a body's RADIUS each ring should reach, on a body small
@@ -151,7 +151,7 @@ fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
 /// a handful of pixels).
 const IMPOSTOR_RADII: f64 = 60.0;
 
-/// G1 RESIDENCY (docs/subsystems/large-world-space.md): a COLD celestial terrain's
+/// G1 residency (docs/subsystems/large-world-space.md): a cold celestial terrain's
 /// field starts loading (background) when the camera comes inside this many body
 /// radii — outside the impostor flip at 60, so the field is always resident
 /// before its meshes could possibly draw. Evict sits farther out again, so
@@ -161,7 +161,7 @@ const RESIDENT_LOAD_RADII: f64 = 80.0;
 /// A RESIDENT celestial terrain beyond this many body radii is evicted: saved to
 /// disk first when its field changed (edit mode), then dropped to [`ColdTerrain`].
 const RESIDENT_EVICT_RADII: f64 = 110.0;
-/// Emergency: something is INSIDE this many radii of a still-cold body (teleport,
+/// Emergency: something is inside this many radii of a still-cold body (teleport,
 /// summon, warp overshoot) — load synchronously, a hitch beats falling through.
 pub(crate) const RESIDENT_SYNC_RADII: f64 = 5.0;
 
@@ -201,7 +201,7 @@ pub(crate) struct TerrainSaveJob {
     /// `terrain_edit_stamps` counter at job start. Still equal when the encode
     /// finishes ⇒ the blob is a clean snapshot and the dirty flag clears; an
     /// edit raced in ⇒ the blob is torn (valid, just mixed generations) — it
-    /// still writes (newer than any previous file) but the field STAYS dirty
+    /// still writes (newer than any previous file) but the field stays dirty
     /// so the next checkpoint re-saves it whole.
     pub stamp: u64,
     pub state: TerrainSaveState,
@@ -225,7 +225,7 @@ const CHECKPOINT_QUIET_SECS: f64 = 1.5;
 /// anyway — a torn snapshot beats a checkpoint that never happens.
 const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 
-/// Run a load to completion, trying each candidate source IN ORDER — a
+/// Run a load to completion, trying each candidate source in order — a
 /// truncated/corrupt field file falls back to the next source (usually the
 /// genspec, which regenerates the body deterministically) instead of failing
 /// the whole stream: a bad file must never take a world offline when its
@@ -252,9 +252,9 @@ fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
 }
 
 /// Stable hash of a genspec string — recorded in the `.meta` sidecar when a
-/// field is written, so a PROJECT field file is only trusted for a body whose
+/// field is written, so a project field file is only trusted for a body whose
 /// genspec still matches. Regenerating a system reuses terrain ids: without
-/// this, the OLD system's leftover `<scene>.<id>.cfield` would load as the NEW
+/// this, the old system's leftover `<scene>.<id>.cfield` would load as the new
 /// body's terrain (the wrong planet entirely). Save-slot files skip the check —
 /// a slot belongs to one galaxy seed by construction (the game's contract).
 fn genspec_hash(spec: &str) -> u64 {
@@ -377,11 +377,11 @@ pub(crate) struct TerrainWorker {
 const WORKER_IN_FLIGHT_CAP: usize = 16;
 
 /// Subtracted from a dirty (brush/script-edited) chunk's queue priority: edits sort
-/// ahead of every LOD migration AND bypass the in-flight cap — a stale mesh under
+/// ahead of every LOD migration and bypass the in-flight cap — a stale mesh under
 /// the player is worse than a deep queue.
 const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 
-/// How close to a body's centre, in body radii, counts as being ON it.
+/// How close to a body's centre, in body radii, counts as being on it.
 ///
 /// Generous — an aircraft at altitude, or a ship on approach, is still landing
 /// on the thing under it and still wants that ground first.
@@ -408,12 +408,12 @@ pub(crate) fn chunk_priority(
     let mid = Vec3::new(coord[0] as f32 + 0.5, coord[1] as f32 + 0.5, coord[2] as f32 + 0.5);
     let world = anchor + (rot * (mid * chunk_world)).as_dvec3();
     // Saturating: a body on the far side of a solar system is millions of units
-    // away and must not wrap into the FRONT of the queue.
+    // away and must not wrap into the front of the queue.
     let metres = (world - cam_world).length().min(i32::MAX as f64 / 4.0) as i32;
     if on_body { metres } else { metres.saturating_add(OFF_BODY_PENALTY) }
 }
 
-/// Added to every chunk of a body the camera is NOT on (`floptle/0074`).
+/// Added to every chunk of a body the camera is not on (`floptle/0074`).
 ///
 /// Metres alone gets one case wrong: standing between two worlds, a chunk under
 /// your feet and a chunk on the horizon of the world you are landing on are
@@ -535,7 +535,7 @@ impl Editor {
             return;
         };
         // Drop render meshes for terrains that no longer exist (deleted nodes).
-        // COLD terrains count as live: their render entry IS the impostor sphere.
+        // cold terrains count as live: their render entry is the impostor sphere.
         let live: Vec<Entity> = self
             .terrains
             .keys()
@@ -628,7 +628,7 @@ impl Editor {
                 render.impostor = false;
             }
             let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
-            // Rings sized to the BODY when there is one (`floptle/0067`): on a
+            // Rings sized to the body when there is one (`floptle/0067`): on a
             // world you can walk around, "24 chunks away" is the far side of it.
             let rings = rings_for_body(
                 self.world
@@ -636,12 +636,12 @@ impl Editor {
                     .map(|cb| cb.body_radius * ts as f64),
                 (chunk_units * ts) as f64,
             );
-            // Camera into the FIELD's local frame (rotation + uniform scale), so
+            // Camera into the field's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
             let cl = (rot.inverse() * (cam_world - anchor).as_vec3()) / (chunk_units * ts);
             let cam_chunk =
                 [cl.x.floor() as i32, cl.y.floor() as i32, cl.z.floor() as i32];
-            // LOD ring selection, in THIS terrain's chunk units — which is the
+            // LOD ring selection, in this terrain's chunk units — which is the
             // right unit for a ring, and the wrong one for a queue position.
             let dist_of = |c: [i32; 3]| {
                 (c[0] - cam_chunk[0])
@@ -730,7 +730,7 @@ impl Editor {
             // by distance. LOD migration for RESIDENT chunks rides the same queue
             // (hysteresis inside lod_for).
             //
-            // THROTTLED: this walks EVERY chunk of the field (a big planet has
+            // THROTTLED: this walks every chunk of the field (a big planet has
             // tens of thousands), so each terrain scans on a 4-frame rotation —
             // a 3-frame queueing delay is invisible next to worker latency,
             // and the per-frame cost of huge worlds drops 4×. Structural
@@ -752,7 +752,7 @@ impl Editor {
                         let d = dist_of(coord);
                         if raw_lod(d, rings) == 0 {
                             // The ground around the player never streams: a fresh
-                            // load (or a dig that created a chunk) meshes it NOW.
+                            // load (or a dig that created a chunk) meshes it now.
                             let cm =
                                 floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
                             if cm.is_empty() {
@@ -917,7 +917,7 @@ pub(crate) fn push_terrain_instances(
         let scale = wt.scale.x.max(1e-6);
         let rot = wt.rotation.normalize();
         let rel = (wt.translation - cam_world).as_vec3();
-        // The node's FULL placement: rotation + uniform scale finally apply to
+        // The node's full placement: rotation + uniform scale finally apply to
         // terrain (physics converts through the same frame — see ChunkTerrain).
         let model = Mat4::from_scale_rotation_translation(Vec3::splat(scale), rot, rel);
         // Per-chunk culling geometry: chunk edge in world units, bounding-sphere
@@ -953,7 +953,7 @@ pub(crate) fn push_terrain_instances(
             mp.terrain_splat = true;
             // Dissolve-in for a chunk that just arrived (`floptle/0067`). The
             // alpha lane is free on terrain — the shader forces terrain opaque
-            // because its VERTEX alpha is a palette slot — so this rides an
+            // because its vertex alpha is a palette slot — so this rides an
             // existing lane, which matters when the raster budget is full at
             // 16/16. An unstamped chunk is fully opaque, so nothing that was
             // already on screen flickers when this ships.
@@ -1043,7 +1043,7 @@ fn upload_chunk(
 
 /// The cubic voxel edge to import (migrate) a legacy dense terrain at.
 ///
-/// TWO constraints, and the tighter (coarser) wins:
+/// two constraints, and the tighter (coarser) wins:
 ///   1. Source detail — the MEDIAN of the three axis resolutions. Using the *min* (my
 ///      first cut) is catastrophic for a STRETCHED legacy field: the 18:1 Y-stretch makes
 ///      one axis ~0.36 units, and meshing the 578×578 footprint at 0.36 is hundreds of
@@ -1119,7 +1119,7 @@ impl Editor {
     /// dynamic bodies cast via their shape proxies instead). Each eligible mesh
     /// bakes once per (asset, rotation, scale) into an unsigned occluder volume
     /// (`bake_occluder`), cached so duplicates and pure moves are free. Returns
-    /// true when the SET changed and the atlas needs re-uploading; per-node
+    /// true when the set changed and the atlas needs re-uploading; per-node
     /// "casts shadows" / visibility toggles are applied at fill time (no rebake).
     pub(crate) fn refresh_mesh_occluders(&mut self) -> bool {
         // The desired (entity → key) set this frame.
@@ -1253,9 +1253,9 @@ impl Editor {
         let rd = (far.truncate() / far.w - ro_rel).normalize();
         let rd_a = [rd.x, rd.y, rd.z];
 
-        // Each field is in its node's LOCAL frame (translation + rotation +
+        // Each field is in its node's local frame (translation + rotation +
         // uniform scale) — transform the cursor ray into each and brush the one
-        // whose surface it hits NEAREST the camera. `hit` stays LOCAL; world
+        // whose surface it hits nearest the camera. `hit` stays local; world
         // positions reconstruct through the same frame.
         type BrushPick = (Entity, Vec3, (DVec3, Quat, f32), f64);
         let entities: Vec<Entity> = self.terrains.keys().copied().collect();
@@ -1326,7 +1326,7 @@ impl Editor {
         };
         if due {
             let brush = self.terrain_brush;
-            // Brush radius is WORLD units; the field works in LOCAL units.
+            // Brush radius is world units; the field works in local units.
             let r_local = brush.radius / tscale;
             let id = match self.world.get::<Matter>(active) {
                 Some(Matter::Terrain { id, .. }) => *id,
@@ -1361,7 +1361,7 @@ impl Editor {
                 // (A dab outside the proxy's box clamps — the proxy is re-derived at
                 // stroke end when bounds outgrow it; see `end_sculpt_stroke`.)
                 let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
-                // Sculpting WHILE PLAYING must reach the sim's collider copy too —
+                // Sculpting while PLAYING must reach the sim's collider copy too —
                 // this path only fed the renderer, so a mid-Play brush stroke left
                 // bodies standing on the old invisible surface.
                 if geom {
@@ -1374,7 +1374,7 @@ impl Editor {
 
     /// Drain + apply the terrain edits scripts queued this pass (`terrain.sculpt/
     /// dig/paint/paintTexture` — Terrain 2.0 P6). Call after reclaiming the sim's
-    /// colliders and BEFORE stepping physics, so a dig affects the same tick.
+    /// colliders and before stepping physics, so a dig affects the same tick.
     pub(crate) fn drain_script_terrain_ops(&mut self) {
         let ops = self.script_host.take_terrain_ops();
         if ops.is_empty() {
@@ -1384,7 +1384,7 @@ impl Editor {
         // it are at the old height. Forget those chunks and they re-settle onto
         // the new surface — SC3's "digging the ground out from under one drops
         // or despawns it", for free, because placement was never remembered in
-        // the first place. Collected BEFORE the edits, since the sources list
+        // the first place. Collected before the edits, since the sources list
         // is borrowed from the script host and the edits do not change it.
         let dirty: Vec<(DVec3, f64)> = {
             let sources = self.script_host.scatter_sources();
@@ -1455,7 +1455,7 @@ impl Editor {
             M::Paint(c) => t.field.paint(local, r_local, op.strength, c, profile),
             M::PaintTexture(slot) => t.field.paint_texture(local, r_local, slot),
         };
-        // Report BEFORE the empty-touch bail: a dab that moved nothing has to
+        // Report before the empty-touch bail: a dab that moved nothing has to
         // report zero rather than nothing, or a game cannot tell "I dug air"
         // from "the report is still coming" (floptle/0037). Volumes are measured
         // in the field's local units, so a scaled terrain converts by scale³.
@@ -1476,7 +1476,7 @@ impl Editor {
         }
         let geom = !matches!(op.mode, M::Paint(_) | M::PaintTexture(_));
         // Mirror geometry edits into the sim's collider copy so collision agrees
-        // with the drawn surface THIS tick (color never affects collision).
+        // with the drawn surface this tick (color never affects collision).
         if geom {
             self.mirror_terrain_chunks_to_sim(e, &touched);
         }
@@ -1487,7 +1487,7 @@ impl Editor {
     /// field over `touched` chunks — by CLONING those chunks (plus the one-chunk
     /// renormalize ring writes spill into), not by re-running the edit. A re-run
     /// can drift; a copy cannot, and a player standing on a stale invisible
-    /// surface is exactly what drift looks like. Call after EVERY authority
+    /// surface is exactly what drift looks like. Call after every authority
     /// geometry write while a sim exists: script ops, the editor brush during
     /// Play, fills, undo. Loudly warns (once per Play) if the sim has no
     /// matching terrain collider — a silent no-op here is unfindable later.
@@ -1558,7 +1558,7 @@ impl Editor {
         self.touch_terrain_edit(e); // an eviction must save this field first
     }
 
-    /// Record a field edit: dirty-for-disk + a fresh edit stamp. EVERY path that
+    /// Record a field edit: dirty-for-disk + a fresh edit stamp. every path that
     /// changes a field's voxels must come through here (brush/script dabs, undo
     /// swaps, generation adopts) — the stamp is how a background checkpoint
     /// knows its snapshot raced an edit, and how the picker finds quiet fields.
@@ -1583,7 +1583,7 @@ impl Editor {
         }
     }
 
-    /// Create a fresh flat terrain as a NEW scene node (you can have any number). It
+    /// Create a fresh flat terrain as a new scene node (you can have any number). It
     /// is placed at the cursor's ground point; its field is in the node's local space.
     /// `cfg` (from the "New terrain" dialog) sizes the STARTING slab and paints it with
     /// a color/texture up front — the sparse field is unbounded, so this is a seed to
@@ -1644,7 +1644,7 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.{id}.cfield", self.scene_name))
     }
 
-    /// Stems of `.cfield` files carrying THIS terrain id under a DIFFERENT scene
+    /// Stems of `.cfield` files carrying this terrain id under a different scene
     /// name. Every per-scene file is keyed by the scene's stem, so a rename of
     /// the `.ron` alone leaves the real data sitting here under the old name —
     /// which is the difference between "your terrain is gone" and "your terrain
@@ -1672,7 +1672,7 @@ impl Editor {
     }
 
     /// The tiny residency sidecar next to a terrain's `.cfield`: the impostor
-    /// color ("r g b", linear floats), so a COLD body can draw its sphere
+    /// color ("r g b", linear floats), so a cold body can draw its sphere
     /// without ever touching the multi-MB field.
     pub(crate) fn terrain_meta_path_id(&self, id: u32) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.{id}.meta", self.scene_name))
@@ -1804,7 +1804,7 @@ impl Editor {
                     }
                     let bytes = saver.finish();
                     // Clean snapshot ⇒ the file will match RAM: clear dirty now
-                    // (an edit AFTER this line re-dirties via its new stamp).
+                    // (an edit after this line re-dirties via its new stamp).
                     // Torn (an edit raced the encode) ⇒ blob is valid but mixes
                     // generations: still write it — newer than any previous
                     // file — but keep the field dirty for the next checkpoint.
@@ -1902,7 +1902,7 @@ impl Editor {
         }
     }
 
-    /// Synchronously write EVERY dirty resident field to the save slot — the
+    /// Synchronously write every dirty resident field to the save slot — the
     /// exit-path guarantee (Stop, scene switch out of a slot): whatever the
     /// background pipeline was mid-way through, the player's edits are on disk
     /// when this returns. No-op without a slot.
@@ -1958,7 +1958,7 @@ impl Editor {
     /// `time` sat at zero and `space.bodies()` was empty, which reads as a game
     /// whose world was never built rather than as a runner that never started.
     ///
-    /// The ORDER is the frame's order and matters: generates before residency,
+    /// The order is the frame's order and matters: generates before residency,
     /// or residency adopts a freshly created body as cold and streams a stale
     /// same-id field into it. Keep the two in step.
     ///
@@ -1994,7 +1994,7 @@ impl Editor {
     /// Does the background terrain worker have anything to do — a whole-body
     /// fill running or queued, or a field streaming in?
     ///
-    /// ONE predicate, because two callers must not disagree about it:
+    /// one predicate, because two callers must not disagree about it:
     /// `terrain.busy()` answers a game with it, and `settle_world_streaming`
     /// waits on it. They did disagree — the wait watched only the streaming
     /// half, so `shot` would photograph a planet that was still GENERATING as
@@ -2077,7 +2077,7 @@ impl Editor {
         budget: std::time::Duration,
     ) -> bool {
         // Residency anchors on the editor camera outside Play, and for a shot
-        // the view being photographed IS the presence in the world.
+        // the view being photographed is the presence in the world.
         self.camera.position = anchor;
         let deadline = floptle_core::time::Instant::now() + budget;
         let mut quiet = false;
@@ -2115,17 +2115,17 @@ impl Editor {
     /// Per-frame residency driver: land finished background loads, kick loads
     /// for cold bodies something is approaching, evict residents left behind.
     ///
-    /// RESIDENCY IS GAMEPLAY-BASED, NOT CAMERA-BASED. During Play the anchors
+    /// residency is gameplay-based, not camera-based. During Play the anchors
     /// are the world positions of every dynamic body (ship, astronaut, debris)
     /// plus any bodies the game explicitly warmed (`terrain.warm` — the map's
     /// focused planet); the camera doesn't count — opening the map and zooming
-    /// across the system must NEVER unload the planet you're standing on (that
-    /// evicted the ground under Ty's feet and dropped him through the world).
-    /// In edit mode the editor camera IS your presence, so it anchors there.
+    /// across the system must never unload the planet you're standing on (that
+    /// evicted the ground under the player's feet and dropped them through the world).
+    /// In edit mode the editor camera is your presence, so it anchors there.
     /// The IMPOSTOR flip stays camera-based — that's visual LOD (screen size),
     /// a different question from which fields are in RAM.
     ///
-    /// Runs OUTSIDE the render borrows (it may rebuild the sim on a mid-Play
+    /// Runs outside the render borrows (it may rebuild the sim on a mid-Play
     /// arrival/eviction) — called right before `sync_terrain_meshes` each frame.
     pub(crate) fn update_terrain_residency(&mut self, cam_world: DVec3) {
         // Gameplay anchors + this frame's warm requests (immediate mode — the
@@ -2157,11 +2157,11 @@ impl Editor {
 
         // 0. Adopt terrain bodies born at RUNTIME: a game's loading screen builds
         //    its galaxy with createNode + setTerrainGen, and those nodes went
-        //    through no scene load — they were in NEITHER the resident nor the
+        //    through no scene load — they were in neither the resident nor the
         //    cold set, so nothing drew or streamed them (planets that were only
         //    their atmosphere, warm/TAB focuses that never landed). Anything
-        //    untracked becomes COLD exactly like adopt_terrain would make it —
-        //    unless its FIRST generation is queued (the generation queue owns
+        //    untracked becomes cold exactly like adopt_terrain would make it —
+        //    unless its first generation is queued (the generation queue owns
         //    those until the fill lands).
         let untracked: Vec<(Entity, u32)> = self
             .world
@@ -2245,12 +2245,12 @@ impl Editor {
 
         // 2. Kick background loads for cold bodies inside an anchor's load radius
         //    or explicitly warmed (the map's focused planet loads however far it
-        //    is), plus a blocking emergency load if a body is practically ON one.
+        //    is), plus a blocking emergency load if a body is practically on one.
         let mut to_sync: Vec<(Entity, u32)> = Vec::new();
         let mut to_load: Vec<(Entity, u32)> = Vec::new();
         for (&e, cold) in &self.terrain_cold {
             let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) else { continue };
-            // Heal the impostor render entry — it IS the body's visual while cold
+            // Heal the impostor render entry — it is the body's visual while cold
             // (covers any path that dropped it, e.g. a scene-switch edge).
             let render = self.terrain_render.entry(e).or_default();
             if !render.impostor {
@@ -2260,7 +2260,7 @@ impl Editor {
             let r = cb.body_radius.max(1.0);
             let p = floptle_core::world_transform(&self.world, e).translation;
             // The blocking emergency load is for mid-play surprises (teleports,
-            // summons) — during the Play-start HOLD the same bodies stream in
+            // summons) — during the Play-start hold the same bodies stream in
             // the background instead (the run is paused; nothing can fall).
             if !self.play_stream_hold && near(p, r * RESIDENT_SYNC_RADII) {
                 to_sync.push((e, cold.id));
@@ -2275,7 +2275,7 @@ impl Editor {
             self.kick_terrain_load(e, id);
         }
 
-        // 3. Evict residents EVERY anchor has left far behind (celestials only —
+        // 3. Evict residents every anchor has left far behind (celestials only —
         //    flat level terrains have no meaningful radius and stay resident).
         //    Warmed bodies are exempt however far away they are.
         let mut to_evict: Vec<(Entity, u32)> = Vec::new();
@@ -2326,8 +2326,8 @@ impl Editor {
     /// taking the world offline:
     ///   1. the game's save-slot file (player-edited state; trusted as-is —
     ///      a slot belongs to one galaxy by the game's own contract),
-    ///   2. the project file (authored/cached) — but ONLY if it was written
-    ///      under the node's CURRENT genspec (meta hash line): regeneration
+    ///   2. the project file (authored/cached) — but only if it was written
+    ///      under the node's current genspec (meta hash line): regeneration
     ///      reuses terrain ids, and a stale file from the previous system must
     ///      not load as the new body's terrain,
     ///   3. the genspec itself (deterministic on-demand generation).
@@ -2371,7 +2371,7 @@ impl Editor {
     /// Spawn a background load/generate job for a cold terrain (capped at 2 in
     /// flight; duplicates are no-ops). Reads + parses a file, or generates the
     /// whole planet from its genspec — either way the shadow proxy derives on
-    /// the thread too, so the main thread never hitches (Ty's no-stutter rule).
+    /// the thread too, so the main thread never hitches (the no-stutter rule).
     pub(crate) fn kick_terrain_load(&mut self, e: Entity, id: u32) {
         if self.terrain_load_jobs.iter().any(|j| j.e == e)
             || self.terrain_load_jobs.len() >= 2
@@ -2381,7 +2381,7 @@ impl Editor {
         let mut sources = self.resolve_terrain_source(e, id);
         // A running `terrain.generatePlanet` batch OWNS generation: while the
         // game's spawn planet (or any explicit fill) is being built, residency
-        // must not start MORE generations behind it — the player is standing
+        // must not start more generations behind it — the player is standing
         // on (or waiting for) the batch's world, and every competing generate
         // steals its cores. Fast file loads stay allowed; genspec-only bodies
         // simply stay cold impostors and re-kick once the batch lands.
@@ -2429,7 +2429,7 @@ impl Editor {
     }
 
     /// Blocking load — the mid-play emergency inside `RESIDENT_SYNC_RADII`
-    /// (teleports, summons). Only a FILE loads synchronously; a body whose only
+    /// (teleports, summons). Only a file loads synchronously; a body whose only
     /// source is its genspec delegates to the background (a 10-second
     /// generation must never freeze a frame — Play start covers the common
     /// case with the streaming hold instead).
@@ -2452,7 +2452,7 @@ impl Editor {
                 false
             }
             Some(TerrainSource::File(_)) => {
-                // Synchronously try the FILE candidates only — a corrupt file
+                // Synchronously try the file candidates only — a corrupt file
                 // must fall back to the background chain (which ends in the
                 // genspec), never to an in-frame generation.
                 let files: Vec<TerrainSource> = sources
@@ -2529,7 +2529,7 @@ impl Editor {
         // Edited fields save before dropping. Destination (G2): the game's
         // save-slot dir when set (player state — writable even during Play,
         // that's the whole point of a save slot), else the project file (edit-
-        // mode authoring). Playing with NO save slot = drop without saving
+        // mode authoring). Playing with no save slot = drop without saving
         // (Stop reverts terrain anyway — today's Play semantics).
         if self.terrain_disk_dirty.contains(&e) {
             let dest = self
@@ -2579,7 +2579,7 @@ impl Editor {
     /// sparse store, old scenes just work) → a fresh flat slab. Call once `scene_name`
     /// is set.
     pub(crate) fn adopt_terrain(&mut self) {
-        // A checkpoint mid-flight for the OLD scene must land before its
+        // A checkpoint mid-flight for the old scene must land before its
         // entities are forgotten (entity ids recycle across scene loads).
         self.settle_terrain_checkpoint();
         self.terrain_flush_queue.clear();
@@ -2604,10 +2604,10 @@ impl Editor {
         let single = nodes.len() == 1;
         for (e, id) in nodes {
             max_id = max_id.max(id);
-            // G1/G2 RESIDENCY: a celestial body starts COLD — no field read, no
+            // G1/G2 residency: a celestial body starts cold — no field read, no
             // generation — whenever its impostor color is knowable up front:
             // from the meta sidecar (a field file exists), or from its genspec's
-            // surface palette (the galaxy path — the body has NO file anywhere
+            // surface palette (the galaxy path — the body has no file anywhere
             // and generates on first approach). The per-frame residency driver
             // streams in whatever the camera is actually near, so scene open
             // gets FASTER as systems get bigger. Bodies with a file but no meta
@@ -2617,7 +2617,7 @@ impl Editor {
                 let color = if floptle_vfs::exists(self.terrain_field_path_id(id)) {
                     self.read_terrain_meta(id)
                 } else {
-                    // A genspec body is ALWAYS cold (falling through to the eager
+                    // A genspec body is always cold (falling through to the eager
                     // path would give it a flat starter slab — it has no file to
                     // load); a garbled spec just gets a neutral sphere color.
                     self.world.get::<floptle_core::TerrainGen>(e).map(|g| {
@@ -2660,7 +2660,7 @@ impl Editor {
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
                 .or_else(dense_migration);
-            // A terrain node in a SAVED scene that has no field on disk is the
+            // A terrain node in a saved scene that has no field on disk is the
             // shape of lost work, not of a new terrain — say so rather than
             // handing back a flat slab that looks identical to one.
             if loaded.is_none() {
@@ -2727,7 +2727,7 @@ impl Editor {
         // Restore the texture palette so painted-texture slots map to images again.
         // A slot line may end in `|glow` — that slot's texture is self-lit (the
         // cave-visibility channel); the marker rides the sidecar, not the path.
-        // (COLD terrains count — their fields still splat this palette on load.)
+        // (cold terrains count — their fields still splat this palette on load.)
         if (!self.terrains.is_empty() || !self.terrain_cold.is_empty())
             && let Ok(text) = floptle_vfs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
@@ -2799,7 +2799,7 @@ impl Editor {
     }
 
     /// Fill the raymarch globals' per-volume slots: each uploaded terrain's box,
-    /// composed anchor (node f64 translation) + local center FIRST, then
+    /// composed anchor (node f64 translation) + local center first, then
     /// camera-relative — exact at any world distance (ADR-0015). Each volume samples
     /// its own atlas slot at native resolution; overlapping volumes fuse on the GPU
     /// with the same smin the old CPU combine used (k = 0.6).
@@ -2841,7 +2841,7 @@ impl Editor {
             let bc = t.shadow.center;
             let hf = t.shadow.half_extent;
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
-            // w = 3: shadow + AO, NOT drawn. Terrain 2.0 draws the extracted chunk meshes
+            // w = 3: shadow + AO, not drawn. Terrain 2.0 draws the extracted chunk meshes
             // through the raster pass (`push_terrain_instances`); the raymarch stops
             // sphere-tracing terrain but its field keeps casting sun shadows and darkening
             // props that stand on it (that is what `w = 3` means, vs `w = 2` which would
@@ -2849,7 +2849,7 @@ impl Editor {
             g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 3.0];
             g.vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
         }
-        // Mesh shadow occluders ride the slots AFTER the terrains, flagged
+        // Mesh shadow occluders ride the slots after the terrains, flagged
         // shadow-only (w = 2): the shadow march folds them in, the drawn field
         // skips them. Per-node "casts shadows" / visibility opt-outs simply leave
         // the slot absent this frame — no re-upload needed to toggle.
@@ -2930,7 +2930,7 @@ mod tests {
     ///
     /// `shot` calls this before it takes the picture and prints a warning about
     /// photographing impostors when it comes back false. A scene with no terrain
-    /// in it must therefore come back TRUE, promptly — a warning that fires on
+    /// in it must therefore come back true, promptly — a warning that fires on
     /// every shot of every 2D project is a warning nobody reads by the time a
     /// planet really is unfinished.
     #[test]
@@ -2957,7 +2957,7 @@ mod tests {
     /// needs to prioritize loading what's right under me"* (`floptle/0074`).
     ///
     /// One queue serves every terrain. Under the old key — chunk distance in
-    /// each terrain's OWN local frame — the ground under your feet and a chunk
+    /// each terrain's own local frame — the ground under your feet and a chunk
     /// on a planet twelve thousand units away were literally equal, and the
     /// winner was `HashMap` iteration order.
     #[test]
@@ -2996,7 +2996,7 @@ mod tests {
         d.dedup();
         assert!(d.len() >= 5, "distinct distances collapsed to the same priority: {d:?}");
 
-        // A body the camera is NOT on is penalised as a whole, so no chunk of it
+        // A body the camera is not on is penalised as a whole, so no chunk of it
         // can slip ahead of the ground being stood on.
         let off = chunk_priority([0, 0, 0], 48.0, DVec3::ZERO, Quat::IDENTITY, cam, false);
         assert!(off > at([200, 0, 0]), "an off-body chunk beat a distant on-body one");
@@ -3069,7 +3069,7 @@ mod tests {
     }
 
     /// Surface chunks of a sphere of `radius`, and how many of them the rings
-    /// would queue at FULL detail from a camera standing on it.
+    /// would queue at full detail from a camera standing on it.
     ///
     /// The count is what `floptle/0067` asks for: on a walkable planet the whole
     /// body used to sit inside ring 0, so arriving meant surface-net meshing all
@@ -3159,7 +3159,7 @@ mod tests {
     /// The shipped bug: `terrain_voxel_size` took the MIN axis resolution, so a STRETCHED
     /// field (the 18:1 Y-stretch) meshed the wide footprint at its thin-axis voxel —
     /// millions of surface cells that flooded the terrain color store (2^24). The chosen
-    /// voxel must keep the surface-cell count bounded for ANY slab shape.
+    /// voxel must keep the surface-cell count bounded for any slab shape.
     #[test]
     fn voxel_size_bounds_the_vertex_count() {
         let cases = [
@@ -3173,7 +3173,7 @@ mod tests {
         for (size, dims) in cases {
             let v = terrain_voxel_size(&baked(size, dims));
             // Surface cells ≈ (two largest extents) / voxel². This is what becomes the
-            // vertex count; it MUST stay well under 2^24 (~16.7 M) — the store's ceiling.
+            // vertex count; it must stay well under 2^24 (~16.7 M) — the store's ceiling.
             let mut ext = size;
             ext.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let cells = ext[1] * ext[2] / (v * v);
@@ -3191,7 +3191,7 @@ mod tests {
 mod residency_tests {
     use super::*;
 
-    /// The FULL genspec streaming pipeline, headless: a PlanetFill serialized
+    /// The full genspec streaming pipeline, headless: a PlanetFill serialized
     /// exactly like `node:setTerrainGen` does (ron::to_string) must round-trip
     /// through `load_terrain_from(Generate(..))` into a real, non-empty terrain
     /// — this is the contract behind "focus a planet on the map and its terrain
@@ -3227,8 +3227,8 @@ mod residency_tests {
         // A garbled genspec fails CLEANLY (None → the loud-failure path), never panics.
         assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())]).is_none());
         assert!(genspec_impostor_color("(not ron").is_none());
-        // A corrupt FILE falls back to the genspec instead of failing the stream —
-        // the exact failure Ty hit (LFS pointer stubs where fields should be).
+        // A corrupt file falls back to the genspec instead of failing the stream —
+        // the exact failure seen in practice (LFS pointer stubs where fields should be).
         let dir = std::env::temp_dir().join(format!("floptle-badfield-{}", std::process::id()));
         floptle_vfs::create_dir_all(&dir).unwrap();
         let bad = dir.join("corrupt.cfield");

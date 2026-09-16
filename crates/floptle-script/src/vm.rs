@@ -82,7 +82,7 @@ pub const VM_HAS_CODEGEN: bool = cfg!(all(feature = "vm-luau-codegen", not(targe
 /// value, which is the worst available outcome — so every result goes back
 /// through `tobit`.
 ///
-/// Deliberately NOT shimmed, because a stand-in would be worse than the
+/// Deliberately not shimmed, because a stand-in would be worse than the
 /// absence: `loadstring`/`load` (a sandbox that compiles a string is not one),
 /// `io`/`os.getenv` (a shipped game must not reach the machine), `goto` (syntax
 /// — no library can add it), and `debug.getinfo`. Those are documented

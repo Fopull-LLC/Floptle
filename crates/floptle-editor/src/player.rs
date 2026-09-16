@@ -275,7 +275,7 @@ impl ApplicationHandler for Player {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            // A build's window close IS quitting: there is no unsaved work to
+            // A build's window close is quitting: there is no unsaved work to
             // ask about.
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -379,7 +379,7 @@ impl Player {
         // A browser cannot block on a GPU readback, so the page's capture is
         // its own path (`capture_web`) and the frame itself is never asked to.
         let capture = !cfg!(target_arch = "wasm32") && self.shot.is_some() && self.frames >= self.shot_at;
-        // `FLOPTLE_FRAME_DUMP=<dir>`: photograph EVERY presented frame into
+        // `FLOPTLE_FRAME_DUMP=<dir>`: photograph every presented frame into
         // that directory, out of the swapchain image, exactly as `--shot` does
         // for one. A glitch that lasts a frame while the camera moves cannot be
         // caught by a screenshot key or a headless render; a stream of the
@@ -439,7 +439,7 @@ impl Player {
                 self.ed.set_cursor_freed(true);
             }
         }
-        // What the GAME wants, minus the player having taken the pointer back
+        // What the game wants, minus the player having taken the pointer back
         // with Escape. `script_mouse_lock` alone is the game's standing wish,
         // and a first-person camera renews it every frame from `update`: read
         // straight, it put the grab back on the frame after Escape and the key
@@ -480,7 +480,7 @@ impl Player {
         // window. The editor has had this since the lock existed; the player
         // binary shipped without it, while `docs/export-builds.md` promised it.
         //
-        // The game still SEES the key: plenty of games open their pause menu on
+        // The game still sees the key: plenty of games open their pause menu on
         // it, and swallowing it would break them. This only releases the grab.
         if pressed && code == KeyCode::Escape {
             self.ed.set_cursor_freed(true);
@@ -616,7 +616,7 @@ pub mod web {
         let keep = buf.clone();
         buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             if let Err(e) = r {
-                // Say WHY. A capture that fails silently reads as a build that
+                // Say why. A capture that fails silently reads as a build that
                 // never drew. (wgpu's own sentence is fixed; the page's
                 // `mapAsync` hook keeps the browser's reason alongside it.)
                 log(&format!("capture: the frame could not be mapped: {e}"));
@@ -683,7 +683,7 @@ pub mod web {
         /// A second render of the same frame rather than a read of the one
         /// presented: a browser's canvas cannot be read back, and its surface
         /// offers neither COPY_SRC nor TEXTURE_BINDING, so there is nothing to
-        /// copy FROM. Named here because the desktop's `--shot` does read the
+        /// copy from. Named here because the desktop's `--shot` does read the
         /// presented image and the two are therefore not the same guarantee.
         pub(super) fn capture_web(&mut self) {
             let Some(gpu) = self.ed.gpu.as_ref() else { return };

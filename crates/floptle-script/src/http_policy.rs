@@ -189,7 +189,7 @@ fn refusal(why: &str, policy: HttpPolicy) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::PermissionDenied, explain(why, policy))
 }
 
-/// The half of the resolver that runs AFTER DNS: drop every address the policy
+/// The half of the resolver that runs after DNS: drop every address the policy
 /// refuses, and fail — naming the first refused class — if none is left. Its
 /// own function so a test can hand it a resolution without needing a name
 /// that resolves that way on the test machine.
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(refused_header(["Authorization", "X-Api-Key"]), None);
     }
 
-    /// The resolver is what makes the policy hold for a NAME: what DNS hands
+    /// The resolver is what makes the policy hold for a name: what DNS hands
     /// back is filtered, and a name whose every address is refused fails with
     /// the class named. A name with one public address among private ones
     /// keeps only the public one.

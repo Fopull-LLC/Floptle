@@ -20,7 +20,7 @@ pub enum GravitySource {
     /// PATCHED CONICS: of all `InvSq` sources whose SOI contains the point, only
     /// the DEEPEST (smallest SOI — the moon inside the planet inside the sun)
     /// pulls; the rest contribute nothing. `soi ≤ 0` = infinite (the system
-    /// root). Non-InvSq sources still add on top as usual. INSIDE `body_r`
+    /// root). Non-InvSq sources still add on top as usual. inside `body_r`
     /// (the physical surface radius; 0 = point mass) the pull falls off
     /// linearly to zero at the center — the uniform-density interior solution —
     /// so digging to a planet's core never meets the 1/r² singularity.
@@ -61,7 +61,7 @@ impl GravityField {
             let r2 = to.length_squared().max(1e-6);
             let r = r2.sqrt();
             // Uniform-density interior below the surface: g = µ·r/R³, reaching
-            // ZERO at the exact center (instead of the 1/r² blow-up that
+            // zero at the exact center (instead of the 1/r² blow-up that
             // slingshotted anyone who dug to the core).
             let g = if body_r > 0.0 && r < body_r {
                 mu * r / (body_r * body_r * body_r)

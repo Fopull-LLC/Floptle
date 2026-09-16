@@ -1,6 +1,6 @@
 //! Built-in `stage ui` effect shaders — the one-click juice for UI elements.
 //!
-//! Each is a small, self-contained `.flsl` that draws OVER an element's shape and
+//! Each is a small, self-contained `.flsl` that draws over an element's shape and
 //! (thanks to `transpile_ui`) is automatically clipped to the element's rounded
 //! corners. They're seeded into every project's `shaders/examples/ui/` folder
 //! (like the material examples) and surfaced in the UI-element inspector's
@@ -10,7 +10,7 @@
 //! UI shaders only see `uv` (0..1 across the rect), `time` (seconds) and
 //! `instanceColor` (the element tint × opacity), plus their own uniforms — no
 //! textures, no `palette`/`hueShift` (those are fragment/sky-only). Effects that
-//! must render OUTSIDE the rect (drop shadow) are built-in `ShapeSpec` features
+//! must render outside the rect (drop shadow) are built-in `ShapeSpec` features
 //! instead — see `floptle_ui::ShadowSpec`.
 
 /// `(menu label, file stem, source)` for each built-in UI effect. The dropdown

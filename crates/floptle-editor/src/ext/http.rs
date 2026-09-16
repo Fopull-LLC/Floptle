@@ -98,7 +98,7 @@ struct Listener {
 
 /// An open event stream and the Lua waiting on it.
 ///
-/// Unlike a request, the frame callback is called MANY times, so its registry
+/// Unlike a request, the frame callback is called many times, so its registry
 /// value is kept until the stream ends rather than removed on first delivery.
 struct Stream {
     on_frame: RegistryKey,
@@ -262,7 +262,7 @@ impl WebState {
 
     /// Open a Server-Sent Events stream.
     ///
-    /// The frame parsing is done HERE and not in Lua on purpose: every consumer
+    /// The frame parsing is done here and not in Lua on purpose: every consumer
     /// of an event stream needs the same subset of the protocol — `event:`,
     /// `data:`, a blank line ending a frame, `:` comments as keepalives — and a
     /// package that has to write that itself will get the keepalive wrong and
@@ -466,7 +466,7 @@ fn run_stream(
         // CONNECT is the caller's timeout: how long to wait for the server to
         // answer at all.
         .timeout_connect(Duration::from_secs_f64(timeout.clamp(1.0, 120.0)))
-        // READ is per read, and it is the only way a blocking reader can notice
+        // read is per read, and it is the only way a blocking reader can notice
         // anything. Without it `read_line` sits in the kernel forever: a
         // cancelled stream would not stop and a dead connection would not be
         // noticed, so the idle timeout below would be code that never runs.
@@ -810,7 +810,7 @@ mod tests {
     }
 
     /// `data:x` with no space is legal and means the same as `data: x`. Only
-    /// ONE leading space is part of the protocol — a second one is data.
+    /// one leading space is part of the protocol — a second one is data.
     #[test]
     fn exactly_one_space_after_the_colon_is_protocol_and_the_rest_is_data() {
         assert_eq!(frames("data:x\n\n"), vec![("message".into(), "x".into())]);
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(got, vec![("message".into(), "x".into())]);
     }
 
-    /// A stream cut off mid-frame delivers the frames that DID complete and
+    /// A stream cut off mid-frame delivers the frames that did complete and
     /// not a half-built one — the caller falls back on the strength of the
     /// `onEnd`, and a truncated frame parsed as complete is a lie about it.
     #[test]

@@ -8,7 +8,7 @@
 
 /// Stable network identity for a replicated object — the id both sides of the
 /// wire agree on. Distinct from [`crate::Entity`], whose generational index is
-/// per-session and NOT stable across scene reloads or machines.
+/// per-session and not stable across scene reloads or machines.
 ///
 /// Scene-authored networked nodes get a deterministic id derived from the scene
 /// (so a level's static networked set needs no spawn messages); runtime spawns
@@ -36,7 +36,7 @@ pub enum ReplicationMode {
     /// Server simulates; clients render interpolated snapshots. The default.
     #[default]
     Authority,
-    /// The owner-client ALSO simulates locally, ahead of the server — for the
+    /// The owner-client also simulates locally, ahead of the server — for the
     /// player's own avatar. Requires an `owner` peer.
     Predicted,
     /// **Every** peer simulates this node locally, every tick, from the session's

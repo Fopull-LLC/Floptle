@@ -149,7 +149,7 @@ impl HubConfig {
         if cfg.settings.manifest_url == LEGACY_MANIFEST_URL {
             cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
         }
-        // A LOCAL manifest path (the dev/testing source) that no longer exists
+        // A local manifest path (the dev/testing source) that no longer exists
         // can only ever error — self-heal to the public default instead of
         // showing a dead version list forever.
         if !cfg.settings.manifest_url.starts_with("http")
@@ -157,7 +157,7 @@ impl HubConfig {
         {
             cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
         }
-        // The Phase-1 sign-in server. A NEW DEFAULT DOES NOT FIX THIS on its own:
+        // The Phase-1 sign-in server. A new default does not FIX this on its own:
         // the value is persisted, so the installs that carry the dead host are
         // exactly the ones that have run before — which is everyone who ever
         // signed in. Rewritten on load rather than left for the user to notice,

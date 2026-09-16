@@ -69,7 +69,7 @@ impl Editor {
 
     /// Drop every registry entry that resolves to `file`, so the next
     /// `ensure_texture` re-uploads from disk. The registry is keyed by the ref as
-    /// WRITTEN (project-relative, usually), so matching has to go through
+    /// written (project-relative, usually), so matching has to go through
     /// `resolve_asset_path` rather than comparing strings.
     pub(crate) fn invalidate_texture(&mut self, file: &Path) {
         let target = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
@@ -262,9 +262,9 @@ impl Editor {
         }
     }
 
-    /// Make a NEW document out of whatever image is on the OS clipboard.
+    /// Make a new document out of whatever image is on the OS clipboard.
     ///
-    /// The other half of "paste an image in": sometimes the clipboard IS the
+    /// The other half of "paste an image in": sometimes the clipboard is the
     /// thing you want to work on, and pasting it into a document you had to
     /// invent the size of first is the long way round.
     pub(crate) fn new_image_from_clipboard(&mut self) {
@@ -293,13 +293,13 @@ impl Editor {
 
     // --- several documents at once ------------------------------------------
     //
-    // The 🖼 tab holds ONE live `ImageEditState` and a stash of parked ones.
+    // The 🖼 tab holds one live `ImageEditState` and a stash of parked ones.
     // Switching documents swaps a stash entry with the live state, carrying the
     // tab-level things (palettes, clipboard, tool, brush) across.
     //
     // Why a stash rather than splitting `ImageEditState` into per-document and
     // shared halves: the split already exists and is already tested — it is what
-    // `close()` preserves — and a state that IS a document, whole, cannot get a
+    // `close()` preserves — and a state that is a document, whole, cannot get a
     // document's undo stack attached to another document's pixels. Every gesture,
     // filter, selection and undo entry in the tab reads `self.image` and needs no
     // idea that any of this is happening.
@@ -323,7 +323,7 @@ impl Editor {
             return;
         }
         let mut next = self.image_stash.remove(i);
-        // Park the current one FIRST, so the tab strip keeps a stable order and
+        // Park the current one first, so the tab strip keeps a stable order and
         // an accidental double-activate cannot drop a document on the floor.
         if self.image.doc.is_some() {
             let mut parked = ImageEditState::default();
@@ -398,7 +398,7 @@ impl Editor {
                 self.image.mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                 self.after_png_written(&png, &doc);
                 self.image.toast(format!("saved {}", short_name(&png)));
-                // Only a NEW file changes the tree; a rescan per save would walk
+                // Only a new file changes the tree; a rescan per save would walk
                 // the whole project every time you pressed Ctrl+S.
                 if fresh {
                     self.asset_tree = crate::assets::build_assets(&self.project_root);
@@ -460,7 +460,7 @@ impl Editor {
             return;
         }
         self.image.last_live = Some(now);
-        // ONLY the PNG: re-encoding every layer into the .flimg four times a
+        // only the PNG: re-encoding every layer into the .flimg four times a
         // second would be felt in the brush. Ctrl+S still writes the document.
         let png = floptle_image::io::png_path_for(&path);
         let flat = floptle_image::composite::flatten(&doc, self.image.frame);
@@ -540,7 +540,7 @@ impl Editor {
                 let out = dir.join(format!("{stem}_sheet.png"));
                 let ok = fio::save_png(&out, &sheet.pixels, sheet.w, sheet.h).is_ok();
                 if ok {
-                    // §5.2: the packer's grid MUST be the grid the engine reads,
+                    // §5.2: the packer's grid must be the grid the engine reads,
                     // so write cols/rows into the texture's import settings.
                     let rel =
                         crate::assets::asset_rel_path(&out.to_string_lossy(), &self.project_root);
@@ -667,7 +667,7 @@ mod tests {
         assert!(!is_image_doc("art/thing.png"));
     }
 
-    /// The registry is keyed by the ref as WRITTEN — usually project-relative,
+    /// The registry is keyed by the ref as written — usually project-relative,
     /// sometimes absolute — while the editor knows only the file it just wrote.
     /// Matching has to go through `resolve_asset_path`, or a save would appear
     /// to do nothing on the mesh (which is the entire feature).

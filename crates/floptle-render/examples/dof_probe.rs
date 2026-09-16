@@ -41,7 +41,7 @@ fn main() {
 
     // ---- near and far are two different ranges ------------------------------
     //
-    // One card four units in FRONT of focus, one four units BEHIND. With a tight
+    // One card four units in front of focus, one four units behind. With a tight
     // near range and a loose far one the front card is fully defocused while the
     // back one is only halfway there — and widening the near range has to
     // SHARPEN the front card. Asserting only the first half would pass on a
@@ -120,7 +120,7 @@ fn main() {
     // Averaging a bright point with its dark neighbours is what turns bokeh into
     // grey mush. Weighting taps by how far past white they are keeps the disc
     // bright, and it only means anything because the frame arriving here is
-    // scene-referred — there IS something past white to find.
+    // scene-referred — there is something past white to find.
     let card = [Card::at(FOCUS + 6.0, 0.0)];
     let dull = rig.render(&gpu, &card, &base);
     let boosted = rig.render(&gpu, &card, &PostSettings { dof_highlight: 6.0, ..base });
@@ -142,7 +142,7 @@ fn main() {
     let dim_pair = [Card::dim(FOCUS - 4.0, 0.45), Card::dim(FOCUS + 4.0, -0.45)];
     let shown = rig.render(&gpu, &dim_pair, &PostSettings { dof_show_focus: true, ..base });
     write_png(&format!("{dir}/dof_show_focus.png"), &shown);
-    // Measured ON the cards, not over the half-frame: the focus view tints the
+    // Measured on the cards, not over the half-frame: the focus view tints the
     // whole picture including the empty background, and the background is far —
     // so a half-frame average is mostly the far tint whichever half it is.
     let (fx, fy) = dim_pair[0].screen_center();
@@ -164,7 +164,7 @@ fn main() {
 }
 
 /// One emissive card: a distance in front of the camera, and where it sits
-/// vertically as a fraction of the half-frame at THAT distance — so two cards at
+/// vertically as a fraction of the half-frame at that distance — so two cards at
 /// different depths still cover the same pixels and land in different halves.
 #[derive(Clone, Copy)]
 struct Card {
@@ -184,7 +184,7 @@ impl Card {
 
     /// A near-POINT source, bright enough to stay visible however far the blur
     /// spreads it. The iris test needs this: the blur footprint of a source is
-    /// the source convolved with the aperture, so measuring the aperture's SHAPE
+    /// the source convolved with the aperture, so measuring the aperture's shape
     /// means making the source small enough to disappear inside it. Against a
     /// card the size of the blur, a triangular iris reads as a barely-rounder
     /// square, and the test cannot see the feature it is for.
@@ -304,7 +304,7 @@ fn in_half(y: usize, h: Half) -> bool {
 }
 
 /// How many pixels the card's light reaches in one half of the frame. Blur
-/// spreads a fixed amount of light over more pixels, so above a LOW threshold
+/// spreads a fixed amount of light over more pixels, so above a low threshold
 /// this grows with the blur — which is the property being measured.
 fn lit(img: &[[u8; 3]], h: Half) -> usize {
     (0..S as usize)

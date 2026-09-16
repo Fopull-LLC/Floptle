@@ -26,7 +26,7 @@
 //! export silently could not work from a Hub install, the ordinary way to run
 //! the engine, and could never work at all for macOS.
 //!
-//! A template is pinned to the editor's OWN version. Mixing them would ship a
+//! A template is pinned to the editor's own version. Mixing them would ship a
 //! game whose netcode protocol disagrees with the editor that built it.
 //!
 //! The `cargo` path survives only as [`ExportKind::Template::cross`]: a fallback
@@ -86,13 +86,13 @@ fn manifest_dir() -> Option<PathBuf> {
     Some(PathBuf::from("/"))
 }
 
-/// How an Export Game… target obtains its PLAYER binary.
+/// How an Export Game… target obtains its player binary.
 #[cfg(feature = "editor-ui")]
 pub(crate) enum ExportKind {
     /// The player binary beside the running editor — always this platform.
     SelfBinary,
     /// A published release bundle for `platform`, downloaded and cached.
-    /// `cross` is the Rust triple used ONLY as a source-checkout fallback when
+    /// `cross` is the Rust triple used only as a source-checkout fallback when
     /// this engine version has no published bundle (macOS has none: it cannot
     /// be cross-compiled, which is exactly why templates exist).
     Template { platform: &'static str, cross: Option<&'static str> },
@@ -154,7 +154,7 @@ on the machine and the browser they were made in.
 
 /// Every target Export Game… offers. "This machine" first (no download); the
 /// rest are published bundles. All four platforms are symmetric — the host you
-/// export FROM stopped mattering when the compiler left. The browser is last:
+/// export from stopped mattering when the compiler left. The browser is last:
 /// the same shape, one more artifact key.
 #[cfg(feature = "editor-ui")]
 pub(crate) const EXPORT_TARGETS: &[ExportTarget] = &[
@@ -343,7 +343,7 @@ fn run_resolve(
     let _ = std::fs::remove_dir_all(&staging);
     floptle_vfs::create_dir_all(&staging)
         .map_err(|e| TemplateProgress::Failed(format!("template dir: {e}")))?;
-    // The PLAYER, not the editor: a bundle carries both, and an export ships
+    // The player, not the editor: a bundle carries both, and an export ships
     // the one with no authoring half in it. A bundle from before the two were
     // split has only the editor, and saying so by name beats shipping it. For
     // the web the marker is the wasm module itself.
@@ -440,7 +440,7 @@ fn spawn_export_build(triple: Option<&str>, log: &Path) -> Result<std::process::
     if let Some(tr) = triple {
         cmd.args(["--target", tr]);
     }
-    // Build into the SAME target dir `cross_binary_path` reads (the running
+    // Build into the same target dir `cross_binary_path` reads (the running
     // editor's). Without this the child cargo used whatever CARGO_TARGET_DIR
     // the environment happened to have — launched differently, the build
     // succeeded in one place while the export looked in another and reported
@@ -459,7 +459,7 @@ fn spawn_export_build(triple: Option<&str>, log: &Path) -> Result<std::process::
             cmd.env("PATH", std::env::join_paths(paths).map_err(|e| e.to_string())?);
             // llvm-mingw ships compiler-rt/libunwind, but rustc's windows-gnu
             // target links `-lgcc`/`-lgcc_eh` — alias them to libunwind once
-            // and point the build at the shim. (A real mingw-w64-gcc on PATH
+            // and point the build at the shim. (A real mingw-w64-gcc on path
             // has libgcc and skips all of this.)
             let root = bin.parent().ok_or("llvm-mingw layout")?;
             let shim = root.join("rust-shim");
@@ -479,9 +479,9 @@ fn spawn_export_build(triple: Option<&str>, log: &Path) -> Result<std::process::
     cmd.spawn().map_err(|e| format!("spawn cargo: {e}"))
 }
 
-/// The mingw cross toolchain for a Windows fallback build: system-wide (PATH) or
+/// The mingw cross toolchain for a Windows fallback build: system-wide (path) or
 /// the user-space llvm-mingw install. Returns the bin dir to prepend to the
-/// child's PATH (None = already on PATH).
+/// child's path (None = already on path).
 #[cfg(feature = "editor-ui")]
 fn windows_toolchain_bin() -> Result<Option<PathBuf>, String> {
     let cc = "x86_64-w64-mingw32-gcc";
@@ -506,7 +506,7 @@ fn windows_toolchain_bin() -> Result<Option<PathBuf>, String> {
 
 // --- the bundle ---------------------------------------------------------------
 
-/// Directories the ENGINE writes into a project at runtime, which a shipped
+/// Directories the engine writes into a project at runtime, which a shipped
 /// build must not carry: `save/` is the player's own save slots
 /// (`floptle_script::save`), `replays/` is recorded match logs
 /// (`crate::shadow`). Shipping the developer's copies hands every player a
@@ -515,7 +515,7 @@ pub(crate) const RUNTIME_DIRS: &[&str] = &["save", "replays"];
 
 /// Whether a project entry should ship. Dot-entries are editor/IDE plumbing
 /// (`.floptle` caches, `.luarc.json`); [`RUNTIME_DIRS`] are runtime state — but
-/// only at the project ROOT, since a nested folder named `save` is content.
+/// only at the project root, since a nested folder named `save` is content.
 /// Extensions a shipped build can never load, so it never carries them.
 ///
 /// These are **authoring inputs**: the model formats `floptle-convert` turns
@@ -528,7 +528,7 @@ pub(crate) const RUNTIME_DIRS: &[&str] = &["save", "replays"];
 /// finished first-person game measured **43 MB of these in a 324 MB build**,
 /// most of it `.uasset` files that rode along inside bought asset packs.
 ///
-/// Deliberately NOT here: `.meta` (the terrain streamer writes those, beside
+/// Deliberately not here: `.meta` (the terrain streamer writes those, beside
 /// its `.cfield`/`.tfield`), and anything texty — a script can read its own
 /// data files through `assets.getContents`, and guessing which of those are
 /// data is not this list's job.
@@ -544,7 +544,7 @@ pub(crate) const NEVER_SHIPS: &[&str] = &[
     "py", "pyc", "pyo",
 ];
 
-/// **What a DEDICATED SERVER never reads**, on top of [`NEVER_SHIPS`]
+/// **What a DEDICATED server never reads**, on top of [`NEVER_SHIPS`]
 /// (`floptle/0197`).
 ///
 /// A server bundle is the same project with everything nobody can see or hear
@@ -552,7 +552,7 @@ pub(crate) const NEVER_SHIPS: &[&str] = &[
 /// on the box: `floptle serve` steps scripts, physics, animation and nav, and
 /// touches a texture, a sound or a font at no point in any of that.
 ///
-/// **What is NOT here is the interesting half.** Models stay, because a mesh
+/// **What is not here is the interesting half.** Models stay, because a mesh
 /// collider is a mesh and a skeleton is in the `.glb`; `.ron` of every kind
 /// stays; scripts, prefabs, navmeshes, animation clips and controllers stay;
 /// anything texty stays, because a script can read its own data files through
@@ -575,11 +575,11 @@ pub(crate) const NEVER_SERVES: &[&str] = &[
     // Video.
     "mp4", "webm", "mkv", "mov", "avi",
     // Shaders are compiled against a device this box does not have. A `.flsl`
-    // is texty and a script CAN read one, but nothing on a server compiles it.
+    // is texty and a script can read one, but nothing on a server compiles it.
     "flsl",
 ];
 
-/// Whether a FILE belongs in a **server** bundle.
+/// Whether a file belongs in a **server** bundle.
 #[cfg(feature = "editor-ui")]
 fn serves_file(path: &Path) -> bool {
     ships_file(path)
@@ -589,14 +589,14 @@ fn serves_file(path: &Path) -> bool {
             .is_some_and(|e| NEVER_SERVES.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Whether a project entry should ship, by NAME (dot-entries, and the runtime
+/// Whether a project entry should ship, by name (dot-entries, and the runtime
 /// dirs at the project root).
 #[cfg(feature = "editor-ui")]
 fn ships(name: &str, at_root: bool) -> bool {
     !(name.starts_with('.') || (at_root && RUNTIME_DIRS.contains(&name)))
 }
 
-/// Whether a FILE should ship, on top of [`ships`]: an authoring input the
+/// Whether a file should ship, on top of [`ships`]: an authoring input the
 /// engine has no loader for does not.
 #[cfg(feature = "editor-ui")]
 fn ships_file(path: &Path) -> bool {
@@ -692,7 +692,7 @@ pub(crate) struct Portability {
     /// file the build carries — a ref written where the project USED to live —
     /// rewritten to that copy, as `(from, to)`.
     pub(crate) redirected: Vec<(String, String)>,
-    /// Absolute paths that point OUTSIDE the project — unfixable here, because
+    /// Absolute paths that point outside the project — unfixable here, because
     /// the file they name isn't in the build at all.
     pub(crate) foreign: Vec<String>,
 }
@@ -703,10 +703,10 @@ pub(crate) struct Portability {
 /// carrying one is broken on every machine except the one that exported it —
 /// silently, since a missing model just doesn't appear. Rewriting the project
 /// root's own prefix is safe by construction: that string can only ever be a
-/// path INTO the project.
+/// path into the project.
 ///
 /// A path outside the project whose TAIL is a file the build carries is a ref
-/// written where the project used to live (2026-09-05: a browser build staged
+/// written where the project used to live (a browser build staged
 /// from a copy shipped 17 files of `/home/…/Forgery/models/…` refs, and every
 /// door and NPC was missing in the tab). The player would rescue it the same
 /// way (`project::rescue_stranded_root`), but a build should not lean on a
@@ -802,7 +802,7 @@ fn absolute_refs(text: &str) -> Vec<String> {
         // endpoint path — `"/api/login"` is shaped exactly like an absolute
         // Unix path and was reported as a foreign asset on every export of a
         // game with a login script. What separates a reference from a route:
-        // an asset either names a FILE (has an extension on its last segment)
+        // an asset either names a file (has an extension on its last segment)
         // or exists on this machine, which a route never does.
         if is_abs
             && chunk.len() > 1
@@ -944,7 +944,7 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     }
     // The build's `assets/` copy is wholly owned by the export: clear the
     // previous one so files deleted from the project don't linger in shipped
-    // builds (and a stale FILE named `assets` — the old broken-export
+    // builds (and a stale file named `assets` — the old broken-export
     // artifact — doesn't block the copy).
     let ship_assets = out_c.join("assets");
     if floptle_vfs::is_dir(&ship_assets) {
@@ -981,7 +981,7 @@ pub(crate) fn export_game_with(
     target: &ExportTarget,
 ) -> Result<(String, PathBuf), String> {
     let (proj, out_c) = prepare_out(project_root, out)?;
-    // Binary name from the title: filesystem-safe, the TARGET's suffix.
+    // Binary name from the title: filesystem-safe, the target's suffix.
     let stem: String = title
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -995,9 +995,9 @@ pub(crate) fn export_game_with(
     if exe_name == "assets" {
         exe_name = "game".into();
     }
-    // Everything the game needs ships BEFORE the binary, and the binary ships
-    // LAST — a failed export must never leave a runnable-looking exe that,
-    // missing its floptle-game.ron, silently boots as the EDITOR.
+    // Everything the game needs ships before the binary, and the binary ships
+    // last — a failed export must never leave a runnable-looking exe that,
+    // missing its floptle-game.ron, silently boots as the editor.
     let staged = stage_game(&proj, &out_c, title)?;
     if let Some(tpl) = target.readme {
         floptle_vfs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
@@ -1031,7 +1031,7 @@ pub(crate) fn export_game_with(
 ///
 /// ## What it refuses
 ///
-/// A project that cannot run headless is refused HERE, at the developer's
+/// A project that cannot run headless is refused here, at the developer's
 /// machine with the reason in front of them, rather than as a deployment that
 /// goes `failed` on a box they cannot see. A `Rollback` scene is the big one and
 /// it is not a gap: every peer simulates a rollback match, so it is hosted by a
@@ -1044,7 +1044,7 @@ pub(crate) fn export_server(
     scene: Option<&str>,
     label: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
-    // **EVERY REFUSAL BEFORE ANYTHING IS CREATED.** `prepare_out` makes the
+    // **every REFUSAL before anything is created.** `prepare_out` makes the
     // output directory, so validating after it leaves a bundle-shaped folder
     // behind for a project that was refused — the same trap the native path
     // learned about its binary ("a failed export must never leave a
@@ -1052,7 +1052,7 @@ pub(crate) fn export_server(
     let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
     let cfg = floptle_scene::load_project(&proj.join("project.ron"));
 
-    // WHICH SCENE this server hosts. `--scene` wins; otherwise the project's
+    // which scene this server hosts. `--scene` wins; otherwise the project's
     // entry scene, which is the only other defensible answer. Named in the
     // manifest either way, because a bundle that does not say what it runs
     // makes the fleet agent guess.
@@ -1073,7 +1073,7 @@ pub(crate) fn export_server(
     .map_err(|e| format!("read {want}: {e}"))?;
     crate::dedicated::check_servable(&doc, &scene_path)?;
 
-    // WHICH ENGINE runs it — and whether a box could ever fetch that engine.
+    // which engine runs it — and whether a box could ever fetch that engine.
     let engine = cfg.engine_version.clone().unwrap_or_else(crate::distribution_version);
     check_server_engine(&engine)?;
 
@@ -1109,7 +1109,7 @@ pub(crate) fn export_server(
     // measured against a 256 MB ceiling. The web target learned the same lesson
     // in rc4; it is sharper here because this one is shipped somewhere.
     //
-    // Only a manifest one of OUR exports wrote, and nothing else in the folder:
+    // Only a manifest one of our exports wrote, and nothing else in the folder:
     // a bundle must not go deleting files it cannot account for.
     for manifest in ["floptle-game.ron", "floptle-server.ron"] {
         let p = out_c.join(manifest);
@@ -1121,7 +1121,7 @@ pub(crate) fn export_server(
 
     // `assets/` is the bundle's own, exactly as it is for a native build: it is
     // written here, so a previous one is replaced rather than merged with — two
-    // projects in one tree is a worse artifact than either. A stale FILE of
+    // projects in one tree is a worse artifact than either. A stale file of
     // that name (the old broken-export shape) would otherwise stop the copy
     // with "File exists" instead of being replaced.
     let ship = out_c.join("assets");
@@ -1140,7 +1140,7 @@ pub(crate) fn export_server(
         .strip_prefix(&proj)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| want.clone());
-    // **When it was MADE, and what the developer called it** (`floptle/0233`).
+    // **When it was made, and what the developer called it** (`floptle/0233`).
     // The control plane knows when the bytes arrived; it cannot know when the
     // build was exported, and a Tuesday bundle uploaded on Friday reads as
     // Friday's work — which is how somebody deploys a build they thought they
@@ -1153,7 +1153,7 @@ pub(crate) fn export_server(
         .unwrap_or_default();
     let manifest = format!(
         "(\n    \
-         // A dedicated-server bundle. The box runs its OWN `floptle serve` of\n    \
+         // A dedicated-server bundle. The box runs its own `floptle serve` of\n    \
          // `engine_version` against `project`, so nothing here is a binary.\n    \
          title: {title:?},\n    \
          project: \"assets\",\n    \
@@ -1630,10 +1630,10 @@ impl Editor {
         let t = &EXPORT_TARGETS[target];
         match t.kind {
             ExportKind::SelfBinary => {
-                // A `cargo run` (debug) editor must not ship ITSELF — a debug
+                // A `cargo run` (debug) editor must not ship itself — a debug
                 // binary is huge (~600 MB) and slow. With the source checkout
                 // around, build the release binary in the background. A release
-                // editor (a Hub install) IS the shipping binary: export directly.
+                // editor (a Hub install) is the shipping binary: export directly.
                 if cfg!(debug_assertions) && repo_root().is_some() {
                     self.begin_cargo_fallback(None, dir, title, target);
                 } else {
@@ -1747,7 +1747,7 @@ impl Editor {
     }
 
     /// Where a typed export folder actually lands: absolute paths as-is;
-    /// relative paths resolve against the PROJECT's parent folder (predictable
+    /// relative paths resolve against the project's parent folder (predictable
     /// and next to your work — never the process's working directory, which
     /// depends on how the editor was launched).
     pub(crate) fn resolve_export_dir(&self, dir: &str) -> PathBuf {
@@ -2137,7 +2137,7 @@ mod tests {
     /// A server bundle is uploaded, so a folder is never the finished article.
     /// Every developer therefore ran a `tar` line copied off the website — the
     /// step that assumes a shell, gets `-C` wrong, and is why both bundles that
-    /// existed were hand-rolled. Ty's steer was that shipping a game should not
+    /// existed were hand-rolled. The direction was that shipping a game should not
     /// be a hassle; this is the whole of the remaining hassle.
     ///
     /// The staging directory must not survive: what was asked for is one file,
@@ -2201,7 +2201,7 @@ mod tests {
     /// **A server bundle keeps what a headless run reads and drops what it
     /// cannot.**
     ///
-    /// The interesting assertions are the KEEPS. Dropping a `.png` is the easy
+    /// The interesting assertions are the keeps. Dropping a `.png` is the easy
     /// half and the obvious list; the way this goes wrong is somebody widening
     /// the list until a server stops having the mesh its colliders are made of,
     /// the clips it steps, or the data file a script reads — none of which
@@ -2217,7 +2217,7 @@ mod tests {
         }
         // Kept, and each for its own reason:
         for keep in [
-            // a mesh collider IS a mesh, and a skeleton lives in the .glb
+            // a mesh collider is a mesh, and a skeleton lives in the .glb
             "models/Sae.glb",
             // scenes, prefabs, controllers, navmeshes — all `.ron`
             "scenes/mp.ron", "prefabs/Crate.prefab.ron", "animation_controllers/Sae.actl.ron",
@@ -2242,7 +2242,7 @@ mod tests {
         assert!(!serves_file(Path::new("audio/Theme.OGG")));
     }
 
-    /// `server` is offered as a platform, and it is NOT one of the binary
+    /// `server` is offered as a platform, and it is not one of the binary
     /// targets — nothing in `EXPORT_TARGETS` answers to it, because a bundle
     /// carries no binary at all.
     #[test]
@@ -2270,7 +2270,7 @@ mod tests {
     /// **A build ships nothing it cannot open.** The model sources an import
     /// consumed, another engine's asset files, a project's own tooling — all
     /// of it is weight, and on the web it is a player's wait. The `.glb` that
-    /// came OUT of the import ships; the `.fbx` that went in does not.
+    /// came out of the import ships; the `.fbx` that went in does not.
     #[test]
     fn authoring_inputs_do_not_ship_but_what_they_produced_does() {
         let proj = temp("strip-proj");
@@ -2285,7 +2285,7 @@ mod tests {
         floptle_vfs::write(proj.join("models/pack/Rock.uasset"), vec![b'u'; 3000]).unwrap();
         floptle_vfs::write(proj.join("models/pack/scene.blend"), vec![b'b'; 900]).unwrap();
         floptle_vfs::write(proj.join("models/pack/build.py"), b"# tool").unwrap();
-        // Extensions that LOOK like tooling but are the engine's own, or a
+        // Extensions that look like tooling but are the engine's own, or a
         // game's data — these must survive.
         floptle_vfs::write(proj.join("models/chunk.meta"), b"terrain").unwrap();
         floptle_vfs::write(proj.join("models/notes.txt"), b"read by a script").unwrap();
@@ -2405,7 +2405,7 @@ mod tests {
         );
         assert!(floptle_vfs::is_file(out.join("game.flpk")), "the web build itself is there");
 
-        // A folder holding an `assets/` that is NOT ours is left alone: no
+        // A folder holding an `assets/` that is not ours is left alone: no
         // manifest, no claim on it.
         let other = temp("web-over-other");
         floptle_vfs::create_dir_all(other.join("assets")).unwrap();
@@ -2451,7 +2451,7 @@ mod tests {
         assert_eq!(manifest.title, "My Cool Game!");
         assert_eq!(manifest.project, "assets");
 
-        // Exporting INTO the project is refused (it would copy itself).
+        // Exporting into the project is refused (it would copy itself).
         let inside = proj.join("build");
         assert!(export_game_with(&proj, &inside, "x", &me, &EXPORT_TARGETS[0]).is_err());
 
@@ -2493,7 +2493,7 @@ mod tests {
     /// The trap behind "the build opens the editor": a project rooted at
     /// `assets/` exported with the default title on a suffix-less target named
     /// the exe `assets` — colliding with the shipped assets FOLDER. The exe must
-    /// dodge the reserved name, and the binary must ship LAST so a failed export
+    /// dodge the reserved name, and the binary must ship last so a failed export
     /// never leaves anything runnable.
     #[test]
     fn export_never_collides_the_exe_with_the_assets_folder() {
@@ -2526,7 +2526,7 @@ mod tests {
     }
 
     /// Every platform the release pipeline publishes is offerable, and each
-    /// carries the suffix of the TARGET rather than of the host.
+    /// carries the suffix of the target rather than of the host.
     #[test]
     fn every_published_platform_is_an_export_target() {
         for p in floptle_dist::PLATFORMS {
@@ -2550,7 +2550,7 @@ mod tests {
     /// The engine writes `save/` and `replays/` into a project at runtime.
     /// Shipping the developer's copies hands every player a pre-populated save —
     /// in the field this made a build boot straight into a match instead of its
-    /// menu. Only at the ROOT: a nested `save/` folder is content.
+    /// menu. Only at the root: a nested `save/` folder is content.
     #[test]
     fn runtime_state_does_not_ship_but_nested_folders_do() {
         let proj = temp("proj-runtime");
@@ -2576,7 +2576,7 @@ mod tests {
 
     /// An absolute asset path resolves as-is with no rescue, so a build carrying
     /// one is broken on every machine but the one that exported it — silently,
-    /// because a missing model simply doesn't appear. Paths INTO the project are
+    /// because a missing model simply doesn't appear. Paths into the project are
     /// rewritten; paths outside it can't be (the file isn't in the build) and are
     /// reported instead.
     #[test]
@@ -2657,7 +2657,7 @@ mod tests {
         assert!(resolve_entry_scene(&proj, "  ").is_none());
 
         // Written through the real serializer: `load_project` falls back to
-        // defaults on ANY parse error, so a hand-rolled fixture would silently
+        // defaults on any parse error, so a hand-rolled fixture would silently
         // test nothing at all.
         let write_entry = |entry: &str| {
             let cfg = floptle_scene::ProjectConfigDoc {
@@ -2687,7 +2687,7 @@ mod tests {
     /// **A bundle with no player cannot stamp a build, and says so.**
     ///
     /// The failure this guards is not a crash: before the editor and the player
-    /// were split, an export copied the EDITOR and every shipped game carried an
+    /// were split, an export copied the editor and every shipped game carried an
     /// authoring application it could never open. A bundle published before the
     /// split still contains exactly that binary, and the tempting thing for the
     /// resolver to do is take it. Refusing by name is the whole point.
@@ -2702,7 +2702,7 @@ mod tests {
                 flate2::Compression::default(),
             );
             let mut tar = tar::Builder::new(gz);
-            // The editor ONLY — a pre-split bundle.
+            // The editor only — a pre-split bundle.
             let payload = b"#!/bin/sh\necho editor\n";
             let mut h = tar::Header::new_gnu();
             h.set_size(payload.len() as u64);
@@ -2753,7 +2753,7 @@ mod tests {
     #[test]
     fn a_cached_template_is_used_without_touching_the_network() {
         let data = temp("tpl-data");
-        // The PLAYER is what "cached" means for an export: it is the binary a
+        // The player is what "cached" means for an export: it is the binary a
         // build ships, so its presence is what lets the fetch be skipped.
         let bin = floptle_dist::template_player_binary(&data, "9.9.9", "windows-x86_64");
         floptle_vfs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -2776,7 +2776,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// An engine version with no published bundle is `Unpublished`, NOT `Failed` —
+    /// An engine version with no published bundle is `Unpublished`, not `Failed` —
     /// that distinction is what lets a source checkout fall back to building one,
     /// which is the only way to export during engine development.
     #[test]
@@ -2821,7 +2821,7 @@ mod tests {
                 flate2::Compression::default(),
             );
             let mut tar = tar::Builder::new(gz);
-            // A real bundle carries BOTH: the editor the Hub runs, and the
+            // A real bundle carries both: the editor the Hub runs, and the
             // player an export ships.
             for name in ["floptle", "floptle-player"] {
                 let payload = b"#!/bin/sh\necho engine\n";
@@ -2871,7 +2871,7 @@ mod tests {
             "the checksum is verified, not assumed"
         );
 
-        // A corrupt manifest entry for the SAME archive must be rejected.
+        // A corrupt manifest entry for the same archive must be rejected.
         floptle_vfs::write(
             &manifest,
             format!(

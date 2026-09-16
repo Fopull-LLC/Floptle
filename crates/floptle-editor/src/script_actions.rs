@@ -1,4 +1,4 @@
-//! EDITOR ACTIONS — Lua tooling that runs in EDIT mode (the Unity
+//! editor ACTIONS — Lua tooling that runs in EDIT mode (the Unity
 //! editor-script analog). A script declares a button:
 //!
 //! ```lua
@@ -7,7 +7,7 @@
 //! ```
 //!
 //! and the Inspector shows **Generate** on that script component; clicking
-//! runs `roll(node)` against the OPEN scene: transform/component writes,
+//! runs `roll(node)` against the open scene: transform/component writes,
 //! `createNode`/`spawn`/`destroy`, the construction setters and
 //! `terrain.generatePlanet` all land in the edited scene (undo-recorded).
 //! Heavy terrain generations run on a background thread and adopt in as they
@@ -141,14 +141,14 @@ impl Editor {
             };
             let chunks = field.data_chunks();
             self.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
-            // A generated field exists ONLY in RAM until the scene is saved — an
+            // A generated field exists only in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.
             self.touch_terrain_edit(e);
             // Restream every terrain's render chunks (cheap, brief) + rebuild
             // the SDF shadow atlas around the new field.
             self.terrain_slots.clear();
             self.terrain_gpu_dirty = true;
-            // Generation may finish DURING Play (▶ Generate then Play before the
+            // Generation may finish during Play (▶ Generate then Play before the
             // fill lands, or a runtime regeneration): rebuild the sim so the new
             // surface is solid immediately — a body standing there must never
             // fall through a planet whose field just arrived. This is also what

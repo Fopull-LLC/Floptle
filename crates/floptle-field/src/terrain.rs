@@ -47,15 +47,15 @@ pub enum Brush {
     Paint,
 }
 
-/// The SHAPE of a brush's weight from its center to its rim — the thing that decides
+/// The shape of a brush's weight from its center to its rim — the thing that decides
 /// whether a stroke reads as a soft airbrush or a hard stamp.
 ///
-/// Every brush in the editor (terrain sculpt/paint AND vertex paint) runs through this,
+/// Every brush in the editor (terrain sculpt/paint and vertex paint) runs through this,
 /// because both used to hardcode `w = strength * (1 - d/radius)` — a fixed linear ramp.
 /// That is *why* everything looked blurry: there was no profile to configure, only one
 /// soft gradient. Two knobs, deliberately, in the shape artists already know:
 ///
-/// * `hardness` — the fraction of the radius that gets FULL weight before any falloff
+/// * `hardness` — the fraction of the radius that gets full weight before any falloff
 ///   starts. `1.0` = a hard-edged stamp with no gradient at all (the N64/PS1 look);
 ///   `0.0` = falloff across the entire radius (an airbrush).
 /// * `falloff` — the shape of the ramp over the remaining rim.
@@ -99,8 +99,8 @@ impl BrushProfile {
             return 0.0;
         }
         let t = d / radius;
-        // Outside the radius FIRST. Clamping t to 1 before this test made `t <= hardness`
-        // true at ANY distance when hardness == 1 — i.e. a hard brush painted the whole
+        // Outside the radius first. Clamping t to 1 before this test made `t <= hardness`
+        // true at any distance when hardness == 1 — i.e. a hard brush painted the whole
         // mesh, ignoring its radius entirely. (Caught by
         // `every_profile_is_bounded_and_dies_at_the_rim`; keep that test.)
         if t >= 1.0 {
@@ -337,7 +337,7 @@ impl Terrain {
         interior
     }
 
-    /// Fill the WHOLE terrain's surface color with `color` (the RGB tint), leaving
+    /// Fill the whole terrain's surface color with `color` (the RGB tint), leaving
     /// the shape + texture slots — "fill terrain with this color".
     pub fn fill_color(&mut self, color: [f32; 3]) {
         let rgb = [
@@ -352,7 +352,7 @@ impl Terrain {
         }
     }
 
-    /// Fill the WHOLE terrain with a texture palette `slot` (1-based; 0 = untextured)
+    /// Fill the whole terrain with a texture palette `slot` (1-based; 0 = untextured)
     /// — "fill terrain with this texture". Leaves the shape + RGB tint.
     pub fn fill_texture(&mut self, slot: u8) {
         for c in &mut self.baked.color {
@@ -376,8 +376,8 @@ impl Terrain {
         self.baked.color[self.idx(x.min(w - 1), y.min(h - 1), z.min(d - 1))]
     }
 
-    /// Fold several terrain fields, each placed at a WORLD `origin` (its node's world
-    /// translation, full `f64`), into ONE [`Terrain`] for rendering. Overlaps blend
+    /// Fold several terrain fields, each placed at a world `origin` (its node's world
+    /// translation, full `f64`), into one [`Terrain`] for rendering. Overlaps blend
     /// via [`smin`] (the same polynomial smooth-min the GPU uses), so terrains fuse
     /// seamlessly; painted color/slot blend toward the nearer surface.
     ///
@@ -743,8 +743,8 @@ mod tests {
     ///
     /// `grow` used to fill new cells with `box_distance(..) + edge_air`. Summing two
     /// distance-like terms sums their gradients — two aligned unit gradients give 2.0.
-    /// Measured on Ty's real 289×271×307 field: 14.4% of near-surface voxels violated
-    /// the bound, p95 |∇d| = 2.25. That ~2.0 IS the sum. `max` unions the same two
+    /// Measured on a real 289×271×307 field: 14.4% of near-surface voxels violated
+    /// the bound, p95 |∇d| = 2.25. That ~2.0 is the sum. `max` unions the same two
     /// bounds while staying 1-Lipschitz.
     #[test]
     fn a_hard_brush_has_no_gradient_and_a_soft_one_is_all_gradient() {

@@ -94,7 +94,7 @@ pub struct NodeDoc {
     /// a fixed-width 4-tuple that hundreds of scenes already spell exactly that
     /// way — widening it would rewrite every one of them, and a scene that only
     /// tints a colour still writes the byte-identical line it always did. Both
-    /// fields land on the ONE [`floptle_core::Tint`] component.
+    /// fields land on the one [`floptle_core::Tint`] component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tint_rim: Option<[f32; 4]>,
     /// The same Tint's ambient multiplier — see [`floptle_core::Tint::ambient`].
@@ -201,7 +201,7 @@ pub struct NodeDoc {
     /// its own serialized form — see [`floptle_audio::AudioSource`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<floptle_audio::AudioSource>,
-    /// The node's collision/query layer, BY NAME (`None` = "Default"). Stored
+    /// The node's collision/query layer, by name (`None` = "Default"). Stored
     /// by name so reordering the project's layer list never re-layers a scene;
     /// unknown names fall back to Default at Play (the editor warns).
     /// See [`floptle_core::Layer`].
@@ -211,7 +211,7 @@ pub struct NodeDoc {
     /// See [`floptle_core::Tags`]; only tagged nodes serialize this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// What draws in front of what: the sorting layer's NAME and the order
+    /// What draws in front of what: the sorting layer's name and the order
     /// within it. `None` = the Default layer at order 0, which is every node
     /// that has not opted in — so this writes nothing to a scene that does not
     /// use it. See [`floptle_core::Sorting`].
@@ -265,14 +265,14 @@ pub struct NodeDoc {
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
 /// The runtime `owner`/`NetId` are session state, not authored — they are
-/// deliberately NOT serialized.
+/// deliberately not serialized.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ReplicatedDoc {
     /// true = the owner-client predicts this node (its own avatar);
     /// false = plain server-authoritative replication (the default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub predicted: bool,
-    /// true = EVERY peer simulates this node every tick from the session input
+    /// true = every peer simulates this node every tick from the session input
     /// set, rolling back on a mispredict (`ReplicationMode::Rollback`).
     ///
     /// A separate flag rather than turning `predicted` into an enum, so every
@@ -722,7 +722,7 @@ pub struct ScriptDoc {
     pub enabled: bool,
     #[serde(default)]
     pub params: Vec<(String, f32)>,
-    /// Node-reference params: param name → target node NAME (Inspector-wired).
+    /// Node-reference params: param name → target node name (Inspector-wired).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<(String, String)>,
     /// String params: per-instance text tunables (`name = "value"` defaults).
@@ -898,7 +898,7 @@ pub enum MatterDoc {
         #[serde(default, skip_serializing_if = "is_point_shape")]
         shape: LightShapeDoc,
         /// Local shadows, off by default and skipped when off — so a lamp placed
-        /// before this existed round-trips byte-identically AND costs nothing.
+        /// before this existed round-trips byte-identically and costs nothing.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         shadows: bool,
         /// Aimed down the node's local −Z, or `None` for an ordinary
@@ -1044,7 +1044,7 @@ pub enum MatterDoc {
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         tonemap: u32,
         // ---- the look chain -------------------------------------------------
-        // Every one has a default AND a `skip_serializing_if` at that default,
+        // Every one has a default and a `skip_serializing_if` at that default,
         // so a scene that touches none of it writes not one extra line — and an
         // older scene, which has none of them, loads unchanged.
         #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
@@ -1099,7 +1099,7 @@ pub enum MatterDoc {
         motion_blur: f32,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         motion_samples: u32,
-        /// A tuning view, so it is deliberately NOT saved when off — and it is
+        /// A tuning view, so it is deliberately not saved when off — and it is
         /// saved when on, because leaving it on and closing the project is a
         /// thing that happens and finding it still on is better than a frame
         /// that mysteriously fixed itself.
@@ -1116,7 +1116,7 @@ pub enum MatterDoc {
     /// hand-written `LightProbes()` is a room-sized box at one probe per two
     /// metres — which is a sensible thing to type and then bake.
     ///
-    /// The bake itself is NOT here: it lives in a `.fgi` beside the scene. A
+    /// The bake itself is not here: it lives in a `.fgi` beside the scene. A
     /// scene file is a thing people read and merge, and a few hundred kilobytes
     /// of spherical harmonics is neither.
     LightProbes {
@@ -1143,7 +1143,7 @@ pub enum MatterDoc {
     /// `NavMesh()` bakes every layer, works its own bounds out, and describes a
     /// human-sized character — which is a sensible thing to type and then bake.
     ///
-    /// The bake itself is NOT here: it lives in a `.fnav` beside the scene, for
+    /// The bake itself is not here: it lives in a `.fnav` beside the scene, for
     /// the same reason the light bake is a `.fgi`.
     NavMesh {
         #[serde(default)]
@@ -1211,7 +1211,7 @@ pub enum MatterDoc {
     /// a hand-written `ReflectionProbe()` is a room-sized box that captures on
     /// load — which is a sensible thing to type and then stop thinking about.
     ///
-    /// The capture is NOT here and is not anywhere: it is taken at runtime, so
+    /// The capture is not here and is not anywhere: it is taken at runtime, so
     /// there is no artefact to go stale and nothing added to a file people read.
     ReflectionProbe {
         #[serde(default = "default_probe_half")]
@@ -1251,7 +1251,7 @@ pub enum VsyncDoc {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScreenShaderDoc {
     pub shader: String,
-    /// Defaults to ON: a pass that arrives without the field was written before
+    /// Defaults to on: a pass that arrives without the field was written before
     /// there was one, and it was running.
     #[serde(default = "on")]
     pub enabled: bool,
@@ -1361,7 +1361,7 @@ fn is_default_ortho_height(v: &f32) -> bool {
 
 /// A light's emitting shape, as it appears in a scene file.
 ///
-/// Sizes are clamped on the way IN rather than trusted: a hand-typed
+/// Sizes are clamped on the way in rather than trusted: a hand-typed
 /// `Rect(width: 0, height: 0)` is a degenerate emitter whose polygon integral is
 /// a divide by zero, and "the scene file said so" is not a reason to hand that
 /// to the shader.
@@ -1401,7 +1401,7 @@ fn is_point_shape(s: &LightShapeDoc) -> bool {
 /// A lamp's cone, when it has one.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SpotDoc {
-    /// The FULL cone angle in degrees, down the node's local −Z.
+    /// The full cone angle in degrees, down the node's local −Z.
     pub angle: f32,
     /// How much of the cone's edge is falloff, 0–1. Defaulted so a hand-written
     /// scene may say only the angle, which is the number somebody actually has
@@ -1494,7 +1494,7 @@ fn default_nav_cell() -> f32 {
     0.15
 }
 /// A drop a person takes without thinking about it, and a gap they step across.
-/// Both default ON: a scene that writes `NavMesh()` and bakes gets a level whose
+/// Both default on: a scene that writes `NavMesh()` and bakes gets a level whose
 /// ledges are joined up, which is what somebody typing that means.
 fn default_max_drop() -> f32 {
     1.5
@@ -1866,7 +1866,7 @@ impl MatterDoc {
                     target_h: h,
                     target_hz: target_hz.max(0.0),
                     ortho: *ortho,
-                    // Clamped on the way IN, so a hand-edited `.ron` with a zero
+                    // Clamped on the way in, so a hand-edited `.ron` with a zero
                     // height cannot hand a singular projection matrix to the
                     // renderer — every ray through its inverse would be NaN.
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
@@ -2177,7 +2177,7 @@ pub struct LightDoc {
     pub shadow_dither: bool,
     #[serde(default = "default_shadow_distance")]
     pub shadow_distance: f32,
-    /// Contact shadows default OFF: they cost a screen-space trace per lit
+    /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub contact_shadows: bool,
@@ -2187,7 +2187,7 @@ pub struct LightDoc {
     pub contact_steps: u32,
     #[serde(default = "default_contact_strength")]
     pub contact_strength: f32,
-    /// Screen-space reflections default OFF, on the same principle contact
+    /// Screen-space reflections default off, on the same principle contact
     /// shadows do: they cost a march per reflective pixel and a copy of the
     /// frame, so an existing scene must load doing exactly what it did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2496,7 +2496,7 @@ pub struct SteamProjectSettings {
 /// [`Exact`](Self::Exact) the first time it is loaded and the value is saved
 /// back, so the choice appears in `project.ron` as a fact instead of staying a
 /// default that a later release could change underneath a shipped game. Only a
-/// NEW project starts at [`Fast`](Self::Fast).
+/// new project starts at [`Fast`](Self::Fast).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ScriptVec3Doc {
     /// Today's vector: 64-bit components in a userdata, and mutable.
@@ -2535,7 +2535,7 @@ pub struct ProjectConfigDoc {
     /// rather than extra world.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub retro_width: u32,
-    /// Upscale the retro composite by a WHOLE number and centre it, letterboxing
+    /// Upscale the retro composite by a whole number and centre it, letterboxing
     /// the remainder, instead of stretching it to fill.
     ///
     /// A fractional upscale puts some source rows on two screen pixels and some
@@ -2583,7 +2583,7 @@ pub struct ProjectConfigDoc {
 
     /// How much detail a reflection probe's capture keeps.
     ///
-    /// A probe's picture spans a full turn across its width, so its width IS the
+    /// A probe's picture spans a full turn across its width, so its width is the
     /// finest thing a mirror in that room can show. Too little and no roughness
     /// setting recovers it — the surface reads as frosted however it is
     /// authored. The cost is paid at capture, not per frame.
@@ -2596,7 +2596,7 @@ pub struct ProjectConfigDoc {
     /// `None` = untitled (exports fall back to the project folder's name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The scene a BUILD boots into, as a project-root-relative path
+    /// The scene a build boots into, as a project-root-relative path
     /// (e.g. `scenes/first.ron`). The editor opens it on project load too, so
     /// what you see is what ships. `None` = the `scenes/first.ron` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2743,7 +2743,7 @@ impl ProjectConfigDoc {
         Self { retro_height: 480, ..Self::ps1() }
     }
 
-    /// The config a project being CREATED starts from.
+    /// The config a project being created starts from.
     ///
     /// The one difference from [`ps1`](Self::ps1) is that the `vec3` choice is
     /// already made — `Fast`, the one that costs nothing to allocate and
@@ -2775,7 +2775,7 @@ impl ProjectConfigDoc {
     /// default, and a default is something a later release is entitled to
     /// change under a game that has already shipped.
     ///
-    /// Deliberately NOT called when the file is missing: no file means no
+    /// Deliberately not called when the file is missing: no file means no
     /// project yet, and a new one starts at [`ScriptVec3Doc::Fast`].
     ///
     /// Returns whether it changed anything, so a caller that wants to persist
@@ -2794,7 +2794,7 @@ impl ProjectConfigDoc {
     ///
     /// Derived rather than a fixed number, because the right value is not a
     /// matter of taste: hardware with no fractional vertex coordinates snapped
-    /// to ITS pixels, so the grid that reads as authentic depends entirely on
+    /// to its pixels, so the grid that reads as authentic depends entirely on
     /// how many pixels this project renders. A 240-row game and a 480-row game
     /// want different numbers for the same look, and asking somebody to work
     /// that out from a slider labelled 0–512 is asking them to guess.
@@ -2861,7 +2861,7 @@ impl ProjectConfigDoc {
         (w, h)
     }
 
-    /// The aspect the CAMERA must project at, given the aspect of the panel or
+    /// The aspect the camera must project at, given the aspect of the panel or
     /// window the frame ends up on.
     ///
     /// **The projection follows the target the scene composites into, not the
@@ -2873,7 +2873,7 @@ impl ProjectConfigDoc {
     /// reason for pinning a width, which is that the framing stops depending on
     /// the window.
     ///
-    /// Unpinned, the target is derived FROM the panel aspect, so this is the
+    /// Unpinned, the target is derived from the panel aspect, so this is the
     /// panel aspect and deliberately not a re-derivation of it: rounding the
     /// width to whole pixels and dividing back would move the projection by a
     /// fraction of a percent for no reason.
@@ -2904,11 +2904,11 @@ impl ProjectConfigDoc {
         names
     }
 
-    /// Where a sorting layer NAME sits, back to front.
+    /// Where a sorting layer name sits, back to front.
     ///
     /// An unknown name ranks last rather than at 0. A layer deleted from the
     /// project while scenes still name it should leave those nodes drawing in
-    /// FRONT, where they are visible and obviously wrong, rather than silently
+    /// front, where they are visible and obviously wrong, rather than silently
     /// sinking them behind the background where the bug is a mystery.
     pub fn sorting_rank(&self, layer: &str) -> u32 {
         let order = self.sorting_order();
@@ -3139,7 +3139,7 @@ pub struct MaterialDoc {
     /// reflections existed loads as a surface that reflects its sky properly.
     #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
     pub reflectivity: f32,
-    /// Glass: how much light passes THROUGH. `0` is a solid surface, and a file
+    /// Glass: how much light passes through. `0` is a solid surface, and a file
     /// written before glass existed says nothing and loads as one.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub transmission: f32,
@@ -3296,7 +3296,7 @@ fn is_white3(c: &[f32; 3]) -> bool {
 // A scene file is authored data that outlives the code reading it: hand-edited,
 // generated by a script, written by an older engine, merged by git. Every one of
 // those produces a file with a field missing, and until now a handful of fields
-// answered that by refusing to parse the WHOLE scene — `Unexpected missing field
+// answered that by refusing to parse the whole scene — `Unexpected missing field
 // 'direction' in 'LightDoc'` for a `lighting: ()` line, and the double-click that
 // should have opened the level did nothing at all, because the only report was an
 // `eprintln!` to a terminal nobody has.
@@ -3518,7 +3518,7 @@ pub fn node_id_positions(nodes: &[NodeDoc]) -> std::collections::HashMap<u32, us
 
 /// This node's parent as a position in `nodes`.
 ///
-/// `parent_id` wins whenever it is present: it names a NODE. The positional
+/// `parent_id` wins whenever it is present: it names a node. The positional
 /// `parent` names a *position*, which any insertion or removal ahead of it
 /// silently re-points at something else — see [`NodeDoc::parent_id`]. A
 /// `parent_id` that resolves to nothing falls through to the index rather than
@@ -3590,7 +3590,7 @@ pub fn subtree_from(nodes: &[NodeDoc], root: usize) -> Vec<NodeDoc> {
 /// A dangling index would at least be *caught*; the fault this exists for never
 /// was, because a stale positional link is always **valid** — node 156 exists,
 /// it is simply not the node the author meant, and nothing in the file records
-/// which one that was. So this reports the cases that ARE decidable, and the
+/// which one that was. So this reports the cases that are decidable, and the
 /// stable ids ([`NodeDoc::parent_id`]) prevent the case that is not.
 /// floptle/0046.
 pub fn validate_parents(nodes: &[NodeDoc]) -> Vec<String> {
@@ -3688,7 +3688,7 @@ pub fn validate_ui_visibility(nodes: &[NodeDoc]) -> Vec<String> {
     out
 }
 
-/// Spawn ONE node's components into the world (no parent/attachment linking —
+/// Spawn one node's components into the world (no parent/attachment linking —
 /// those need the whole doc's index space; the caller links if it wants to).
 /// Used by the editor's node clipboard/spawners and by `floptle-net` to
 /// materialize a replicated runtime spawn.
@@ -3714,7 +3714,7 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
             ),
         );
     }
-    // The three fields are three lines in the file and ONE component in the
+    // The three fields are three lines in the file and one component in the
     // world, so a node carrying only a rim (or only an ambient lift, which is
     // what a character wants) still gets a Tint.
     if node.tint.is_some() || node.tint_rim.is_some() || node.tint_ambient.is_some() {
@@ -3842,7 +3842,7 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
 /// whether a scene is being opened or layered on top of another one. Returns
 /// the entities in `doc.nodes` order.
 ///
-/// Deliberately does NOT create the per-scene singletons (lighting, skybox,
+/// Deliberately does not create the per-scene singletons (lighting, skybox,
 /// post-processing): those belong to whichever scene is the base.
 pub fn spawn_nodes(nodes: &[NodeDoc], world: &mut World) -> Vec<floptle_core::Entity> {
     // First pass: spawn each node (keeping the index→entity map for parent links).
@@ -3904,7 +3904,7 @@ pub fn spawn_additive(
 /// Remove every node an additive load tagged with `tag`. Returns how many went.
 ///
 /// Children first is not required — the ECS has no ordering constraint — but a
-/// node whose PARENT is being removed goes too even if it was spawned later by
+/// node whose parent is being removed goes too even if it was spawned later by
 /// something else (a projectile parented to an additive room leaves with the
 /// room, rather than becoming a child of nothing).
 pub fn despawn_tagged(world: &mut World, tag: &str) -> usize {
@@ -4051,13 +4051,13 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         // reorder or insertion that would move an index. floptle/0046.
         let id = index.get(&e).map(|i| *i as u32 + 1);
         let parent_id = parent.map(|p| p as u32 + 1);
-        // "Default" never serializes — a node's absence of a layer IS Default.
+        // "Default" never serializes — a node's absence of a layer is Default.
         let layer = world
             .get::<floptle_core::Layer>(e)
             .map(|l| l.0.clone())
             .filter(|l| l != floptle_core::layers::DEFAULT_LAYER);
         let tags = world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
-        // Default-at-0 never serializes: a node's absence of sorting IS the
+        // Default-at-0 never serializes: a node's absence of sorting is the
         // default, exactly as with `layer` above, so a scene that does not use
         // sorting layers is written byte for byte as it always was.
         let sorting = world.get::<floptle_core::Sorting>(e).and_then(|s| {
@@ -4069,17 +4069,17 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             (name != floptle_core::DEFAULT_SORTING_LAYER || s.order != 0)
                 .then(|| (name.to_string(), s.order))
         });
-        // Same rule again: identity IS the default, so it writes nothing.
+        // Same rule again: identity is the default, so it writes nothing.
         let parallax = world
             .get::<floptle_core::Parallax>(e)
             .filter(|p| !p.is_identity())
             .map(|p| (p.factor[0], p.factor[1]));
-        // Same rule again: `Order` IS the default, so it writes nothing.
+        // Same rule again: `Order` is the default, so it writes nothing.
         let sort_mode = world
             .get::<floptle_core::Sorting>(e)
             .and_then(|s| s.mode.as_str())
             .map(str::to_string);
-        // Same rule as `sorting` above: `Auto` with no layer list IS the
+        // Same rule as `sorting` above: `Auto` with no layer list is the
         // default, so a scene that has never touched 2D lighting is written
         // byte for byte as it always was.
         let lit = world.get::<floptle_core::Lighting2D>(e);
@@ -4196,7 +4196,7 @@ mod tests {
     }
 
     /// **A project that predates the setting keeps today's vector, and the
-    /// answer gets WRITTEN DOWN.**
+    /// answer gets written down.**
     ///
     /// The compatibility contract in ADR-0028 is that nothing changes silently.
     /// Leaving the field absent would satisfy the first half — such a project
@@ -4314,7 +4314,7 @@ mod tests {
                 "at a {panel} panel the camera projected at {a}, not the target's aspect"
             );
         }
-        // Unpinned, the target is derived FROM the panel, so the panel's own
+        // Unpinned, the target is derived from the panel, so the panel's own
         // number is the answer — not a re-derivation of it through a rounded
         // pixel width.
         let derived = ProjectConfigDoc { retro: true, retro_height: 180, ..Default::default() };
@@ -4419,7 +4419,7 @@ mod tests {
             pixel_snap: 32.0,
             ..Default::default()
         };
-        // Live state that must NOT be written.
+        // Live state that must not be written.
         c.pos = floptle_core::math::DVec2::new(123.0, 456.0);
         c.started = true;
         c.shake(9.0, 9.0);
@@ -4527,7 +4527,7 @@ mod tests {
         assert!(!r.exempt, "the project itself has nothing to be exempt from");
     }
 
-    /// The named jitter strengths are measured against the project's OWN pixel
+    /// The named jitter strengths are measured against the project's own pixel
     /// resolution, so the same preset means the same look at any resolution —
     /// which is the whole reason they are derived rather than fixed numbers.
     /// They must also be ordered coarsest-last, because that is the order they
@@ -5016,7 +5016,7 @@ mod tests {
         let mut world = World::new();
         spawn_into(&doc, &mut world);
         // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + an
-        // auto-spawned PostProcess node + the mandatory Lighting node. NO
+        // auto-spawned PostProcess node + the mandatory Lighting node. no
         // auto gravity: gravity volumes are optional (deleting one sticks).
         assert_eq!(world.len(), 7);
         let snap = to_doc("demo", &world);
@@ -5115,13 +5115,13 @@ mod tests {
             panic!("the node is a PostProcess");
         };
         assert_eq!(screen_shaders.len(), 2, "both passes survive: {screen_shaders:?}");
-        // Omitted `enabled` means ON — a pass written before the field existed
+        // Omitted `enabled` means on — a pass written before the field existed
         // was running, and so is one somebody typed without it.
         assert!(screen_shaders[0].enabled, "an omitted `enabled` is on");
         assert_eq!(screen_shaders[0].params["thickness"], [2.0, 0.0, 0.0, 0.0]);
         assert!(!screen_shaders[1].enabled);
         assert!(screen_shaders[1].params.is_empty());
-        // …and the ORDER is the list's meaning, so it must not be a set.
+        // …and the order is the list's meaning, so it must not be a set.
         assert!(screen_shaders[0].shader.ends_with("inkOutline.flsl"));
     }
 
@@ -5130,7 +5130,7 @@ mod tests {
     ///
     /// The compat half is the point: `tint` is a fixed-width 4-tuple that
     /// hundreds of authored scenes already spell, so the rim and the ambient
-    /// arrived as their OWN fields. If they had widened `tint` instead, every
+    /// arrived as their own fields. If they had widened `tint` instead, every
     /// one of those scenes would fail to parse — and this test is what says so.
     #[test]
     fn a_tints_additive_lanes_round_trip_and_old_scenes_still_load() {
@@ -5139,7 +5139,7 @@ mod tests {
         world.insert(e, Name("Fighter".into()));
         world.insert(e, Transform::IDENTITY);
         world.insert(e, Matter::Empty);
-        // Every lane set to something that differs from BOTH the default and
+        // Every lane set to something that differs from both the default and
         // the other lanes, so a mix-up cannot pass.
         let authored = floptle_core::Tint {
             color: [0.92, 0.13, 0.15],
@@ -5180,7 +5180,7 @@ mod tests {
         assert_eq!(got.ambient, 1.0, "and the room's own ambient");
     }
 
-    /// A node that lifts ONLY its ambient — the character case — still gets a
+    /// A node that lifts only its ambient — the character case — still gets a
     /// Tint, and does not gain a `tint: Some((1, 1, 1, 1))` line saying nothing.
     #[test]
     fn an_ambient_only_tint_needs_no_colour_line() {
@@ -5305,7 +5305,7 @@ mod tests {
         }
         assert_eq!(seen, 6, "every light survived");
 
-        // A bare point writes NOTHING extra. Every light in every scene that
+        // A bare point writes nothing extra. Every light in every scene that
         // exists is one, and a release that rewrites all of them on first save
         // is a release that shows up as a diff nobody asked for.
         let just_a_point = to_ron(&{
@@ -5370,7 +5370,7 @@ mod tests {
         assert_eq!(back.to_light(), authored, "every contact knob round trips");
 
         // A scene written before this existed must arrive with contact shadows
-        // OFF. They cost a trace per lit fragment, and a release that silently
+        // off. They cost a trace per lit fragment, and a release that silently
         // switches on a per-fragment cost in every existing project is a release
         // that reads as "the update made my game slower".
         let old: LightDoc = ron::from_str(
@@ -5452,7 +5452,7 @@ mod tests {
         assert!(l.fog_anisotropy > 0.0, "scattering forward, which is what makes them read");
         assert_eq!(l.fog_density, 0.03, "without disturbing what the scene did say");
 
-        // The march is bounded on BOTH ends: 0 steps is a divide, and an
+        // The march is bounded on both ends: 0 steps is a divide, and an
         // unbounded one is a hang no scene should be able to author.
         let wild: LightDoc =
             ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), \
@@ -5464,7 +5464,7 @@ mod tests {
     #[test]
     fn post_process_settings_round_trip() {
         // An authored PostProcess node survives World → RON → World unchanged,
-        // and the self-heal does NOT add a second one.
+        // and the self-heal does not add a second one.
         let mut world = World::new();
         let e = world.spawn();
         world.insert(e, Name("Post Processing".into()));
@@ -5485,7 +5485,7 @@ mod tests {
             posterize_chroma: true,
             tonemap: 2,
             // The look chain, all non-default, so the round trip is proving the
-            // NEW knobs survive it and not just that the old ones still do.
+            // new knobs survive it and not just that the old ones still do.
             exposure: -0.75,
             contrast: 1.4,
             saturation: 0.6,
@@ -5513,7 +5513,7 @@ mod tests {
             dof_show_focus: true,
             dof_focus_node: "Hero".into(),
             // Two passes, one of them switched off and one with a knob override:
-            // the ORDER, the switch and the params all have to survive, and a
+            // the order, the switch and the params all have to survive, and a
             // Vec of structs is exactly where a round trip quietly loses one.
             screen_shaders: vec![
                 floptle_core::ScreenShader {
@@ -5637,7 +5637,7 @@ mod tests {
         assert_eq!(world.len(), base, "back to the base scene exactly");
     }
 
-    /// A node parented under an additive layer leaves WITH the layer, even
+    /// A node parented under an additive layer leaves with the layer, even
     /// though nothing tagged it — otherwise unloading a room leaves the
     /// projectile fired inside it orphaned, drawing at a pose derived from a
     /// parent that no longer exists.
@@ -5648,7 +5648,7 @@ mod tests {
         let base = world.len();
         let ents = spawn_additive(&layer_doc("room"), &mut world, "room");
 
-        // Something the GAME spawned later, parented into the room.
+        // Something the game spawned later, parented into the room.
         let bullet = world.spawn();
         world.insert(bullet, Transform::IDENTITY);
         world.insert(bullet, Matter::Empty);
@@ -5678,7 +5678,7 @@ mod tests {
     }
 
     /// Spot lights: the cone round-trips, a lamp nobody aimed writes nothing at
-    /// all, and a spot with a deliberately HARD edge keeps its zero.
+    /// all, and a spot with a deliberately hard edge keeps its zero.
     ///
     /// That last one is why the two numbers live in one optional field rather
     /// than as two defaulted ones. `skip_serializing_if` cannot see a sibling,

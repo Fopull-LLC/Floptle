@@ -45,7 +45,7 @@ fn main() {
 // 1. A volume lights a surface that had no light.
 //
 // One white cube, no sun, no point lights, no ambient: without GI it is black,
-// and that black IS the control. Switch a red volume on and it must go red —
+// and that black is the control. Switch a red volume on and it must go red —
 // which proves the uniforms, the texture, the sampling and the ambient
 // replacement all connect, and separates "GI works" from "the scene was
 // already lit".
@@ -79,7 +79,7 @@ fn a_volume_lights_a_surface_that_had_no_light(gpu: &Gpu, dir: &str) {
     );
 
     // Intensity is applied on upload, so it is the cheap knob — and it has to
-    // actually be cheap AND actually work, which is one assertion.
+    // actually be cheap and actually work, which is one assertion.
     let dim = render(gpu, Some(&red), 0.25, "gi-dim");
     let c_dim = centre(&dim);
     println!("intensity: 1.0 → {:.3}   0.25 → {:.3}", c_on[0], c_dim[0]);
@@ -95,7 +95,7 @@ fn a_volume_lights_a_surface_that_had_no_light(gpu: &Gpu, dir: &str) {
 // 2. The bounce carries a direction.
 //
 // The whole reason to keep band 1 of the spherical harmonic. Probes holding
-// light that arrives from ABOVE must light the cube's top face and leave its
+// light that arrives from above must light the cube's top face and leave its
 // bottom face dark; a constant-only fit would light both identically, and would
 // look completely fine in a screenshot.
 // ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ fn a_buried_probe_lights_nothing(gpu: &Gpu, dir: &str) {
 // twice. The Rust one has the unit tests; this is the only thing that says the
 // GPU is running the same thing. The cube's front face is at a known point with
 // a known normal, its albedo is white and every other light is off, so the
-// centre pixel IS the sampler's output and nothing else.
+// centre pixel is the sampler's output and nothing else.
 // ---------------------------------------------------------------------------
 fn the_shader_agrees_with_the_rust(gpu: &Gpu) {
     // Deliberately not uniform and not centred: a lopsided volume with a lobe
@@ -285,7 +285,7 @@ fn draw(
 ) -> Vec<[u8; 4]> {
     let mut raster = Raster::new(gpu);
     // A whole Raymarch, because the GI probe texture and the `G` uniform the
-    // shader reads both live in the SHARED field bind group. A probe that
+    // shader reads both live in the shared field bind group. A probe that
     // passed `field: None` would bind the zeroed fallback and measure nothing —
     // which is exactly the shape of bug this file exists to catch.
     let mut raymarch = floptle_render::Raymarch::new(gpu);
@@ -350,7 +350,7 @@ fn target(gpu: &Gpu, label: &str) -> (wgpu::Texture, wgpu::TextureView) {
     (tex, view)
 }
 
-/// The pixel at fractional position `(fx, fy)`, in LINEAR light.
+/// The pixel at fractional position `(fx, fy)`, in linear light.
 ///
 /// The target is 8-bit sRGB, so the hardware encoded on write; comparing the
 /// bytes to a linear number without undoing that is a 2.2-power error that looks

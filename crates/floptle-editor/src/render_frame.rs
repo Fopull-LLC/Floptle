@@ -56,7 +56,7 @@ use crate::anim_ui;
 /// game, treat it like one" — and because the call already takes nine.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct OffscreenOpts<'a> {
-    /// The TEXTURE behind the depth view, which is what lets this render run the
+    /// The texture behind the depth view, which is what lets this render run the
     /// opaque depth prepass. It cannot be derived from the view: a view cannot
     /// be asked its size and cannot be copied out of.
     ///
@@ -65,7 +65,7 @@ pub(crate) struct OffscreenOpts<'a> {
     /// and wrong for anything a player looks at.
     pub depth_tex: Option<&'a wgpu::Texture>,
     /// Which stored picture screen-space reflections read from and write to.
-    /// Each view needs its OWN: the history carries the camera it was taken
+    /// Each view needs its own: the history carries the camera it was taken
     /// from, and two views sharing one would reproject each other's frames.
     pub history: HistorySlot,
 }
@@ -83,7 +83,7 @@ pub(crate) enum HistorySlot {
     /// otherwise want a full-frame mip chain of its own.
     #[default]
     None,
-    /// The docked Game panel — the one offscreen view that IS the game.
+    /// The docked Game panel — the one offscreen view that is the game.
     GamePanel,
 }
 
@@ -154,7 +154,7 @@ fn read_back_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture) -> Option<Vec
 ///
 /// A free function over the two fields it needs, not an `&self` method: the
 /// render fns hold `self.gpu` mutably for their whole body, so nothing inside
-/// them can borrow all of `self`. Asked by BOTH gathers, so the Scene view and
+/// them can borrow all of `self`. Asked by both gathers, so the Scene view and
 /// the Game view cannot disagree about which surfaces are lit — the failure this
 /// renderer has already paid for three times.
 /// `reach` is [`floptle_render::Light2dUniform::reach`] — the ranks anything in
@@ -194,11 +194,11 @@ fn lit_2d_rank(
 /// A function for the same reason [`lit_2d_rank`] is one: both gathers ask it,
 /// so a cube cannot look one way in the Scene view and another in the Game
 /// view. It used to be written out twice, and the two copies had already drifted
-/// — the offscreen one never applied VERTEX PAINT, so a painted primitive was
+/// — the offscreen one never applied vertex PAINT, so a painted primitive was
 /// painted on screen and plain in every other view.
 ///
 /// `node_paint` is this node's own paint block (`paint_bases`). Every primitive
-/// of a shape shares ONE MeshId, so the node's block is the only way two cubes
+/// of a shape shares one MeshId, so the node's block is the only way two cubes
 /// can be painted differently; falling back to the mesh's block (0 for
 /// built-ins) is what an unpainted one gets. Brush paint modulates 2× (paint
 /// light); a glTF import stays ×1.
@@ -229,7 +229,7 @@ fn primitive_draw(
 /// A frozen sea drops the translucency and the shine: ice is a surface you stand
 /// on, and it should not look like something you could swim through.
 ///
-/// Asked by BOTH gathers. It was inline in the Scene view's gather only, so an
+/// Asked by both gathers. It was inline in the Scene view's gather only, so an
 /// ocean was there while you edited and gone the moment you looked through the
 /// game's camera — the fourth time this file's two gathers have disagreed about
 /// whether something exists, and the reason this is a function.
@@ -241,7 +241,7 @@ fn primitive_draw(
 /// below, untouched. Present → those defaults are the FALLBACK and the
 /// material's own `specular`/`specular_strength`/`shininess` win outright, the
 /// same "the node's Material wins whole" rule the rest of this file uses
-/// (`part_look_rule`). `alpha` is the one field that does NOT follow that rule:
+/// (`part_look_rule`). `alpha` is the one field that does not follow that rule:
 /// every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
 /// that carries one for some other reason (today, that is almost always
 /// `retro: (exempt: true)` and nothing else) must not go opaque just because
@@ -320,7 +320,7 @@ fn water_draw(
 /// black there would read as the feature having broken the game.
 /// Every flat node on the 2D lighting path this frame, and its sorting rank.
 ///
-/// One function, called by BOTH gathers, because 0122 asks for exactly that:
+/// One function, called by both gathers, because 0122 asks for exactly that:
 /// *the Scene-view and the Game-view gathers make the same decision, by
 /// construction.* It used to be the same nine lines written out twice, which is
 /// the shape this file has already paid for four times — see
@@ -342,7 +342,7 @@ fn lit_2d_ranks(
     world
         .query::<Matter>()
         // A Sprite joins the flat set for the same reason the other two are in
-        // it: it IS flat, so a 2D light should reach it. Leaving it out would
+        // it: it is flat, so a 2D light should reach it. Leaving it out would
         // make the one node type actually called "Sprite" the one a torch does
         // not touch.
         .filter(|(_, m)| {
@@ -372,7 +372,7 @@ fn casts_2d(world: &floptle_core::World, e: Entity) -> bool {
     floptle_core::resolve_shadow_2d(cast, flat_matter, collidable).0
 }
 
-/// Takes the 2D half of a split that has ALREADY happened rather than asking for
+/// Takes the 2D half of a split that has already happened rather than asking for
 /// one: both gathers need this before the draw loop (to know what a light can
 /// reach — `floptle/0122`) and again at the pass, and each was walking the
 /// scene's lights a second time to build the same value twice.
@@ -415,7 +415,7 @@ fn light2d_uniform(
 }
 
 /// The decision behind the 16-light-cap warning (`floptle/0116`, `floptle/0168`):
-/// given how many lights just got cut and what the LAST warning was about,
+/// given how many lights just got cut and what the last warning was about,
 /// what should the latch become and what (if anything) should the Console say.
 ///
 /// A plain function with no `self` on purpose — both gathers need this, one of
@@ -529,7 +529,7 @@ impl Editor {
         // The project's packages get their frame here — before the GPU state is
         // borrowed for the rest of `render`, because an extension's hooks need
         // the whole editor and the draw path holds pieces of it. What they
-        // DRAW is projected further down, where `view_proj` exists.
+        // draw is projected further down, where `view_proj` exists.
         self.ext_clock += self.ui_frame_dt as f64;
         self.ext_tick();
         // Built here rather than inside the UI pass, where only disjoint field
@@ -554,11 +554,11 @@ impl Editor {
         self.autosave_tick();
         // Reap a finished cross-target export build (Windows-from-Linux etc.).
         self.poll_export_build();
-        // Terrain volumes render PER-VOLUME, each at native resolution: moving a
-        // terrain needs NO GPU work — only structural changes re-upload into the
+        // Terrain volumes render per-volume, each at native resolution: moving a
+        // terrain needs no GPU work — only structural changes re-upload into the
         // shared 3D atlas (where shadow-only mesh occluders also live).
         //
-        // Capture the terrain dirty state BEFORE `sync_terrain_gpu` consumes it: the atlas
+        // Capture the terrain dirty state before `sync_terrain_gpu` consumes it: the atlas
         // upload feeds shadows/AO from each terrain's shadow proxy, then
         // `sync_terrain_meshes` re-extracts the PRIMARY-ray chunk meshes straight from the
         // authority field (Terrain 2.0 / P3). Structural change = full re-mesh; a sculpt
@@ -575,14 +575,14 @@ impl Editor {
             self.camera.position
         };
         // G1 residency: stream celestial terrain fields in/out by camera distance
-        // (BEFORE the mesh sync so a landed field streams meshes this same frame;
+        // (before the mesh sync so a landed field streams meshes this same frame;
         // outside the render borrows because a mid-Play arrival rebuilds the sim).
-        // Hand queued `terrain.generatePlanet` fills to the generator BEFORE
+        // Hand queued `terrain.generatePlanet` fills to the generator before
         // residency runs: the fill marks its body generation-owned
         // (`planet_gen_pending`), and residency must see that mark the same
         // frame — or it adopts the freshly created body as cold and streams a
         // STALE same-id file into it (the authored scene's old planet loaded
-        // under a rolled galaxy's spawn world — Ty fell straight through it).
+        // under a rolled galaxy's spawn world — the player fell straight through it).
         self.drain_terrain_generates();
         self.update_terrain_residency(lod_cam);
         self.publish_terrain_busy();
@@ -600,7 +600,7 @@ impl Editor {
         self.sync_sky_texture();
         self.sync_sky_shader();
         // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;
-        // rebuild them when vertex paint changed this frame (no-op otherwise). AFTER
+        // rebuild them when vertex paint changed this frame (no-op otherwise). after
         // `vertex_paint_frame_update` above, so a dab shows the same frame it lands.
         self.sync_tex_paint_mirrors();
         // Keep the Inspector's script param list in sync with each script's `defaults`
@@ -671,7 +671,7 @@ impl Editor {
         self.play_step(dt, game_focused);
         self.finish_input_frame();
         // Register every texture + import every mesh the particle system needs
-        // BEFORE the gather that resolves them (full &mut self here — no borrow
+        // before the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
         self.frame_no = self.frame_no.wrapping_add(1);
         self.ensure_vfx_assets();
@@ -694,7 +694,7 @@ impl Editor {
             self.console.push(floptle_script::LogLevel::Error, format!("GPU: {e}"), None);
         }
         // Baked GI: push any pending probe upload, then advance a bake by one
-        // frame's slice. Both run BEFORE the gathers below, so this frame's
+        // frame's slice. Both run before the gathers below, so this frame's
         // draws see this frame's light — and a bake, which renders the scene
         // itself, cannot be re-entered from inside one of them.
         self.refresh_gi();
@@ -729,7 +729,7 @@ impl Editor {
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
-        // playhead. This must run BEFORE anything gathers draw data — the UI
+        // playhead. This must run before anything gathers draw data — the UI
         // overlay/hologram gathers and the docked Game viewport below all read the
         // ECS, so applying the preview after them meant scrubbing a property track
         // (e.g. a spritesheet `cell`) showed nothing in the editor. Scene-node
@@ -744,14 +744,14 @@ impl Editor {
                     if self.anim_ui.preview_playing {
                         self.anim_ui.playhead += dt;
                     }
-                    // Record first: capture the user's pose edits as keys BEFORE
+                    // Record first: capture the user's pose edits as keys before
                     // the preview re-applies the clip (which then includes them).
                     if self.anim_ui.record
                         && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
                             self.anim_ui.clip_dirty = true;
                         }
                     // A held edit (bone gizmo/inspector DRAG) defers its disk save to
-                    // pointer-up, so without this the preview keeps re-sampling the OLD
+                    // pointer-up, so without this the preview keeps re-sampling the old
                     // clip and the bone looks frozen mid-drag. Refresh the in-memory clip
                     // + bump the revision so preview_pose rebinds to the live edit — the
                     // bone tracks the gizmo in real time. Disk save stays coalesced.
@@ -769,7 +769,7 @@ impl Editor {
                     );
                     if self.anim_ui.record {
                         // Re-baseline against what the preview applied, so next
-                        // frame's diff sees only NEW user edits.
+                        // frame's diff sees only new user edits.
                         anim_ui::refresh_record_baseline(&self.world, &mut self.anim_ui, target);
                     }
                 }
@@ -791,7 +791,7 @@ impl Editor {
 
         // Game-UI layers: gather + solve on the CPU while `self` is free (the
         // draw core borrows the GPU stack); drawn over the finished frame below.
-        // AFTER the animation preview, so scrubbing shows live in every view.
+        // after the animation preview, so scrubbing shows live in every view.
         // Is the game drawn over the whole WINDOW this frame? Not "does the Game
         // tab have focus" — a docked tab has focus and draws into its own rect,
         // and asking the focus question here meant the overlay was also packed
@@ -812,7 +812,7 @@ impl Editor {
         } else {
             Vec::new()
         };
-        // World canvases: in the Scene (authoring) view, EVERY layer renders as
+        // World canvases: in the Scene (authoring) view, every layer renders as
         // a movable hologram at its node's transform; in game/player view, only
         // the layers whose `space` is World (screen-space ones are the overlay
         // above). Either way outlines project onto the canvas and drags come
@@ -831,14 +831,14 @@ impl Editor {
             Vec::new()
         };
 
-        // Offscreen previews render LAST (after play_step advanced this frame's poses
+        // Offscreen previews render last (after play_step advanced this frame's poses
         // and particles, and after ensure_vfx_assets registered their textures/meshes):
         // otherwise a docked/split Game view or the Inspector camera POV showed frozen
         // animation and missing effects — it was drawing a frame before the sim, with
         // VFX assets not yet resolved. Reuses `elapsed` so it costs no extra clock read.
         // Both take &mut self and must live outside the main GPU destructure below, so
         // this is the last safe point before it.
-        // A1 target cameras render FIRST, so every later pass (previews, game
+        // A1 target cameras render first, so every later pass (previews, game
         // viewport, the surface itself) samples this frame's feed.
         self.update_render_targets(elapsed);
         self.update_camera_preview(elapsed);
@@ -855,7 +855,7 @@ impl Editor {
             uir.set_time(elapsed);
         }
 
-        // Terrain surface material, resolved BEFORE the GPU destructure borrows `self.raster`
+        // Terrain surface material, resolved before the GPU destructure borrows `self.raster`
         // out (`terrain_material` is `&self`): the meshed terrain draws with it in the raster
         // pass (Terrain 2.0 / P2). Cheap; only read when terrains exist.
         let terrain_base_mat = self.terrain_material();
@@ -923,7 +923,7 @@ impl Editor {
             return;
         };
         let window = window.clone();
-        // One pose table per FRAME, not per pass (`floptle/0080`). A frame gathers
+        // One pose table per frame, not per pass (`floptle/0080`). A frame gathers
         // the scene several times over — the Scene view, a docked Game view, every
         // render target, the selection mask — and each of those passes reads pose
         // indices handed out by an earlier gather. Resetting between them would
@@ -967,7 +967,7 @@ impl Editor {
         // (Inlined — self methods can't be called while gpu/egui are borrowed.) A
         // fullscreened tab overrides which view is front. A DOCKED (non-fullscreen)
         // Game tab renders through its own offscreen target sized to the tab rect
-        // (update_game_viewport + the tab's Image blit), so the SURFACE renders the
+        // (update_game_viewport + the tab's Image blit), so the surface renders the
         // editor view underneath — this keeps the game framed to its panel instead of
         // spilling the full-window render behind the other tabs. (Cost: a docked Game
         // tab draws the scene once for the offscreen game view and once for the hidden
@@ -1029,7 +1029,7 @@ impl Editor {
         self.body_gizmos.clear();
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
-        // Emptied HERE, outside the `show_gizmos` guard, and not where they are
+        // Emptied here, outside the `show_gizmos` guard, and not where they are
         // filled. Inside it, turning gizmos off left the last frame's navmesh
         // on screen — projected, so frozen in place while the camera moved
         // around it — until something else happened to make the block run
@@ -1039,8 +1039,8 @@ impl Editor {
         self.nav_surface.clear();
         self.mesh_wire_gizmo.clear();
         self.particle_gizmo.clear();
-        // Script debug gizmos (`gizmo.*` from Lua), projected for the SURFACE camera and
-        // painted in the Scene view. The GAME view gets its own set (`game_gizmo_lines`)
+        // Script debug gizmos (`gizmo.*` from Lua), projected for the surface camera and
+        // painted in the Scene view. The game view gets its own set (`game_gizmo_lines`)
         // off its own camera, behind the "Also in Game view" toggle — it's off by
         // default so the game view still shows what the player sees.
         self.script_gizmo_lines.clear();
@@ -1055,7 +1055,7 @@ impl Editor {
                 &mut self.script_gizmo_lines,
             );
         }
-        // Fullscreen Game tab: `cam` above already IS the active gameplay camera and the
+        // Fullscreen Game tab: `cam` above already is the active gameplay camera and the
         // viewport is the whole surface, so the same projection serves. The DOCKED game
         // tab fills this from `update_game_viewport`, which has its own camera + rect.
         if game_view {
@@ -1213,7 +1213,7 @@ impl Editor {
                         }
                     }
                     Giz::Volume(half, fade) => {
-                        // The node's transform positions AND scales the box, so
+                        // The node's transform positions and scales the box, so
                         // the drawn outline has to be scaled the same way or it
                         // would describe a volume nothing uses.
                         let half = floptle_core::math::Vec3::from(half) * wt.scale;
@@ -1242,7 +1242,7 @@ impl Editor {
                         }
                     }
                     Giz::Link(to, both) => {
-                        // The far end is in the node's OWN space, so it turns
+                        // The far end is in the node's own space, so it turns
                         // and scales with whatever the link is parented to —
                         // which is what lets a ladder live in a prefab.
                         let far = wt.mul_transform(&floptle_core::Transform::from_translation(
@@ -1258,7 +1258,7 @@ impl Editor {
                     }
                     Giz::Audio(min_d, max_d) => {
                         // Two rings: full volume inside the first, silent at the
-                        // second. Both, because the gap between them IS the
+                        // second. Both, because the gap between them is the
                         // fade, and one ring cannot show a gap.
                         for r in [min_d, max_d] {
                             let lines = crate::viz::radius_rings(
@@ -1346,7 +1346,7 @@ impl Editor {
             } else {
                 Vec::new()
             };
-            // During Play the LIVE body, not the authored component: a script
+            // During Play the live body, not the authored component: a script
             // that set `node.height` (a controller's stand height, a crouch)
             // changed the capsule and moved its centre to keep the feet
             // planted, and an outline drawn from the component then sat a
@@ -1404,7 +1404,7 @@ impl Editor {
                     }
                 }
             }
-            // Terrain collider wireframes: the surface physics ACTUALLY collides
+            // Terrain collider wireframes: the surface physics actually collides
             // with. For a terrain set to collide with the drawn surface (the
             // default) that is every drawn triangle, from the same extraction
             // the collider runs — so this wireframe lies on the picture or the
@@ -1516,7 +1516,7 @@ impl Editor {
                     // Per island rather than per region, which is what this was.
                     // The one question the picture exists to answer is *are
                     // these two pieces of ground joined?*, and a region is the
-                    // bake's own grouping BEFORE any link is counted — so a
+                    // bake's own grouping before any link is counted — so a
                     // balcony and the floor its drop lands on came out two
                     // colours while a character walks between them freely. A
                     // level with five hundred ledges in it read as five hundred
@@ -1585,7 +1585,7 @@ impl Editor {
                     let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
                     // The same cull the lines get, done conservatively: a
                     // triangle is dropped only when all three corners fall off
-                    // the SAME side of the viewport, which is the one case where
+                    // the same side of the viewport, which is the one case where
                     // no part of it can cross the screen. A corner the camera is
                     // behind projects to nothing, and anything with one of those
                     // is kept — a wrong answer here would delete floor from the
@@ -1683,7 +1683,7 @@ impl Editor {
                     }
                 }
             }
-            // Mesh collider wireframes. Every Mesh node flagged Collidable OR (legacy)
+            // Mesh collider wireframes. Every Mesh node flagged Collidable or (legacy)
             // MeshCollider when the global toggle is on, plus the SELECTED one always (so
             // you can verify it). Both markers build a static triangle-mesh collider, so
             // both must draw the wireframe (union; dedup a node flagged both).
@@ -1878,7 +1878,7 @@ impl Editor {
         // slot — both are "gizmo on a non-entity target". Cached by the frame
         // driver (this scope holds a mutable gpu borrow, so no &self calls).
         let map_xf = self.map_gizmo;
-        // The map tool's gizmo is whatever its OWN transform mode says (move /
+        // The map tool's gizmo is whatever its own transform mode says (move /
         // rotate / scale) — see `Editor::gizmo_tool`.
         // (inlined `gizmo_tool()`: this scope holds a mutable `gpu` borrow, so
         // whole-`self` method calls are out — disjoint field reads are fine)
@@ -1975,7 +1975,7 @@ impl Editor {
         let contact = crate::shading::contact_uniform(&light_node);
         // Does any lamp in this frame cast? Local shadows march the depth
         // prepass, so if none does there is nothing here to pay for — and if one
-        // does, the prepass has to RUN, which is decided far below. Reading the
+        // does, the prepass has to run, which is decided far below. Reading the
         // flag off the packed lanes (rather than the World a second time) keeps
         // the answer tied to the sixteen lights that actually reached the
         // shader: a lamp ranked out of the slots casts nothing, so it must not
@@ -1983,7 +1983,7 @@ impl Editor {
         let point_shadows = lit3.shape[..lit3.count.min(16)]
             .iter()
             .any(|s| (s[3] as u32) & 2 != 0);
-        // Screen-space reflections read LAST frame's picture, so what the shader
+        // Screen-space reflections read last frame's picture, so what the shader
         // is told here depends on whether one was ever taken — see `ssr_uniform`.
         // The matrix comes from the history itself, because only it knows which
         // camera the stored frame belongs to.
@@ -2032,7 +2032,7 @@ impl Editor {
             point_shape: pl_shape,
             point_rot: pl_rot,
             point_cone: pl_cone,
-            // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
+            // Meshed terrain reads the triplanar scale + the per-slot nearest /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [
@@ -2074,14 +2074,14 @@ impl Editor {
         // mutable borrow and can't call &self helpers.
         let terrain_nearest_mask =
             crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
-        // Per-node vertex-paint bases, resolved BEFORE the draw loop (which borrows
+        // Per-node vertex-paint bases, resolved before the draw loop (which borrows
         // `raster` mutably, so it can't call &self helpers). Empty for unpainted scenes.
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in.
         let sort_z = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
 
-        // This frame's 2D lights, built ONCE. The pass below is handed this very
+        // This frame's 2D lights, built once. The pass below is handed this very
         // value, so what the gather filtered by and what the shader accumulates
         // cannot be two different answers.
         let lights_2d = light2d_uniform(&self.world, &lights_split.two_d, view_proj);
@@ -2104,7 +2104,7 @@ impl Editor {
         // the two halves are not separable from Lua anyway.
         let gather_t = floptle_core::profile::Span::new();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
-        // The 2D lighting G-buffer's draw list, built in THIS loop from the very
+        // The 2D lighting G-buffer's draw list, built in this loop from the very
         // instances the raster pass gets (`Light2dInstance::from_raster`). That
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
@@ -2146,7 +2146,7 @@ impl Editor {
         //
         // Built from the same camera-relative `view_proj` the instance matrices
         // are, so a position that is right for a draw is right for the test.
-        // The rejection sits at the TOP of the loop, before the match, so every
+        // The rejection sits at the top of the loop, before the match, so every
         // arm benefits from one test rather than eight.
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
@@ -2159,7 +2159,7 @@ impl Editor {
             if matches!(self.world.get::<floptle_core::Visible>(*e), Some(floptle_core::Visible(false))) {
                 continue;
             }
-            // Switched OFF (the Hierarchy/Inspector toggle) — this node or an ancestor.
+            // Switched off (the Hierarchy/Inspector toggle) — this node or an ancestor.
             // Unlike `Visible`, this also takes the node out of physics and stops its
             // scripts; see `floptle_core::Disabled`.
             if floptle_core::is_disabled(&self.world, *e) {
@@ -2173,7 +2173,7 @@ impl Editor {
             }
             // World transform (composes any parent chain) — a parent carries children.
             let mut t = floptle_core::world_transform(&self.world, *e);
-            // A sorting layer is a Z nudge on the DRAWN transform, so ordering a
+            // A sorting layer is a Z nudge on the drawn transform, so ordering a
             // flat scene never moves anything the physics or a script can see.
             // Resolved before the loop (`raster` is borrowed mutably in here).
             t.translation += sort_z.get(e).copied().unwrap_or_default();
@@ -2181,7 +2181,7 @@ impl Editor {
             // every arm below (`floptle/0075`). Answers false for anything whose
             // extent the scene does not know, and for the Blob, which is an SDF
             // primitive that shadows things it is not itself beside.
-            // A pixels-per-unit sprite is drawn at its TEXTURE's size, not at
+            // A pixels-per-unit sprite is drawn at its texture's size, not at
             // its `size` field, so culling has to know the texture — otherwise a
             // sixteen-unit sprite is culled on a radius of half a unit and pops
             // out of existence at the edge of the screen.
@@ -2203,7 +2203,7 @@ impl Editor {
             // primitive's color (meshes default to white = untinted texture). A
             // material texture (resolved to a registered handle) re-textures the shape.
             let mat = self.world.get::<Material>(*e).cloned();
-            // A TEXTURE-PAINTED node ALSO draws its paint OVERLAY: the per-triangle atlas
+            // A texture-painted node also draws its paint OVERLAY: the per-triangle atlas
             // mesh, coplanar over the base, alpha-blended in the transparent pass. The base
             // renders normally below — texture paint never changes how the node looks,
             // it only draws over it.
@@ -2212,9 +2212,9 @@ impl Editor {
                 let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                 crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *e, model, &mp, &mut instances);
             }
-            // The node's texture and its SURFACE EXTRAS index, both resolved by
+            // The node's texture and its surface EXTRAS index, both resolved by
             // the renderer: a material with normal/roughness/metallic/occlusion
-            // maps comes back as ONE combined `TexId`, so every arm below (and
+            // maps comes back as one combined `TexId`, so every arm below (and
             // everything downstream of them) keeps handling a single texture.
             let (tex, node_ext) = match mat.as_ref() {
                 Some(m) => {
@@ -2424,7 +2424,7 @@ impl Editor {
             if node_ext != 0 {
                 use floptle_render::{ext_index_of, set_ext_index};
                 // Only where nothing is set yet. A model part with its own
-                // material override resolved its OWN extras a moment ago, and
+                // material override resolved its own extras a moment ago, and
                 // the node's must not overwrite them — the override is the more
                 // specific answer, exactly as it is for colour and texture.
                 let fill = |raw: &mut floptle_render::InstanceRaw| {
@@ -2470,7 +2470,7 @@ impl Editor {
         // makes a shoreline forest go murky at the same rate as its ground.
         // Nothing here is a scene node.
         {
-            // Where each anchored source's node has got to THIS frame
+            // Where each anchored source's node has got to this frame
             // (`floptle/0073`). A celestial body orbits at ~99 units/s, so a
             // region pinned to the world slides out from under its own props in
             // about two seconds. Refreshing one transform per source is the
@@ -2605,7 +2605,7 @@ impl Editor {
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
-        // NOT while recording: record keeps the previewed values live so the
+        // not while recording: record keeps the previewed values live so the
         // Inspector shows what's under the playhead (edit it → it's keyed) and a
         // scrub can't diff a stale pose into spurious keys. The pre-record scene is
         // restored by stop_record_ui when ● Record turns off.
@@ -2663,7 +2663,7 @@ impl Editor {
         // The scene's PostProcess node drives the whole post chain (per scene, not
         // per project): PostStack settings + the raymarch SDF-AO params.
         let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
-        // The player's colour-vision filter rides ON TOP of the scene's chain,
+        // The player's colour-vision filter rides on top of the scene's chain,
         // and deliberately survives a scene whose PostProcess node is disabled
         // (`floptle/0079`): a scene must not be able to veto an accessibility
         // setting the player turned on.
@@ -2671,8 +2671,8 @@ impl Editor {
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
         // Film grain needs a clock or it is a dirty lens, not film. Reduced
-        // motion is deliberately NOT applied here: grain is texture, not
-        // movement, and freezing it makes it MORE of a fixed pattern to look at.
+        // motion is deliberately not applied here: grain is texture, not
+        // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
         // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
         // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
@@ -2708,7 +2708,7 @@ impl Editor {
                 vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
                 vol_atlas: [[0.0; 4]; 16],
                 vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
-                // .w = per-slot NEAREST mask (bit i = slot i is Pixelated). The palette
+                // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
                 // is one texture_2d_array with one sampler, so the shader can't pick a
                 // sampler per slot — it reads this mask and selects the result instead.
                 terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask as f32],
@@ -2782,7 +2782,7 @@ impl Editor {
             let mut sel_shapes: Vec<Entity> = Vec::new();
             for &e in &self.selection {
                 let Some(m) = self.world.get::<Matter>(e) else { continue };
-                // The SAME offset the draw uses. Without it the outline of a
+                // The same offset the draw uses. Without it the outline of a
                 // parallaxed or sorted sprite is drawn where the node is rather
                 // than where its picture is — which for a background layer is
                 // most of the screen away from the thing it is outlining.
@@ -2809,14 +2809,14 @@ impl Editor {
                     // would trace whatever happened to be alive when you
                     // clicked. The Hierarchy row is the selection you want.
                     Matter::SpriteBatch { .. } => {}
-                    // One sprite IS a quad, so it can be outlined — unlike a
+                    // One sprite is a quad, so it can be outlined — unlike a
                     // batch, whose sprites are this frame's and would trace
                     // whatever happened to be alive when you clicked.
                     Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
                         if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize)
                         {
                             let model = t.render_matrix(cam.world_position);
-                            // **The same arguments the DRAW gets.** This passed
+                            // **The same arguments the draw gets.** This passed
                             // no material and no texture size, and
                             // `sprite_world_size` falls back to the authored
                             // `size` without them — so the outline of a
@@ -2847,7 +2847,7 @@ impl Editor {
                                         // A SKINNED part draws from `model` alone —
                                         // the pose is in the deform, not the matrix.
                                         // Applying node_world here too would transform
-                                        // it TWICE, which is the offset outline Ty saw
+                                        // it twice, which is the offset outline that was reported
                                         // on the astronaut. Match the draw.
                                         let raw = instance_of(model, [1.0, 1.0, 1.0]);
                                         let base = rig.skin_bases.get(i).copied().unwrap_or(0);
@@ -2949,7 +2949,7 @@ impl Editor {
         }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
-        // and/or the combined terrain volume — and it's ALSO what draws a textured
+        // and/or the combined terrain volume — and it's also what draws a textured
         // skybox (rays that miss every bound sample the sky, zero march steps), so a
         // scene with no terrain/blobs still runs it when the sky has a texture; a
         // solid-color sky is just the raster clear. The globals are built either way
@@ -2966,7 +2966,7 @@ impl Editor {
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             // Baked GI. The renderer owns the probe texture; these four lanes
-            // are only where the volume IS, and they have to be stamped per
+            // are only where the volume is, and they have to be stamped per
             // view because the field is camera-relative (ADR-0015).
             raymarch.gi().apply(&mut g, cam.world_position.into());
             g
@@ -2979,7 +2979,7 @@ impl Editor {
         // press on the dock's tab bar and left `input.pressed("tab")` returning
         // false — the same as not being pressed, so a game bound to the most
         // conventional inventory key there is had no way to tell. Gated on a text
-        // field NOT wanting input, so typing into the Console or the Inspector
+        // field not wanting input, so typing into the Console or the Inspector
         // during play still works; a click is how you go back to the editor.
         // `text_edit_focused`, not `egui_wants_keyboard_input` — the latter is
         // "any widget has focus", so clicking a Play-mode HUD button used to
@@ -3269,7 +3269,7 @@ impl Editor {
         // The package extensions and their window. `ext_host` is handed to the
         // dock (its Scene overlays draw in the viewport), and used again after
         // for the floating panels — sequentially, so one `&mut` covers both.
-        // What the last load found, read off the host BEFORE it is borrowed
+        // What the last load found, read off the host before it is borrowed
         // mutably for the tab viewer — the 📦 Packages tab draws from inside
         // that viewer and cannot hold a second borrow of the host itself.
         let pkg_load = crate::packages_ui::PkgLoad::of(&self.ext);
@@ -3378,7 +3378,7 @@ impl Editor {
         let net_input_ack = self.net_play_client.as_ref().and_then(|c| c.input_ack());
         // Rollback health (docs/multiplayer.md §7 P6): a fighting
         // game's connection quality is rollback depth and mispredict rate, not
-        // ping — and the stall indicator is the one readout a player NEEDS,
+        // ping — and the stall indicator is the one readout a player needs,
         // because a stalled sim looks like the game running slightly slow and
         // is otherwise indistinguishable from a bad frame rate.
         let net_rollback = self.net_rollback.as_ref().map(|d| {
@@ -3393,7 +3393,7 @@ impl Editor {
             .as_ref()
             .map(|r| (r.tick(), self.net_rollback.as_ref().map(|d| d.net.current()).unwrap_or(0)));
         let replays = crate::shadow::list_replays(&self.project_root);
-        // Interest management is the one feature whose job is to NOT send
+        // Interest management is the one feature whose job is to not send
         // things, so with no readout it is indistinguishable from a bug: set
         // the radius too tight and distant objects quietly stop moving, with
         // nothing anywhere saying why. `None` when it's off, which is a
@@ -3413,7 +3413,7 @@ impl Editor {
         let voice_test_peer = self.voice.test_speaker();
         // Set by the panel below, acted on after the UI closure releases `self`.
         let (mut voice_test_pick, mut voice_test_stop) = (false, false);
-        // A REAL session (QUIC) has no hub: the link is the actual network, so
+        // A real session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
             && self.net_hub.is_none();
@@ -3424,7 +3424,7 @@ impl Editor {
             self.net_join_addr = "quic://127.0.0.1:7777".into();
         }
         if self.net_relay_addr.is_empty() {
-            // The Floptle Cloud rendezvous relay (task 0005): a DNS-only
+            // The Floptle Cloud rendezvous relay: a DNS-only
             // record straight to the host — the name is the stable contract
             // even if the box moves. Self-hosters just type their own.
             self.net_relay_addr = "relay.fopull.com:7788".into();
@@ -3452,7 +3452,7 @@ impl Editor {
         // needs the profile and the closure has the fields split.
         let mut perf_toggle: Option<bool> = None;
         // Player mode (an exported build / --play): no editor chrome at all —
-        // the Game view IS the window. F1 (handled at the winit layer) toggles
+        // the Game view is the window. F1 (handled at the winit layer) toggles
         // the multiplayer window, which still works for LAN/relay sessions.
         let player_mode = self.player_mode;
         let play_t = self.play_t;
@@ -3461,7 +3461,7 @@ impl Editor {
         let script_meta = &mut self.script_meta;
         let ui_canvas_snapshot = self.ui_canvas.clone();
         let show_export = &mut self.show_export;
-        // Relative export folders resolve against the project's PARENT (shown
+        // Relative export folders resolve against the project's parent (shown
         // live in the dialog) — never the process CWD, which depends on how
         // the editor was launched.
         let export_base =
@@ -3856,7 +3856,7 @@ impl Editor {
                             )
                         } else {
                             // Glow bright right after a save, settle to quiet
-                            // (t = 0 IS the resting state — one branch, one wording).
+                            // (t = 0 is the resting state — one branch, one wording).
                             let t = (*save_flash / Editor::SAVE_FLASH_SECS).clamp(0.0, 1.0);
                             (
                                 "✔ saved",
@@ -3969,7 +3969,7 @@ impl Editor {
                                     } else {
                                         String::new()
                                     },
-                                    // What this client is NOT being told, and
+                                    // What this client is not being told, and
                                     // by which rule. "Is my filter working"
                                     // has to be a number, or a project turns
                                     // one on and cannot tell it from a typo.
@@ -4102,7 +4102,7 @@ impl Editor {
                                      teleporting the opponent. It catches up on its own.",
                                 );
                             } else {
-                                // Delay and mispredict rate on ONE line, because
+                                // Delay and mispredict rate on one line, because
                                 // neither means anything alone: a rollback
                                 // implementation working perfectly and one badly
                                 // misconfigured look identical from outside, and
@@ -4152,7 +4152,7 @@ impl Editor {
                                  numbers are the measurement you choose it from: a healthy \
                                  match sits at low average depth.",
                             );
-                            // WHO is starved, and on what. A frozen match used
+                            // who is starved, and on what. A frozen match used
                             // to look identical from both screens; this names
                             // the side that stopped keeping up (floptle/0039).
                             ui.small(format!(
@@ -4232,7 +4232,7 @@ impl Editor {
                             }
                             ui.separator();
                         }
-                        // Replays. A match's inputs and its seed ARE the match,
+                        // Replays. A match's inputs and its seed are the match,
                         // so a replay is kilobytes and playing it back is
                         // re-simulation rather than re-enactment.
                         if !replays.is_empty() {
@@ -4330,7 +4330,7 @@ impl Editor {
                             match (net_hosting, net_has_client) {
                                 (false, _) => {
                                     // The simulated-link harness is an editor
-                                    // dev tool — a BUILD's menu is just the
+                                    // dev tool — a build's menu is just the
                                     // real hosting/joining flows.
                                     if !player_mode {
                                         ui.label("Test alone (simulated link)");
@@ -4726,7 +4726,7 @@ impl Editor {
             // untouched underneath and comes back exactly as it was.
             if let Some(ft) = *viewer.fullscreen_tab {
                 let mut exit = false;
-                // A build has nothing to restore TO — no header, and Escape
+                // A build has nothing to restore to — no header, and Escape
                 // belongs to the game (cursor release), not the layout.
                 if !player_mode {
                     // A PANEL, not a bare `ui.horizontal`. A plain row paints no
@@ -4800,7 +4800,7 @@ impl Editor {
             // Floating windows, like every other tool window here: they can be
             // moved and resized, they remember where they were put, and a
             // package cannot take a docked slot away from the editor's own
-            // panels. Drawn AFTER the dock, so a panel is over the viewport it
+            // panels. Drawn after the dock, so a panel is over the viewport it
             // is about.
             for i in 0..ext_host.windows.len() {
                 if !ext_host.windows[i].open {
@@ -4815,7 +4815,7 @@ impl Editor {
                     .default_width(320.0)
                     .resizable(true);
                 // `ed.window(...):focus()` brings the panel to the front. It
-                // does NOT move it: a window that jumps to the middle of the
+                // does not move it: a window that jumps to the middle of the
                 // screen because a script mentioned it is a window somebody has
                 // to put back.
                 if ext_focus_window == Some(i) {
@@ -5320,7 +5320,7 @@ impl Editor {
                                 cmd.paste = true;
                                 cmd.close_menu = true;
                             }
-                            // The SAME node catalog as the Hierarchy's ✚ New and
+                            // The same node catalog as the Hierarchy's ✚ New and
                             // the menu-bar Add — one list, no stale subset.
                             ui.menu_button("Add", |ui| {
                                 crate::hierarchy::node_new_menu(ui, &mut cmd, None);
@@ -5363,7 +5363,7 @@ impl Editor {
             if let Some((path, buf)) = rename_target.as_mut() {
                 let mut open = true;
                 let mut close = false;
-                // The fixed suffix = everything after the FIRST dot, so compound
+                // The fixed suffix = everything after the first dot, so compound
                 // extensions (.prefab.ron, .vfx.ron) ride along whole. Folders
                 // have no suffix.
                 let ext = if floptle_vfs::is_dir(Path::new(path.as_str())) {
@@ -5509,7 +5509,7 @@ impl Editor {
                             (false, false) => ui.label("Quit Floptle?"),
                         };
                         ui.horizontal(|ui| {
-                            // Save & Quit: save everything, THEN close (the save runs after
+                            // Save & Quit: save everything, then close (the save runs after
                             // this closure, then `about_to_wait` exits — a real close, not the
                             // no-op ViewportCommand this app used to send).
                             let save_label =
@@ -5528,7 +5528,7 @@ impl Editor {
                                 want_exit = !image_unnamed;
                                 close = true;
                             }
-                            // Discard: leave WITHOUT saving.
+                            // Discard: leave without saving.
                             if ui.button("Discard & Quit").clicked() {
                                 want_exit = true;
                                 close = true;
@@ -5547,7 +5547,7 @@ impl Editor {
             // ---- closing an image with unsaved changes ----
             //
             // Three answers, because there are three things a person means.
-            // The old code offered ONE — "save first" — and a document that has
+            // The old code offered one — "save first" — and a document that has
             // never been named cannot be saved without a name, so that answer
             // was sometimes not available and the close simply never happened.
             // Discard is the arm that was missing, and it is the arm that turns
@@ -5567,7 +5567,7 @@ impl Editor {
                         );
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            // Only offered for the LIVE document: saving a parked
+                            // Only offered for the live document: saving a parked
                             // one would mean making it live first, and a button
                             // that silently switches which image you are looking
                             // at is worse than not being there.
@@ -5741,7 +5741,7 @@ impl Editor {
                                 });
                                 close = true;
                             }
-                            // Closing the window IS Cancel, and cancel changes
+                            // Closing the window is Cancel, and cancel changes
                             // nothing — the layer has not been written yet.
                             if ui.button("Cancel").clicked() {
                                 close = true;
@@ -5886,7 +5886,7 @@ impl Editor {
             }
 
             // ---- who has the pointer ------------------------------------------
-            // A grabbed cursor is invisible by definition, so the ONE thing that
+            // A grabbed cursor is invisible by definition, so the one thing that
             // says how to get it back cannot itself be the cursor. Without this
             // the way out (Escape) was findable only by reading the source, and
             // what people did instead was alt-tab out of the whole application
@@ -5896,7 +5896,7 @@ impl Editor {
             // pointer is actually contested — a game that never grabs never
             // sees it.
             // Never in a shipped build: `player_mode` has no editor to hand the
-            // pointer back TO, so the hint names a negotiation that does not
+            // pointer back to, so the hint names a negotiation that does not
             // exist there. The build's own way out is the player-mode hint
             // above, which says Escape once and then goes away.
             if playing
@@ -5938,7 +5938,7 @@ impl Editor {
         // egui-winit's cursor-icon handling calls set_cursor_visible(true) whenever
         // the hover icon changes — un-hiding a cursor the game grabbed. Re-assert
         // the hide while any lock is held so the pointer can't flicker back.
-        // A script lock only hides the cursor while it's actually OVER the game
+        // A script lock only hides the cursor while it's actually over the game
         // view: where the grab is only a Confine (X11), the pointer can reach
         // the Inspector mid-play — it must be visible there to tweak values.
         // Where the grab is a real Lock it cannot travel at all, which is what
@@ -5952,7 +5952,7 @@ impl Editor {
             window.set_cursor_visible(false);
         } else if self.script_mouse_lock {
             // Off the game view with the lock still wanted — or held back by
-            // Escape — force the show. egui only un-hides on an icon CHANGE,
+            // Escape — force the show. egui only un-hides on an icon change,
             // which may never fire, and a cursor you freed but cannot see is
             // the same bug as one you never freed.
             window.set_cursor_visible(true);
@@ -5960,7 +5960,7 @@ impl Editor {
         // **Against the dims last APPLIED, not against what they were at the top
         // of this frame.** The old check captured the value before the UI pass
         // and compared after it, which caught exactly one source of change:
-        // Project Settings. A script setting `app.setRetroHeight` runs BEFORE
+        // Project Settings. A script setting `app.setRetroHeight` runs before
         // that capture, so its new value was already there to be captured as the
         // "old" one and the target was never resized — the setting appeared to
         // do nothing, for ever (`floptle/0175`). Comparing against what the
@@ -5974,7 +5974,7 @@ impl Editor {
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
         // gathered above) runs at the resolution the scene was composited at: the
-        // retro internal res in retro mode (BEFORE the nearest-neighbor upscale, so
+        // retro internal res in retro mode (before the nearest-neighbor upscale, so
         // AO/bloom/vignette land on the same chunky pixel grid as the scene), else
         // full frame res. The stack lazily re-sizes when retro toggles/resizes.
         let post_size =
@@ -5991,7 +5991,7 @@ impl Editor {
         let ssr_on = light_node.reflections;
         // Glass needs the same stored picture, for the opposite reason: not to
         // reflect the scene but to see through it. So the texture is allocated
-        // when EITHER asks, and a scene with a single window in it gets one
+        // when either asks, and a scene with a single window in it gets one
         // without having to switch reflections on as well.
         let glass = raster.any_transmissive(&instances);
         {
@@ -6034,7 +6034,7 @@ impl Editor {
         };
         match acquired {
             Some(frame) => {
-                // The scene ALWAYS renders into the post input, whether or not
+                // The scene always renders into the post input, whether or not
                 // any effect is switched on.
                 //
                 // It used to go straight to the swapchain when the chain was
@@ -6112,7 +6112,7 @@ impl Editor {
                     .size();
                     (d.width.max(1), d.height.max(1))
                 };
-                // Posterize, HERE — over the art the raster and raymarch passes
+                // Posterize, here — over the art the raster and raymarch passes
                 // just drew and before a light touches it. The palette is what
                 // the setting quantizes; the light is a multiplier on top of it
                 // (`floptle/0127`).
@@ -6121,7 +6121,7 @@ impl Editor {
                 }
                 // 2D lighting composites over the scene the raster pass just
                 // drew, so a lit tilemap replaces its own unlit pixels. Runs on
-                // BOTH draw paths — see `lit_2d_rank`.
+                // both draw paths — see `lit_2d_rank`.
                 gpu_mark!("2D lighting");
                 raster.light2d_pass(
                     gpu,
@@ -6144,7 +6144,7 @@ impl Editor {
                 // every frame it stayed on screen.
                 gpu_mark!("glass");
                 if glass && let Some(h) = scene_history.as_mut() {
-                    // The stored picture is THIS frame's, taken from THIS
+                    // The stored picture is this frame's, taken from this
                     // camera, so the reprojection is the identity — say so, or
                     // the reflections on the glass would look up last frame's
                     // matrix against a texture that is not last frame's.
@@ -6152,7 +6152,7 @@ impl Editor {
                     glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
                     raymarch.upload_globals(gpu, glass_rm);
                     // Far to near, re-capturing between: each layer of glass
-                    // samples a picture holding the panes BEHIND it and none of
+                    // samples a picture holding the panes behind it and none of
                     // the panes in front. One layer is one capture and one pass,
                     // exactly as before.
                     let cuts = raster.transmissive_cuts(
@@ -6162,7 +6162,7 @@ impl Editor {
                     );
                     for layer in 0..=cuts.len() {
                         h.capture(gpu, color, view_proj, cam.world_position);
-                        // The capture writes into the SAME texture every time, so
+                        // The capture writes into the same texture every time, so
                         // the bind group it belongs to stays valid — rebinding is
                         // only for the frame that (re)created it.
                         if layer == 0 {
@@ -6220,7 +6220,7 @@ impl Editor {
                     tri_layer.draw(gpu, color, depth, view_proj, &verts);
                 }
                 // Live particles: after all opaque work (they depth-test against
-                // meshes AND raymarched matter), before post/retro — so they're
+                // meshes and raymarched matter), before post/retro — so they're
                 // AO'd/bloomed and pixelate with the scene.
                 if !vfx_batches.is_empty() {
                     particles.draw(
@@ -6233,7 +6233,7 @@ impl Editor {
                         raster,
                     );
                 }
-                // Keep this frame's picture, for the NEXT frame's reflections.
+                // Keep this frame's picture, for the next frame's reflections.
                 //
                 // Here and not later: everything that belongs to the scene has
                 // drawn — the raymarched world, the meshes, the palette
@@ -6249,7 +6249,7 @@ impl Editor {
                     h.capture(gpu, color, view_proj, cam.world_position);
                 }
                 // The reference grid is an editor aid — Scene view only, and
-                // deliberately AFTER the capture above: it is not part of the
+                // deliberately after the capture above: it is not part of the
                 // scene, and a mirror that reflected the editor's own graph
                 // paper would be showing something that does not exist.
                 if self.grid.show && !game_view {
@@ -6367,19 +6367,19 @@ impl Editor {
                     }
                 }
 
-                // Post runs BEFORE any retro upscale, at the scene's composited
+                // Post runs before any retro upscale, at the scene's composited
                 // resolution. SSAO reads whichever depth the scene rendered with;
                 // in retro mode the chain outputs into the retro color target so
                 // the nearest-neighbor blit carries the finished effects up with
                 // the same chunky pixels as the scene.
-                // Capture the composited scene into the UI backdrop BEFORE post
+                // Capture the composited scene into the UI backdrop before post
                 // consumes it, so frosted-glass UI (`backdrop()`) works in
                 // fullscreen/player. Retro mode is the one case with nothing to
                 // capture at this size — its offscreen is the retro internal
                 // resolution, not the frame's — so there the backdrop is cleared
                 // and `backdrop()` reads black rather than a stale capture.
                 //
-                // What is captured is the scene BEFORE the tonemap, so anything
+                // What is captured is the scene before the tonemap, so anything
                 // brighter than white clamps on the way into the (8-bit) backdrop
                 // texture. Frosted glass is a blur of what is behind it, not a
                 // measurement, so that is the right trade rather than a second
@@ -6414,7 +6414,7 @@ impl Editor {
                     // the nearest-neighbour blit carries the finished picture up;
                     // otherwise it writes the window.
                     let out = if self.project.retro { retro.color_view() } else { &frame.view };
-                    // Focus-on-a-node is resolved HERE, against the camera this
+                    // Focus-on-a-node is resolved here, against the camera this
                     // view is actually rendering from, so the Scene view shows
                     // its own focus while you fly around instead of the game
                     // camera's.
@@ -6547,7 +6547,7 @@ impl Editor {
                     egui.renderer.render(&mut pass, &tris, &screen);
                 }
                 gpu.queue.submit([encoder.finish()]);
-                // ⏱ Close the frame BEFORE `present`: what happens after this is
+                // ⏱ Close the frame before `present`: what happens after this is
                 // the display's business, and the panel's job is to account for
                 // the work the engine asked for.
                 if timing && let Some(t) = gpu_timer.as_mut() {
@@ -6556,7 +6556,7 @@ impl Editor {
                 for id in &full_output.textures_delta.free {
                     egui.renderer.free_texture(id);
                 }
-                // `FLOPTLE_FRAME_DUMP=<dir>`: photograph EVERY presented frame
+                // `FLOPTLE_FRAME_DUMP=<dir>`: photograph every presented frame
                 // into that directory, out of the swapchain image itself. A
                 // glitch that lasts one frame while the camera moves cannot be
                 // caught by a screenshot key or a headless render; a stream of
@@ -6622,7 +6622,7 @@ impl Editor {
             self.apply_input_edits(edits);
         }
         // The ⚙ Settings tab drives its own edits (it has `&mut self`); what
-        // remains here is the per-frame upkeep it needs while VISIBLE: keep the
+        // remains here is the per-frame upkeep it needs while visible: keep the
         // script scan fresh, and settle a press-to-bind that just landed.
         let settings_front = self
             .dock_state
@@ -6645,7 +6645,7 @@ impl Editor {
 
         self.apply_frame_commands(cmd, frame_pointer_down);
         // ---- what the packages asked for this frame ----
-        // Menu items and shortcuts run their Lua HERE, not in the UI pass: a
+        // Menu items and shortcuts run their Lua here, not in the UI pass: a
         // callback may open a panel, edit the scene or reload the package it
         // belongs to, and none of that can happen while the host is drawing.
         if let Some(i) = ext_menu_click {
@@ -6729,7 +6729,7 @@ impl Editor {
         self.sync_map_meshes();
         self.sync_map_paint();
         self.sync_tilemaps();
-        // Capture the dirty flag BEFORE `sync_terrain_gpu` consumes it, exactly
+        // Capture the dirty flag before `sync_terrain_gpu` consumes it, exactly
         // as the editor frame does — a structural change is a full re-mesh.
         let terrain_full_rebuild = self.terrain_gpu_dirty;
         self.sync_terrain_gpu();
@@ -6755,7 +6755,7 @@ impl Editor {
         self.pump_input_devices();
 
         // ---- the game ----
-        // `true`: a build's window IS the game, so input is never somebody
+        // `true`: a build's window is the game, so input is never somebody
         // else's. In the editor this is "does the Game view have focus".
         self.timed_script_pass(|ed| ed.play_step(dt, true));
         self.finish_input_frame();
@@ -6848,8 +6848,8 @@ impl Editor {
     /// volumes + shadow-occluder bakes into the shared 3D atlas (or just the
     /// dabbed region on the fast sculpt path), and refresh the texture palette.
     pub(crate) fn sync_terrain_gpu(&mut self) {
-        // Terrain volumes render PER-VOLUME, each at native resolution: moving a
-        // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
+        // Terrain volumes render per-volume, each at native resolution: moving a
+        // terrain needs no GPU work at all — its f64 anchor is read fresh every frame
         // when the globals are built. Only structural changes (add/edit/delete/resize)
         // re-upload the volume set into the shared 3D atlas. Static collider MESHES
         // join the same atlas as shadow-only occluder volumes (they cast, never draw).
@@ -6877,7 +6877,7 @@ impl Editor {
                     .collect();
                 items.sort_by_key(|(id, _)| *id);
                 let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
-                // Occluders upload AFTER the terrains (stable order by asset + name,
+                // Occluders upload after the terrains (stable order by asset + name,
                 // so identical content always lays out identically).
                 let mut occ_items: Vec<(String, Entity)> = self
                     .mesh_occluders
@@ -6933,7 +6933,7 @@ impl Editor {
         // Re-upload the terrain texture palette when it changes. Each slot resolves
         // to a 256² layer (empty / unreadable slots become white so indices align).
         if self.terrain_textures_dirty {
-            // Every slot is resampled to the palette's 256². Honour the texture's OWN
+            // Every slot is resampled to the palette's 256². Honour the texture's own
             // filter setting while doing it — a bilinear resize of pixel art destroys
             // it here, before any sampler runs (this was half the "terrain textures are
             // always blurry" bug; the other half was the hardcoded Linear sampler).
@@ -7006,7 +7006,7 @@ impl Editor {
             return;
         };
         // Asset-tree paths already carry the root ("assets/shaders/…") — joining
-        // project_root onto them gave assets/assets/… ENOENT, so NO picked sky
+        // project_root onto them gave assets/assets/… ENOENT, so no picked sky
         // shader ever loaded (the Material-shader double-join bug, same fix).
         let abs = self.resolve_asset_path(&path);
         let mtime = floptle_vfs::modified(&abs)
@@ -7083,7 +7083,7 @@ impl Editor {
         self.frame_log_len = (self.frame_log_len + 1).min(Self::FRAME_LOG);
     }
 
-    /// The 1% low: the MEAN of the worst 1% of frame times in the log, ms.
+    /// The 1% low: the mean of the worst 1% of frame times in the log, ms.
     ///
     /// **The worst frames, reported as a time rather than as a rate.** "1% low
     /// fps" is the usual name, but the honest quantity is the frame time — it is
@@ -7129,7 +7129,7 @@ impl Editor {
         self.refresh_period = chosen_refresh_period(self.refresh_period, current, any);
     }
 
-    /// Put every node in `targets` on `layer`, as ONE undo step.
+    /// Put every node in `targets` on `layer`, as one undo step.
     ///
     /// One `record()` and one `rebuild_sim()` for the whole set, not per node:
     /// twenty crates re-layered is one thing somebody did and one Ctrl+Z, and
@@ -7158,7 +7158,7 @@ impl Editor {
 
     /// Frame-time smoothing: SNAP the measured dt to the nearest whole multiple
     /// of the display's refresh period when it's close. Under vsync (Fifo) a
-    /// frame's true screen time IS a whole number of refresh periods — the
+    /// frame's true screen time is a whole number of refresh periods — the
     /// CPU-side measurement just adds 1–3 ms of scheduler noise on top, and
     /// feeding that noise into the fixed-step accumulator moves everything the
     /// interpolation renders by `velocity × noise` every frame (the moving-
@@ -7187,7 +7187,7 @@ impl Editor {
         if n < 1.0 || (raw - n * period).abs() > period * 0.12 {
             self.dt_snap_error = self.dt_snap_error.clamp(-period, period);
             // A miss is not a fault — an uncapped frame legitimately misses. A
-            // long RUN of them means the snap is inert, which is a different
+            // long run of them means the snap is inert, which is a different
             // thing and worth being able to see (`floptle/0160`).
             self.dt_snap_rate *= 0.99;
             return raw;
@@ -7251,7 +7251,7 @@ impl Editor {
             if self.fps_timer >= 0.4 {
                 self.fps_timer = 0.0;
                 if let Some(window) = self.window.as_ref() {
-                    // The frame's OWN cost beside the rate, because they answer
+                    // The frame's own cost beside the rate, because they answer
                     // different questions and an fps number alone cannot tell
                     // "this scene is expensive" from "this display is pacing
                     // us". A scene costing 8 ms and presenting at 20 fps is the
@@ -7260,7 +7260,7 @@ impl Editor {
                     // Reaches the Console too, not only the ⏱ panel and the
                     // title — the panel is opt-in and the title is easy not to
                     // read closely, and this is exactly the report a user who
-                    // is NOT looking for it needs to see (`floptle/0169`).
+                    // is not looking for it needs to see (`floptle/0169`).
                     match fifo_pacing_multiple(self.present_wait_ms, cost, self.refresh_period * 1000.0) {
                         Some(n) if n != self.fifo_pacing_warned => {
                             self.fifo_pacing_warned = n;
@@ -7373,7 +7373,7 @@ impl Editor {
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
-            // A scene transition a script queued LAST frame happens first —
+            // A scene transition a script queued last frame happens first —
             // at a frame boundary, never mid-frame under the scripts that
             // asked for it (offline/host = switch; joined client = refused).
             for req in std::mem::take(&mut self.pending_scene) {
@@ -7386,7 +7386,7 @@ impl Editor {
                     break;
                 }
             }
-            // Pausing freezes the clock AND the frame delta scripts see, so
+            // Pausing freezes the clock and the frame delta scripts see, so
             // dt-driven motion stops too (not just `time`-driven motion).
             let sdt = if self.paused { 0.0 } else { dt };
             self.play_t += sdt;
@@ -7409,7 +7409,7 @@ impl Editor {
                             grounded,
                             height: 0.0,
                             pos: [pos.x, pos.y, pos.z],
-                            // Compounds resolve contacts per SHAPE with real
+                            // Compounds resolve contacts per shape with real
                             // impulses; "the floor under it" isn't one normal.
                             ground_normal: None,
                             wall_normal: None,
@@ -7420,29 +7420,29 @@ impl Editor {
             }
             // The active camera's view angles ride every input snapshot
             // (`input.aimYaw()`): camera-relative movement stays deterministic
-            // under prediction because the aim IS part of the input command.
+            // under prediction because the aim is part of the input command.
             let aim = floptle_core::active_camera(&self.world).map(|e| {
                 let wt = floptle_core::world_transform(&self.world, e);
                 let (yaw, pitch, _) = wt.rotation.to_euler(floptle_core::math::EulerRot::YXZ);
                 [yaw, pitch]
             });
             // Repeaters first: a list whose count changed last frame gets its
-            // rows NOW, so this frame's layout, hit-testing and hooks all see
+            // rows now, so this frame's layout, hit-testing and hooks all see
             // the same set of rows the player is looking at.
             let ui_t = floptle_core::profile::Span::new();
             self.ui_repeaters();
             // Game-UI interaction (buttons + draggable sliders): detect hover/press/
-            // click against this frame's layout BEFORE scripts run, so a dragged
+            // click against this frame's layout before scripts run, so a dragged
             // slider's value is already in the ECS when `update` reads it. The hook
             // events dispatch to Lua right after the run.
             self.ui_interact();
-            // GAME UI: repeater expansion, the layout solve and hit-testing.
+            // game UI: repeater expansion, the layout solve and hit-testing.
             self.profile_record(floptle_core::profile::Bucket::Ui, ui_t.ms());
-            // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
+            // Feed the player input to scripts (the Lua `input` API) — but only while the
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
             // keeps simulating.
-            // …and while the EDITOR is holding the pointer (Escape, with the
+            // …and while the editor is holding the pointer (Escape, with the
             // game still asking for it), the mouse half of that input is the
             // editor's. Freeing the cursor would otherwise be half a fix: the
             // camera script keeps reading raw motion, so the view spins the
@@ -7506,7 +7506,7 @@ impl Editor {
             self.script_host.set_project_root(self.project_root.clone());
             // The running scene's name, for `scene.current()`.
             self.script_host.set_scene_name(&self.scene_name);
-            // The scene's bodies of water, in WORLD coordinates — `water.depthAt`
+            // The scene's bodies of water, in world coordinates — `water.depthAt`
             // answers the same question the solver does, from the same geometry,
             // so a swim state can never disagree with the physics floating it.
             self.script_host.set_water_volumes(crate::shading::water_infos(&self.world));
@@ -7582,7 +7582,7 @@ impl Editor {
             }
             self.pending_scene.extend(self.script_host.take_scene_requests());
             // Accessibility (`floptle/0079`): the settings a game's options menu
-            // wrote this frame come back OUT, and the captions it asked for join
+            // wrote this frame come back out, and the captions it asked for join
             // the on-screen queue. Read after the run so a menu that changes text
             // scale is honoured by the very next layout.
             self.access = self.script_host.access();
@@ -7631,10 +7631,10 @@ impl Editor {
             }
             // GPU-load any models a script swapped via `node.model` (the Matter is
             // already updated by run; re-importing here means the new mesh renders
-            // THIS frame).
+            // this frame).
             self.load_script_swapped_models();
             // `physics.step([n])` from a script — the same frame-stepper as ⏭. Drained
-            // in the FRAME pass, not inside the tick loop: once the tick is frozen that
+            // in the frame pass, not inside the tick loop: once the tick is frozen that
             // loop doesn't run, so a request drained there could never be the thing that
             // unfreezes it. And before animation, so the step it releases advances the
             // pose on the same frame as the gameplay tick rather than one behind.
@@ -7679,7 +7679,7 @@ impl Editor {
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
             }
-            // Apply script velocity writes, then run the GAMEPLAY TICK loop (docs/
+            // Apply script velocity writes, then run the GAMEPLAY tick loop (docs/
             // netcode-design.md §3): each banked 60 Hz tick runs `fixedUpdate` with a
             // per-tick input snapshot, applies its writes, and steps physics exactly one
             // tick — the deterministic unit netcode snapshots/prediction share. Rendered
@@ -7753,9 +7753,9 @@ impl Editor {
                         break;
                     }
                     self.game_tick_no += 1;
-                    // Celestial rails FIRST (solar demo S2): body nodes + their
+                    // Celestial rails first (solar demo S2): body nodes + their
                     // terrain collider anchors + gravity centers + the space.*
-                    // snapshot all reflect THIS tick before scripts and physics.
+                    // snapshot all reflect this tick before scripts and physics.
                     self.update_space_rails(self.game_tick.step as f64);
                     // Per-tick input: consume the tick accumulators (edges bank between
                     // ticks so a between-tick press is never lost). Neutral when the
@@ -7812,7 +7812,7 @@ impl Editor {
                         self.resolve_tick_actions(self.game_tick.step, game_focused);
                     }
                     if let Some(sim) = self.sim.as_mut() {
-                        // Fresh body state for THIS tick (post previous tick's physics).
+                        // Fresh body state for this tick (post previous tick's physics).
                         let mut states = HashMap::new();
                         for r in sim.body_states() {
                             states.insert(r.entity.index(), crate::play::body_state(&r));
@@ -7842,7 +7842,7 @@ impl Editor {
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
                     // Real hosting: each REMOTE player's Predicted node runs
-                    // with ITS OWNER's replayed input for this tick — the
+                    // with its OWNER's replayed input for this tick — the
                     // one-script model (§6), server side. Those nodes are
                     // filtered out of the global passes; run_*_for bypasses
                     // the filters. The host's own input is restored after.
@@ -7901,9 +7901,9 @@ impl Editor {
                             sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
                         }
                     }
-                    // `fixedUpdate`'s assembly thrust arms THIS tick's substeps.
+                    // `fixedUpdate`'s assembly thrust arms this tick's substeps.
                     self.drain_assembly_cmds();
-                    // This tick's terrain edits (`fixedUpdate` digs) land BEFORE the
+                    // This tick's terrain edits (`fixedUpdate` digs) land before the
                     // step: the tick that dug the hole also falls into it.
                     self.drain_script_terrain_ops();
                     // Bound crash loss on `save.*` data: flush every ~5 s of ticks
@@ -7911,7 +7911,7 @@ impl Editor {
                     if self.game_tick_no.is_multiple_of(300) {
                         self.script_host.flush_save();
                     }
-                    // `physics.pause(on)` gates the WHOLE physics step (scripts,
+                    // `physics.pause(on)` gates the whole physics step (scripts,
                     // rails and streaming keep running — loading screens hold
                     // the world still while it assembles). Queued held forces
                     // are dropped, not banked: unpausing must not fire a burst
@@ -7924,7 +7924,7 @@ impl Editor {
                         if self.physics_paused {
                             sim.clear_held_forces();
                         } else {
-                            // PHYSICS (`floptle/0077`). Timed per TICK and
+                            // PHYSICS (`floptle/0077`). Timed per tick and
                             // accumulated, because a frame can run several — a
                             // per-frame timer would report the last tick and hide
                             // a catch-up frame, which is exactly the spike a game
@@ -7938,8 +7938,8 @@ impl Editor {
                                 .record(floptle_core::profile::Bucket::Physics, ms);
                         }
                     }
-                    // Collision / trigger events from THIS tick, dispatched to
-                    // BOTH nodes' scripts: `onCollisionEnter/Stay/Exit(node,
+                    // Collision / trigger events from this tick, dispatched to
+                    // both nodes' scripts: `onCollisionEnter/Stay/Exit(node,
                     // other, hit)` for solid contacts (incl. body-vs-body),
                     // `onTriggerEnter/Stay/Exit` when a Trigger collider is
                     // involved. Events fire where physics runs (offline, the
@@ -7961,7 +7961,7 @@ impl Editor {
                         self.script_host.call_touch(&mut self.world, ev.a, func, ev.b, p, n);
                         self.script_host.call_touch(&mut self.world, ev.b, func, ev.a, p, n);
                     }
-                    // A handler's body writes (knockback, bounce) land THIS
+                    // A handler's body writes (knockback, bounce) land this
                     // tick, not the next one.
                     if let Some(sim) = self.sim.as_mut() {
                         for (eid, v) in self.script_host.take_body_changes() {
@@ -7987,17 +7987,17 @@ impl Editor {
                         floptle_core::math::DVec3::from_array(pred.error_offset);
                 }
             }
-            // `lateUpdate` — the CAMERA pass: after physics and the interpolated
+            // `lateUpdate` — the camera pass: after physics and the interpolated
             // writeback, so followers sample this frame's FINAL poses. (A camera
-            // positioned in `update` reads LAST frame's pose — a follow error of
+            // positioned in `update` reads last frame's pose — a follow error of
             // velocity × dt that turns frame-time noise into visible jitter.)
             // The tick loop overwrote the input snapshot with per-tick state —
-            // restore the FRAME snapshot first, so mouse/scroll reads in
+            // restore the frame snapshot first, so mouse/scroll reads in
             // lateUpdate see this frame's input, not the last tick's leftovers.
             self.script_host.set_input(frame_input);
             // Re-lend the sim's state for the late pass: the tick loop reclaimed
             // the colliders before stepping, so without this an orbit camera's
-            // wall raycast would see NO static geometry. Hulls and body state are
+            // wall raycast would see no static geometry. Hulls and body state are
             // refreshed too — post-step, so `raycast` hits bodies where they
             // rendered and `node.vx/grounded` reads this frame's final values.
             if let Some(sim) = self.sim.as_mut() {
@@ -8017,7 +8017,7 @@ impl Editor {
                             grounded,
                             height: 0.0,
                             pos: [pos.x, pos.y, pos.z],
-                            // Compounds resolve contacts per SHAPE with real
+                            // Compounds resolve contacts per shape with real
                             // impulses; "the floor under it" isn't one normal.
                             ground_normal: None,
                             wall_normal: None,
@@ -8046,16 +8046,16 @@ impl Editor {
                 self.script_errors = self.script_host.errors().to_vec();
             }
             // Immediate-mode 3D lines queued this frame — by `update`, `fixedUpdate`
-            // AND `lateUpdate` — drained once per frame, REPLACING the list (an
+            // and `lateUpdate` — drained once per frame, REPLACING the list (an
             // idle script clears its lines). Drained here, after the late pass,
-            // so a camera-pass drawer (the solar map) lands the SAME frame as the
+            // so a camera-pass drawer (the solar map) lands the same frame as the
             // camera it positioned — draining per tick left the lines a frame
             // behind an interpolated camera.
             self.script_lines = self.script_host.take_draw_lines();
             self.script_tris = self.script_host.take_draw_tris();
             self.script_rects = self.script_host.take_draw_rects();
             self.script_texts = self.script_host.take_draw_texts();
-            // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
+            // Script debug gizmos queued this frame — by `update` and `fixedUpdate` —
             // drained once here (drawn by the viewport overlay), plus the multiplayer
             // harness's ghost-client markers.
             self.script_gizmos = self.script_host.take_gizmos();
@@ -8067,11 +8067,11 @@ impl Editor {
             // Scatter prototypes: resolved here, before the frame's GPU borrow,
             // because baking a prefab imports models and that needs `&mut self`.
             self.bake_scatter_prototypes();
-            // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
+            // Bone attachments resolve after physics: physics moves the mesh root (a
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.
             anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
-            // 2D cameras follow AFTER all of that, for the same reason bone
+            // 2D cameras follow after all of that, for the same reason bone
             // attachments do: a camera chasing a player has to read where the
             // player ended up this frame, not where they started it.
             floptle_core::camera2d::step_all(&mut self.world, sdt, self.play_t as f64);
@@ -8080,7 +8080,7 @@ impl Editor {
             // play/stop/restart a script queued this frame first, so it lands now.
             // `floptle/0115`: everything from here to the end of `advance` is the
             // particles bucket. It had no producer at all, so `perf.ms("particles")`
-            // answered a confident 0.0 while collection was ON — which reads as
+            // answered a confident 0.0 while collection was on — which reads as
             // "particles are free", the one answer a profiler must never give by
             // accident.
             let vfx_t = floptle_core::profile::Span::new();
@@ -8091,7 +8091,7 @@ impl Editor {
                 let vel = floptle_core::math::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
                 self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p), vel);
             }
-            // Hand particles the LIVE gravity field so `GravityMode::Field` effects fall
+            // Hand particles the live gravity field so `GravityMode::Field` effects fall
             // toward planets (same field the rigidbodies use), not world −Y.
             let vfx_grav = self.sim.as_ref().map(|s| crate::vfx::VfxGravity {
                 field: &s.world.gravity,
@@ -8173,7 +8173,7 @@ impl Editor {
     /// project ships as `assets/` and the CWD is wherever the player launched
     /// from, so every runtime model swap missed its file and the node rendered
     /// as nothing at all — the only trace a `swap-import … failed` line on a
-    /// stderr no player ever sees. A model some scene ALSO referenced
+    /// stderr no player ever sees. A model some scene also referenced
     /// statically was registered at load and still appeared, which is what made
     /// the failure present as "some models are missing" rather than all of them.
     pub(crate) fn load_script_swapped_models(&mut self) {
@@ -8211,7 +8211,7 @@ impl Editor {
         // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
         // wander inside the window — pin it ourselves while a look/pan/lock/trap is
         // active. Look/pan read RAW device motion, so re-centering never pollutes
-        // the deltas. A trapped Game cursor re-centers to the GAME rect (not the
+        // the deltas. A trapped Game cursor re-centers to the game rect (not the
         // window) so a Confined pointer stays inside the viewport it's playing in.
         if self.cursor_lock_soft
             && (self.game_holds_cursor() || self.input.looking || self.panning || self.game_trap)
@@ -8263,11 +8263,11 @@ impl Editor {
     ///
     /// The echo exists because running the editor from a terminal should not
     /// mean opening the Console panel to see `log(...)` — but a dedicated
-    /// server's whole log IS the Console, drained to stderr every tick, and
+    /// server's whole log is the Console, drained to stderr every tick, and
     /// echoing here as well would print every line a script writes twice.
     pub(crate) fn adopt_script_logs(&mut self, echo: bool) {
         // On **stderr**: stdout belongs to whatever the caller asked for, and
-        // a verb's `--json` document is on it. Locked ONCE for the drain
+        // a verb's `--json` document is on it. Locked once for the drain
         // rather than per line, and a failed write is dropped: this is the
         // hottest print in the process — a thousand lines a frame at the
         // cap — and the descriptor it writes to is whatever launched the
@@ -8590,7 +8590,7 @@ impl Editor {
                     self.world.insert(e, spec);
                 }
             }
-            // Pasting a LOOK copies the visual properties only: placement, size
+            // Pasting a look copies the visual properties only: placement, size
             // and the element's children are what make it that element, and
             // nothing about "make this look like that" should move it.
             for (idx, src) in &cmd.ui_paste_look {
@@ -8670,8 +8670,8 @@ impl Editor {
         }
         // Close the undo-coalescing session whenever the pointer isn't held. A drag
         // (gizmo, DragValue, UI move) keeps the button down across frames, so it stays
-        // ONE step; but a discrete edit (checkbox, combo pick, typed value) releases
-        // the button, so this frees `editing` and the NEXT edit banks its own pre-edit
+        // one step; but a discrete edit (checkbox, combo pick, typed value) releases
+        // the button, so this frees `editing` and the next edit banks its own pre-edit
         // snapshot. Without it, `editing` stuck true after any non-drag edit and every
         // following edit silently coalesced into it — the "undo doesn't work on
         // property edits" bug. (The raw LMB-release handler also clears it; this is the
@@ -8856,8 +8856,8 @@ impl Editor {
                 ),
             }
         }
-        // Override ONE sub-object's material, seeded with what that part already
-        // looks like — its imported colour AND, if the model brought one, its
+        // Override one sub-object's material, seeded with what that part already
+        // looks like — its imported colour and, if the model brought one, its
         // texture (extracted on the spot, because an override that names no
         // texture draws untextured and "override" must not mean "go blank").
         if let Some((e, key, model)) = cmd.override_object_material {
@@ -8963,7 +8963,7 @@ impl Editor {
                 }
             }
         }
-        // ✚ Effect asks for a name BEFORE it writes anything.
+        // ✚ Effect asks for a name before it writes anything.
         //
         // It used to invent `NewEffect`, `NewEffect1`, `NewEffect2` and hand you
         // the timeline — so naming your own effect meant renaming a file that a
@@ -9091,10 +9091,10 @@ impl Editor {
             // Default-at-0 is the absence of the component, so a node put back
             // to the default stops carrying one and its scene stops mentioning
             // sorting at all.
-            // The MODE is not this command's to change — it has its own control
+            // The mode is not this command's to change — it has its own control
             // — so it is carried over rather than reset. And it joins the
             // default test: a Y-sorted node on the Default layer at order 0 is
-            // NOT the default, and dropping its component would silently turn
+            // not the default, and dropping its component would silently turn
             // Y-sorting off the first time somebody touched the layer picker.
             let mode = self
                 .world
@@ -9128,7 +9128,7 @@ impl Editor {
         }
         if let Some((e, p)) = cmd.set_parallax {
             self.record();
-            // Identity IS the absence of the component, the same rule sorting
+            // Identity is the absence of the component, the same rule sorting
             // and 2D lighting follow — so a layer put back to 1,1 stops carrying
             // one and its scene stops mentioning parallax.
             if p.is_identity() {
@@ -9140,7 +9140,7 @@ impl Editor {
         }
         if let Some((e, lit)) = cmd.set_lighting_2d {
             self.record();
-            // Auto with no layer list IS the absence of the component, exactly
+            // Auto with no layer list is the absence of the component, exactly
             // as with sorting above — so a node put back to the default stops
             // carrying one and its scene stops mentioning 2D lighting.
             if lit == floptle_core::Lighting2D::default() {
@@ -9554,7 +9554,7 @@ impl Editor {
             self.add_parented(matter, parent);
         }
         if cmd.paint_fill {
-            // Same target routing as Clear: filling VERTEX blocks while the UI says
+            // Same target routing as Clear: filling vertex blocks while the UI says
             // ▦ Texture would silently stomp vertex work.
             if self.vertex_brush.target == crate::paint_ui::PaintTarget::Texture {
                 self.tex_fill_selected();
@@ -9635,8 +9635,8 @@ impl Editor {
                     _ => 0,
                 };
                 if let Some(t) = self.terrains.get(&e) {
-                    // Fill-bounds may CREATE chunks inside the bounds box — cover the
-                    // stored set plus that box so undo can also REMOVE them.
+                    // Fill-bounds may create chunks inside the bounds box — cover the
+                    // stored set plus that box so undo can also remove them.
                     let mut cand = t.field.all_chunk_coords();
                     if let Some((lo, hi)) = t.field.bounds() {
                         let pad = t.field.band() + 2.0 * t.field.voxel();
@@ -9657,7 +9657,7 @@ impl Editor {
                     self.terrain_brush.color,
                 );
                 if let Some(t) = self.terrains.get_mut(&e) {
-                    // Mirror cover = chunks present BEFORE ∪ AFTER the fill, so
+                    // Mirror cover = chunks present before ∪ after the fill, so
                     // chunks the fill removed clear from the sim copy too.
                     let mut coords = t.field.all_chunk_coords();
                     t.field.fill_bounds(top, floor, inset, color);
@@ -9673,7 +9673,7 @@ impl Editor {
             self.focus_terrain();
         }
         if cmd.focus_tiles {
-            // The tab AND the tool: reaching the Tiles tab and finding the pointer
+            // The tab and the tool: reaching the Tiles tab and finding the pointer
             // still on Select is the "why is nothing painting" moment, and it is
             // avoidable with one line.
             if let Some(dock) = self.dock_state.as_mut() {
@@ -9716,7 +9716,7 @@ impl Editor {
             }
         }
         if let Some(path) = cmd.open_scene {
-            // Opening a scene ends any play session FIRST — Stop restores the
+            // Opening a scene ends any play session first — Stop restores the
             // pre-Play scene (name, world, terrain), so the unsaved-changes
             // prompt and its save below operate on real edit state, never on
             // play-simulation state or a mid-play `scene.load(...)`'s scene.
@@ -9884,7 +9884,7 @@ impl Editor {
     /// A gather cannot do it itself — `gpu`/`raster` are borrowed there — so it
     /// resolves a material's texture by looking the path up in the registry, and
     /// a path that never got here comes back `None`. `None` does not draw
-    /// nothing: it means "no override", so the mesh's OWN imported texture draws
+    /// nothing: it means "no override", so the mesh's own imported texture draws
     /// instead. A material whose texture was never registered therefore looks
     /// exactly like a material that was never applied — except that its colour,
     /// its emissive and its maps all work, which is the most confusing possible
@@ -9896,7 +9896,7 @@ impl Editor {
     /// editor's UI pass. So it ran for the editor's own window and for nothing
     /// else: `floptle shot` and every other path that goes straight to
     /// `render_world_into` photographed a scene wearing the wrong textures, and
-    /// said nothing about it. It belongs to the FRAME, and both paths call it.
+    /// said nothing about it. It belongs to the frame, and both paths call it.
     ///
     /// Idempotent and cheap: every entry is skipped once registered, so the
     /// steady-state cost is one hash lookup per material per frame.
@@ -9910,7 +9910,7 @@ impl Editor {
             return;
         }
         self.textures_warmed_frame = self.frame_no;
-        // Node Materials AND per-object override materials — an override's
+        // Node Materials and per-object override materials — an override's
         // texture is as much a texture as the node's.
         let mut tex_paths: Vec<String> = self
             .world
@@ -9924,7 +9924,7 @@ impl Editor {
                 .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
                 .filter(|p| !self.texture_registry.contains_key(p)),
         );
-        // The SURFACE MAPS too — normal, roughness, metallic, occlusion. They go
+        // The surface MAPS too — normal, roughness, metallic, occlusion. They go
         // through the same registry lookup as the base texture and had the same
         // silence on a miss: a material with a normal map it could not resolve
         // drew flat, and the only sign was that it looked like every other flat
@@ -10016,7 +10016,7 @@ impl Editor {
     /// the shared body behind the Inspector camera preview and the split-view Game render.
     /// `cull_mask` is the rendering camera's layer bitmask (bit i = project
     /// layer i; `u32::MAX` = everything). `skip_tex` excludes one material
-    /// texture from resolution — a target camera must not sample its OWN
+    /// texture from resolution — a target camera must not sample its own
     /// render target mid-pass (wgpu forbids attachment+sampled in one pass).
     /// The scene-colour history a given slot owns, if it has one.
     fn history_slot(&self, slot: HistorySlot) -> Option<&floptle_render::SceneHistory> {
@@ -10072,7 +10072,7 @@ impl Editor {
         elapsed: f32,
         cull_mask: u32,
         skip_tex: Option<TexId>,
-        // The target's pixel size. Explicit because only a VIEW is passed and a
+        // The target's pixel size. Explicit because only a view is passed and a
         // view cannot be asked how big it is — and the 2D lighting G-buffer has
         // to match the frame exactly or the composite lands stretched.
         size: (u32, u32),
@@ -10106,7 +10106,7 @@ impl Editor {
         let flat_camera = floptle_core::active_camera(&self.world).is_some_and(|ce| {
             matches!(self.world.get::<Matter>(ce), Some(Matter::Camera { ortho: true, .. }))
         });
-        // ONE split, both halves — the 3D slots the globals want and the 2D ones
+        // one split, both halves — the 3D slots the globals want and the 2D ones
         // the gather filters by. This path used to walk the scene's lights twice
         // (`collect_point_lights` here, and again to build the 2D uniform at the
         // pass), which is half of what `floptle/0122` measured.
@@ -10169,7 +10169,7 @@ impl Editor {
             point_shape: pl_shape,
             point_rot: pl_rot,
             point_cone: pl_cone,
-            // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
+            // Meshed terrain reads the triplanar scale + the per-slot nearest /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [
@@ -10181,11 +10181,11 @@ impl Editor {
         };
 
         // Camera-relative instances + blobs, exactly like the main gather —
-        // including the frustum cull, built from THIS camera's matrix.
+        // including the frustum cull, built from this camera's matrix.
         let off_frustum = floptle_render::Frustum::from_view_proj(view_proj);
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
-        // Per-node paint, resolved BEFORE the draw loop (which borrows `raster`
+        // Per-node paint, resolved before the draw loop (which borrows `raster`
         // mutably, so it can't call &self helpers). This path renders the world too, so
         // painted props must look identical here. Empty for unpainted scenes.
         // Every node's sorting-layer Z, resolved before the draw loop borrows
@@ -10212,7 +10212,7 @@ impl Editor {
             })
             .collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
-        // The 2D lighting G-buffer's draw list, built in THIS loop from the very
+        // The 2D lighting G-buffer's draw list, built in this loop from the very
         // instances the raster pass gets (`Light2dInstance::from_raster`). That
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
@@ -10251,10 +10251,10 @@ impl Editor {
             // from the Scene view — the drift this file has already had three
             // times over.
             t.translation += sort_z.get(ent).copied().unwrap_or_default();
-            // …and the same cull the screen uses (`floptle/0075`), against THIS
+            // …and the same cull the screen uses (`floptle/0075`), against this
             // camera's frustum. An offscreen target that culled differently from
             // the window would be a mirror showing a different room.
-            // A pixels-per-unit sprite is drawn at its TEXTURE's size, not at
+            // A pixels-per-unit sprite is drawn at its texture's size, not at
             // its `size` field, so culling has to know the texture — otherwise a
             // sixteen-unit sprite is culled on a radius of half a unit and pops
             // out of existence at the edge of the screen.
@@ -10273,7 +10273,7 @@ impl Editor {
                 continue;
             }
             let mat = self.world.get::<Material>(*ent).cloned();
-            // Texture-painted node → ALSO push its paint overlay; the base draws normally
+            // Texture-painted node → also push its paint overlay; the base draws normally
             // below (see the main path).
             if self.world.get::<floptle_core::TexturePaint>(*ent).is_some() {
                 let model = t.render_matrix(cam.world_position);
@@ -10493,7 +10493,7 @@ impl Editor {
                 // of matter would have joined them without a word. Naming each
                 // one makes the compiler ask.
                 //
-                // Everything below is drawn somewhere else in THIS function or
+                // Everything below is drawn somewhere else in this function or
                 // is not drawable at all:
                 Matter::Terrain { .. } => {} // push_terrain_instances, further down
                 Matter::FieldShape { .. } => {} // the raymarch pass
@@ -10556,7 +10556,7 @@ impl Editor {
         // scene read `lights=0` in one session and correctly in another: the
         // number was never this camera's, it was whichever gather happened to
         // run last. `lights`/`lightsDropped` come from `off_split` above,
-        // computed for THIS camera and THIS frame.
+        // computed for this camera and this frame.
         self.light_counts = (off_split.three_d.count + off_split.two_d.count, off_split.dropped);
         self.warn_lights_dropped(off_split.dropped);
         {
@@ -10585,7 +10585,7 @@ impl Editor {
                 chunks,
                 // This gather does not draw scatter (unlike the Scene view's),
                 // so a scatter-heavy scene under-reports its props here. A
-                // separate, real gap — not this card — see the ledger.
+                // separate, real gap.
                 props: 0,
                 particles,
                 effects,
@@ -10597,7 +10597,7 @@ impl Editor {
             });
         }
         let show_blobs = self.project.matter && !blobs.is_empty();
-        // A textured skybox is DRAWN by the raymarch pass (missed rays sample the
+        // A textured skybox is drawn by the raymarch pass (missed rays sample the
         // sky) — keep it running even with no terrain/blobs in the scene.
         let rm_draw = show_blobs
             || !self.terrains.is_empty()
@@ -10660,7 +10660,7 @@ impl Editor {
                 vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
                 vol_atlas: [[0.0; 4]; 16],
                 vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
-                // .w = per-slot NEAREST mask (bit i = slot i is Pixelated). The palette
+                // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
                 // is one texture_2d_array with one sampler, so the shader can't pick a
                 // sampler per slot — it reads this mask and selects the result instead.
                 terrain_tint: [
@@ -10788,14 +10788,14 @@ impl Editor {
                     }
                 };
             }
-            // The opaque depth prepass, HERE as well as on the window path.
+            // The opaque depth prepass, here as well as on the window path.
             // Contact shadows, `surfaceGap`, screen-space reflections and lamp
             // shadows all read it, and without it every one of them silently
             // does nothing — which is exactly how a docked Game panel came to
             // look different from the same game fullscreen.
             //
             // It runs when something actually reads it, and needs the depth
-            // TEXTURE (a view cannot be copied into), so a caller that has none
+            // texture (a view cannot be copied into), so a caller that has none
             // opts out by construction rather than by forgetting.
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),
@@ -10812,7 +10812,7 @@ impl Editor {
                 );
             } else {
                 // No prepass this view: unbind, or this render would march the
-                // LAST view's depth buffer — a different camera at a different
+                // last view's depth buffer — a different camera at a different
                 // size, which is worse than marching nothing.
                 raymarch.bind_frame_targets(gpu, None, None);
             }
@@ -10973,8 +10973,8 @@ impl Editor {
 }
 
 /// Gather one `Matter::Mesh`'s draw instances. Rigged meshes animate: each part
-/// either rides its (possibly animated) node rigidly (R6-style), or — for a TRUE
-/// vertex-skinned part (Ty) — is CPU-deformed by this frame's bone palette, its
+/// either rides its (possibly animated) node rigidly (R6-style), or — for a true
+/// vertex-skinned part — is CPU-deformed by this frame's bone palette, its
 /// vertices re-uploaded, and drawn at the mesh matrix. `pose` is the node's animated
 /// world matrices (falls back to the rig rest pose). Static (unrigged) meshes just
 /// draw every part at `model`.
@@ -11032,7 +11032,7 @@ fn prepass_and_bind(
 /// and not the other is a model that is red while you edit it and plain in the
 /// game, which is the drift `offscreen_draws_the_same_world` exists to catch.
 ///
-/// `from` is where this node's instances START — everything after it belongs to
+/// `from` is where this node's instances start — everything after it belongs to
 /// this node and nothing before it does.
 pub(crate) fn apply_node_tint(
     tint: Option<&floptle_core::Tint>,
@@ -11041,13 +11041,13 @@ pub(crate) fn apply_node_tint(
     flsl_draws: &mut [floptle_render::FlslDraw],
     skin_draws: &mut [floptle_render::SkinDraw],
     // The 2D lighting G-buffer. A flat node on the lit path draws UNLIT in the
-    // raster pass and is corrected by the light composite, which reads THIS
+    // raster pass and is corrected by the light composite, which reads this
     // copy of the colour — so a tint applied only to the raster instance is
     // corrected back out again by a pass that never heard about it.
     flat2d: &mut [(MeshId, Option<TexId>, floptle_render::Light2dInstance)],
 ) {
     let Some(t) = tint.filter(|t| !t.is_identity()) else { return };
-    // The one place that knows WHICH LANES a tint's rim and ambient live in:
+    // The one place that knows which LANES a tint's rim and ambient live in:
     // `params` is (shininess, rim strength, unlit, ambient) and `rim` is
     // (r, g, b, packed tiling flags) — so only `rim[..3]` may be written, and
     // `rim[3]` must survive, or a tinted node loses its texture tiling.
@@ -11110,7 +11110,7 @@ fn count_draw_batches(
 ///
 ///   this object's override  ▸  the node's Material  ▸  the part as imported
 ///
-/// The most specific one wins, WHOLE — its colour, its texture, its maps, its
+/// The most specific one wins, whole — its colour, its texture, its maps, its
 /// retro flags. Its own function because that sentence is the contract, and it
 /// used to be three-quarters true: a node Material multiplied its colour into
 /// each part's imported colour while its texture replaced outright, so a model
@@ -11121,7 +11121,7 @@ pub(crate) enum PartLook<'a> {
     /// This sub-object's own override material, plus the exact key it is
     /// stored under in `ObjectMaterials` — the object name or the material
     /// name, whichever matched. A per-part `.flsl` shader binding is keyed the
-    /// same way, so callers that need to find THIS override's shader (rather
+    /// same way, so callers that need to find this override's shader (rather
     /// than the node's own) need this back, not just the `Material`.
     Override(&'a str, &'a floptle_core::Material),
     /// The node-level Material, over every part of the model.
@@ -11140,9 +11140,9 @@ pub(crate) fn part_look_rule<'a>(
     node_material: Option<&'a MaterialParams>,
     imported_base: [f32; 3],
 ) -> PartLook<'a> {
-    // **A part answers to its object name AND to its material name.**
+    // **A part answers to its object name and to its material name.**
     //
-    // The object name is the precise one — it addresses ONE sub-object — but it
+    // The object name is the precise one — it addresses one sub-object — but it
     // is not the name anybody has. Import de-duplicates repeated node names, so
     // an avatar whose torso node is called `Torso` in Blender is keyed `Torso#2`
     // here, and an override written as `Torso` matched nothing at all and said
@@ -11157,7 +11157,7 @@ pub(crate) fn part_look_rule<'a>(
     if let Some(om) = obj_mats {
         // `get_key_value` rather than `get`: the returned key has to outlive
         // this call (a per-part `.flsl` binding is looked up by it later), and
-        // the map's OWN key — not the caller's `override_key`/`material_name`
+        // the map's own key — not the caller's `override_key`/`material_name`
         // argument — is the only one guaranteed to live that long.
         if let Some(k) = override_key
             && let Some((k, m)) = om.0.get_key_value(k)
@@ -11176,7 +11176,7 @@ pub(crate) fn part_look_rule<'a>(
     }
 }
 
-/// Shared by the main surface gather AND the offscreen `render_world_into` so the
+/// Shared by the main surface gather and the offscreen `render_world_into` so the
 /// fullscreen, docked, split, and camera-preview views all animate identically —
 /// previously the offscreen path drew every mesh rigidly at its root, so a character
 /// looked frozen whenever the Game view wasn't the fullscreen/focused one.
@@ -11199,7 +11199,7 @@ fn push_mesh_instances(
     // whatever the mesh imported with, so Blender paint still shows on unpainted nodes.
     node_paint: Option<&[u32]>,
     // The drawing entity + the per-entity skinned-buffer cache: each entity bakes
-    // its pose into its OWN clone of a skinned part's vertex buffer, so instances
+    // its pose into its own clone of a skinned part's vertex buffer, so instances
     // of one model animate independently.
     entity: Entity,
     variants: &mut anim::SkinVariants,
@@ -11207,7 +11207,7 @@ fn push_mesh_instances(
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
     // GPU-skinned parts land here instead of `instances` (`floptle/0080`): same
     // mesh, same material, but drawn through the `vs_skin` pipelines with this
-    // draw's bone palette. Several characters of one model stay ONE draw call,
+    // draw's bone palette. Several characters of one model stay one draw call,
     // which the CPU path could not manage — it had to give each entity a private
     // vertex buffer to bake its pose into.
     skins: &mut Vec<floptle_render::SkinDraw>,
@@ -11216,13 +11216,13 @@ fn push_mesh_instances(
     // Per-PART `.flsl` bindings — an `ObjectMaterials` override that names its
     // own shader, keyed by (this entity, the override's key). Looked up fresh
     // per part rather than threaded in like `flsl`, because unlike the node's
-    // shader this can differ PART TO PART.
+    // shader this can differ part to part.
     obj_flsl: &crate::shaders::ObjFlslBinds,
 ) {
     // A node's custom `.flsl` material routes every part through the shader's
     // pipeline instead of the built-in one — same instance data either way.
     // `part_flsl` overrides that per part: `None` inherits the node's `flsl`,
-    // `Some(x)` is the override's OWN answer (its own binding, or `None` for
+    // `Some(x)` is the override's own answer (its own binding, or `None` for
     // "built-in, and not the node's shader either" — seeing the override at
     // all already means the node's shader does not apply here).
     let mut push_for = |mid: MeshId,
@@ -11250,7 +11250,7 @@ fn push_mesh_instances(
     // one property this rule didn't reach yet.
     //
     // A model that looks right therefore carries no node Material at all. One is
-    // how you say "this whole model is made of THIS" — and per-object overrides
+    // how you say "this whole model is made of this" — and per-object overrides
     // are how you say it about one part.
     let part_look = |raster: &mut floptle_render::Raster,
                          asset: &MeshAsset,
@@ -11267,7 +11267,7 @@ fn push_mesh_instances(
             PartLook::Override(key, m) => {
                 let (t, p) = crate::shading::material_draw(raster, gpu, m, texture_registry, None);
                 // No shader named: built-in look, same as ever. A shader
-                // named: this part's OWN binding if it has compiled yet, or
+                // named: this part's own binding if it has compiled yet, or
                 // (for the frame or two before it has) the built-in look
                 // rather than the node's shader — an override that hasn't
                 // finished compiling is not the same as no override.
@@ -11277,7 +11277,7 @@ fn push_mesh_instances(
                     .then(|| obj_flsl.get(&(entity, key.to_string())).map(|b| b.binding));
                 (Some(t.unwrap_or_else(|| raster.white_texture(gpu))), p, part_flsl)
             }
-            // `tex` is this node Material's own texture. `None` there does NOT
+            // `tex` is this node Material's own texture. `None` there does not
             // mean "keep what the part had" — a bind of `None` is what makes the
             // MESH's texture draw, which is the imported look this material is
             // superseding. An untextured material means untextured, so it says
@@ -11292,7 +11292,7 @@ fn push_mesh_instances(
     let painted = |raster: &floptle_render::Raster, mid: MeshId, part: usize, base: MaterialParams| {
         let mut m = base;
         let brush = node_paint.and_then(|p| p.get(part).copied()).filter(|&b| b != 0);
-        // Brush paint modulates 2× (paint light AND shadow); imported glTF COLOR_0 stays a
+        // Brush paint modulates 2× (paint light and shadow); imported glTF COLOR_0 stays a
         // plain ×1 multiply, per the glTF convention (white = identity).
         m.paint_modulate = brush.is_some();
         m.paint_base = brush.unwrap_or_else(|| raster.mesh_paint_base(mid));
@@ -11316,7 +11316,7 @@ fn push_mesh_instances(
             // A custom `.flsl` material routes the part through its own pipeline,
             // which has no skinned variant — those parts keep the CPU deform.
             if skin_base != 0 && this_flsl.is_none() {
-                // GPU skinning: hand the pose over and draw the SHARED bind-pose
+                // GPU skinning: hand the pose over and draw the shared bind-pose
                 // buffer. `push_skin_pose` is the same arithmetic `cpu_skin_part`
                 // applies per vertex, done once per draw instead of once per vertex.
                 let palette: Vec<Mat4> = skin
@@ -11552,7 +11552,7 @@ mod readout_tests {
             "the buckets account for {accounted:.3} ms of a {step_ms:.3} ms step ({ratio:.2}) \
              — scripts {scripts:.3}, mirror {mirror:.3}, hooks {hooks:.3}"
         );
-        // …and the per-script hook figures are a PART of the Scripts bucket now,
+        // …and the per-script hook figures are a part of the Scripts bucket now,
         // not the whole of it. If they ever sum to more, the pass is being timed
         // twice.
         assert!(
@@ -11563,7 +11563,7 @@ mod readout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The 1% low has to SEE the slow frames. A mean cannot, which is the whole
+    /// The 1% low has to see the slow frames. A mean cannot, which is the whole
     /// reason it is reported beside one.
     #[test]
     fn the_one_percent_low_reports_the_worst_frames_not_the_average() {
@@ -11586,7 +11586,7 @@ mod readout_tests {
         assert!((steady.frame_time_low() - 6.9).abs() < 0.01);
     }
 
-    /// The 16-light cap says so ONCE per count, not every frame, and says
+    /// The 16-light cap says so once per count, not every frame, and says
     /// nothing while nothing is being cut (`floptle/0168`).
     #[test]
     fn the_light_cap_warns_once_per_count_and_falls_silent_under_it() {
@@ -11601,7 +11601,7 @@ mod readout_tests {
         // Each `ed.frame_no += 1` moves to a new simulated frame.
         // `render_world_into` runs several times per `render()` (Game view,
         // camera previews, a GI bake), each a different camera, so two calls
-        // at the SAME frame_no simulate two cameras in one frame — which must
+        // at the same frame_no simulate two cameras in one frame — which must
         // not each get their own say.
 
         ed.frame_no += 1;
@@ -11611,7 +11611,7 @@ mod readout_tests {
         ed.frame_no += 1;
         ed.warn_lights_dropped(24);
         assert_eq!(warns(&ed), 1, "24 dropped lights must say so");
-        // SAME frame, a second camera reporting a DIFFERENT count (an
+        // same frame, a second camera reporting a different count (an
         // orthographic minimap beside a perspective main camera, say) — must
         // not be read as the count "changing" and re-warn.
         ed.warn_lights_dropped(30);
@@ -11661,7 +11661,7 @@ fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl FnOnce() -> 
 /// The signature `docs/subsystems/renderer.md` already describes: `acquire`
 /// blocks for very close to a whole multiple (≥2) of the refresh period —
 /// the compositor presenting every Nth vblank rather than every one — while
-/// the frame's OWN work (`cost_ms`, the same subtraction the window title's
+/// the frame's own work (`cost_ms`, the same subtraction the window title's
 /// "cost" figure already does) is small next to that wait. A scene that is
 /// genuinely heavy can also land near a multiple by coincidence, which is
 /// exactly why `cost_ms` is the second half of the test: a real 40 ms scene
@@ -11696,7 +11696,7 @@ mod fifo_pacing_tests {
         assert_eq!(fifo_pacing_multiple(50.0, 0.3, 16.68), Some(3));
     }
 
-    /// An ordinary vsynced frame — `acquire` near ONE refresh — is not this.
+    /// An ordinary vsynced frame — `acquire` near one refresh — is not this.
     /// One refresh of waiting is just vsync working; the signature is being
     /// held for *more* than the display's own pace warrants.
     #[test]
@@ -11813,8 +11813,8 @@ mod tint_tests {
 mod refresh_tests {
     use super::chosen_refresh_period;
 
-    /// Measured on Ty's machine with `present_stats`: `current_monitor()` is
-    /// **NONE** at window creation and becomes `Some(DP-2, 144001)` once the
+    /// Measured with `present_stats`: `current_monitor()` is
+    /// **none** at window creation and becomes `Some(DP-2, 144001)` once the
     /// surface is mapped, while `available_monitors()` reports
     /// `[HDMI-A-1 59951, DP-2 144001]` correctly the entire time.
     #[test]
@@ -11833,7 +11833,7 @@ mod refresh_tests {
         // millisecond readout. 144.001 Hz -> 6.944 ms.
         assert!((live - 1.0 / 144.001).abs() < 1e-6, "{live}");
 
-        // A later transient None — an output hotplug, a window drag — must KEEP
+        // A later transient None — an output hotplug, a window drag — must keep
         // the good value rather than replace it with a guess about the other
         // monitor or with zero.
         let after = chosen_refresh_period(live, None, hdmi);
@@ -11875,7 +11875,7 @@ fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
             .monospace(),
         );
     });
-    // A 1% low several times the mean IS the stutter, whatever the fps says.
+    // A 1% low several times the mean is the stutter, whatever the fps says.
     if p.p99_ms > p.mean_ms * 2.0 {
         ui.small(
             egui::RichText::new(format!(
@@ -11938,7 +11938,7 @@ fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
 
 /// Draw the frame-cost readout.
 ///
-/// Two columns per row on purpose: the rolling mean AND the worst frame of the
+/// Two columns per row on purpose: the rolling mean and the worst frame of the
 /// last second. The spike is what anybody is ever chasing, and a mean hides it —
 /// a 40 ms hitch once a second adds under a millisecond to a 60-frame average.
 #[cfg(feature = "editor-ui")]
@@ -11992,7 +11992,7 @@ fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
 
     ui.add_space(6.0);
     ui.separator();
-    // BY SCRIPT NAME. The whole point: "scripts: 6 ms" does not answer "which of
+    // by script name. The whole point: "scripts: 6 ms" does not answer "which of
     // my scripts is doing this".
     ui.label(egui::RichText::new("per script").strong());
     if s.scripts.is_empty() {
@@ -12075,7 +12075,7 @@ mod lit_2d_tests {
                 assert_eq!(m.color, [0.0, 1.0, 0.0]);
                 // The key matters as much as the material: it is how a
                 // per-part `.flsl` binding for this override gets found again
-                // at draw time — the WRONG key silently loses the shader.
+                // at draw time — the wrong key silently loses the shader.
                 assert_eq!(k, "Torso#2");
             }
             _ => panic!("the object's own material is the most specific one"),
@@ -12256,7 +12256,7 @@ mod water_draw_tests {
 
     /// A Material's specular/shininess win outright once it exists — the same
     /// "most specific wins, whole" rule `part_look_rule` states for meshes —
-    /// but its default `alpha = 1.0` must NOT silently make the water opaque:
+    /// but its default `alpha = 1.0` must not silently make the water opaque:
     /// a water volume wearing a Material purely for `retro: (exempt: true)`
     /// keeps its translucency.
     #[test]
@@ -12287,7 +12287,7 @@ mod water_draw_tests {
         );
     }
 
-    /// An author who DOES dial in a specific alpha gets it.
+    /// An author who does dial in a specific alpha gets it.
     #[test]
     fn material_alpha_is_honoured_once_actually_set() {
         let ids = mesh_ids();
@@ -12322,7 +12322,7 @@ mod water_draw_tests {
     }
 
     /// Criterion 5, watched against the real surface-extras store: under a
-    /// project with `retro_dither_alpha: true`, a WaterVolume with NO Material
+    /// project with `retro_dither_alpha: true`, a WaterVolume with no Material
     /// stays on the project's (dithered) neutral entry — matching every other
     /// undecorated surface — while one carrying `retro: (exempt: true)` lands
     /// on its own, distinct entry. `push_surface_extras` is the only thing
@@ -12337,7 +12337,7 @@ mod water_draw_tests {
         // maps) — a capability CI's adapter does not have (the same class of
         // gap as "the raster pipeline cannot be built on OpenGL", already
         // documented in HANDOFF; wgpu's default uncaptured-error handler
-        // panics, so without this the FIRST test to build a full `Raster` on a
+        // panics, so without this the first test to build a full `Raster` on a
         // headless device anywhere finds that out by crashing the test binary).
         // Same idiom `doctor.rs` uses to answer "can this machine render" at
         // all: install a sink instead of the default panic, and if the
@@ -12384,11 +12384,11 @@ mod water_draw_tests {
 
         // A Material attached but touching nothing (not even `retro`) still
         // follows the project's dither, same as the materialless case above —
-        // it just lands on its OWN entry to get there, because an attached
+        // it just lands on its own entry to get there, because an attached
         // Material's other neutral values (e.g. `roughness = 0.5`) genuinely
         // differ from the GPU-wide neutral (`roughness = 1.0`) index 0 holds.
         // That is an existing, general property of `push_surface_extras` and
-        // not specific to water; the comparison below is against THIS index,
+        // not specific to water; the comparison below is against this index,
         // not against 0, so the test isolates what `retro.exempt` changes.
         let plain_material = Material::default();
         let (_, plain_mat) = water_draw(
@@ -12403,7 +12403,7 @@ mod water_draw_tests {
         let dithered_index = floptle_render::ext_index_of(&plain_mat);
 
         // `retro: (exempt: true)`, otherwise identical — must land on a
-        // DIFFERENT entry than the (still dithered) plain material above.
+        // different entry than the (still dithered) plain material above.
         let exempt = Material {
             retro: floptle_core::Retro { exempt: true, ..floptle_core::Retro::default() },
             ..Material::default()

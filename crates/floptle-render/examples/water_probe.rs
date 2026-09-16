@@ -1,4 +1,4 @@
-//! Water probe (`floptle/0038`): a body of water has to LOOK like water, not
+//! Water probe (`floptle/0038`): a body of water has to look like water, not
 //! like a coloured wall.
 //!
 //! Three things this checks, because all three were wrong at some point while
@@ -15,7 +15,7 @@
 //!    see-through, an ice world would read as a place you are about to fall
 //!    through — which is exactly what it used to be.
 //!
-//! What this probe CANNOT show: the specular highlight. `draw_scene` without a
+//! What this probe cannot show: the specular highlight. `draw_scene` without a
 //! field bind group shades flat in every probe in this directory (compare
 //! `material_probe`, whose "shiny" sphere is as flat as its "matte" one), so a
 //! highlight assertion here would be testing the harness, not the water. The
@@ -79,7 +79,7 @@ fn main() {
     );
     let globals = Globals {
         view_proj: cam.view_proj(1.0).to_cols_array_2d(),
-        // `light_dir` is the direction TO the light: up, and toward the viewer,
+        // `light_dir` is the direction to the light: up, and toward the viewer,
         // so the near-top shoulder of the water gets the highlight.
         // A sun coming over the viewer's shoulder and down, so the near face of
         // the water gets a highlight and the far side does not.
@@ -89,14 +89,14 @@ fn main() {
         ..Default::default()
     };
 
-    // A bright marker BEHIND the water: if the surface blends, this shows
+    // A bright marker behind the water: if the surface blends, this shows
     // through it; if it renders opaque, it does not.
     let marker = MaterialParams { unlit: true, ..MaterialParams::flat([1.0, 0.25, 0.1]) };
     let marker_at = Mat4::from_translation(Vec3::new(-1.6, 0.3, -1.0) - eye)
         * Mat4::from_scale(Vec3::splat(0.45));
 
     let tint = [0.10, 0.32, 0.38];
-    // LEFT: liquid, covering the marker. RIGHT: the same volume, frozen.
+    // LEFT: liquid, covering the marker. right: the same volume, frozen.
     let liquid = Mat4::from_translation(Vec3::new(-1.6, 0.3, 0.6) - eye)
         * Mat4::from_scale(Vec3::splat(1.4 / 0.85));
     let frozen = Mat4::from_translation(Vec3::new(1.7, 0.3, 0.6) - eye)
@@ -141,7 +141,7 @@ fn main() {
          an opaque water surface is a coloured wall you cannot see the seabed through"
     );
 
-    // 2. THE POOL scales to its half-extents, not the sphere's fit factor.
+    // 2. the POOL scales to its half-extents, not the sphere's fit factor.
     //    The drawn surface has to land where the SOLVER's box is, or you float
     //    at a waterline that is not the one you can see. Checked by colour: a
     //    pixel inside the pool's footprint must be the water, and one outside
@@ -154,7 +154,7 @@ fn main() {
     assert!(is_water(in_pool), "the pool should reach here, got {in_pool:?}");
     assert!(!is_water(beyond_pool), "the pool should NOT reach here, got {beyond_pool:?}");
 
-    // 3. FROZEN IS OPAQUE: the ice sphere must show its own tint, with the dark
+    // 3. FROZEN is OPAQUE: the ice sphere must show its own tint, with the dark
     //    background nowhere near as visible through it as through the liquid.
     let ice = at(0.72, 0.50);
     println!("ice {ice:?}");

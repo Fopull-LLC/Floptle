@@ -50,10 +50,10 @@ trait AnyColumn: Any {
 /// finding rows. Rows stay dense and unordered; only the way in changed.
 struct Column<T> {
     rows: Vec<(Entity, T)>,
-    /// How many times THIS column was handed out mutably — the per-type half
+    /// How many times this column was handed out mutably — the per-type half
     /// of [`World::revision`]. See [`World::revision_of`].
     revision: u64,
-    /// Entity index → row. Keyed by `index` alone, NOT the generation, because
+    /// Entity index → row. Keyed by `index` alone, not the generation, because
     /// that is what row lookup has always matched on: a stale handle to a
     /// reused slot finds the new occupant, and every caller above this already
     /// checks liveness where it matters.
@@ -164,7 +164,7 @@ impl World {
     /// Exists so a cache can tell "only transforms moved" from "something else
     /// might have": `revision() - revision_of::<Transform>()` is unchanged
     /// across a physics tick and changes on any spawn, despawn, attach, detach
-    /// or mutable access to any OTHER type. Structural operations (`insert`,
+    /// or mutable access to any other type. Structural operations (`insert`,
     /// `remove`, `spawn`, `despawn`) deliberately count against the global
     /// number only, so they always read as "something else" — the direction
     /// that is safe to be wrong in.
@@ -377,7 +377,7 @@ mod tests {
         assert!(w.is_alive(e2));
     }
 
-    /// Removing a row `swap_remove`s the LAST one into the hole. Whichever
+    /// Removing a row `swap_remove`s the last one into the hole. Whichever
     /// entity that was has moved, and its way back in has to move with it —
     /// forget that and every lookup after the first despawn reads a stranger's
     /// component. The scan this replaced could not get this wrong.

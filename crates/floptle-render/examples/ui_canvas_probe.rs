@@ -5,14 +5,14 @@
 //! sRGB target that was first cleared to the author's chosen backdrop. Two
 //! things there can silently go wrong and both look plausible on screen:
 //!
-//! 1. **The backdrop colour.** wgpu clear values are LINEAR and the target is
+//! 1. **The backdrop colour.** wgpu clear values are linear and the target is
 //!    sRGB, so a colour handed straight to `LoadOp::Clear` comes out visibly
 //!    too light. The editor pre-encodes it; this checks the byte that lands.
 //! 2. **The multi-resolution preview.** The whole claim of the resolution
 //!    dropdown is that re-solving at another shape shows what `Pin` and
 //!    `Stretch` actually do. If the canvas re-solved at the reference and then
 //!    merely stretched the image, every layout would look responsive and none
-//!    would be — so this renders the SAME layer at 16:9 and 21:9 and asserts
+//!    would be — so this renders the same layer at 16:9 and 21:9 and asserts
 //!    the elements moved the way each placement promises.
 //!
 //! Run: cargo run --release -p floptle-render --example ui_canvas_probe
@@ -251,7 +251,7 @@ fn main() {
     );
 
     // The backdrop survives the round trip. Rendered sRGB bytes are the picked
-    // colour × 255 (±1 for rounding), NOT the ~40%-too-light value you get by
+    // colour × 255 (±1 for rounding), not the ~40%-too-light value you get by
     // handing a display colour to a linear clear.
     let corner = wide.at(4, wide.h - 4);
     let want = backdrop.map(|c| (c * 255.0).round() as i32);
@@ -301,7 +301,7 @@ fn main() {
         "the header should have grown into the extra width, found backdrop: {header_far:?}"
     );
 
-    // 2 — the FREE panel did NOT move: free placement is absolute, and a tool
+    // 2 — the FREE panel did not move: free placement is absolute, and a tool
     // that quietly re-flowed it would be lying about what Free means.
     let free_wide = ultra.at_design(200.0, 250.0);
     println!("free panel at 21:9: {free_wide:?}");
@@ -311,7 +311,7 @@ fn main() {
     );
 
     // 3 — the bottom-right PIN tracked the corner: it is no longer near where
-    // it sat at 16:9, and it IS near the new corner.
+    // it sat at 16:9, and it is near the new corner.
     let old_corner = ultra.at_design(1280.0 - 100.0, 720.0 - 60.0);
     let new_corner = ultra.at_design(vp_w - 100.0, 720.0 - 60.0);
     println!("bottom-right pin: at old corner {old_corner:?}, at new corner {new_corner:?}");
@@ -327,7 +327,7 @@ fn main() {
     assert!(mid[0] > 200 && mid[1] > 150 && mid[2] < 140, "centre badge re-centred: {mid:?}");
     println!("21:9 OK → ui_canvas_21x9.png");
 
-    // ---- zoom renders MORE pixels, not a stretched image ----
+    // ---- zoom renders more pixels, not a stretched image ----
     println!("16:9 @ 200% zoom");
     let zoomed = canvas(
         &gpu,

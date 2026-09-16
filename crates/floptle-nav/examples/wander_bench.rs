@@ -6,7 +6,7 @@
 //! `tests/scaling.rs`, which asserts a ratio, because a duration on a shared
 //! runner is a coin flip.
 //!
-//! The pillars matter: a flat square merges into ONE polygon and measures
+//! The pillars matter: a flat square merges into one polygon and measures
 //! nothing at all.
 //!
 //! Run: `cargo run --release -p floptle-nav --example wander_bench`
@@ -22,7 +22,7 @@ fn main() {
     let mut tris = Vec::new();
     quad(-100.0, -100.0, 200.0, 200.0, &mut tris);
     // Pillars, so the walkable surface fragments into many polygons — a flat
-    // square merges into ONE rect and measures nothing at all.
+    // square merges into one rect and measures nothing at all.
     for i in 0..40 {
         for j in 0..40 {
             let (x, z) = (-98.0 + i as f32 * 5.0, -98.0 + j as f32 * 5.0);

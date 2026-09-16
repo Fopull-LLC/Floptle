@@ -8,18 +8,18 @@
 //!
 //! Two changes came out of that, and neither is safe by inspection:
 //!
-//! * a sample is HELD for a run of steps (`fog_noise_stride`), and
+//! * a sample is held for a run of steps (`fog_noise_stride`), and
 //! * octaves finer than a step are replaced by their mean (`cloud_fbm_lod`).
 //!
 //! Both trade exactness for speed, so both need a check that would fail if the
 //! trade went too far. `fog_probe` cannot be that check — it runs with noise
-//! switched OFF on purpose, so every assertion in it passed unchanged while this
+//! switched off on purpose, so every assertion in it passed unchanged while this
 //! code was being rewritten underneath it.
 //!
 //! **The assertions are convergence, not appearance.** A held sample is only
 //! sound if the picture it produces is the picture the un-held march was
 //! converging to, and the way to ask that without a golden image is to render
-//! the same fog at step counts that produce DIFFERENT strides and require the
+//! the same fog at step counts that produce different strides and require the
 //! results to agree. A stride that lost the noise, doubled it, or thinned the
 //! fog would move one of them and not the other.
 //!
@@ -56,7 +56,7 @@ fn main() {
 // The failure this guards is the quiet one: a stride that came out as "hold the
 // first sample for the whole ray" produces perfectly smooth fog that looks
 // entirely reasonable on its own, costs almost nothing, and is wrong. Switching
-// the noise on has to MOVE pixels.
+// the noise on has to move pixels.
 fn the_noise_actually_reaches_the_picture(gpu: &Gpu, rm: &Raymarch, dir: &str) {
     let off = shot(gpu, rm, 0.0, 18.0, 16.0);
     let on = shot(gpu, rm, 0.9, 18.0, 16.0);
@@ -69,7 +69,7 @@ fn the_noise_actually_reaches_the_picture(gpu: &Gpu, rm: &Raymarch, dir: &str) {
     // **Per pixel, not per frame.** A frame's own spread is dominated by the
     // lamp's glow, which is there either way — comparing the two totals would
     // pass with the noise switched off entirely. What has to be shown is that
-    // turning the noise on MOVED pixels, so the comparison is pixel against
+    // turning the noise on moved pixels, so the comparison is pixel against
     // matching pixel.
     let moved = mean_abs_diff(&off, &on);
     println!("noise moves the picture by {moved:.4} per pixel");
@@ -92,7 +92,7 @@ fn mean_abs_diff(a: &[[u8; 4]], b: &[[u8; 4]]) -> f32 {
 //
 // Step counts of 8, 16 and 48 give three different strides over the same field.
 // If holding a sample changed the answer rather than just the cost, they would
-// disagree — and they are compared on the MEAN, because the point at issue is
+// disagree — and they are compared on the mean, because the point at issue is
 // whether the fog's total density survived, not whether two different march
 // cadences put their lumps in identical places.
 fn a_held_sample_lands_where_the_march_was_going(gpu: &Gpu, rm: &Raymarch, dir: &str) {
@@ -117,7 +117,7 @@ fn a_held_sample_lands_where_the_march_was_going(gpu: &Gpu, rm: &Raymarch, dir: 
 }
 
 // ---------------------------------------------------------------------------
-// 3. A dropped octave contributes its MEAN, not nothing.
+// 3. A dropped octave contributes its mean, not nothing.
 //
 // `cloud_fbm_lod` stops sampling octaves finer than a step can resolve. Dropping
 // them outright would remove their average as well as their variation, and the

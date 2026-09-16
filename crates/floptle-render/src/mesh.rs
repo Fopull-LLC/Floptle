@@ -42,7 +42,7 @@ pub struct MeshData {
     /// Per-vertex paint color (RGBA8), parallel to `vertices` — `None` for unpainted
     /// geometry. It is a SEPARATE stream (like `SkinStream`'s joints/weights) rather
     /// than a `Vertex` field for one hard reason: the raster vertex-attribute budget is
-    /// FULL at 16/16 (`Vertex::ATTRS` 0..2 + `INSTANCE_ATTRS` 3..15, against
+    /// full at 16/16 (`Vertex::ATTRS` 0..2 + `INSTANCE_ATTRS` 3..15, against
     /// `Limits::default()`'s 16), so a color attribute cannot exist. Colors reach the
     /// GPU through the `vpaint` storage buffer instead, indexed by `vertex_index`.
     /// Must be empty or exactly `vertices.len()` long.
@@ -63,7 +63,7 @@ pub struct MeshData {
 /// UVs are zero: terrain has no meaningful unwrap, and its material is triplanar.
 ///
 /// The colour's ALPHA byte carries the painted TEXTURE-SLOT INDEX (`Terrain::flat`: "0 =
-/// untextured", 1 = palette layer 0, …), NOT opacity — the terrain splat shader reads it as
+/// untextured", 1 = palette layer 0, …), not opacity — the terrain splat shader reads it as
 /// a slot and triplanar-samples the palette. The instance's `terrain_splat` flag tells the
 /// fragment shader to interpret alpha this way and force the surface opaque; without the
 /// flag a slot index would read as a near-zero alpha and the chunk would be discarded. The
@@ -336,7 +336,7 @@ pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshD
     oriented(vertices, indices)
 }
 
-/// A flat square of half-extent `half` in the XY plane, facing +Z. ONE face:
+/// A flat square of half-extent `half` in the XY plane, facing +Z. one face:
 /// no pass culls, so the same two triangles rasterize from either side, and
 /// the fragment paths flip the shading normal toward the viewer
 /// (`facing_normal` in raster.wgsl). A second, coplanar back face — the old
@@ -357,7 +357,7 @@ pub fn plane(half: f32) -> MeshData {
     oriented(vertices, vec![0, 1, 2, 0, 2, 3])
 }
 
-/// A grid of spritesheet cells as ONE mesh, centred on the origin in the XY
+/// A grid of spritesheet cells as one mesh, centred on the origin in the XY
 /// plane, facing +Z (`floptle/0058`).
 ///
 /// `data` is row-major from the TOP-LEFT, `cols * rows` long; a cell of
@@ -413,10 +413,10 @@ pub fn tilemap(
             }
             let cell = floptle_core::tile_index(packed);
             let xf = floptle_core::tile_xform(packed);
-            // The two expressions below are the ONLY place a tile edge is
+            // The two expressions below are the only place a tile edge is
             // computed, which is what makes neighbouring edges identical.
             let (x0, x1) = (col as f32 * tile - w, (col + 1) as f32 * tile - w);
-            // Row 0 is the TOP of the map, so y descends as row grows.
+            // Row 0 is the top of the map, so y descends as row grows.
             let (y1, y0) = (h - row as f32 * tile, h - (row + 1) as f32 * tile);
 
             let (cx, cy) = (cell % sc, cell / sc);
@@ -427,13 +427,13 @@ pub fn tilemap(
             // The quad's four corners in (s, t) — s left→right, t bottom→top —
             // paired with the position they sit at. The UV comes from asking the
             // orientation which corner of the ART lands here, so a rotated tile
-            // is the SAME geometry with permuted UVs: shared edges stay
+            // is the same geometry with permuted UVs: shared edges stay
             // bit-identical and the seam fix survives rotation.
             for (s, t, px, py) in [(0u8, 0u8, x0, y0), (1, 0, x1, y0), (1, 1, x1, y1), (0, 1, x0, y1)]
             {
                 let (a, b) = floptle_core::tile_corner(s, t, xf);
                 let u = if a == 0 { u0 } else { u1 };
-                // Texture v runs DOWN, so the art's top (b = 1) is the smaller v.
+                // Texture v runs down, so the art's top (b = 1) is the smaller v.
                 let v = if b == 0 { v1 } else { v0 };
                 vertices.push(Vertex { pos: [px, py, 0.0], normal: [0.0, 0.0, 1.0], uv: [u, v] });
             }
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn plane_is_one_face_and_flat() {
         let m = plane(0.7);
-        // ONE face: a coplanar back face z-fights the front (uv shard glitch).
+        // one face: a coplanar back face z-fights the front (uv shard glitch).
         assert_eq!(m.vertices.len(), 4);
         assert_eq!(m.indices.len(), 6);
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
@@ -671,7 +671,7 @@ mod tilemap_tests {
     /// this replaces.
     #[test]
     fn neighbouring_tiles_share_an_exact_edge() {
-        // A tile size that is NOT a round binary number, which is the case the
+        // A tile size that is not a round binary number, which is the case the
         // real project hit (32 px at 240p works out to 1.4364 world units).
         let tile = 1.436_4_f32;
         let m = tilemap(4, 3, tile, 2, 2, [0.0, 0.0], &[0; 12]);
@@ -725,7 +725,7 @@ mod tilemap_tests {
         assert!(m.vertices.is_empty());
     }
 
-    /// The grid is centred on the node's origin, and row 0 is the TOP.
+    /// The grid is centred on the node's origin, and row 0 is the top.
     #[test]
     fn the_grid_is_centred_and_row_zero_is_the_top() {
         let m = tilemap(2, 2, 2.0, 1, 1, [0.0, 0.0], &[0; 4]);
@@ -739,7 +739,7 @@ mod tilemap_tests {
         assert!(m.vertices[0].pos[1] >= 0.0, "row 0 must be the top of the map");
     }
 
-    /// A rotated or mirrored tile is the SAME geometry with permuted UVs.
+    /// A rotated or mirrored tile is the same geometry with permuted UVs.
     ///
     /// That is the whole reason the orientation rides in the cell value rather
     /// than being a per-tile transform: if a turned tile moved its own corners,
@@ -757,7 +757,7 @@ mod tilemap_tests {
             for (i, (a, b)) in plain.vertices.iter().zip(&turned.vertices).enumerate() {
                 assert_eq!(a.pos.map(f32::to_bits), b.pos.map(f32::to_bits), "{xf:?} moved vertex {i}");
             }
-            // The UVs of one tile are the same FOUR corners, reordered — never a
+            // The UVs of one tile are the same four corners, reordered — never a
             // different window, and never fewer than four distinct corners.
             let uvs = |m: &MeshData| {
                 let mut v: Vec<[u32; 2]> =

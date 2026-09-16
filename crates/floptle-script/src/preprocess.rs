@@ -109,10 +109,10 @@ pub(crate) fn lvalue_start(out: &[u8], end: usize) -> usize {
 }
 
 /// Rewrite Lua compound-assignment operators (`+= -= *= /= %= ^= ..=`) — which
-/// Lua 5.1 / LuaJIT do NOT support — into plain assignments before compiling, e.g.
+/// Lua 5.1 / LuaJIT do not support — into plain assignments before compiling, e.g.
 /// `x += y` → `x = x + (y)`, `t.k *= a + b` → `t.k = t.k * (a + b)`. A single-pass
 /// scanner skips strings and comments (so `"a += b"` and `-- a += b` are untouched)
-/// and adds NO newlines, so error line numbers stay correct. The `(R)` parentheses
+/// and adds no newlines, so error line numbers stay correct. The `(R)` parentheses
 /// preserve precedence.
 pub(crate) fn preprocess(src: &str) -> String {
     let b = src.as_bytes();

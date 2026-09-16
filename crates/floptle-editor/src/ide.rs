@@ -140,7 +140,7 @@ impl IdeState {
 
     /// Save open file `i` to disk. Returns whether the write succeeded.
     ///
-    /// Formatting is NOT done here: it needs the caret, which lives in egui and
+    /// Formatting is not done here: it needs the caret, which lives in egui and
     /// belongs to the caller (see `format_file`). A save that silently re-indents
     /// and leaves the caret at a stale offset puts your next keystroke somewhere
     /// else — a worse bug than un-formatted code.
@@ -2609,7 +2609,7 @@ impl EditorTabViewer<'_> {
         }
         let n = self.ide.lints.len();
         let amber = egui::Color32::from_rgb(230, 180, 90);
-        // The strip is ALWAYS one line, warnings or not. Drawing it only when
+        // The strip is always one line, warnings or not. Drawing it only when
         // there are warnings resized the editor under the caret as they appeared
         // and disappeared mid-typing — a half-written `local` is briefly an unused
         // one — which is the "nothing moves on its own" rule this editor is held to.
@@ -2651,7 +2651,7 @@ impl EditorTabViewer<'_> {
                     // A suggestion, not a defect — its own mark so the strip
                     // reads as "here is a better way", not "here is a bug".
                     crate::lua_lint::LintKind::RawInput => "➜",
-                    // This one IS a defect, and a total one: the hook raises on
+                    // This one is a defect, and a total one: the hook raises on
                     // its first sum, so the script does nothing whatsoever.
                     crate::lua_lint::LintKind::HookSignature => "✖",
                     // Also a defect: the binding cannot ever fire, and the
@@ -2713,7 +2713,7 @@ impl EditorTabViewer<'_> {
         }
         let cursor = range.primary.index.0;
         let (start, token) = current_token(&self.ide.open[i].text, cursor);
-        // WHEN THE POPUP OPENS ON ITS OWN: only for MEMBER ACCESS — after a `.`
+        // when the POPUP opens on its own: only for MEMBER ACCESS — after a `.`
         // or `:`, which is exactly the moment you're asking what fields a thing
         // has, and where the answer is short-lived. A plain identifier does not
         // summon it (that was the intrusive case: a popup over your code every
@@ -3778,7 +3778,7 @@ fn api_entry_for(word: &str) -> Option<&'static ApiEntry> {
     if let Some(a) = LUA_API.iter().find(|a| a.label == word) {
         return Some(a);
     }
-    // `foo:bar` / `foo.bar` — the LAST separator, so `a.b:c` resolves on `c`.
+    // `foo:bar` / `foo.bar` — the last separator, so `a.b:c` resolves on `c`.
     let sep = word.rfind([':', '.'])?;
     let (member, ch) = (&word[sep + 1..], word.as_bytes()[sep] as char);
     if member.is_empty() {
@@ -3838,7 +3838,7 @@ fn inline_doc_label(ui: &mut egui::Ui, text: &str, mono: &egui::FontId) {
     ui.add(egui::Label::new(job).selectable(true));
 }
 
-/// Every API name the engine provides, as bare identifiers — the ROOT of each
+/// Every API name the engine provides, as bare identifiers — the root of each
 /// entry (`node:getcomponent` → `node`, `math.clamp` → `math`). The lints use this
 /// so "that's not a thing" can never disagree with what autocomplete offers.
 pub(crate) fn api_labels() -> Vec<String> {
@@ -4416,7 +4416,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "node.index", insert: "node.index", doc: "Which row of a UI repeater this node is, 0-based — nil on anything a repeater didn't spawn, so `if node.index then` is a fine \"am I a row\". Read the count with getcomponent(\"UiElement\").count on the container." },
 
     // ---- Added by the API-coverage audit -------------------------------
-    // Every one of these is reachable from a script and had NO reference row:
+    // Every one of these is reachable from a script and had no reference row:
     // the whole of water.*, scatter.*, assembly.*, physics.*, the shape
     // queries, half of draw.*, the gamepad calls, and sixteen table
     // overviews. `lua_api_reference_covers_the_whole_surface` now fails if
@@ -4556,7 +4556,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "water.volumes", insert: "water.volumes()", doc: "water.volumes() — every body of water in the scene, as node handles. What a climate or weather system iterates when it wants to know where the seas are." },
 
     // ---- Handle members ------------------------------------------------
-    // Everything reachable THROUGH a handle rather than by name: the component
+    // Everything reachable through a handle rather than by name: the component
     // handles `node:getcomponent` returns, the sound/track/particle handles,
     // vec3/vec2's own methods, a raycast hit's fields. `api_surface()` cannot
     // see these — they live on metatables and userdata — so they are checked
@@ -5522,7 +5522,7 @@ mod tests {
     ///
     /// The list of names comes from [`floptle_script::ScriptHost::api_surface`],
     /// which diffs a live Lua state against a bare one — so this is checked
-    /// against what the engine ACTUALLY installs, never against a second list
+    /// against what the engine actually installs, never against a second list
     /// that could rot in the same direction as the first.
     ///
     /// It found 69 undocumented names the first time it ran: the whole of
@@ -5566,7 +5566,7 @@ mod tests {
         // that covers it, rather than being silently absent.
         //
         // The all-lowercase `getchild` / `getscript` / `getcomponent` /
-        // `getparent` were the ORIGINAL spellings and go on working; they are
+        // `getparent` were the original spellings and go on working; they are
         // here rather than in the reference because every other node method is
         // camelCase, and one exception that only autocomplete knows about is
         // exactly how `node:getChild(...)` came to die as "a nil value".
@@ -5876,7 +5876,7 @@ mod tests {
         assert!(long <= formatted.chars().count());
     }
 
-    /// Every API entry that has a worked example must name a REAL entry — an
+    /// Every API entry that has a worked example must name a real entry — an
     /// example keyed to a label that no longer exists is invisible, so it would rot
     /// silently as the API is renamed.
     #[test]
@@ -5885,7 +5885,7 @@ mod tests {
         let orphans: Vec<&str> =
             API_EXAMPLES.iter().map(|(l, _)| *l).filter(|l| !known.contains(l)).collect();
         assert!(orphans.is_empty(), "examples for entries that don't exist: {orphans:?}");
-        // And every example must be Lua THE ENGINE can parse — checked through the
+        // And every example must be Lua the engine can parse — checked through the
         // script host itself, so an example can't be valid-looking Lua that the
         // preprocessor or LuaJIT rejects. A copyable example that doesn't compile is
         // worse than no example.
@@ -5904,7 +5904,7 @@ mod tests {
     }
 
     /// The Docs page renders its guides, the API reference, and the worked
-    /// examples — with a REAL screen rect, because a headless pass with none lays
+    /// examples — with a real screen rect, because a headless pass with none lays
     /// out into nothing and would "pass" while drawing zero widgets.
     #[test]
     fn the_docs_page_renders_its_guides_and_examples() {

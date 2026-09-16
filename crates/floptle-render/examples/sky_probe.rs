@@ -1,4 +1,4 @@
-//! Headless render probe — a textured skybox in a scene with NO terrain and NO
+//! Headless render probe — a textured skybox in a scene with no terrain and no
 //! blobs (plus two reference meshes), to a PNG. This is the empty-march sky path:
 //! every ray misses every bound (zero steps) and samples the equirect, which is
 //! how a terrain-less scene draws its sky. The equirect is a generated latitude
@@ -90,7 +90,7 @@ fn main() {
         mesh(sphere_id, [1.8, 0.0, 0.0], [0.4, 0.7, 0.95]),
     ];
 
-    // ZERO blobs (params[1] = 0) and NO terrain volumes — the whole raymarch pass
+    // zero blobs (params[1] = 0) and no terrain volumes — the whole raymarch pass
     // is sky. sky_params[0] = 1 (textured), identity rotation.
     let rm = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),

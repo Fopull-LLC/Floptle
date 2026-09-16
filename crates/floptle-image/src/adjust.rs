@@ -270,7 +270,7 @@ pub fn eval_curve(points: &[(f32, f32)], t: f32) -> f32 {
         if t >= w[0].0 && t <= w[1].0 {
             let d = (w[1].0 - w[0].0).max(1e-6);
             let f = (t - w[0].0) / d;
-            // Deliberately LINEAR between keys: a two-point 0→1 curve has to be
+            // Deliberately linear between keys: a two-point 0→1 curve has to be
             // exactly the identity, or "Curves, untouched" would quietly regrade
             // the image. Add keys to get a curve.
             return w[0].1 + (w[1].1 - w[0].1) * f;

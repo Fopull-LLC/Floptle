@@ -8,7 +8,7 @@
 //!
 //! ## Layers are nodes
 //!
-//! There is no layer list here. A tilemap layer is a `Matter::Tilemap` NODE: it
+//! There is no layer list here. A tilemap layer is a `Matter::Tilemap` node: it
 //! already has a transform (so Z orders it), a Material (so each layer has its
 //! own sheet), a `Visible` flag, a name and a place in the Hierarchy. The tab's
 //! layer list is a view of the scene's tilemap nodes, and hiding a layer is the
@@ -37,9 +37,9 @@ use crate::Editor;
 pub(crate) struct TileStore {
     /// Project-relative path → the parsed tileset.
     pub(crate) sets: HashMap<String, TileSet>,
-    /// Paths whose file exists but could NOT be parsed.
+    /// Paths whose file exists but could not be parsed.
     ///
-    /// While a path is in here the store is NOT the authority for it: it is not
+    /// While a path is in here the store is not the authority for it: it is not
     /// healed into a blank tileset and it is never saved over. A blank tileset
     /// written over a parse failure would silently un-solid an entire level and
     /// erase every autotile group — the same failure mode that ate a night of
@@ -237,7 +237,7 @@ pub(crate) struct TileTools {
     /// A set rather than one cell, because "these forty tiles are all solid" and
     /// "these six are the same slope" are the two things setting up a sheet
     /// actually consists of, and doing them one tile at a time is where the
-    /// afternoon goes. Every control in the TILE section writes to all of it.
+    /// afternoon goes. Every control in the tile section writes to all of it.
     ///
     /// Driven by the palette: a click selects one, a drag selects the band,
     /// ctrl-click adds or removes one so the set does not have to be a
@@ -312,7 +312,7 @@ impl TileTools {
         if self.stamp.cols <= 1 && self.stamp.rows <= 1 {
             self.stamp.reoriented(self.xform)
         } else {
-            // A multi-square stamp turns as a whole: layout AND each square.
+            // A multi-square stamp turns as a whole: layout and each square.
             let mut s = self.stamp.clone();
             for _ in 0..(self.xform.rot & 3) {
                 s = s.rotated_cw();
@@ -325,7 +325,7 @@ impl TileTools {
     }
 }
 
-/// Add a tilemap node's colliders to a sim — the ONE implementation, called by
+/// Add a tilemap node's colliders to a sim — the one implementation, called by
 /// both the play sim (`play.rs`) and the hidden server's (`net.rs`).
 ///
 /// Two copies of this would be two answers to "where is the floor", and the
@@ -334,7 +334,7 @@ impl TileTools {
 /// are already parallel copies of each other for meshes and primitives; this is
 /// the one shape that does not join them.
 ///
-/// Depth is half a tile each way: a 2D collider has to have SOME depth to be a
+/// Depth is half a tile each way: a 2D collider has to have some depth to be a
 /// box, and the tile's own size is the only defensible choice — it keeps a
 /// character with any thickness inside the layer rather than passing through a
 /// paper-thin wall.
@@ -355,7 +355,7 @@ pub(crate) fn add_tilemap_colliders(
     let s = xf.scale;
     let depth = (*tile * 0.5 * s.z.abs().max(1e-3)).max(1e-3);
     for b in &shapes.boxes {
-        // Each box's centre is in the node's LOCAL frame, so it goes through the
+        // Each box's centre is in the node's local frame, so it goes through the
         // node's rotation and scale exactly like the mesh does: a rotated or
         // scaled tilemap collides where it draws.
         let local = Vec3::new(b.cx * s.x, b.cy * s.y, 0.0);
@@ -580,7 +580,7 @@ impl Editor {
         let (lx, ly) = (rel.x / xf.scale.x, rel.y / xf.scale.y);
         let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
         let fx = (lx + w) / tile;
-        // Row 0 is the TOP, so the row index counts down from +h.
+        // Row 0 is the top, so the row index counts down from +h.
         let fy = (h - ly) / tile;
         let (x, y) = (fx.floor() as i32, fy.floor() as i32);
         (x >= 0 && y >= 0 && x < cols as i32 && y < rows as i32).then_some((x, y))
@@ -624,7 +624,7 @@ impl Editor {
     /// What a brush stroke places at `(x, y)`: the armed stamp, or — when a group
     /// is armed — that group's tile for the neighbourhood.
     ///
-    /// A group's tile is resolved AFTER the write by the retile pass, so this only
+    /// A group's tile is resolved after the write by the retile pass, so this only
     /// has to place *a* tile of the group for the square to join it. It places the
     /// group's lowest-numbered tile, and the retile then corrects it along with
     /// every neighbour. Trying to resolve it here would read a neighbourhood the
@@ -658,7 +658,7 @@ impl Editor {
 
         match self.tile_tools.tool {
             TileTool::Pick => {
-                // The eyedropper is immediate and NOT an undoable edit: it changes
+                // The eyedropper is immediate and not an undoable edit: it changes
                 // the tool, not the map.
                 if let Some(p) = self.with_grid(|g| g.get(x, y)).flatten()
                     && p != floptle_core::EMPTY_TILE
@@ -737,7 +737,7 @@ impl Editor {
             return;
         }
         let (Some(a), Some(cursor)) = (from, cursor) else { return };
-        // A drag that ends off the grid commits to the last square that WAS on it,
+        // A drag that ends off the grid commits to the last square that was on it,
         // which is what "drag past the edge to fill to the edge" means.
         let b = self.tile_cell_under(cursor).unwrap_or(a);
 
@@ -774,7 +774,7 @@ impl Editor {
         self.begin_edit();
         let stamp = self.stroke_stamp();
         let cell = stamp.data.first().copied().unwrap_or(floptle_core::EMPTY_TILE);
-        // Read the tool out BEFORE the closure: `with_grid` takes `&mut self` and
+        // Read the tool out before the closure: `with_grid` takes `&mut self` and
         // the closure would otherwise hold a borrow of `self.tile_tools` across it.
         let tool = self.tile_tools.tool;
         let changed = self
@@ -925,7 +925,7 @@ impl Editor {
         self.console.push(floptle_script::LogLevel::Debug, format!("tiles: {msg}"), None);
     }
 
-    /// Every tileset the CURRENT SCENE references, for lending to the script host
+    /// Every tileset the current scene references, for lending to the script host
     /// and for building collision.
     ///
     /// Keyed by the path the nodes name, so a node whose tileset failed to load
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn a_stroke_tool_is_not_a_drag_tool() {
         // The press handler branches on these, and a tool that claimed both would
-        // paint on press AND commit a rectangle on release.
+        // paint on press and commit a rectangle on release.
         for t in TileTool::ALL {
             assert!(!(t.is_stroke() && t.is_drag()), "{t:?} is both a stroke and a drag");
         }
@@ -1074,7 +1074,7 @@ impl Editor {
             let wp = xf.translation + (xf.rotation * (xf.scale * p)).as_dvec3();
             crate::viz::project(wp, cam.world_position, vp, w, h)
         };
-        // Grid space → the layer's local frame. Row 0 is the TOP, matching the
+        // Grid space → the layer's local frame. Row 0 is the top, matching the
         // mesh and every coordinate the tools use.
         let (hw, hh) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
         let corner = |x: f32, y: f32| Vec3::new(x * tile - hw, hh - y * tile, 0.0);
@@ -1129,7 +1129,7 @@ impl Editor {
             && !tileset.is_empty()
             && let Some(set) = self.tiles.get(tileset)
         {
-            // The merged boxes — the SAME ones the sim gets, so what you see is
+            // The merged boxes — the same ones the sim gets, so what you see is
             // what a character walks on. Drawing per-tile outlines instead would
             // show a grid that does not exist in the physics world.
             for b in floptle_tiles::collision_shapes(cols, rows, tile, data, set).boxes {

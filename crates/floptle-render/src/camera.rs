@@ -29,7 +29,7 @@ pub struct Input {
 ///
 /// Building a 2D game in a 3D editor means fighting the camera: every drag
 /// nudges you a little off-axis until "flat" is a thing you keep re-achieving
-/// rather than a thing you have. A locked view is square to its plane and STAYS
+/// rather than a thing you have. A locked view is square to its plane and stays
 /// square — mouse-look does nothing, and moving slides you around the plane
 /// instead of through it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,7 +51,7 @@ impl ViewLock {
     fn angles(self) -> (f32, f32) {
         use std::f32::consts::FRAC_PI_2;
         match self {
-            // EXACTLY straight down, not the near-miss the free-look clamp
+            // exactly straight down, not the near-miss the free-look clamp
             // uses. A locked view never calls `look`, so there is no gimbal to
             // dodge — and a fraction of a degree off square is the difference
             // between W sliding across the map and W slowly sinking into it.
@@ -193,7 +193,7 @@ impl FlyCamera {
     /// Dolly along the view direction (mouse wheel): positive `amount` moves forward
     /// (toward what you're looking at). Steps scale with the fly speed.
     ///
-    /// Under an orthographic view, moving forward changes NOTHING you can see — the
+    /// Under an orthographic view, moving forward changes nothing you can see — the
     /// view is the same height at every distance. So there the wheel changes the
     /// height instead, multiplicatively, which is the only thing "zoom" can mean.
     /// (Getting this wrong is not subtle: the wheel simply appears dead, and the
@@ -217,7 +217,7 @@ impl FlyCamera {
     /// Integrate movement for `dt` seconds from the held keys.
     pub fn update(&mut self, input: &Input, dt: f32) {
         let rot = self.rotation();
-        // Locked: W/S slide UP and DOWN the plane you are looking at rather than
+        // Locked: W/S slide up and down the plane you are looking at rather than
         // flying into it. On a Top view, forward is straight down — pressing W
         // would otherwise bury the camera in the floor, which is the single most
         // annoying thing about using a 3D fly camera as a 2D one.
@@ -237,7 +237,7 @@ impl FlyCamera {
             dir -= right;
         }
         // Space/Ctrl keep their world-up meaning when free. Locked, they are the
-        // only way to move ALONG the view axis (step a 2D layer forward/back),
+        // only way to move along the view axis (step a 2D layer forward/back),
         // which is occasionally exactly what you want.
         let axis = if self.lock.is_locked() { rot * Vec3::NEG_Z } else { Vec3::Y };
         if input.up {
@@ -254,7 +254,7 @@ impl FlyCamera {
 
     /// The renderer-facing camera for this frame.
     pub fn render_camera(&self) -> RenderCamera {
-        // An orthographic view needs its near plane BEHIND the camera: the box
+        // An orthographic view needs its near plane behind the camera: the box
         // has no apex, so things level with the camera are in frame, and a near
         // plane at +0.1 would slice the layer you are working on in half. The
         // range comes from `ORTHO_DEPTH` rather than a literal here, because a
@@ -341,7 +341,7 @@ mod tests {
         assert!(cam.position.y.abs() < 1e-3, "W must not dive: y = {}", cam.position.y);
         assert!(cam.position.z.abs() > 0.5, "W moves across the plane: {:?}", cam.position);
 
-        // Space/Ctrl are the deliberate way THROUGH the plane (step a layer).
+        // Space/Ctrl are the deliberate way through the plane (step a layer).
         let mut cam = FlyCamera { position: DVec3::ZERO, ..Default::default() };
         cam.set_lock(ViewLock::Top);
         cam.update(&Input { up: true, ..Default::default() }, 1.0);
@@ -364,7 +364,7 @@ mod tests {
         assert!(cam.position.y > 0.5 && cam.position.x.abs() < 1e-3, "{:?}", cam.position);
     }
 
-    /// The wheel has to do SOMETHING under an orthographic view. Moving forward
+    /// The wheel has to do something under an orthographic view. Moving forward
     /// changes nothing you can see there, so it must change the height instead —
     /// otherwise the wheel simply appears dead.
     #[test]
@@ -415,7 +415,7 @@ mod tests {
         assert!(m.is_finite() && m.inverse().is_finite(), "the projection must stay invertible");
     }
 
-    /// An orthographic view's near plane sits BEHIND the eye. Otherwise the layer
+    /// An orthographic view's near plane sits behind the eye. Otherwise the layer
     /// you are working on is sliced in half by the near plane the moment the
     /// camera is level with it — which is exactly where a 2D view sits.
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         cam.set_lock(ViewLock::Front);
         cam.set_ortho(Some(10.0));
         let vp = cam.render_camera().view_proj(1.0);
-        // A point AT the camera plane, in camera-relative render space.
+        // A point at the camera plane, in camera-relative render space.
         let p = vp * floptle_core::math::Vec4::new(0.0, 0.0, 0.0, 1.0);
         assert!(p.z >= 0.0 && p.z <= 1.0, "the camera's own plane must be in frame, z = {}", p.z);
         // …and so is something a little behind it.

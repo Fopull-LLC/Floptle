@@ -66,7 +66,7 @@ fn an_exempt_surface_stays_out_of_the_fog(
     mesh: MeshId,
     dir: &str,
 ) {
-    // ONE cube, dead centre, deep in the fog — rendered three times with
+    // one cube, dead centre, deep in the fog — rendered three times with
     // nothing moved. Three frames of the same geometry rather than two cubes
     // side by side, because then no part of the answer depends on where either
     // of them happened to land.
@@ -89,7 +89,7 @@ fn an_exempt_surface_stays_out_of_the_fog(
     println!("(surface is {SURFACE:.3?}, fog is {FOG_COLOR:.3?})");
 
     // The fogged one has been taken well into the fog — measured against the
-    // SAME surface with the fog off, not against a distance ramp computed here.
+    // same surface with the fog off, not against a distance ramp computed here.
     // Where exactly the ramp lands is `fog_probe`'s question; this one only has
     // to establish that the fog reached this surface at all, or the exemption
     // below would be comparing two unfogged frames and always pass.
@@ -105,7 +105,7 @@ fn an_exempt_surface_stays_out_of_the_fog(
          the SURFACE has none of, so anything there arrived from the fog."
     );
 
-    // THE ONE THAT MATTERS: an exempt surface standing in fog is the same
+    // the one that matters: an exempt surface standing in fog is the same
     // picture as that surface with the fog switched off. Not "close to its own
     // colour" — the same frame, because a half-applied exemption would still
     // pass a looser test and would still be a bug.
@@ -130,10 +130,10 @@ fn the_snap_is_recomputed_every_frame(
     dir: &str,
 ) {
     // A coarse grid (cells a few pixels wide at this size) against a surface
-    // that creeps by a fraction of one per frame. Unlit, so the ONLY thing that
+    // that creeps by a fraction of one per frame. Unlit, so the only thing that
     // can change between frames is where the silhouette lands.
     //
-    // The SURFACE moves rather than the camera, because the world here is
+    // The surface moves rather than the camera, because the world here is
     // camera-relative: the view matrix carries no translation at all (the world
     // is offset to the eye instead), so a probe that moved the camera would
     // render the same frame twelve times and prove nothing.
@@ -175,7 +175,7 @@ fn the_snap_is_recomputed_every_frame(
         smooth_steps.iter().all(|&n| n > 0),
         "the control never moved ({smooth_steps:?}) — the pan is too small to measure."
     );
-    // With it, the surface HOLDS. A held frame is a thing that CANNOT happen
+    // With it, the surface holds. A held frame is a thing that cannot happen
     // without a snap: the object moved and the picture did not, which is only
     // possible if its vertices landed back in the cells they were already in.
     assert!(
@@ -183,7 +183,7 @@ fn the_snap_is_recomputed_every_frame(
         "a jittered surface moved on every frame ({snap_steps:?}). Every frame differing \
          by a little is the un-snapped creep — the grid is not being applied."
     );
-    // …and it also MOVES. Held frames alone would be a surface frozen at one
+    // …and it also moves. Held frames alone would be a surface frozen at one
     // position; the two together are a picture that is recomputed every frame
     // and quantised every frame, which is the whole answer to "is this actually
     // running, or does the slider have to move?"
@@ -229,7 +229,7 @@ fn the_project_reaches_a_draw_that_names_no_material(
 ) {
     let project = floptle_core::Retro { jitter: 20.0, ..Default::default() };
     // A position deliberately off a grid line, so the snap has somewhere to
-    // move the silhouette TO. Landing exactly on one would make "nothing moved"
+    // move the silhouette to. Landing exactly on one would make "nothing moved"
     // the right answer for the wrong reason.
     const OFF_GRID: f32 = 0.037;
 
@@ -293,7 +293,7 @@ fn at(x: f32, y: f32, z: f32, s: f32) -> Mat4 {
 /// The camera never moves and takes no argument: the view matrix in this
 /// renderer carries no translation (the world is offset to the eye instead), so
 /// an eye position here would be a parameter that quietly did nothing. An
-/// instance's model translation IS its position relative to the camera.
+/// instance's model translation is its position relative to the camera.
 fn render(
     gpu: &Gpu,
     raster: &mut Raster,
@@ -368,7 +368,7 @@ fn changed(a: &[u8], b: &[u8]) -> usize {
         .count()
 }
 
-/// The probe measures in LINEAR light: the target is sRGB, so a raw byte is
+/// The probe measures in linear light: the target is sRGB, so a raw byte is
 /// not the value the shader wrote and comparing bytes against a colour the
 /// shader was handed would be comparing two different quantities.
 fn srgb_to_linear(c: f32) -> f32 {

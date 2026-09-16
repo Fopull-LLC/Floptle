@@ -10,7 +10,7 @@
 //! * **They are nearly free in this engine.** Every collider already answers a
 //!   signed distance, so an overlap is `d(center) < radius` and a swept sphere
 //!   is the ray march with the radius subtracted. No new geometry kernels.
-//! * **Lag compensation.** Inside `net.rewind` the lent hulls ARE the rewound
+//! * **Lag compensation.** Inside `net.rewind` the lent hulls are the rewound
 //!   ones, so an overlap sees the world as the attacker saw it. The netcode
 //!   design promised rewound overlaps (§7) and only `raycast` had ever kept it;
 //!   a game cannot fix that from outside, because it cannot rewind anything.
@@ -211,7 +211,7 @@ pub(crate) fn install_shape_api(
     // `hit_table` these do, and it was installed before this ran.
     install_hit_meta(lua, &shared);
     // overlapSphere(center, radius [, opts]) → list of hits, nearest-surface
-    // first. Reports BOTH static geometry and body hulls; `hit.node` is the
+    // first. Reports both static geometry and body hulls; `hit.node` is the
     // node where there is one.
     {
         let s = shared.clone();

@@ -26,7 +26,7 @@ pub struct PadState {
     pub connected: bool,
     /// The device's reported name ("Xbox 360 Controller"). Empty when unknown —
     /// a headless/test `RawInput` never has one, and the backend fills it on
-    /// connect. Carried here so a SCRIPT can answer "is there a controller at
+    /// connect. Carried here so a script can answer "is there a controller at
     /// all", which no action-shaped API could: every one of them reports the
     /// resolved question, and "not bound" and "not present" read identically
     /// through them. floptle/0047.

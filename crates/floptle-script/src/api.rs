@@ -85,7 +85,7 @@ fn no_such_kind_in_scene(call: &str, kind: &str, s: &crate::SceneMirror) -> Stri
     if hint.starts_with(" (did you mean") {
         return format!("{call}(\"{kind}\") found nothing —{}", &hint[1..]);
     }
-    // No near miss: list what IS there, capped — a forty-name list buries the
+    // No near miss: list what is there, capped — a forty-name list buries the
     // answer as surely as no list at all.
     const CAP: usize = 12;
     let more = names.len().saturating_sub(CAP);
@@ -138,7 +138,7 @@ pub(crate) fn world_transform_of(s: &crate::SceneMirror, e: u32) -> floptle_core
     w
 }
 
-/// The composed world transform of `e`'s PARENT (identity when it has none) —
+/// The composed world transform of `e`'s parent (identity when it has none) —
 /// the frame a world position has to be brought back through to become a local
 /// one.
 pub(crate) fn parent_world_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
@@ -148,7 +148,7 @@ pub(crate) fn parent_world_of(s: &crate::SceneMirror, e: u32) -> floptle_core::T
     }
 }
 
-/// A node's LOCAL transform as the script currently sees it: the handle's live
+/// A node's local transform as the script currently sees it: the handle's live
 /// raw `x`/`y`/`z` when this is the script's own node — possibly written earlier
 /// in this same hook — otherwise the mirror.
 ///
@@ -4713,10 +4713,10 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             if has {
                 return Ok(Value::Table(new_component_handle(lua, e, &name)?));
             }
-            // A miss here is nearly always a casing slip on a name the node DOES
+            // A miss here is nearly always a casing slip on a name the node does
             // carry ("rigidbody" for "RigidBody"), and the old answer to that was
             // a bare nil. Say which components are actually on the node — that
-            // list IS the did-you-mean, and it is short.
+            // list is the did-you-mean, and it is short.
             let (who, mut have) = {
                 let s = scene.borrow();
                 let who = s.names.get(&e).cloned().unwrap_or_else(|| format!("#{e}"));
@@ -4783,7 +4783,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     // have to know that white is the identity.
                     Value::Nil => *clear = true,
                     Value::Table(t) => {
-                        // **A COLOUR OR AN OPTIONS TABLE, decided BY NAME.** A
+                        // **A COLOUR or AN OPTIONS TABLE, decided by name.** A
                         // colour is `{1,0.5,0.2}` or `{r=,g=,b=}` and never
                         // carries any of these names, so their presence is the
                         // whole test — a positional list stays a colour and
@@ -4791,7 +4791,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         //
                         // **`alpha` has to be in this list**, and leaving it out
                         // was not a no-op: `read_color` defaults a missing r/g/b
-                        // to ZERO, so `setTint{ alpha = 0.5 }` read as a colour
+                        // to zero, so `setTint{ alpha = 0.5 }` read as a colour
                         // is BLACK at full opacity — the model goes dark, the
                         // fade never happens, and nothing is logged. It cannot
                         // collide with a colour, because a `color(...)` table
@@ -4839,7 +4839,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             if let Some(r) = colour_at("rim")? {
                                 *rim = Some(r);
                                 // A rim with no strength named is a rim you
-                                // asked for: default it ON rather than writing
+                                // asked for: default it on rather than writing
                                 // a colour at strength 0, which would look like
                                 // the call did nothing.
                                 *rim_strength = Some(1.0);
@@ -4878,7 +4878,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         )?;
     }
     // node:material() / node:material("Clothing") — the node's own Material, or
-    // ONE PART of a model's materials, as a handle you can read and assign.
+    // one part of a model's materials, as a handle you can read and assign.
     {
         let scene = shared.scene.clone();
         let q = shared.rich_sets.clone();
@@ -4896,7 +4896,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         .components
                         .get(&e)
                         .is_some_and(|c| c.contains_key("Material"))
-                        // …or it is ABOUT to have one: `setMaterial` is queued
+                        // …or it is about to have one: `setMaterial` is queued
                         // and applied after the pass, so the two lines anybody
                         // writes — give it a material, then take its handle —
                         // have to work in that order. The batch handle makes the
@@ -4920,7 +4920,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                          object like \"Torso#2\" or a material like \"Clothing\".",
                     ));
                 }
-                // A part's material handle is NOT refused when the part has no
+                // A part's material handle is not refused when the part has no
                 // override yet: writing one is how an override comes to exist,
                 // and that is the whole point of the call. It starts as the
                 // engine's default material (white, untextured) rather than as
@@ -4932,7 +4932,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         )?;
     }
     // node:materials() -> the model's material slots, so a script can find out
-    // what the parts are CALLED before trying to address one.
+    // what the parts are called before trying to address one.
     {
         let scene = shared.scene.clone();
         methods.set(
@@ -4953,7 +4953,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     t.set("object", slot.object.as_str())?;
                     t.set("material", slot.material.as_str())?;
                     t.set("textured", slot.textured)?;
-                    // Whether THIS node has already said something about it —
+                    // Whether this node has already said something about it —
                     // either by its object name or by its material name.
                     t.set("overridden", overridden(&slot.object) || overridden(&slot.material))?;
                     arr.set(i + 1, t)?;
@@ -4966,7 +4966,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // WINDOW physical pixels: the same space input.mouse() reports and
     // camera.worldToScreen() returns, so a docked editor Game tab's rects carry
     // that tab's offset. Lets a script hit-test the cursor against a panel's
-    // ACTUAL rendered position instead of guessing its geometry.
+    // actual rendered position instead of guessing its geometry.
     //
     // **`nil` when it has no screen-space rect this frame** — not a UI
     // element, not laid out yet, or no surface to lay out against at all,
@@ -5028,7 +5028,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // the node doesn't have it. Field names are the Lua-facing camelCase.
     {
         let q = shared.rich_sets.clone();
-        // A 3-vector in ANY of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
+        // A 3-vector in any of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
         /// Every spelling of a three-component value the docs promise: a `vec3`, an
         /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
         /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`

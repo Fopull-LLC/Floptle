@@ -283,7 +283,7 @@ pub(crate) struct TextSession {
     bitmap: Option<(Vec<u8>, u32, u32)>,
     /// The bitmap needs rebuilding from the font atlas (needs an egui Context).
     dirty: bool,
-    /// The panel's field should claim the keyboard — ONCE, on the frame the
+    /// The panel's field should claim the keyboard — once, on the frame the
     /// block is placed. Asking every frame is a focus trap: nothing else in the
     /// tab can be clicked and Escape can never be seen, because the field takes
     /// focus straight back.
@@ -406,7 +406,7 @@ pub(crate) struct ImageEditState {
     last_view: Option<ERect>,
     /// Cut/copied pixels: straight RGBA and its size.
     ///
-    /// Fed by this tab's own copy/cut AND by the OS clipboard's image side
+    /// Fed by this tab's own copy/cut and by the OS clipboard's image side
     /// (`Editor::clipboard_image_into_tab`) — copy a reference in a browser,
     /// paste it here. `pub(crate)` for that bridge; nothing else writes it.
     pub(crate) clip: Option<(Vec<u8>, u32, u32)>,
@@ -418,7 +418,7 @@ pub(crate) struct ImageEditState {
     // --- undo ---
     undo: Vec<Image>,
     redo: Vec<Image>,
-    /// The pre-edit document backing the NEXT undo push, while a continuous
+    /// The pre-edit document backing the next undo push, while a continuous
     /// edit (a dragged slider) is in flight.
     pending_undo: Option<Image>,
 
@@ -627,7 +627,7 @@ impl ImageEditState {
         if self.dirty { format!("{name} •") } else { name }
     }
 
-    /// A gesture or a filter preview is in flight — the moment NOT to write a
+    /// A gesture or a filter preview is in flight — the moment not to write a
     /// PNG to disk.
     pub(crate) fn busy(&self) -> bool {
         self.drag.is_some() || self.filter.is_some() || self.xform.is_some() || self.text.is_some()
@@ -1176,7 +1176,7 @@ impl ImageEditState {
                 ImgTool::Move => egui::CursorIcon::Move,
                 ImgTool::Text => egui::CursorIcon::Text,
                 ImgTool::Transform => egui::CursorIcon::Move,
-                // NOT `CursorIcon::None` for the brushes: a 1 px nib telegraphs
+                // not `CursorIcon::None` for the brushes: a 1 px nib telegraphs
                 // as a 2 px ring, and "my cursor vanished" is a worse trade
                 // than a crosshair sitting inside the outline.
                 _ => egui::CursorIcon::Crosshair,
@@ -1261,7 +1261,7 @@ impl ImageEditState {
 
     fn begin_drag(&mut self, x: f32, y: f32, shift: bool, _alt: bool) {
         // The live preview states are modal over the document; starting a
-        // gesture with a DIFFERENT tool means you're done with them.
+        // gesture with a different tool means you're done with them.
         if self.filter.is_some() {
             self.commit_filter();
         }
@@ -1278,7 +1278,7 @@ impl ImageEditState {
             ImgTool::Bucket | ImgTool::Wand | ImgTool::Eyedropper | ImgTool::Pen => {
                 self.click(x, y, shift);
             }
-            // …but NOT while a transform or text block is live: those own the
+            // …but not while a transform or text block is live: those own the
             // canvas until they're committed.
             t if t.is_paint() => {
                 self.push_undo();
@@ -1292,7 +1292,7 @@ impl ImageEditState {
                 self.drag = Some(Drag::Gradient { from: (x, y) });
             }
             ImgTool::SelectRect | ImgTool::SelectEllipse => {
-                // Dragging INSIDE a live selection moves it. Every editor does
+                // Dragging inside a live selection moves it. Every editor does
                 // this, it is obviously what you were about to do, and needing a
                 // tool change first is most of why moving a bit of art felt like
                 // more work than the edit (`floptle/0095`).
@@ -1856,7 +1856,7 @@ impl ImageEditState {
         let frame = self.frame;
         let Some(doc) = self.doc.as_mut() else { return };
         let sel = doc.selection.clone();
-        // A tiling document blurs ACROSS the seam; a clamped blur would build a
+        // A tiling document blurs across the seam; a clamped blur would build a
         // bright rim exactly where the texture repeats.
         let tiling = doc.tiling;
         let active = doc.active;
@@ -1904,7 +1904,7 @@ impl ImageEditState {
 
     pub(crate) fn commit_filter(&mut self) {
         let Some(f) = self.filter.take() else { return };
-        // The undo step is the document as it was BEFORE the preview started.
+        // The undo step is the document as it was before the preview started.
         self.undo.push(f.base);
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);
@@ -2441,7 +2441,7 @@ impl ImageEditState {
         let Some(tex) = &self.tex else { return };
         let tint = Color32::WHITE;
         let uv = ERect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        // Onion skin: the PREVIOUS frame, ghosted, underneath. Composited once
+        // Onion skin: the previous frame, ghosted, underneath. Composited once
         // per frame change (sync_texture), not once per paint.
         if let Some(o) = &self.onion_tex {
             p.image(o.id(), img_rect, uv, Color32::from_white_alpha(90));
@@ -2732,10 +2732,10 @@ impl ImageEditState {
         }
 
         // --- brush telegraph ---
-        // Drawn DURING a stroke as well — a brush you can't see the size of
+        // Drawn during a stroke as well — a brush you can't see the size of
         // halfway through a stroke is a brush you're guessing with.
         //
-        // And drawn from the brush's OWN footprint, so what you see outlined is
+        // And drawn from the brush's own footprint, so what you see outlined is
         // the set of texels that will change. The circle this used to draw was
         // re-derived from `radius` and was wrong for every brush that is not a
         // smooth disc — most visibly the one-pixel pencil, which showed a small
@@ -3127,7 +3127,7 @@ fn point_in_quad(p: (f32, f32), q: &[(f32, f32); 4]) -> bool {
     tri(q[0], q[1], q[2]) || tri(q[0], q[2], q[3])
 }
 
-/// Rasterize `text` through the EDITOR'S OWN font stack into an RGBA block.
+/// Rasterize `text` through the editor'S own font stack into an RGBA block.
 ///
 /// The glyphs come out of egui's font atlas — the same atlas the rest of the
 /// engine's UI draws from — so text stamped into an image matches the text
@@ -3277,7 +3277,7 @@ fn draw_checker(p: &egui::Painter, rect: ERect, look: &crate::prefs::CanvasLook)
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
-    // A checker sized in SCREEN pixels, so it doesn't turn into a moiré at
+    // A checker sized in screen pixels, so it doesn't turn into a moiré at
     // high zoom or vanish at low zoom.
     let step = look.checker_px.clamp(2.0, 64.0);
     let a = Color32::from_rgb(look.checker_a[0], look.checker_a[1], look.checker_a[2]);
@@ -3527,7 +3527,7 @@ mod tests {
         assert_eq!(st.ants.len(), 4, "capped to the bounding box");
     }
 
-    /// Free transform: lift, move, commit — and ONE undo puts it all back.
+    /// Free transform: lift, move, commit — and one undo puts it all back.
     #[test]
     fn free_transform_moves_pixels_and_undo_restores_them() {
         let mut st = state_with_doc();
@@ -3551,7 +3551,7 @@ mod tests {
         assert_eq!(g.get(16, 14)[3], 0);
     }
 
-    /// Cancelling must restore the document EXACTLY, not approximately.
+    /// Cancelling must restore the document exactly, not approximately.
     #[test]
     fn cancelling_a_transform_is_exact() {
         let mut st = state_with_doc();
@@ -3745,7 +3745,7 @@ mod tests {
         assert!(st.xform.is_some(), "a press inside the selection arms the transform");
         assert_eq!(st.tool, ImgTool::Transform, "and the transform owns the drag");
 
-        // A press OUTSIDE it still starts a new marquee.
+        // A press outside it still starts a new marquee.
         st.cancel_transform();
         st.tool = ImgTool::SelectRect;
         st.begin_drag(25.0, 25.0, false, false);

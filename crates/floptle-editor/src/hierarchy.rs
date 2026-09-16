@@ -22,7 +22,7 @@ pub(crate) struct NodePayload(pub(crate) Entity);
 /// [`fold_all_parents`] on load and then had no triangle to open it again. The
 /// children were still there, still in the scene, still saved; there was simply
 /// no way left to reach them, and adding another child only added to the pile.
-/// A node with children IS a folder, whatever else it also is.
+/// A node with children is a folder, whatever else it also is.
 pub(crate) fn row_expandable(has_kids: bool, has_bones: bool) -> bool {
     has_kids || has_bones
 }
@@ -50,7 +50,7 @@ pub(crate) fn fold_all_parents(
 // Two things stopped a drag from reaching a row that was not already on screen,
 // and between them they made re-parenting in a real scene a matter of luck.
 //
-// egui switches a `ScrollArea`'s mouse wheel OFF for as long as anything is
+// egui switches a `ScrollArea`'s mouse wheel off for as long as anything is
 // being dragged — `scroll_area.rs`'s `is_hovering_outer_rect` requires
 // `ctx.dragged_id().is_none()` — and it has no edge auto-scroll of its own. So
 // picking a node up at the bottom of a long tree left you holding it with no
@@ -69,14 +69,14 @@ const DRAG_EDGE_BAND: f32 = 30.0;
 /// second — ramped down to nothing at the band's inner side.
 const DRAG_EDGE_SPEED: f32 = 700.0;
 
-/// How far OUTSIDE the viewport the pointer may stray and still count as asking
+/// How far outside the viewport the pointer may stray and still count as asking
 /// to scroll. The gesture is "take this somewhere that is not on screen", so
 /// overshooting the panel is the ordinary way to perform it rather than a reason
 /// to stop; leave the neighbourhood entirely and it does stop.
 const DRAG_EDGE_REACH: egui::Vec2 = egui::vec2(72.0, DRAG_EDGE_BAND * 2.0);
 
 /// The scroll a drag hovering at `pointer` asks of a tree whose visible viewport
-/// is `view`, over `dt` seconds. Positive scrolls DOWN, further into the tree;
+/// is `view`, over `dt` seconds. Positive scrolls down, further into the tree;
 /// zero means the pointer is nowhere near an edge.
 pub(crate) fn edge_scroll(view: egui::Rect, pointer: egui::Pos2, dt: f32) -> f32 {
     if !view.expand2(DRAG_EDGE_REACH).contains(pointer) {
@@ -94,7 +94,7 @@ pub(crate) fn edge_scroll(view: egui::Rect, pointer: egui::Pos2, dt: f32) -> f32
 /// Scroll the tree while a drag is in flight: the wheel, which egui takes away
 /// for the duration, and the edges, which it never had.
 ///
-/// Call this from INSIDE the scroll area's closure — `clip_rect` is the visible
+/// Call this from inside the scroll area's closure — `clip_rect` is the visible
 /// viewport there, and `scroll_with_delta` writes to the pass state that the
 /// enclosing `ScrollArea` drains when the closure returns.
 pub(crate) fn scroll_while_dragging(ui: &egui::Ui) {
@@ -255,7 +255,7 @@ impl<'a> EditorTabViewer<'a> {
 
         // ---- search ----------------------------------------------------------
         //
-        // The scope only bites WHILE SEARCHING, and that is deliberate. Hiding
+        // The scope only bites while SEARCHING, and that is deliberate. Hiding
         // switched-off nodes from the tree itself would take away the only place
         // you can switch them back on — the disease, not the cure. But a search
         // is you asking "where is the thing I am working on", and the thing you
@@ -318,7 +318,7 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
-        // FOLD EVERY PARENT, ONCE, on the first draw after a scene load. Done here
+        // FOLD every parent, once, on the first draw after a scene load. Done here
         // rather than at load time because this is where the parent⏵children map
         // exists — and doing it from the six places that replace the world would be
         // six chances to forget.
@@ -327,7 +327,7 @@ impl<'a> EditorTabViewer<'a> {
             fold_all_parents(&children, &roots, self.collapsed);
         }
 
-        // The flat VISIBLE row order (DFS, collapsed subtrees skipped) — the
+        // The flat visible row order (DFS, collapsed subtrees skipped) — the
         // range for Shift-click select, matching the Assets browser.
         let mut visible: Vec<Entity> = Vec::new();
         {
@@ -342,7 +342,7 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
-        // A search shows a FLAT list of matches, not a tree with the misses
+        // A search shows a flat list of matches, not a tree with the misses
         // pruned. Pruned-tree filtering keeps the indentation of a structure you
         // are not currently looking at, and a match nine levels down arrives at
         // the right-hand edge of the panel where its name is elided away.
@@ -504,7 +504,7 @@ impl EditorTabViewer<'_> {
         };
         let selected = self.selection.contains(&e);
 
-        // The row's own background, reserved BEFORE the row is laid out: egui
+        // The row's own background, reserved before the row is laid out: egui
         // paints in call order, and by the time we know whether this row is
         // selected or hovered its text has already gone down.
         let band_slot = ui.painter().add(egui::Shape::Noop);
@@ -683,7 +683,7 @@ impl EditorTabViewer<'_> {
                 ui.close();
             }
             ui.separator();
-            // The target state is decided from THIS row and applied to the whole
+            // The target state is decided from this row and applied to the whole
             // selection, so a mixed selection ends up uniform rather than inverted
             // node by node.
             let targets: Vec<Entity> =
@@ -726,7 +726,7 @@ impl EditorTabViewer<'_> {
         // asset spawns an instance as my child.
         if let Some(p) = resp.dnd_release_payload::<NodePayload>() {
             // Dragging a node that's part of a multi-selection re-parents the
-            // WHOLE selection under the drop target (a node whose ancestor is
+            // whole selection under the drop target (a node whose ancestor is
             // also moving is filtered in reparent_many). The row already said in
             // red whether this drop lands; honouring the same rule here is what
             // makes the red mean something.
@@ -871,7 +871,7 @@ mod tests {
     /// driven headlessly through a real `egui::Context`.
     ///
     /// The arithmetic guards below check [`edge_scroll`] on its own. This checks
-    /// the thing that was actually broken: that a `ScrollArea` MOVES, under the
+    /// the thing that was actually broken: that a `ScrollArea` moves, under the
     /// conditions egui puts it in while a drag is in flight. It is the only way
     /// to catch the panel silently going back to not scrolling, because that is
     /// a change in egui's behaviour, not in ours — and there is no arithmetic
@@ -887,7 +887,7 @@ mod tests {
         }
 
         /// One pass. `dragging` reproduces what egui does mid-drag: a payload in
-        /// flight AND a `dragged_id`, which is the half that switches the scroll
+        /// flight and a `dragged_id`, which is the half that switches the scroll
         /// area's own wheel handling off.
         fn pass(&mut self, events: Vec<egui::Event>, dragging: bool) {
             let offset = std::cell::Cell::new(self.offset);

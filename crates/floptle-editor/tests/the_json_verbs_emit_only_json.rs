@@ -12,7 +12,7 @@
 //! what keeps it there — because the next `println!` will be added by somebody
 //! who has never read this file, in a function three calls away from the verb.
 //!
-//! It runs the REAL binary. A unit test cannot see this: the whole failure is
+//! It runs the real binary. A unit test cannot see this: the whole failure is
 //! about what reaches the process's stdout, and nothing that stays inside the
 //! process can observe that.
 
@@ -156,7 +156,7 @@ fn a_verb_that_fails_still_answers_in_json() {
 /// `println!` — so the moment a script logged anything at all, `run --json`
 /// stopped emitting JSON. A project with no logging scripts hides both.
 ///
-/// What this does NOT cover, said plainly rather than assumed: `run` drains
+/// What this does not cover, said plainly rather than assumed: `run` drains
 /// per step as well as after Stop, and removing the per-step one still passes
 /// here. That drain is there to keep the host's buffer bounded on a long run,
 /// not to make the log arrive, and three frames cannot tell the difference.
@@ -251,7 +251,7 @@ fn exec_writes_when_it_is_told_to_and_says_so_when_it_is_not() {
     .expect("write");
     let doc = json_of(&["exec", &script.to_string_lossy(), &p, "--json"]);
     assert_eq!(doc["ok"], true, "{doc}");
-    // …and it does NOT warn. Asserted, because without this the warning could
+    // …and it does not warn. Asserted, because without this the warning could
     // fire on every run and the test above would still pass — which is exactly
     // what the first version of this check did.
     assert!(
@@ -635,7 +635,7 @@ fn serve_refuses_what_the_runtime_refuses() {
     let why = String::from_utf8_lossy(&out.stderr);
     assert!(why.contains("--port"), "the refusal did not say what to give it: {why}");
 
-    // **A scene that cannot be served is the PROJECT being wrong: 1.** The
+    // **A scene that cannot be served is the project being wrong: 1.** The
     // server answers both with its own 2, and a caller has to be able to tell
     // "you typed it wrong" from "your project is wrong" — which is the whole
     // reason the check above happens here rather than in the server.

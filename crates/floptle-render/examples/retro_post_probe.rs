@@ -101,8 +101,8 @@ fn main() {
     };
     let clear = Some([0.55, 0.7, 0.9, 1.0]);
 
-    // OLD order (the mismatch): scene at retro res, nearest-upscale to window res,
-    // THEN post at window res — pixelated scene, smooth AO/vignette on top.
+    // old order (the mismatch): scene at retro res, nearest-upscale to window res,
+    // then post at window res — pixelated scene, smooth AO/vignette on top.
     let post_full = PostStack::new(&gpu, W, H);
     raster.draw_scene(&gpu, retro.color_view(), retro.depth_view(), globals, &instances, clear, None);
     // Posterize is the palette pass now, and it runs at the scene's resolution
@@ -114,9 +114,9 @@ fn main() {
     post_full.run(&gpu, &settings, Some(&ssao_frame), &color_view);
     save_png(&gpu, &color_tex, &out_old);
 
-    // NEW order (the engine's): scene into a retro-sized pixel-perfect post
+    // new order (the engine's): scene into a retro-sized pixel-perfect post
     // input, the whole chain at retro res into the retro color target, upscale
-    // LAST. Pixel-perfect = per-retro-pixel AO with a tightened blur.
+    // last. Pixel-perfect = per-retro-pixel AO with a tightened blur.
     let mut post_retro = PostStack::new(&gpu, rw, rh);
     post_retro.configure(&gpu, rw, rh, true);
     raster.draw_scene(&gpu, post_retro.input_view(), retro.depth_view(), globals, &instances, clear, None);

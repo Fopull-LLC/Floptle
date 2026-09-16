@@ -474,7 +474,7 @@ mod tests {
         let ps = packets(7);
 
         // Get playback genuinely under way first, and leave the read head at
-        // 65535 — the ONE position where a naive `seq < next` misjudges the
+        // 65535 — the one position where a naive `seq < next` misjudges the
         // next packet. Feeding everything up front leaves `next` unset and
         // exercises none of this.
         j.accept(u16::MAX - 2, &ps[0]);

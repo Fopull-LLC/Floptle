@@ -1,4 +1,4 @@
-//! Headless point-light probe — a row of white spheres lit ONLY by a single point
+//! Headless point-light probe — a row of white spheres lit only by a single point
 //! light (near-zero directional/ambient), so the smooth range falloff + lit
 //! hemisphere are obvious: the sphere nearest the light is bright, distant ones fade
 //! to black past the light's range. Validates the raster point_diffuse path.

@@ -48,7 +48,7 @@ pub struct Camera2D {
     pub limits_on: bool,
     pub limit_min: [f32; 2],
     pub limit_max: [f32; 2],
-    /// Land the DRAWN camera position on a whole pixel of this many per world
+    /// Land the drawn camera position on a whole pixel of this many per world
     /// unit. `0` is off.
     ///
     /// The number is `camera.pixelsPerUnit()` — a sprite drawn at 32 pixels per
@@ -218,7 +218,7 @@ impl Camera2D {
                 self.pos[i] = if lo <= hi { self.pos[i].clamp(lo, hi) } else { (lo + hi) * 0.5 };
             }
         }
-        // 4. Shake, added to what is drawn and NEVER written back into `pos`.
+        // 4. Shake, added to what is drawn and never written back into `pos`.
         let mut out = self.pos;
         if self.shaking() {
             let left = (self.shake_left / self.shake_total.max(1e-6)).clamp(0.0, 1.0) as f64;
@@ -235,7 +235,7 @@ impl Camera2D {
                 self.shake_amp = 0.0;
             }
         }
-        // 5. Pixel snap, LAST — so it is the drawn position that lands on the
+        // 5. Pixel snap, last — so it is the drawn position that lands on the
         // grid, shake included. Snapping before the shake would put the camera
         // on a whole pixel and then move it off one again, which is the entire
         // problem.
@@ -309,7 +309,7 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
         // world space and converting back is what makes it work rather than
         // drifting by the parent's transform.
         let cam_world = crate::matter::world_transform(world, e);
-        // An EMPTY follow is "follow nothing", and must not be able to match a
+        // An empty follow is "follow nothing", and must not be able to match a
         // node that happens to have an empty name — which the map would
         // otherwise hand back quite happily.
         let target = (!follow.is_empty())
@@ -363,7 +363,7 @@ mod tests {
         // Well inside: not a pixel.
         c.step(at(0.0, 0.0), Some(at(1.9, 0.9)), 0.016, 0.0);
         assert_eq!(c.pos, at(0.0, 0.0), "a target inside the box must not move the camera");
-        // Three units out on X: the camera moves the ONE unit that left the box.
+        // Three units out on X: the camera moves the one unit that left the box.
         c.step(at(0.0, 0.0), Some(at(3.0, 0.0)), 0.016, 0.0);
         assert!((c.pos.x - 1.0).abs() < 1e-9, "moved {} instead of 1", c.pos.x);
         assert_eq!(c.pos.y, 0.0);
@@ -508,7 +508,7 @@ mod tests {
     /// 2D project writes this by hand against a constant the engine already
     /// knows.
     ///
-    /// Snapping the DRAWN position and not `pos` is the part that matters: round
+    /// Snapping the drawn position and not `pos` is the part that matters: round
     /// the state and the rounding is re-applied to an already-rounded number
     /// every frame, and the camera cannot creep at less than a pixel per frame
     /// at all.
@@ -592,7 +592,7 @@ mod tests {
         t.translation.x = -500.0;
         world.insert(unnamed, t);
         world.insert(unnamed, crate::matter::Name(String::new()));
-        // A second camera that DOES follow something, so the name map is built
+        // A second camera that does follow something, so the name map is built
         // at all — the empty-name entry only exists once it is.
         let target = world.spawn();
         world.insert(target, crate::transform::Transform::default());

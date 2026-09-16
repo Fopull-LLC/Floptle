@@ -65,7 +65,7 @@ pub(crate) struct TargetPlan {
 /// Decide this frame's render-target work.
 ///
 /// `now` is the play/edit clock in seconds and `last` the clock reading at which
-/// each target last redrew. Ordering is by name (then entity), NOT query order:
+/// each target last redrew. Ordering is by name (then entity), not query order:
 /// which targets survive the limit has to be the same on every run and after
 /// every unrelated scene edit, or a scene "works" until a node is added
 /// somewhere else entirely.

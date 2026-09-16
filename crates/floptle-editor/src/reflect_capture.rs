@@ -148,7 +148,7 @@ impl Editor {
         // captures too, which is right: they hold less detail than was just
         // asked for.
         //
-        // **Before the slots are scanned, not after.** The scan picks WHICH slot
+        // **Before the slots are scanned, not after.** The scan picks which slot
         // to refill, and clearing the slot list under it would file the new
         // capture's key against a slot index that no longer means the same thing.
         let detail = probe_detail(self.project.probe_detail);
@@ -198,7 +198,7 @@ impl Editor {
             self.reflection_probes =
                 Some(floptle_render::ReflectionProbes::with_detail(gpu, detail));
         }
-        // Taken OUT of `self` for the duration: `render_world_into` needs
+        // Taken out of `self` for the duration: `render_world_into` needs
         // `&mut self`, and the targets it is rendering into live here. Put back
         // at the end, whatever happens in between.
         let Some(probes) = self.reflection_probes.take() else { return };
@@ -223,7 +223,7 @@ impl Editor {
             let cam = floptle_render::RenderCamera::new(
                 at,
                 floptle_render::reflect::face_rotation(f),
-                // A cube face IS a 90° square frustum. Anything else and the
+                // A cube face is a 90° square frustum. Anything else and the
                 // directions the conversion assumes stop matching the pixels.
                 floptle_render::Projection::Perspective {
                     fov_y: std::f32::consts::FRAC_PI_2,

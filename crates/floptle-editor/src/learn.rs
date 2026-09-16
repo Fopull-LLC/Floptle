@@ -268,7 +268,7 @@ pub(crate) fn scan(world: &World, root: &Path, played: bool) -> Snapshot {
 
 /// Where a project remembers how far through a tutorial you are.
 ///
-/// In the PROJECT, not the editor's config: progress is a fact about this game
+/// In the project, not the editor's config: progress is a fact about this game
 /// you are building, so it should still be there on another machine, and two
 /// projects should not share one bookmark.
 pub(crate) fn progress_path(root: &Path) -> std::path::PathBuf {
@@ -350,7 +350,7 @@ pub(crate) fn render_markdown(t: &Tutorial) -> String {
     out.push_str("\n\n");
     for (i, s) in t.steps.iter().enumerate() {
         out.push_str(&format!("## {}. {}\n\n", i + 1, s.title));
-        // A step's own sub-headings sit UNDER its number. In the panel they are
+        // A step's own sub-headings sit under its number. In the panel they are
         // all just "a heading", but a markdown file grows a table of contents
         // and an outline, and a body heading level with the step it belongs to
         // reads as a sibling of it.

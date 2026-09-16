@@ -163,7 +163,7 @@ mod tests {
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         // The project path is always passed as an argument, on every platform.
         assert!(args.iter().any(|a| a == "/home/ty/games/mygame"), "args were {args:?}");
-        // On non-macOS the program IS the editor binary.
+        // On non-macOS the program is the editor binary.
         #[cfg(not(target_os = "macos"))]
         assert!(
             cmd.get_program().to_string_lossy().ends_with(crate::registry::editor_bin_name()),

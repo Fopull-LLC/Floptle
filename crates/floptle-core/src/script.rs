@@ -17,11 +17,11 @@ pub struct ScriptInst {
     pub enabled: bool,
     pub params: Vec<(String, f32)>,
     /// Node-reference params (declared `name = noderef()` in the script's
-    /// `defaults`): param name → the target node's NAME, wired in the Inspector
+    /// `defaults`): param name → the target node's name, wired in the Inspector
     /// and resolved by name each tick (O(1) via the host's name index). The
     /// script sees a node handle — no `find()` needed.
     pub refs: Vec<(String, String)>,
-    /// STRING params (declared `name = "value"` in the script's `defaults`):
+    /// string params (declared `name = "value"` in the script's `defaults`):
     /// per-instance text tunables, edited in the Inspector like the numeric
     /// ones — a portal's destination scene, a pickup's item id. Two-way, like
     /// `params`.

@@ -160,7 +160,7 @@ fn shot(gpu: &Gpu, raster: &mut Raster, args: &Args, path: &Path) -> Result<Path
         ambient: [0.42, 0.44, 0.50, 1.0],
         ..Default::default()
     };
-    // `--bg` is the colour a person wants to SEE. A clear value is written
+    // `--bg` is the colour a person wants to see. A clear value is written
     // straight into the target, and the target is sRGB, so handing it the
     // number as typed makes every backdrop three shades paler than asked for —
     // which is exactly what the first sheet out of this tool looked like.

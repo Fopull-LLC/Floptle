@@ -5,7 +5,7 @@
 //! 16x16 tilemap in the XY plane at `z = 0` — rendered twice:
 //!
 //! * **was** — the near plane every gameplay camera used to pass (`0.05`, in
-//!   FRONT of the eye). The whole map is clipped away; the image is background.
+//!   front of the eye). The whole map is clipped away; the image is background.
 //! * **now** — `Projection::of_camera`, which owns the orthographic depth range.
 //!
 //! It writes both PNGs so the difference is something you look at rather than a

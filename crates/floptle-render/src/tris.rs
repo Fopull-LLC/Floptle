@@ -1,5 +1,5 @@
 //! Runtime 3D triangle layer — world-space filled triangles with per-vertex
-//! color, drawn OVER the scene alongside [`crate::lines::Lines`]. This is the
+//! color, drawn over the scene alongside [`crate::lines::Lines`]. This is the
 //! FILLED companion to the line telegraph layer: solid gizmo arrowheads,
 //! rotation discs, world-space markers and held-item highlights. Scripts queue
 //! triangles via the Lua `draw.tri` / `draw.cone` / `draw.disc` API each tick
@@ -115,7 +115,7 @@ impl Tris {
                 cull_mode: None,
                 ..Default::default()
             },
-            // Drawn OVER the scene like the line layer (no depth test, never
+            // Drawn over the scene like the line layer (no depth test, never
             // writes depth): a gizmo the player is manipulating must never be
             // occluded by the very part it sits on.
             depth_stencil: Some(wgpu::DepthStencilState {

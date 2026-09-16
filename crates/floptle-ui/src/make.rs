@@ -1,7 +1,7 @@
 //! `ui.make` — a UI tree described as data, reconciled against the one on
 //! screen.
 //!
-//! The case this exists for: a screen whose SHAPE depends on data. A roster of
+//! The case this exists for: a screen whose shape depends on data. A roster of
 //! four fighters or nine, an inventory of whatever the player is carrying, a
 //! lobby list that arrives over the wire. The scene file can't hold a tree that
 //! doesn't exist yet, so both projects built on the engine solved it the same
@@ -20,7 +20,7 @@
 //! 2. **The description is authoritative.** A property the table stops
 //!    mentioning goes back to the element's default, because otherwise removing
 //!    a line from your table leaves its effect on screen forever. The exception
-//!    is state the PLAYER owns rather than the description — scroll offset, a
+//!    is state the player owns rather than the description — scroll offset, a
 //!    field's typed value, a toggle's selection, a draggable slider's value —
 //!    which is carried across (see [`MadeNode::rebuild`]).
 //!
@@ -110,7 +110,7 @@ impl Kind {
                 spec.shape = Some(clear());
                 spec.button = true;
                 // Reachable by pad and keyboard unless you say otherwise. This
-                // is a behaviour default, not a look: what focus LOOKS like is
+                // is a behaviour default, not a look: what focus looks like is
                 // still entirely the style's business.
                 spec.focusable = true;
             }
@@ -252,7 +252,7 @@ fn hex(s: &str) -> Option<[f32; 4]> {
 }
 
 /// One described element: what it is, what it looks like, and what is inside
-/// it. The behaviour hooks (`onClicked` and friends) are NOT here — they are
+/// it. The behaviour hooks (`onClicked` and friends) are not here — they are
 /// Lua functions, and this crate has never heard of Lua. The parser keeps them
 /// beside the tree, addressed by path.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -279,7 +279,7 @@ impl MadeNode {
     pub fn build(&self) -> ElementSpec {
         let mut spec = self.kind.base();
         // Two passes so the table's key order can't matter. The first sets the
-        // placement MODE and the second fills in numbers within it; written as
+        // placement mode and the second fills in numbers within it; written as
         // one pass, `{ margin = 8, inset = 0 }` and `{ inset = 0, margin = 8 }`
         // would quietly mean different things.
         for (name, v) in self.props.iter().filter(|(n, _)| is_place_mode(n)) {
@@ -328,7 +328,7 @@ impl MadeNode {
     }
 }
 
-/// Properties that decide the PLACEMENT MODE, and so must land before the
+/// Properties that decide the PLACEMENT mode, and so must land before the
 /// numbers that live inside it.
 fn is_place_mode(name: &str) -> bool {
     matches!(name, "pin" | "inset" | "stretch")
@@ -357,7 +357,7 @@ pub enum Applied {
 /// doesn't exist yet). Deliberately not a second naming scheme: a test in
 /// `floptle-script` asserts every mirrored field name is accepted here.
 pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
-    // An enumerated property is checked BEFORE anything is written, so a
+    // An enumerated property is checked before anything is written, so a
     // refused value leaves the spec exactly as it found it.
     if prop_values(name).is_some() && !enum_ok(name, &v.text()) {
         return Applied::BadValue;
@@ -599,7 +599,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
 /// a mistyped property is reported instead of dropped.
 pub fn known_prop(name: &str) -> bool {
     // A number is not a valid value for any of the enumerated properties, so
-    // this asks only about the NAME — which is the question.
+    // this asks only about the name — which is the question.
     apply_prop(&mut ElementSpec::default(), name, &PropVal::Num(0.0)) != Applied::NoSuchProp
 }
 
@@ -740,7 +740,7 @@ fn anchor(s: &str) -> Option<Anchor> {
 /// free text, a number or a boolean.
 ///
 /// Used to REFUSE anything else, and to say what was expected. `ui.make` has
-/// always raised on a property NAME it doesn't know — "a declarative screen
+/// always raised on a property name it doesn't know — "a declarative screen
 /// that silently ignores a line is worse than one that stops" — and a value it
 /// doesn't know is the same bug wearing different clothes. `pin = "topCenter"`
 /// answered `TopLeft`, silently, forever, and four HUD elements stacked into one
@@ -1129,7 +1129,7 @@ mod tests {
         assert_eq!(r.0, [8.0, 8.0, 0.0, 0.0]);
     }
 
-    /// `floptle/0124`: `ui.make` CAN name a font — reported as though it could
+    /// `floptle/0124`: `ui.make` can name a font — reported as though it could
     /// not, and worth a test rather than a correction, because a property is
     /// only useful if it survives the rebuild a reconcile puts a node through.
     #[test]
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(plain.rebuild(&old).shape.unwrap().fill, [0.0; 4]);
     }
 
-    /// …but what the PLAYER did is not something the description said.
+    /// …but what the player did is not something the description said.
     #[test]
     fn a_re_render_keeps_what_the_player_did() {
         // Scrolled halfway down a list.
@@ -1305,7 +1305,7 @@ mod tests {
     }
 
     /// Carrying player state must not become "ignores the description": when
-    /// the table DOES say, the table wins.
+    /// the table does say, the table wins.
     #[test]
     fn the_description_still_wins_when_it_speaks() {
         let mut old = MadeNode { kind: Kind::Field, ..Default::default() }.build();

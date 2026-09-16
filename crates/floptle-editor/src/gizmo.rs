@@ -182,7 +182,7 @@ pub(crate) fn axis_world(i: usize) -> Vec3 {
     [Vec3::X, Vec3::Y, Vec3::Z][i]
 }
 
-/// The object's LOCAL axis `i` expressed in world space (so the gizmo aligns with
+/// The object's local axis `i` expressed in world space (so the gizmo aligns with
 /// the object's current orientation, not the world frame).
 pub(crate) fn local_axis(rot: Quat, i: usize) -> Vec3 {
     rot * axis_world(i)
@@ -355,7 +355,7 @@ pub(crate) fn build_gizmo(
     let dist = (t.translation - cam_world).length().max(0.4) as f32;
     let axis_len = GIZMO_PX * 2.0 * dist * (30f32.to_radians()).tan() / h;
 
-    // Tips follow the object's LOCAL axes, so the gizmo aligns with its orientation.
+    // Tips follow the object's local axes, so the gizmo aligns with its orientation.
     let mut tips = [None; 3];
     for (i, tip) in tips.iter_mut().enumerate() {
         let tip_world = t.translation + (local_axis(rot, i) * axis_len).as_dvec3();
@@ -387,11 +387,11 @@ pub(crate) fn build_gizmo(
                 }
             }
             // A ring whose axis points at the camera is seen face-on, and the
-            // test above — which is the EXACT sphere-silhouette test, so it is
+            // test above — which is the exact sphere-silhouette test, so it is
             // right about this — puts every one of its points a hair behind the
             // silhouette. Ghosting it whole would fade out the one ring you can
             // see as a full circle and are most likely to be reaching for. Read
-            // "no near half at all" as "this ring IS the silhouette" and draw it
+            // "no near half at all" as "this ring is the silhouette" and draw it
             // solid.
             if !front.iter().any(|f| *f) {
                 front.fill(true);
@@ -650,7 +650,7 @@ mod tests {
         let e = w.spawn();
         w.insert(e, Transform { translation: DVec3::new(0.0, 0.0, -10.0), ..Default::default() });
         // Camera-relative projection: the view carries no translation, so the
-        // object's world position IS its position relative to the eye (ADR-0015).
+        // object's world position is its position relative to the eye (ADR-0015).
         let proj = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 1000.0);
         (w, e, DVec3::ZERO, proj)
     }
@@ -677,7 +677,7 @@ mod tests {
 
     /// The ring facing the camera is the one you see as a full circle and the one
     /// you are most likely to reach for. The exact sphere-silhouette test puts all
-    /// of it a hair BEHIND the silhouette, so without the degenerate-case rule it
+    /// of it a hair behind the silhouette, so without the degenerate-case rule it
     /// would be the only ring drawn entirely as a ghost — the exact opposite of
     /// what it deserves.
     #[test]

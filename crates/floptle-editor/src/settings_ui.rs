@@ -265,7 +265,7 @@ impl<'a> SettingsCtx<'a> {
         // **The nav column collapses.** A 146 px sidebar in a 200 px dock leaves
         // twenty pixels of settings, which is not a narrow layout — it is a
         // broken one, and it is what the tab used to do. Below the threshold the
-        // sections become a wrapped strip of chips ABOVE the content and the
+        // sections become a wrapped strip of chips above the content and the
         // content gets the whole panel. Nothing is hidden either way: every
         // section is still one click from here, it is just reading across
         // instead of down.
@@ -394,7 +394,7 @@ impl<'a> SettingsCtx<'a> {
     /// here. The registration flow ends "paste it into Floptle: Project
     /// settings ⏵ Networked ⏵ Game key", and before this there was no such
     /// place — the key could only be set by hand-editing `project.ron`, which
-    /// is exactly the thing Ty ruled out.
+    /// is exactly the thing that was ruled out.
     ///
     /// **Multiplayer needs none of it.** A direct connection and a self-hosted
     /// relay both work with no account, no key and no internet, and the blurb
@@ -721,7 +721,7 @@ impl<'a> SettingsCtx<'a> {
                     out.save_project = true;
                 }
                 // Said in the row rather than in a toast that goes away: a Lua
-                // state picks its backing when it is BUILT, so this lands on
+                // state picks its backing when it is built, so this lands on
                 // the next Play. A setting that appears to do nothing while you
                 // are looking at it is one somebody clicks twice.
                 ui.weak("takes effect on the next Play");
@@ -892,7 +892,7 @@ impl<'a> SettingsCtx<'a> {
                 // A segmented strip, so four presets shrink together and then
                 // wrap together rather than the last one leaving the panel.
                 //
-                // Float comparison is exact on purpose: these ARE the values the
+                // Float comparison is exact on purpose: these are the values the
                 // buttons write, so a highlighted chip means the setting is that
                 // preset and not near it.
                 let hovers: Vec<String> = presets
@@ -1134,7 +1134,7 @@ impl<'a> SettingsCtx<'a> {
                     out.rename_layer = Some((before, after));
                     out.save_project = true;
                 }
-                // Removal is destructive and NOT undoable, so it's two clicks.
+                // Removal is destructive and not undoable, so it's two clicks.
                 let arm_id = egui::Id::new("layer-delete-armed");
                 let armed: Option<usize> = ui.ctx().data(|d| d.get_temp(arm_id)).flatten();
                 if armed == Some(i) {
@@ -1276,7 +1276,7 @@ mod tests {
     /// fopull.com ends its registration flow with "paste it into Floptle:
     /// Project settings ⏵ Networked ⏵ Game key", and before this card there was
     /// no Networked section and no Game key field — the key could only be set
-    /// by hand-editing `project.ron`, which is the one thing Ty ruled out. So
+    /// by hand-editing `project.ron`, which is the one thing that was ruled out. So
     /// every developer who registered a game arrived at a menu that was not
     /// there.
     ///
@@ -1535,7 +1535,7 @@ mod tests {
             });
             painted = painted_text(&out);
         }
-        // Only things above the fold: the pass paints what's VISIBLE, and the
+        // Only things above the fold: the pass paints what's visible, and the
         // live tester sits below the scroll in an 800 px viewport.
         for want in ["Jump", "Punch", "Kick", "Move", "Actions"] {
             assert!(painted.contains(want), "the Input section never drew {want:?}:\n{painted}");

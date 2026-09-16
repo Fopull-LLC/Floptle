@@ -81,7 +81,7 @@ pub struct Globals {
     /// per-slot bitmasks moved to `terrain_bits`, where 32 slots stay bit-exact;
     /// f32 packing silently corrupts bits past 2^24).
     pub terrain_mask: [f32; 4],
-    /// Per-slot bitmasks, exact at 32 slots: x = NEAREST filtering, y = GLOW
+    /// Per-slot bitmasks, exact at 32 slots: x = nearest filtering, y = GLOW
     /// (self-lit slots), z/w unused.
     pub terrain_bits: [u32; 4],
     /// Each light's CONE, when it is aimed: x = cosine of the half angle where
@@ -89,7 +89,7 @@ pub struct Globals {
     /// **x = -1 is no cone**, which is what the default fills, so a caller that
     /// never sets this gets exactly the omnidirectional light it always had.
     ///
-    /// Appended at the END so the WGSL struct stays byte-identical.
+    /// Appended at the end so the WGSL struct stays byte-identical.
     pub point_cone: [[f32; 4]; 16],
 }
 
@@ -121,7 +121,7 @@ pub struct InstanceRaw {
     pub model: [[f32; 4]; 4],
     /// The inverse-transpose normal matrix, as three vec4 columns whose `.w` is padding
     /// the shader's `mat3x3` never reads — except two lanes that were free (a vec3
-    /// attribute still costs a vec4 slot) and the attribute budget is FULL at 16/16, so
+    /// attribute still costs a vec4 slot) and the attribute budget is full at 16/16, so
     /// these are the only places a per-instance index could go without spending a slot
     /// that does not exist:
     ///   - `normal_mat[0].w` = the instance's TERRAIN color base.
@@ -183,12 +183,12 @@ pub struct MaterialParams {
     /// everything else. Multiplies albedo exactly like `paint_base` (they are the same
     /// `vcolor` varying downstream) — an instance never has both.
     pub terrain_paint_base: u32,
-    /// Modulate-2× the vertex paint (mid-grey = neutral, so paint carries BOTH light and
+    /// Modulate-2× the vertex paint (mid-grey = neutral, so paint carries both light and
     /// shadow) instead of the plain darken-only multiply. True for brush paint, false for
     /// imported glTF COLOR_0 (whose spec is a linear ×1 multiply). Ignored when
     /// `paint_base == 0`. Rides the free `normal_mat[1].w` instance lane.
     pub paint_modulate: bool,
-    /// This instance's entry in the SURFACE EXTRAS store — the PBR scalars and
+    /// This instance's entry in the surface EXTRAS store — the PBR scalars and
     /// the retro flags ([`SurfaceExtras`]). `0` is the reserved neutral entry, so
     /// leaving it alone shades exactly as before v0.43. Fill it from
     /// [`Raster::push_surface_extras`], the same way `paint_base` is filled: the
@@ -230,7 +230,7 @@ impl MaterialParams {
     }
 
     /// Pack an artist-facing [`floptle_core::Material`] into per-instance params —
-    /// the ONE conversion every render site goes through (the editor's gather, the
+    /// the one conversion every render site goes through (the editor's gather, the
     /// probes), so nothing can drift from what ships.
     ///
     /// Tiling comes from [`floptle_core::Material::effective_tiling`], which is
@@ -420,7 +420,7 @@ pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
     })
 }
 
-/// The per-material properties that live in the SURFACE EXTRAS store rather than
+/// The per-material properties that live in the surface EXTRAS store rather than
 /// in an instance attribute — because there is no attribute left (the stream is
 /// full at 16/16) and because these will keep arriving.
 ///
@@ -451,7 +451,7 @@ pub struct SurfaceExtras {
     /// to weight an environment by, so a project that never opted into physical
     /// shading looks exactly as it did.
     pub reflectivity: f32,
-    /// Glass: how much light passes THROUGH rather than stopping here
+    /// Glass: how much light passes through rather than stopping here
     /// ([`floptle_core::Material::transmission`]). `0` is a solid surface.
     pub transmission: f32,
     /// How sharply it bends on the way in ([`floptle_core::Material::ior`]).
@@ -481,7 +481,7 @@ impl Default for SurfaceExtras {
 
 /// `vec4`s per entry in the surface-extras store.
 ///
-/// Named, and named on BOTH sides of the boundary (`EXT_LANES` in raster.wgsl),
+/// Named, and named on both sides of the boundary (`EXT_LANES` in raster.wgsl),
 /// because the stride is written down in six places — the packer, the dedup key,
 /// the index arithmetic, the CPU-side snapshot the bucketing reads, the neutral
 /// entry, and the shader's own indexing. It went from two to three the first time
@@ -526,7 +526,7 @@ impl SurfaceExtras {
     }
 
     /// Does this set nothing at all? Not the same question as "is this index 0"
-    /// — under project-wide retro artefacts index 0 carries THOSE, and
+    /// — under project-wide retro artefacts index 0 carries those, and
     /// [`Raster::push_surface_extras`] tests against that folded neutral.
     pub fn is_neutral(&self) -> bool {
         *self == Self::default()
@@ -622,7 +622,7 @@ struct DynSlot {
     tpaint_cap: u32,
 }
 
-/// Group draw items by key in ONE pass, preserving first-appearance order
+/// Group draw items by key in one pass, preserving first-appearance order
 /// (transparent draw order and bucket determinism both ride on it). Every
 /// draw-list bucketization must use this: chunk-meshed terrain hands the
 /// raster THOUSANDS of unique mesh ids per frame, and any scan-per-key
@@ -654,7 +654,7 @@ fn slot_cap(n: u32) -> u32 {
 
 pub struct Raster {
     pipeline: wgpu::RenderPipeline,
-    /// Same as `pipeline` but alpha-blended with depth-write OFF, for instances whose
+    /// Same as `pipeline` but alpha-blended with depth-write off, for instances whose
     /// material opacity is < 1. Drawn after the opaque pass so they composite over the
     /// solid scene.
     transparent_pipeline: wgpu::RenderPipeline,
@@ -672,20 +672,20 @@ pub struct Raster {
     skin_transparent_pipeline: wgpu::RenderPipeline,
     skin_mask_pipeline: wgpu::RenderPipeline,
     skin_prepass_pipeline: wgpu::RenderPipeline,
-    /// The prepass's own sampleable depth targets, ONE PER TARGET SIZE, and
+    /// The prepass's own sampleable depth targets, one per target SIZE, and
     /// which of them the last prepass wrote.
     ///
     /// A cache and not a single slot, because a frame runs the prepass more than
     /// once at more than one size: the window surface, a docked Game panel sized
     /// to its tab, a camera's render target. A single slot keyed on "is the size
-    /// different" would find it different EVERY TIME and reallocate a full-frame
+    /// different" would find it different every TIME and reallocate a full-frame
     /// depth texture twice a frame, forever — which is not a cache miss, it is a
     /// leak with extra steps.
     prepass: Vec<PrepassSlot>,
     /// Monotonic counter, doubling as the token source and the LRU clock.
     prepass_seq: u64,
     /// Index into `prepass` of the target the last [`depth_prepass_with`]
-    /// (Self::depth_prepass_with) wrote, so `prepass_view` answers about THAT
+    /// (Self::depth_prepass_with) wrote, so `prepass_view` answers about that
     /// one rather than about whichever happened to be created last.
     prepass_active: Option<usize>,
     globals_bind: wgpu::BindGroup,
@@ -700,7 +700,7 @@ pub struct Raster {
     /// The TERRAIN color store: chunk-mesh per-vertex colors, read in `vs` exactly like
     /// `vpaint` but through its own base offset. Separate from `vpaint` for two reasons,
     /// both learned rather than guessed:
-    ///   1. `vpaint` is bump-allocated and NEVER freed (its blocks are owned by meshes
+    ///   1. `vpaint` is bump-allocated and never freed (its blocks are owned by meshes
     ///      and nodes for the scene's life). Remeshing churns blocks every sculpt dab,
     ///      so terrain in that store would leak without bound.
     ///   2. `vpaint` bases are packed into `params.z` beside the unlit bit, a budget of
@@ -759,7 +759,7 @@ pub struct Raster {
     /// with nothing flat in it.
     light2d: crate::light2d::Light2d,
     /// The palette (posterize) pass. It lives next to the 2D light because it
-    /// has to run immediately BEFORE it — that ordering is the whole feature
+    /// has to run immediately before it — that ordering is the whole feature
     /// (`floptle/0127`), and a caller that has one to hand has the other.
     palette: crate::palette::Palette,
     /// Fallback group(2) for callers without a raymarch pass: zeroed field
@@ -780,7 +780,7 @@ pub struct Raster {
     flat_normal_view: wgpu::TextureView,
     _flat_normal_tex: wgpu::Texture,
     neutral_samp: wgpu::Sampler,
-    /// This frame's SURFACE EXTRAS: two `vec4`s per distinct material, indexed
+    /// This frame's surface EXTRAS: two `vec4`s per distinct material, indexed
     /// by the instance's `normal_mat[1].w >> 1`.
     ///
     ///   `[i*2 + 0]` = roughness, metallic, normal strength, occlusion strength
@@ -822,7 +822,7 @@ pub struct Raster {
 
 /// The WGSL every raster-pass module starts from: the pass shader + the shared
 /// distance-field module. Public so the editor can naga-validate a generated
-/// `.flsl` chunk against the REAL seam before asking for a pipeline.
+/// `.flsl` chunk against the real seam before asking for a pipeline.
 pub fn pass_prelude() -> &'static str {
     concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl"))
 }
@@ -861,14 +861,14 @@ pub fn raster_custom_source(code: Option<(&str, &str)>) -> String {
 struct TexBind {
     bind: wgpu::BindGroup,
     view: wgpu::TextureView,
-    /// The SAME pixels, read WITHOUT the sRGB decode.
+    /// The same pixels, read without the sRGB decode.
     ///
     /// A base-colour image is a picture and belongs in sRGB. A normal map, a
     /// roughness map, an occlusion map are not pictures — they are numbers that
     /// happen to be stored in an image, and putting them through a display
     /// transform silently changes every one of them. 0.5 becomes 0.216, which
     /// on a normal map is not "slightly off": the flat normal (128,128,255)
-    /// decodes to a surface tilted 39°, so EVERY unmapped material shades as
+    /// decodes to a surface tilted 39°, so every unmapped material shades as
     /// though its geometry were bent. (Found by `gi_probe`, which is the first
     /// thing in the engine that measures a shading normal directly rather than
     /// looking at a highlight and judging it plausible.)
@@ -932,7 +932,7 @@ struct FlslShader {
     blend: FlslBlend,
     /// The chunk calls `flsl_surface_gap`, so it needs the opaque depth prepass
     /// to have run this frame. Recorded at compile time rather than asked of the
-    /// source later: this is the ONE place that knows what the chunk contains.
+    /// source later: this is the one place that knows what the chunk contains.
     reads_scene_depth: bool,
 }
 
@@ -979,7 +979,7 @@ impl Raster {
         });
 
         // Group 0: frame globals (uniform) + the vertex-paint block store (storage).
-        // `vpaint` is here, not on the per-mesh group(1), because it is ONE global
+        // `vpaint` is here, not on the per-mesh group(1), because it is one global
         // buffer every draw indexes with its own base offset — which is what keeps
         // painted nodes inside their instanced batches (see docs/subsystems/materials-and-textures.md
         // §2.1/§4.1). It is VERTEX-visible only: `vs` resolves paint to a varying.
@@ -1042,7 +1042,7 @@ impl Raster {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // Binding 11: the palette texture a SECOND time, so binding 5's
+                // Binding 11: the palette texture a second time, so binding 5's
                 // nearest sampler has an image of its own. OpenGL's combined
                 // sampler type is the reason; see `raster.wgsl`.
                 wgpu::BindGroupLayoutEntry {
@@ -1064,9 +1064,9 @@ impl Raster {
                 wgpu::BindGroupLayoutEntry { binding: 7, ..SKIN_STORAGE_ENTRY },
                 wgpu::BindGroupLayoutEntry { binding: 8, ..SKIN_STORAGE_ENTRY },
                 wgpu::BindGroupLayoutEntry { binding: 9, ..SKIN_STORAGE_ENTRY },
-                // Binding 10: the SURFACE EXTRAS store — see `mat_ext_buf`. The
+                // Binding 10: the surface EXTRAS store — see `mat_ext_buf`. The
                 // third store on the `vpaint` pattern, and the one that ends the
-                // instance-attribute famine for good: the vertex stream is FULL
+                // instance-attribute famine for good: the vertex stream is full
                 // at 16/16 attributes, so every material property invented from
                 // here on lands in this buffer behind one index, instead of
                 // being bit-packed into a lane meant for something else.
@@ -1224,7 +1224,7 @@ impl Raster {
             gpu,
             &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
         );
-        // 1×1 FLAT normal — `(0.5, 0.5, 1)` decodes to `(0, 0, 1)` in tangent
+        // 1×1 flat normal — `(0.5, 0.5, 1)` decodes to `(0, 0, 1)` in tangent
         // space, i.e. "the surface's own normal". Bound wherever a material names
         // no normal map, so the shader has one code path and no flag to get
         // out of step with what is actually bound.
@@ -1286,7 +1286,7 @@ impl Raster {
             view_formats: &[],
         });
         // A 1×1 stand-in for the depth prepass: the shader reads its dimensions
-        // to decide whether there IS a prepass this frame, so 1×1 means "no
+        // to decide whether there is a prepass this frame, so 1×1 means "no
         // contact shadows" without a flag anyone has to keep in sync.
         let empty_prime = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -1306,7 +1306,7 @@ impl Raster {
         // raymarch pass simply reflects nothing rather than needing a flag.
         let (empty_env, empty_env_samp) = crate::env::EnvMap::empty(device);
         // …and a 1×1 scene history, for the same reason again: with no previous
-        // frame there is nothing to reflect OF the scene, and the reflection
+        // frame there is nothing to reflect of the scene, and the reflection
         // falls back to the environment map on its own.
         let (empty_scene, empty_scene_samp) = crate::ssr::SceneHistory::empty(device);
         // …and 1×1 reflection probes, for the same reason a third time: no
@@ -1414,7 +1414,7 @@ impl Raster {
         let device = &gpu.device;
         // Built twice, once per vertex entry point: `vs` for ordinary geometry and
         // `vs_skin` for GPU-skinned parts, which deform the vertex by their bone
-        // palette before the identical shading tail. The FOUR passes each need
+        // palette before the identical shading tail. The four passes each need
         // their own skinned variant, because a character has to prime depth,
         // shade, blend and silhouette from the same posed vertices — a prepass
         // that used the bind pose would depth-reject the pose that shades.
@@ -1497,7 +1497,7 @@ impl Raster {
             cache: None,
         });
 
-        // Transparent variant: identical vertex/fragment, but alpha-blends and does NOT
+        // Transparent variant: identical vertex/fragment, but alpha-blends and does not
         // write depth, so an object behind it still shows through and later opaque draws
         // aren't occluded by it. (No back-to-front sort yet, so overlapping transparent
         // surfaces are approximate — enough for the basic transparency this exposes.)
@@ -1514,7 +1514,7 @@ impl Raster {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                // LESS-EQUAL, not Less: texture-paint overlays are COPLANAR with the mesh
+                // less-equal, not Less: texture-paint overlays are COPLANAR with the mesh
                 // they decorate (identical positions through the same vertex shader, so
                 // byte-identical depth) — under Less the opaque base's prepass depth would
                 // reject every overlay fragment. Equal-depth translucents draw over the
@@ -1590,7 +1590,7 @@ impl Raster {
 
     /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
     /// transpiler's generated WGSL **including its stdlib support**, concatenated
-    /// onto [`pass_prelude`] here. The caller MUST have naga-validated the
+    /// onto [`pass_prelude`] here. The caller must have naga-validated the
     /// assembled source first (`floptle_shader::validate` with this prelude) —
     /// this builds the pipeline unconditionally. `replace` swaps an existing
     /// shader in place (hot reload): live bindings stay valid when the slot
@@ -1722,7 +1722,7 @@ impl Raster {
             tex_slots,
             opaque,
             // The transpiler emits this identifier and nothing else does, so
-            // its presence in the generated chunk IS the question being asked.
+            // its presence in the generated chunk is the question being asked.
             reads_scene_depth: chunk.contains("flsl_surface_gap"),
             chunk: chunk.to_string(),
             blend,
@@ -1739,11 +1739,11 @@ impl Raster {
         }
     }
 
-    /// Splice (or clear, with `None`) the scene's Field Shape code into EVERY
+    /// Splice (or clear, with `None`) the scene's Field Shape code into every
     /// module this pass owns — the core pipelines and each registered flsl
     /// shader — so meshes (built-in and custom-material alike) receive shape
     /// shadows and AO. `code` = `(field distance functions, stdlib support)`;
-    /// the caller MUST have naga-validated [`raster_custom_source`] first.
+    /// the caller must have naga-validated [`raster_custom_source`] first.
     pub fn set_custom_field(&mut self, gpu: &Gpu, code: Option<(&str, &str)>) {
         self.custom_field = code.map(|(f, s)| (f.to_string(), s.to_string()));
         let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1786,7 +1786,7 @@ impl Raster {
     ///
     /// The host has to ask, because the prepass is otherwise only run when
     /// there is raymarched content to cap. Without this a water shader would
-    /// foam correctly against terrain and do NOTHING AT ALL in a scene built
+    /// foam correctly against terrain and do nothing at all in a scene built
     /// out of meshes — working in the author's test level and silently failing
     /// in the game, which is the worst shape a graphics feature can have.
     pub fn flsl_draws_want_depth(&self, draws: &[FlslDraw]) -> bool {
@@ -2028,7 +2028,7 @@ impl Raster {
         id
     }
 
-    /// The PROJECT's retro artefacts — the era's look asked for once instead of
+    /// The project's retro artefacts — the era's look asked for once instead of
     /// on every material (see [`floptle_core::Retro::under`] for the precedence
     /// rule). All-default, the initial value, is the identity.
     ///
@@ -2070,7 +2070,7 @@ impl Raster {
     /// (see [`MaterialParams::ext_index`]). The neutral set is index 0 and costs
     /// nothing, so a caller can hand this every material unconditionally.
     ///
-    /// The project's artefacts are folded in HERE, before the neutral test, and
+    /// The project's artefacts are folded in here, before the neutral test, and
     /// the test is against the folded neutral — so a material that sets nothing
     /// still lands on index 0 and still shares one entry with every other.
     pub fn push_surface_extras(&mut self, mut e: SurfaceExtras) -> u32 {
@@ -2106,7 +2106,7 @@ impl Raster {
 
     /// Does anything in this draw list let light through it?
     ///
-    /// The caller asks BEFORE drawing, because the answer decides whether the
+    /// The caller asks before drawing, because the answer decides whether the
     /// frame pays for a refraction pass at all: a scene with no glass in it runs
     /// exactly the passes it always did, with no capture and no second draw.
     pub fn any_transmissive(&self, instances: &[(MeshId, Option<TexId>, InstanceRaw)]) -> bool {
@@ -2160,7 +2160,7 @@ impl Raster {
             return Vec::new();
         }
         depths.sort_by(|a, b| b.total_cmp(a));
-        // The gap BELOW each sorted depth, paired with the midpoint that would
+        // The gap below each sorted depth, paired with the midpoint that would
         // split it. Descending order, so `d[i] - d[i + 1]` is the drop.
         let mut gaps: Vec<(f32, f32)> = depths
             .windows(2)
@@ -2218,7 +2218,7 @@ impl Raster {
     /// reused.
     ///
     /// The difference between two things a draw needs to be able to say. `None`
-    /// means "no override — the mesh's OWN texture draws", which is right for a
+    /// means "no override — the mesh's own texture draws", which is right for a
     /// model wearing its imported look. There was no way to say the other one:
     /// *deliberately untextured*. A node-level Material that supersedes a
     /// model's own materials needs exactly that — without it, a material with no
@@ -2270,7 +2270,7 @@ impl Raster {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // The SCENE format, so every scene pipeline renders into it
+            // The scene format, so every scene pipeline renders into it
             // unchanged — a render target is a second view of the world, drawn
             // by the same passes. It is sampled back as an ordinary material
             // texture, and in linear light either way (an sRGB view decodes on
@@ -2364,7 +2364,7 @@ impl Raster {
         );
     }
 
-    /// Rebuild the group(0) bind group from this Raster's CURRENT buffers.
+    /// Rebuild the group(0) bind group from this Raster's current buffers.
     ///
     /// A bind group holds the buffers it was built from, so every store on
     /// group(0) — the paint blocks, the terrain colors, the three skinning
@@ -2457,7 +2457,7 @@ impl Raster {
     }
 
     /// Allocate a paint block of `count` vertices filled with `fill`, returning its
-    /// base (0 on failure). This is how the brush gives a node its OWN paint, separate
+    /// base (0 on failure). This is how the brush gives a node its own paint, separate
     /// from whatever its mesh imported with.
     pub fn paint_alloc(&mut self, gpu: &Gpu, count: u32, fill: [u8; 4]) -> u32 {
         self.alloc_paint(gpu, &vec![fill; count as usize])
@@ -2476,7 +2476,7 @@ impl Raster {
             .map_or([255; 4], |c| c.to_le_bytes())
     }
 
-    /// Write one vertex's color to the CPU mirror. The GPU does NOT see this until
+    /// Write one vertex's color to the CPU mirror. The GPU does not see this until
     /// [`Raster::paint_flush`] — a brush dab touches many vertices, and one upload per
     /// dab beats one per vertex.
     pub fn paint_set(&mut self, base: u32, i: u32, c: [u8; 4]) {
@@ -2522,7 +2522,7 @@ impl Raster {
     //
     //   * per ASSET, once: `register_skin` uploads a part's per-vertex joint slots
     //     and weights. They belong to the bind pose and never change.
-    //   * per FRAME, per skinned draw: `push_skin_pose` appends that draw's bone
+    //   * per frame, per skinned draw: `push_skin_pose` appends that draw's bone
     //     palette. A pose is a frame's worth of data, so the store is rebuilt from
     //     scratch each frame rather than diffed.
     //   * at draw time: `SkinDraw`s go through the `vs_skin` pipelines, which read
@@ -2663,9 +2663,9 @@ impl Raster {
     /// have reached the GPU.
     ///
     /// Every pass that binds `globals_bind` goes through here, and that is the
-    /// point rather than a tidiness: the skinning stores hang off THAT bind
+    /// point rather than a tidiness: the skinning stores hang off that bind
     /// group, so a pass which sets its globals without this one still draws —
-    /// silently, and with the PREVIOUS frame's pose. The depth prepass did
+    /// silently, and with the previous frame's pose. The depth prepass did
     /// exactly that: it primed depth (and the raymarch's per-pixel march cap)
     /// from where the character was last frame, so this frame's triangles
     /// depth-failed against their own stale silhouette and flickered.
@@ -2954,7 +2954,7 @@ impl Raster {
         }
     }
 
-    /// Clone a registered mesh into a new slot with its OWN vertex buffer, sharing
+    /// Clone a registered mesh into a new slot with its own vertex buffer, sharing
     /// the source's index buffer, texture bind group, and paint block. Made for CPU
     /// vertex skinning: each entity instancing a skinned part gets a private buffer
     /// to bake its pose into, so two characters sharing a model never fight over
@@ -3138,7 +3138,7 @@ impl Raster {
         // bucketed separately (and packed contiguously into one instance buffer) so the
         // transparent ones can render last, blended, in a second pass.
         //
-        // Grouping MUST be hash-based O(N): thousands of terrain chunk meshes
+        // Grouping must be hash-based O(N): thousands of terrain chunk meshes
         // each carry a unique MeshId, and the old scan-per-key version went
         // quadratic in them — tens of milliseconds of tuple comparisons per
         // frame on a big planet (the 60→10 fps collapse on approach).
@@ -3167,7 +3167,7 @@ impl Raster {
                 || raw.color[3] >= OPAQUE_CUTOFF
                 || dithers.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
         };
-        // Glass belongs to neither phase HERE. It is drawn by
+        // Glass belongs to neither phase here. It is drawn by
         // `draw_transmissive` once the scene behind it has been captured, and
         // leaving it in this pass would both hide what it is supposed to refract
         // and refract a picture taken before it existed.
@@ -3309,14 +3309,14 @@ impl Raster {
 
     /// **The refraction pass**: draw only the surfaces light passes through.
     ///
-    /// Run it AFTER the scene behind them has been composited and captured, with
+    /// Run it after the scene behind them has been composited and captured, with
     /// a `field` bind group whose scene texture is that capture. Everything about
     /// the split is in service of one fact: a surface cannot sample a picture it
     /// is already in. Draw glass with the rest of the scene and the only picture
     /// available is the previous frame's — which has the glass in it, so its tint
     /// compounds every frame it stays on screen and a green bottle goes black.
     ///
-    /// Depth is LOADED and written: glass tests against the scene in front of it
+    /// Depth is loaded and written: glass tests against the scene in front of it
     /// and occludes glass behind it.
     ///
     /// `cuts` and `layer` draw one depth layer of the glass — see
@@ -3430,7 +3430,7 @@ impl Raster {
         gpu.queue.submit([encoder.finish()]);
     }
 
-    /// The depth target the LAST prepass wrote (valid once one has run) — what
+    /// The depth target the last prepass wrote (valid once one has run) — what
     /// `Raymarch::set_depth_prime` binds as the march cap.
     ///
     /// "The last one", not "the only one": a frame runs the prepass once per view
@@ -3525,7 +3525,7 @@ impl Raster {
     /// **The palette pass** (`floptle/0127`): quantize `color` in place to the
     /// scene's posterize settings.
     ///
-    /// Run it after the raster and raymarch passes and immediately BEFORE
+    /// Run it after the raster and raymarch passes and immediately before
     /// [`light2d_pass`](Self::light2d_pass). Posterize quantizes the palette —
     /// the set of values the art is allowed to be — and a light is a multiplier
     /// on the palette, not a member of it. Quantizing the finished frame instead
@@ -3576,7 +3576,7 @@ impl Raster {
         if flat.is_empty() || lights.reach() == 0 {
             return;
         }
-        // Three facts about the FRAME rather than about a light, stamped here so
+        // Three facts about the frame rather than about a light, stamped here so
         // that no caller can build a uniform that is missing them — the two
         // gathers in the editor have drifted four times over exactly this shape
         // of "remember to also set".
@@ -3763,7 +3763,7 @@ impl Raster {
             raws.extend_from_slice(&members);
             buckets.push((mesh_idx, tex_key, start, members.len() as u32));
         }
-        // Skinned parts prime depth from the SAME posed vertices the color pass
+        // Skinned parts prime depth from the same posed vertices the color pass
         // shades — `vs_skin` is `@invariant` through the shared tail, so the two
         // agree bit for bit. Priming from the bind pose instead would depth-reject
         // the pose, and a character would vanish behind its own T-stance.
@@ -3931,7 +3931,7 @@ pub fn instance_of(model: Mat4, color: [f32; 3]) -> InstanceRaw {
 ///
 /// The one thing the CPU-side pass routing needs to know about terrain, and it
 /// needs to know it because terrain does not read `color.a` as opacity: the
-/// shader forces the surface opaque (its VERTEX alpha is a palette slot) and
+/// shader forces the surface opaque (its vertex alpha is a palette slot) and
 /// the instance alpha is instead the dissolve-in of a chunk that just streamed
 /// in. Reading the flag back off the packed instance rather than threading a
 /// parallel bool through every draw list keeps the two in step by construction.
@@ -3956,7 +3956,7 @@ pub const MAX_GLASS_LAYERS: u32 = floptle_core::Light::MAX_REFRACTION_LAYERS;
 /// How far an instance's origin is from the eye.
 ///
 /// Camera-relative rendering (ADR-0015) is what makes this a one-liner: the view
-/// matrix carries no translation, so an instance's model translation already IS
+/// matrix carries no translation, so an instance's model translation already is
 /// its position relative to the camera and its length is the distance. No view
 /// matrix has to be threaded in to sort by depth.
 fn instance_depth(raw: &InstanceRaw) -> f32 {
@@ -3989,13 +3989,13 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     let nm = if m3.determinant().abs() > 1e-12 { m3.inverse().transpose() } else { m3 };
     InstanceRaw {
         model: model.to_cols_array_2d(),
-        // n0.w = the terrain color base (0 = none): a plain index, NOT bit-packed, so
+        // n0.w = the terrain color base (0 = none): a plain index, not bit-packed, so
         // unlike params.z it needs no decode ceremony — but it is still read only in
         // `vs`, where it is exact off the attribute rather than interpolated.
         normal_mat: [
             [nm.x_axis.x, nm.x_axis.y, nm.x_axis.z, m.terrain_paint_base as f32],
-            // n1.w packs TWO things, on the same rule params.z follows: bit 0 =
-            // paint-modulate, bits 1.. = this instance's SURFACE EXTRAS index
+            // n1.w packs two things, on the same rule params.z follows: bit 0 =
+            // paint-modulate, bits 1.. = this instance's surface EXTRAS index
             // (0 = the neutral entry). Both are read only in `vs`, exact off the
             // attribute — a ~16.7M integer that got perspective-interpolated
             // could land one entry over and read another material's roughness.
@@ -4010,10 +4010,10 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
         color: [m.color[0], m.color[1], m.color[2], m.alpha],
         emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],
         specular: [m.specular[0], m.specular[1], m.specular[2], m.specular_strength],
-        // params.z packs TWO things: bit 0 = unlit, bits 1.. = the vertex-paint base
+        // params.z packs two things: bit 0 = unlit, bits 1.. = the vertex-paint base
         // (0 = unpainted). Exact in f32 up to 2^24; `alloc_paint` refuses past that.
         //
-        // The fragment shader NEVER sees this packing — `vs` decodes it and re-emits a
+        // The fragment shader never sees this packing — `vs` decodes it and re-emits a
         // clean 0/1 into `VsOut.params.z`, because fs reads it as `> 0.5` (a THRESHOLD,
         // not a bit test): a raw packed value there would make every painted node
         // silently render unlit. Keep the decode in `vs`. See raster.wgsl's `vs`.

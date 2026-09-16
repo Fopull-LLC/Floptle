@@ -5,7 +5,7 @@
 //!
 //! There is one honest answer per host, and they are genuinely different things:
 //!
-//! * **In an exported build**, the game IS the program, so quitting ends it. The
+//! * **In an exported build**, the game is the program, so quitting ends it. The
 //!   save store is flushed first — somebody quitting from a settings menu
 //!   expects the setting they just changed to have been kept, and the ordinary
 //!   flush happens on Stop, which a build never reaches.
@@ -116,7 +116,7 @@ impl crate::Editor {
     /// Alt+Enter a build answers on its own.
     ///
     /// Only the game's own window does this. In the editor the window is the
-    /// EDITOR's, and a game under test taking it over would be the same
+    /// editor's, and a game under test taking it over would be the same
     /// surprise as `app.quit()` closing it — so, like `quit`, it does the
     /// honest thing for the host it is in and says so in the Console once.
     pub(crate) fn app_set_fullscreen(&mut self, on: bool) {
@@ -295,7 +295,7 @@ mod tests {
         assert!(ed.playing);
         ed.play_step(1.0 / 60.0, true);
         assert!(ed.pending_exit, "a build was asked to quit and did not");
-        // Play is NOT stopped in a build: the process is leaving, and stopping
+        // Play is not stopped in a build: the process is leaving, and stopping
         // would run the editor's whole restore path on the way out.
         assert!(ed.playing, "a build stopped Play instead of quitting");
         let _ = std::fs::remove_dir_all(&dir);
@@ -329,7 +329,7 @@ mod tests {
             "the parse error's position is what makes this actionable: {said}"
         );
 
-        // A project with NO project.ron is not a fault — that is a project with
+        // A project with no project.ron is not a fault — that is a project with
         // default settings, and warning about it would cry wolf on every new one.
         floptle_vfs::remove_file(dir.join("project.ron")).unwrap();
         let mut fresh = crate::Editor { project_root: dir.clone(), ..Default::default() };

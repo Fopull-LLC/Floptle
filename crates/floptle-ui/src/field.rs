@@ -67,7 +67,7 @@ impl Cursor {
     }
 }
 
-/// How far a field's text run slides LEFT (a negative number, or 0) so the
+/// How far a field's text run slides left (a negative number, or 0) so the
 /// caret stays inside the box — a value longer than its field scrolls out from
 /// under itself as you type past the end.
 ///
@@ -97,7 +97,7 @@ pub fn scroll_shift(caret_x: f32, run_w: f32, rect_x: f32, rect_w: f32, pad: f32
 /// frame being clicked, which is what decides how far the run had scrolled —
 /// `None` for a field that wasn't focused, and therefore hadn't scrolled.
 ///
-/// Lands on the NEAREST gap, not the one before: clicking the right half of a
+/// Lands on the nearest gap, not the one before: clicking the right half of a
 /// letter puts the caret after it, which is what every text field does and what
 /// nobody notices until it doesn't.
 pub fn caret_at(
@@ -137,7 +137,7 @@ pub fn apply(value: &mut String, cur: &mut Cursor, op: &Edit, extend: bool, spec
     match op {
         Edit::Insert(text) => {
             let filtered = filter(text, spec);
-            // A rejected keystroke does NOTHING — it must not quietly eat the
+            // A rejected keystroke does nothing — it must not quietly eat the
             // selection. Typing `x` into a numeric field with three digits
             // highlighted has to leave the three digits there.
             if filtered.is_empty() {
@@ -440,7 +440,7 @@ mod tests {
             (10..=11).contains(&at_edge),
             "clicking the left edge of a scrolled field gave index {at_edge}, not ~10"
         );
-        // And the inverse of the renderer: whatever x the caret is DRAWN at
+        // And the inverse of the renderer: whatever x the caret is drawn at
         // must map back to the caret's own index.
         for c in [0usize, 3, 9, 17, 20] {
             let caret_x = left + w(&shown[..c]);

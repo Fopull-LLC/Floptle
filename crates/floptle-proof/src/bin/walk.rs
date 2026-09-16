@@ -112,7 +112,7 @@ fn dwarp_dt(p: Vec3, t: f32) -> Vec3 {
 }
 
 /// A "branch": a tapering chain of blended spheres following a helix that winds
-/// around the planet AND lifts off its surface into the sky.
+/// around the planet and lifts off its surface into the sky.
 fn arm(q: Vec3, phase: f32) -> f32 {
     let mut d = 1e9_f32;
     for k in 0..ARM_STEPS {
@@ -139,7 +139,7 @@ fn f_macro(q: Vec3) -> f32 {
     d
 }
 
-/// Collision field: the smooth, solid macro planetoid (NO crust). Source of
+/// Collision field: the smooth, solid macro planetoid (no crust). Source of
 /// truth for all physics.
 fn f_c(p: Vec3, t: f32) -> f32 {
     f_macro(p + warp(p, t))
@@ -214,7 +214,7 @@ impl Character {
             self.jump_lock = JUMP_LOCK;
         }
 
-        // substep count sized off BOTH travel speed AND surface speed (no tunneling)
+        // substep count sized off both travel speed and surface speed (no tunneling)
         let speed = self.vel.length().max(SURF_VMAX);
         let n = ((speed * dt) / (0.5 * CAP_R)).ceil().max(4.0) as u32;
         let sub = dt / n as f32;
@@ -742,7 +742,7 @@ impl State {
             let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
             (self.cc.pos + up * EYE, look)
         } else {
-            // third person: orbit ABOVE and BEHIND, always looking down at the
+            // third person: orbit above and behind, always looking down at the
             // player. The elevation is clamped so the camera can never dip under
             // the horizon (which is what made the view feel inverted).
             let target = self.cc.pos + up * (CAP_HH + 0.3);

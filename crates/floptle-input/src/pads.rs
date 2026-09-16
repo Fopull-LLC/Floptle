@@ -165,7 +165,7 @@ impl Pads {
             return;
         }
 
-        // Events FIRST: `next_event` is what advances gilrs's internal gamepad
+        // Events first: `next_event` is what advances gilrs's internal gamepad
         // state, so polling levels before draining would read last frame's pose
         // and miss a pad that connected this frame.
         let mut edges: Vec<(gilrs::GamepadId, gilrs::Button, bool)> = Vec::new();
@@ -197,7 +197,7 @@ impl Pads {
             let Some(uuid) = live.iter().find(|(i, _)| *i == id).map(|(_, u)| *u) else { continue };
             let Some(slot) = self.slots.iter().position(|s| *s == Some(uuid)) else { continue };
             let out = if down { &mut raw.pressed } else { &mut raw.released };
-            // Bank BOTH forms: an `Any` binding must see the edge too, and once
+            // Bank both forms: an `Any` binding must see the edge too, and once
             // the frame is over the resolver can no longer work out which pad an
             // `Any` binding would have read.
             out.insert(Source::Pad { id: PadId::Slot(slot as u8), ctrl: PadControl::Button(b) });

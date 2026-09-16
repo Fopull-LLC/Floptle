@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 ///
 /// Every op that moves a vertex or changes the face set calls this: once the
 /// user has pulled a face, re-generating from the old parameters would throw
-/// that edit away. Material-slot assignment deliberately does NOT clear it —
+/// that edit away. Material-slot assignment deliberately does not clear it —
 /// painting a stair's treads must not cost you the step-count control.
 fn touched(mesh: &mut MapMesh) {
     mesh.spec = None;
@@ -53,7 +53,7 @@ pub fn transform_verts(mesh: &mut MapMesh, verts: &[u32], m: &Mat4) {
 /// area-weighted average normal.
 ///
 /// Semantics:
-/// - The selected faces MOVE (their vertices are duplicated first so shared
+/// - The selected faces move (their vertices are duplicated first so shared
 ///   unselected geometry stays put; verts shared by two selected faces are
 ///   duplicated once — the region stays welded).
 /// - Side wall quads are created only on the region's BOUNDARY edges (edges
@@ -74,7 +74,7 @@ pub fn extrude_faces(mesh: &mut MapMesh, faces: &[u32], distance: f32) -> Vec<u3
     for &fi in &sel {
         nsum += newell(mesh, &mesh.faces[fi]);
     }
-    // A CLOSED selection has no direction to go. Every face of a box sums to zero, so
+    // A closed selection has no direction to go. Every face of a box sums to zero, so
     // "select all, press E" used to normalize a zero vector, fall back to +Y, and
     // translate the entire shell upward — while making no walls (nothing is a boundary
     // edge) and leaving every original vertex behind as an orphan that still draws as a
@@ -195,7 +195,7 @@ pub fn inset_faces(mesh: &mut MapMesh, faces: &[u32], amount: f32) -> Vec<u32> {
                 MapMesh { verts: inner.clone(), faces: vec![probe], slots: mesh.slots.clone(), spec: None };
             let n2 = newell(&scratch, &scratch.faces[0]);
             // Newell's magnitude is 2x the area: an inset must keep the winding
-            // AND shrink. (A point-reflected polygon — what a wildly oversized
+            // and shrink. (A point-reflected polygon — what a wildly oversized
             // amount produces — keeps its winding, so the area test is the one
             // that catches it.)
             let n0 = newell(mesh, &f);
@@ -221,7 +221,7 @@ pub fn inset_faces(mesh: &mut MapMesh, faces: &[u32], amount: f32) -> Vec<u32> {
 
 /// Split the selected faces off into their own mesh (returned, with the same
 /// slot names), removing them from `mesh`. The new mesh's vertices are in the
-/// SAME local frame, so the caller can spawn a node with the identical
+/// same local frame, so the caller can spawn a node with the identical
 /// transform and nothing moves. Returns `None` when the selection is empty or
 /// covers the whole mesh (nothing would be left behind).
 pub fn detach_faces(mesh: &mut MapMesh, faces: &[u32]) -> Option<MapMesh> {
@@ -300,7 +300,7 @@ pub fn bridge_faces(mesh: &mut MapMesh, a: u32, b: u32) -> Vec<u32> {
         }
         walls.push(Face { verts, slot: fa.slot });
     }
-    // Append the walls FIRST (their vertex indices are still valid), then drop
+    // Append the walls first (their vertex indices are still valid), then drop
     // the two bridged faces — `delete_faces` remaps the walls along with
     // everything else, so nothing has to be rebuilt by hand.
     let start = mesh.faces.len() as u32;
@@ -372,7 +372,7 @@ pub fn resize(mesh: &mut MapMesh, size: Vec3) {
     }
 }
 
-/// Append `src` (transformed by `m`) into `mesh`, merging slot lists by NAME so
+/// Append `src` (transformed by `m`) into `mesh`, merging slot lists by name so
 /// per-face materials survive the merge. Returns the merged faces' indices.
 pub fn merge_into(mesh: &mut MapMesh, src: &MapMesh, m: &Mat4) -> Vec<u32> {
     touched(mesh);
@@ -541,8 +541,8 @@ pub fn set_face_slot(mesh: &mut MapMesh, faces: &[u32], slot: u16) {
 }
 
 /// Topological subdivide: each selected n-gon face is split into n quads via
-/// edge midpoints + face centroid (Catmull-Clark connectivity WITHOUT the
-/// smoothing — positions don't move). Edge midpoints are SHARED between two
+/// edge midpoints + face centroid (Catmull-Clark connectivity without the
+/// smoothing — positions don't move). Edge midpoints are shared between two
 /// selected faces that share the edge (dedupe by canonical edge key) so the
 /// result stays welded; edges bordering unselected faces get their midpoint
 /// INSERTED into that neighbour's corner list too, so the seam has no
@@ -631,7 +631,7 @@ pub fn loop_cut(mesh: &mut MapMesh, edge: (u32, u32), t: f32) -> Vec<(u32, u32)>
     }
     let t = t.clamp(0.02, 0.98);
     // Every face the ring crosses must be a quad with exactly two ring edges.
-    // Checked BEFORE anything is written, so a refusal leaves the mesh alone.
+    // Checked before anything is written, so a refusal leaves the mesh alone.
     let ring_set: BTreeSet<(u32, u32)> = ring.iter().copied().collect();
     let mut cut_faces: Vec<(usize, usize, usize)> = Vec::new(); // face, edge slot a, slot b
     for (fi, f) in mesh.faces.iter().enumerate() {
@@ -718,7 +718,7 @@ pub fn bevel_edges(mesh: &mut MapMesh, edges: &[(u32, u32)], amount: f32) -> usi
         .collect();
     let mut moved = 0usize;
     // Per face, per corner: a fresh vertex pulled `amount` toward the face
-    // centre. Faces stop sharing the corner, which IS the chamfer.
+    // centre. Faces stop sharing the corner, which is the chamfer.
     for (fi, &c) in centres.iter().enumerate() {
         for k in 0..mesh.faces[fi].verts.len() {
             let v = mesh.faces[fi].verts[k];
@@ -752,7 +752,7 @@ fn key(a: u32, b: u32) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// Extruding a CLOSED selection has no direction, and used to translate the whole
+    /// Extruding a closed selection has no direction, and used to translate the whole
     /// shell along +Y while leaving every original vertex behind as an orphan — which
     /// looks like the tool inventing loose vertices.
     #[test]
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(m.verts, before.verts, "the shell did not move");
     }
 
-    /// Welding two corners of one face that are NOT neighbours leaves a bowtie ring.
+    /// Welding two corners of one face that are not neighbours leaves a bowtie ring.
     /// `dedup` only sees consecutive repeats, so it survived as a zero-area face that
     /// drew nothing, picked nothing, and kept its vertices in every edge and loop query.
     #[test]
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(m.verts[1], before + Vec3::Y * 2.0);
     }
 
-    /// The point of a loop cut: the SHAPE does not change, only what it is made
+    /// The point of a loop cut: the shape does not change, only what it is made
     /// of. A cube's silhouette, volume and validity all survive; it just has a
     /// seam through the middle to work with now.
     #[test]
@@ -1058,7 +1058,7 @@ mod tests {
         }
     }
 
-    /// Subdividing PART of a mesh must not leave a T-junction where the new
+    /// Subdividing part of a mesh must not leave a T-junction where the new
     /// midpoints meet the untouched neighbours — that seam is exactly where a
     /// face drag would tear the shape open.
     #[test]

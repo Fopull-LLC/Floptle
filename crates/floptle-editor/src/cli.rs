@@ -156,7 +156,7 @@ impl Verb {
 /// its own row, and both halves reach `help --json` together.
 pub(crate) const COMMON_EXITS: &[(i32, &str)] = &[
     (0, "the operation succeeded"),
-    // Including a PROJECT that is not one. Said here rather than in each row
+    // Including a project that is not one. Said here rather than in each row
     // because every verb taking a project answers it the same way, and "your
     // path is wrong" must not share a code with "your project is broken".
     (2, "the command line was wrong, including a PROJECT that is not a project directory"),
@@ -1916,7 +1916,7 @@ mod tests {
         }
     }
 
-    /// …and a verb IS claimed, including a nested one.
+    /// …and a verb is claimed, including a nested one.
     #[test]
     fn a_verb_is_claimed() {
         for line in [vec!["version"], vec!["help"], vec!["bake"], vec!["open"]] {
@@ -1944,7 +1944,7 @@ mod tests {
             dispatch(&argv(&["play", "--steam"])),
             Outcome::Launch { project: None, player: true, steam: true }
         ));
-        // …and `bake gi` is NOT one of them any more. It renders offscreen and
+        // …and `bake gi` is not one of them any more. It renders offscreen and
         // exits, which is what its help always claimed.
         assert!(!matches!(dispatch(&argv(&["bake", "gi", "no-such-project"])), Outcome::Launch { .. }));
     }

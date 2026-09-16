@@ -143,7 +143,7 @@ pub enum Space {
 
 /// Where an effect's per-track `gravity` pull points — the dev-facing knob for
 /// particles near worlds with non-down gravity. `WorldDown` is the classic
-/// constant −Y pull (unchanged default). `Field` samples the LIVE scene gravity
+/// constant −Y pull (unchanged default). `Field` samples the live scene gravity
 /// field at the emitter each tick (radial "planet" volumes + celestial µ/r²), so
 /// debris, dust and embers fall toward the ground beneath them instead of toward
 /// world −Y. The host supplies the sampled vector; the per-track `gravity` scalar
@@ -273,7 +273,7 @@ pub struct Trail {
     pub time: f32,
     /// Ribbon width in world units at the head (the tail tapers when `fade`).
     pub width: f32,
-    /// Taper width AND alpha to zero at the tail.
+    /// Taper width and alpha to zero at the tail.
     pub fade: bool,
     /// Ribbon texture (`None` = the track's own texture, or a soft untextured strip).
     pub texture: Option<String>,
@@ -288,7 +288,7 @@ impl Default for Trail {
 }
 
 /// The rendered look of a track. Lighting and shadow casting are per-track opt-ins,
-/// both OFF by default (classic crisp VFX costs nothing until asked).
+/// both off by default (classic crisp VFX costs nothing until asked).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     pub render: RenderMode,
@@ -325,7 +325,7 @@ impl Default for Look {
     }
 }
 
-/// One visual layer AND its timeline lane — the unit you select, drag, mute, copy.
+/// One visual layer and its timeline lane — the unit you select, drag, mute, copy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub name: String,
@@ -373,7 +373,7 @@ pub struct Track {
     pub trail: Option<Trail>,
     /// Beam tracks only: how many quads the origin→`beam_end` ribbon subdivides into.
     pub segments: u32,
-    /// Beam tracks only: the ribbon's endpoint, a LOCAL offset from the effect origin
+    /// Beam tracks only: the ribbon's endpoint, a local offset from the effect origin
     /// (scripts override it per instance via `setBeamEnd`).
     pub beam_end: Vec3,
     /// Beam tracks only: sine-ripple amplitude across the chain (0 = straight).

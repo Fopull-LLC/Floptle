@@ -63,7 +63,7 @@ const SALT_COLOR: u32 = 0x5EED_0004;
 const SALT_ANGULAR: u32 = 0x5EED_0005;
 const SALT_LIFE: u32 = 0x5EED_0006;
 /// Per-(clip, pulse) salts for burst count / interval jitter. These derive from a stable
-/// (clip index, pulse index) hash — NOT the monotonic emit counter — so scrubbing the
+/// (clip index, pulse index) hash — not the monotonic emit counter — so scrubbing the
 /// playhead re-rolls the identical pulse times and counts and re-simulation stays exact.
 const SALT_COUNT: u32 = 0x5EED_0007;
 const SALT_INTERVAL: u32 = 0x5EED_0008;
@@ -109,7 +109,7 @@ fn noise3(p: Vec3) -> Vec3 {
 }
 
 /// The acceleration one [`Force`] applies to a particle at `pos` (simulation-space).
-/// `world` is the particle's ABSOLUTE world position (anchor + pos for World tracks,
+/// `world` is the particle's absolute world position (anchor + pos for World tracks,
 /// = pos for Local) — used only for turbulence so its noise field is fixed in the
 /// world and rebase-invariant. Spatial forces use `pos` directly: for World tracks
 /// both the authored centre and `pos` are anchor-relative, so `centre − pos` is
@@ -211,7 +211,7 @@ impl TrackParticles {
 /// Per-track live state inside an instance.
 struct TrackState {
     particles: TrackParticles,
-    /// Births this track ASKED for and could not have, because the pool was
+    /// Births this track asked for and could not have, because the pool was
     /// full. Counted rather than merely returned from, because dropping
     /// silently is how an effect comes out thinner than it was authored and
     /// nothing says why (`floptle/0099`). Cleared by `reset`, like the
@@ -248,7 +248,7 @@ pub struct EffectInstance {
     /// from the origin. `anchored` guards the first advance (no shift on birth).
     anchor: DVec3,
     anchored: bool,
-    /// Emitter world velocity (m/s) for the NEXT advance only — set by
+    /// Emitter world velocity (m/s) for the next advance only — set by
     /// `advance_at_moving`, consumed and cleared inside `advance_at`, so a plain
     /// `advance`/`advance_at` never inherits stale motion. Newborns on World tracks
     /// add `inherit_velocity * this` at birth.
@@ -390,7 +390,7 @@ impl EffectInstance {
 
     /// [`advance_at`] with an explicit emitter world velocity (m/s) so newborns can
     /// inherit the emitter's momentum (see [`crate::Track::inherit_velocity`]). Detached
-    /// one-shots on a fast vessel pass its velocity here; node instances usually pass ZERO.
+    /// one-shots on a fast vessel pass its velocity here; node instances usually pass zero.
     pub fn advance_at_moving(&mut self, dt: f32, gravity: Vec3, emitter: Transform, emitter_vel: Vec3) {
         self.pending_emit_vel = emitter_vel;
         self.advance_at(dt, gravity, emitter);
@@ -487,7 +487,7 @@ impl EffectInstance {
                 let jitter = clip.lifetime_jitter;
                 match clip.emit {
                     Emit::Rate { rate } => {
-                        // Entering a clip resets THIS clip's fractional accumulator: each
+                        // Entering a clip resets this clip's fractional accumulator: each
                         // span starts its emission phase fresh (deterministic across
                         // scrubs), without disturbing a co-active clip's carry.
                         if prev < clip.start
@@ -637,7 +637,7 @@ fn spawn(
 ) {
     if ts.particles.count as u32 >= ct.capacity {
         // Pool full: drop, never reallocate mid-play. Recorded so the editor
-        // can say WHICH track was asked for more than it can hold, instead of
+        // can say which track was asked for more than it can hold, instead of
         // the effect quietly coming out thinner than it was authored.
         ts.dropped = ts.dropped.saturating_add(1);
         return;
@@ -649,7 +649,7 @@ fn spawn(
     let un = tau / lifetime; // normalized effect time for lane sampling
     let shape_scale = ct.lane_shape.sample(un);
     let (mut offset, mut dir) = sample_shape(ct.shape, shape_scale, seed);
-    // A World-space track bakes the birth offset + emit direction into WORLD
+    // A World-space track bakes the birth offset + emit direction into world
     // orientation (the emitter's rotation/scale); the anchor carries translation, so
     // the particle stops riding the node. Local tracks stay emitter-local (the node
     // matrix is applied at render).
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn clip_gated_rate_emits_exact_count() {
         // 10/s inside a [0.0, 0.55] clip = exactly 5 particles, none outside it
-        // (crossings at 0.1..0.5; the clip edge is deliberately NOT a crossing so
+        // (crossings at 0.1..0.5; the clip edge is deliberately not a crossing so
         // float accumulation can't fencepost the count). The clip length (0.55) is now
         // the lifetime, so check at t=0.6 — after emission ends but before the first
         // particle (born ~0.1) expires at 0.65.
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn scrub_is_bit_deterministic() {
-        // A jittered rate stream AND a jittered burst clip on one track — exercises both
+        // A jittered rate stream and a jittered burst clip on one track — exercises both
         // emission paths plus lifetime jitter, and must re-simulate bit-for-bit.
         let fx = one_track_effect(
             Track {
@@ -1104,7 +1104,7 @@ mod tests {
     fn world_space_particles_reanchor_when_the_emitter_moves() {
         use crate::effect::Space;
         // A World-space burst with zero velocity/gravity: once born, moving the emitter
-        // must NOT drag the particles along — their stored offset re-anchors by the
+        // must not drag the particles along — their stored offset re-anchors by the
         // emitter delta so the absolute world position stays fixed.
         let mut track = Track {
             clips: vec![burst_clip(0.0, 4, 100.0)],
@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn turbulence_is_world_fixed_and_rebase_safe() {
         use crate::effect::Space;
-        // A World-space particle pushed only by turbulence: its ABSOLUTE world
+        // A World-space particle pushed only by turbulence: its absolute world
         // trajectory must be identical whether or not the emitter drifts (which
         // re-anchors it every step). The noise field is fixed in the world.
         let mk = || {

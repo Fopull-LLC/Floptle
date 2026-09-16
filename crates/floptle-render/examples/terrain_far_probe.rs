@@ -1,5 +1,5 @@
 //! Headless probe for LARGE-WORLD terrain (ADR-0015): the exact scene of
-//! `terrain_blend_probe`, but placed TEN MILLION units from the world origin
+//! `terrain_blend_probe`, but placed ten MILLION units from the world origin
 //! (camera there too). With per-volume f64 anchors + camera-relative upload the
 //! output must be pixel-stable and identical to the near-origin probe — any f32
 //! world math left in the terrain path shows up here as melting/stepping.

@@ -77,7 +77,7 @@ pub struct SkinStream {
 /// Import a `.glb`/`.gltf` keeping its node structure. `None` = a single-object
 /// static prop with no rig (use the flattening static import instead).
 ///
-/// We keep the tree when the model is animated, skinned, OR made of more than one
+/// We keep the tree when the model is animated, skinned, or made of more than one
 /// mesh object (an N64-style character split into body-part meshes). In every
 /// case each mesh stays in its node's local space, the whole node tree becomes a
 /// [`Skeleton`], and the model's objects/bones are individually addressable,
@@ -86,8 +86,8 @@ pub struct SkinStream {
 /// or animate independently) takes the cheaper flattening path.
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     let (doc, buffers, images) = crate::gltf_import::read_gltf(path, true)?;
-    // Keep the structure if the file is animated OR skinned (a rig authored
-    // elsewhere, clips to be keyed IN-ENGINE — the astronaut_male case) OR it has
+    // Keep the structure if the file is animated or skinned (a rig authored
+    // elsewhere, clips to be keyed IN-ENGINE — the astronaut_male case) or it has
     // two or more mesh objects (the multi-part unrigged character — Sae). A single
     // mesh with no rig has no sub-objects to expose, so it stays a plain baked prop.
     let mesh_objects = doc.nodes().filter(|n| n.mesh().is_some()).count();
@@ -116,7 +116,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
             .name()
             .map(|n| n.to_string())
             .unwrap_or_else(|| format!("Node{}", node.index()));
-        // Baked clips bind channels by node NAME, so names must be unique.
+        // Baked clips bind channels by node name, so names must be unique.
         // Blender exports often carry a bone and its mesh child with the same
         // name — dedupe deterministically (first keeps the plain name; the
         // animated bone comes first in the walk, so it wins the plain name).

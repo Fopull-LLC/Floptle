@@ -10,7 +10,7 @@
 //! claim about a picture, and the only honest check is a number taken from the
 //! rendered pixels plus a look at the file. This asserts three things:
 //!
-//! 1. the filter CHANGES the image (a shader that silently no-ops would
+//! 1. the filter changes the image (a shader that silently no-ops would
 //!    otherwise pass every test anyone would think to write),
 //! 2. simulating deuteranopia collapses the red/green pair toward each other —
 //!    which is what the deficiency does, so it proves the matrices are wired the

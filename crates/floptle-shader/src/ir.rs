@@ -34,7 +34,7 @@ pub enum Stage {
     ///
     /// Its inputs are the screen `uv` and `time`; everything about the scene
     /// arrives through ops — [`sceneColor`], [`sceneDepth`], [`sceneNormal`],
-    /// [`screenTexel`] — because a post shader reads the frame at ANY pixel,
+    /// [`screenTexel`] — because a post shader reads the frame at any pixel,
     /// not only its own, and that is what makes an edge detect (or a blur, or a
     /// warp) expressible at all.
     ///
@@ -136,7 +136,7 @@ pub enum Input {
     WorldPos,
     /// SURFACE-LOCKED object position (`vec3`) — the mesh-local position scaled
     /// to world units (`in.pos * modelScale`), the same coordinate triplanar
-    /// projects along. Unlike `worldPos` it does NOT ride the floating origin,
+    /// projects along. Unlike `worldPos` it does not ride the floating origin,
     /// so procedural detail (panel seams, rivets, weathering) STICKS to the
     /// surface instead of swimming/rescaling as the camera moves. Fragment only.
     ObjectPos,
@@ -291,7 +291,7 @@ pub struct ShaderIr {
     pub uniforms: Vec<Uniform>,
     /// Texture slot names, in declaration order (= group(3) binding order).
     pub textures: Vec<String>,
-    /// Per-slot DEFAULT image (`texture ramp = "art/ramp.png"`), keyed by slot
+    /// Per-slot default image (`texture ramp = "art/ramp.png"`), keyed by slot
     /// name. Semantic, not cosmetic: a slot with a default binds that image
     /// everywhere the material leaves the slot empty — which is what makes a
     /// texture shader show its art in the graph's previews (and on a fresh
@@ -322,7 +322,7 @@ impl ShaderIr {
     /// Structural equality ignoring the cosmetic layout block, source spans and
     /// arena ordering — the round-trip contract (`parse(print(ir))` must be
     /// `same_shader`). Expressions compare recursively; `Let` references
-    /// compare by binding NAME so two arenas laid out differently still match.
+    /// compare by binding name so two arenas laid out differently still match.
     pub fn same_shader(&self, other: &ShaderIr) -> bool {
         if self.name != other.name
             || self.stage != other.stage
@@ -353,7 +353,7 @@ impl ShaderIr {
 /// Recursive structural expression equality across two arenas (see
 /// [`ShaderIr::same_shader`]). `Uniform`/`Texture` indices compare directly
 /// (both shaders passed the header equality check) and `Let` references by
-/// index too (let ORDER is part of the header comparison).
+/// index too (let order is part of the header comparison).
 fn same_expr(a: &ShaderIr, ea: ExprId, b: &ShaderIr, eb: ExprId) -> bool {
     match (&a.expr(ea).kind, &b.expr(eb).kind) {
         (ExprKind::Num(x), ExprKind::Num(y)) => x == y,

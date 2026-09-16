@@ -7,7 +7,7 @@
 #[cfg(feature = "editor-ui")]
 use crate::EditorTabViewer;
 
-/// What surface a brush paints INTO. Vertex = per-vertex color (resolution follows the
+/// What surface a brush paints into. Vertex = per-vertex color (resolution follows the
 /// mesh's tessellation, the classic retro look); Texture = a per-node paint texture sampled
 /// through the mesh UVs (resolution-independent — paint fine detail on a flat low-poly wall).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub(crate) enum PaintMode {
     Paint,
     /// Average each vertex toward its neighbours-in-radius — softens hard edges.
     Smooth,
-    /// Undo paint under the brush: texture paint returns to the node's ORIGINAL look
+    /// Undo paint under the brush: texture paint returns to the node's original look
     /// (the seeded canvas), vertex paint returns to neutral. Strength/falloff apply,
     /// so a soft low-strength eraser fades paint out gradually.
     Erase,
@@ -135,7 +135,7 @@ impl EditorTabViewer<'_> {
         let cmd = &mut *self.cmd;
 
         if self.playing {
-            // Paint edits asset-adjacent data that Stop does NOT revert, and
+            // Paint edits asset-adjacent data that Stop does not revert, and
             // `push_history` is a hard no-op while playing — so a Play-time stroke
             // would be both unrecorded and un-undoable. Refuse rather than lose work.
             ui.label("⏸ Paint is disabled during Play.");

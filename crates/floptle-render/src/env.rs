@@ -28,7 +28,7 @@
 //! approximation — a true prefilter would integrate the GGX lobe per level — and
 //! it is a good one for skies, which are overwhelmingly low-frequency. What it
 //! gets exactly right is the case that matters most here: at roughness 0 a
-//! mirror samples level 0, which IS the sky.
+//! mirror samples level 0, which is the sky.
 
 /// Width of the captured sky. Height is half (equirectangular), and the chain
 /// runs down to 1×1 — nine levels, which is enough that the roughest surface
@@ -183,7 +183,7 @@ impl EnvMap {
             multiview_mask: None,
             cache: None,
         });
-        // Level i is the SOURCE for level i+1, so there is one bind per step.
+        // Level i is the source for level i+1, so there is one bind per step.
         let down_binds = (0..mips.saturating_sub(1))
             .map(|m| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {

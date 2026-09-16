@@ -127,7 +127,7 @@ fn fountain_effect() -> ParticleEffect {
 }
 
 /// A showcase of the non-camera-facing orientation modes, all at once, so one frame
-/// proves each looks right: a ring of FLAT decals on the ground, a row of UPRIGHT
+/// proves each looks right: a ring of flat decals on the ground, a row of UPRIGHT
 /// cards down the middle, and a fountain of VELOCITY-stretched sparks. Viewed from a
 /// near-level camera, the ground ring reads as thin ellipses (proving it's flat, not
 /// facing us), the cards stay vertical, and the sparks elongate along their motion.
@@ -236,7 +236,7 @@ impl Harness {
             packed.len(),
             draws.iter().map(|d| (d.blend, d.range.clone())).collect::<Vec<_>>()
         );
-        // Resolve textures EXACTLY as the editor does: by path, through a registry
+        // Resolve textures exactly as the editor does: by path, through a registry
         // map (not a direct TexId). This exercises the real editor resolve path.
         let batches: Vec<ParticleBatch> = draws
             .iter()
@@ -282,7 +282,7 @@ fn main() {
     let particles = Particles::new(&gpu);
     let retro = Retro::new(&gpu, RETRO_H);
     let box_mesh = raster.register(&gpu, &cube(1.0), None);
-    // Registry keyed by PATH, exactly like the editor's texture_registry — the
+    // Registry keyed by path, exactly like the editor's texture_registry — the
     // probe resolves batches through this map, exercising the real resolve path.
     let mut registry = std::collections::HashMap::new();
     registry.insert("soft".to_string(), raster.register_texture(&gpu, &soft_puff(64), TexSampling::default()));

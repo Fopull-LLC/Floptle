@@ -290,7 +290,7 @@ impl Ease {
     }
 
     /// Shape a 0..1 progress. Values may leave 0..1 in the middle for the
-    /// overshooting curves — that IS the effect, so nothing clamps here.
+    /// overshooting curves — that is the effect, so nothing clamps here.
     pub fn apply(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
@@ -344,7 +344,7 @@ impl Default for Transition {
 // ---------------------------------------------------------------------------
 
 /// The closed set of element states. Order matters: [`UiState::pick`] returns
-/// the FIRST match, so disabled beats pressed beats hover.
+/// the first match, so disabled beats pressed beats hover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UiState {
     #[default]
@@ -455,7 +455,7 @@ pub struct StyleBlock {
     pub selection_color: Option<ColorRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder_color: Option<ColorRef>,
-    // --- layout (opt-in; a style CAN own padding/gap so a "card" is one name) ---
+    // --- layout (opt-in; a style can own padding/gap so a "card" is one name) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pad: Option<NumRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -614,7 +614,7 @@ struct Anim {
 
 /// Per-element transition state, owned by whoever drives the frame.
 ///
-/// Kept OUTSIDE the scene on purpose: a hover that persisted into the saved
+/// Kept outside the scene on purpose: a hover that persisted into the saved
 /// `.ron` would be a bug, and the play-snapshot machinery would have to know
 /// about it. Nothing here is serialized, ever.
 #[derive(Clone, Debug, Default)]
@@ -651,7 +651,7 @@ impl StyleRuntime {
     }
 
     /// Open a new frame: from here until the next call, each element's
-    /// transition advances by `dt` ONCE, however many times it is styled.
+    /// transition advances by `dt` once, however many times it is styled.
     ///
     /// A frame styles the same tree more than once by design — the hit test
     /// needs the styled geometry, the screen overlay draws it, and a world
@@ -679,7 +679,7 @@ impl StyleRuntime {
 
     /// Advance `id` toward `target`, returning what to draw this frame.
     ///
-    /// A state change restarts the transition FROM THE CURRENT ANIMATED VALUE,
+    /// A state change restarts the transition from the current ANIMATED VALUE,
     /// not from the old state's target — so un-hovering halfway through a hover
     /// eases back from where it actually is instead of snapping to full hover
     /// and then leaving.
@@ -789,7 +789,7 @@ fn overlay(mut a: Animated, block: &StyleBlock, tk: &Tokens) -> Animated {
         a.tracking = v;
     }
     if let Some(g) = &block.gradient {
-        // Resolved AFTER `a.fill`, because the default far stop is the fill at
+        // Resolved after `a.fill`, because the default far stop is the fill at
         // alpha 0 — which is what "fade this out" means, and what a hand-written
         // literal most often gets subtly wrong.
         a.grad_to = match &g.to {
@@ -912,7 +912,7 @@ fn apply_animated(spec: &mut crate::ElementSpec, a: &Animated, styled_shape: boo
 
 /// Resolve every styled element in a tree and advance its transitions.
 ///
-/// Call this on the freshly-built [`crate::Node`] tree each frame, BEFORE
+/// Call this on the freshly-built [`crate::Node`] tree each frame, before
 /// [`crate::solve`]. It mutates the tree's spec copies, never the scene — which
 /// is the whole reason play-time hover states can't end up in a saved `.ron`.
 ///
@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(s.c, NumRef::Lit(12.0));
     }
 
-    /// An unknown colour token has to be VISIBLE. Falling back to a plausible
+    /// An unknown colour token has to be visible. Falling back to a plausible
     /// colour turns a typo into a twenty-minute debugging session.
     #[test]
     fn unknown_color_token_is_loud() {
@@ -1083,14 +1083,14 @@ mod tests {
         for _ in 0..2 {
             apply_styles(&mut roots, &button_sheet(), &tokens(), &StateInput::default(), &mut rt, 0.0);
         }
-        // "button" IS in the sheet; "ghost" is not, and two elements share it.
+        // "button" is in the sheet; "ghost" is not, and two elements share it.
         assert_eq!(rt.take_missing_styles(), vec!["ghost".to_string()]);
         // Draining means the report is once per reload, not once per frame.
         assert!(rt.take_missing_styles().is_empty());
     }
 
     /// floptle/0053: `shadow` and `glow` could name a token and these three
-    /// could not, so one `to: "gold-none"` failed the WHOLE file and took every
+    /// could not, so one `to: "gold-none"` failed the whole file and took every
     /// style in the project with it.
     #[test]
     fn a_gradient_stroke_and_text_shadow_all_take_tokens() {
@@ -1208,7 +1208,7 @@ mod tests {
         assert!((roots[0].spec.scale[0] - 1.05).abs() < 1e-4);
     }
 
-    /// Un-hovering mid-transition must ease back from where the element ACTUALLY
+    /// Un-hovering mid-transition must ease back from where the element actually
     /// is, not snap to the full hover value first. Getting this wrong produces
     /// a visible pop that reads as a bug.
     #[test]
@@ -1226,7 +1226,7 @@ mod tests {
                 },
             )]
         };
-        // Settle on base first. An element seen for the FIRST time in a state
+        // Settle on base first. An element seen for the first time in a state
         // snaps to it (a menu that opens already-hovered must not animate in),
         // so without this the "hover" frame below would start from hover
         // rather than transition into it.
@@ -1239,7 +1239,7 @@ mod tests {
         apply_styles(&mut roots, &sheet, &tk, &hover, &mut rt, 0.05); // → 1.025
         assert!((roots[0].spec.scale[0] - 1.025).abs() < 1e-4);
 
-        // Leave immediately; one frame later we must be BETWEEN 1.0 and 1.025 —
+        // Leave immediately; one frame later we must be between 1.0 and 1.025 —
         // never above it, which is what snapping to the full hover value first
         // would produce, and what reads on screen as a pop.
         rt.begin_frame();
@@ -1386,7 +1386,7 @@ mod tests {
             assert!((e.apply(0.0)).abs() < 1e-5, "{} at 0", e.label());
             assert!((e.apply(1.0) - 1.0).abs() < 1e-4, "{} at 1", e.label());
         }
-        // OutBack is supposed to overshoot — that IS the effect.
+        // OutBack is supposed to overshoot — that is the effect.
         assert!(Ease::OutBack.apply(0.7) > 1.0);
     }
 
@@ -1411,7 +1411,7 @@ mod tests {
         }"#;
         let sheet = StyleSheet::parse(text).unwrap();
         let s = sheet.get("button/primary").unwrap();
-        // Note: NO `Some(...)` anywhere above. That is the whole point of
+        // Note: no `Some(...)` anywhere above. That is the whole point of
         // parsing these files with implicit-some.
         assert_eq!(s.base.fill, Some(ColorRef::Token("accent".into())));
         assert_eq!(s.base.case, Some(Case::Upper));
@@ -1455,7 +1455,7 @@ mod tests {
                     fill: Some(ColorRef::Token("accent".into())),
                     radius: Some(CornerRef::Lit(Corners::all(6.0))),
                     // A style owning padding is the case that forces styles to
-                    // resolve BEFORE layout.
+                    // resolve before layout.
                     pad: Some(NumRef::Token("md".into())),
                     ..Default::default()
                 },

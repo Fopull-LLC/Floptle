@@ -10,7 +10,7 @@
 //!    lives outside that context, so nothing the map binds can reach them.
 //! 2. **Reservation.** Inside that context the editor still owns some keys —
 //!    the fly camera, the tool digits, focus/grid/gizmo toggles. Those arms
-//!    don't test modifiers, so a reserved key is reserved with EVERY modifier;
+//!    don't test modifiers, so a reserved key is reserved with every modifier;
 //!    [`reserved`] knows them by name and [`MapKeys::conflict`] refuses to bind
 //!    onto one. The same check catches a chord another map command already
 //!    holds.
@@ -590,7 +590,7 @@ pub(crate) fn save_map_keys(keys: &MapKeys) {
 mod tests {
     use super::*;
 
-    /// The shipped bindings must be conflict-free — with each other AND with
+    /// The shipped bindings must be conflict-free — with each other and with
     /// everything the editor already answers in the same context.
     #[test]
     fn the_default_binds_are_all_distinct_and_unreserved() {
@@ -634,7 +634,7 @@ mod tests {
         assert!(err.contains("Inset"), "{err}");
         // Extrude keeps its own chord through all that.
         assert_eq!(keys.chord(MapCmd::Extrude), Some(Chord::new(KeyCode::KeyE)));
-        // A free chord takes, and re-binding the SAME command to what it
+        // A free chord takes, and re-binding the same command to what it
         // already holds is not a conflict with itself.
         keys.set(MapCmd::Extrude, Chord::shifted(KeyCode::KeyQ)).unwrap_err();
         keys.set(MapCmd::Extrude, Chord::new(KeyCode::F5)).unwrap();

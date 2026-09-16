@@ -23,7 +23,7 @@ pub enum Projection {
 /// Half the depth range an orthographic camera spans, in world units: its box
 /// runs from `-ORTHO_DEPTH` to `+ORTHO_DEPTH` about the eye.
 ///
-/// **An orthographic near plane belongs BEHIND the camera.** The projection does
+/// **An orthographic near plane belongs behind the camera.** The projection does
 /// not divide by `w`, so a negative near is ordinary rather than degenerate —
 /// and it is what a flat game needs, because a flat game puts its art on one
 /// plane and its camera on that plane. A near plane in front of the eye slices
@@ -52,7 +52,7 @@ impl Projection {
 
     /// The projection a `Matter::Camera` node describes.
     ///
-    /// The ONE place a camera component becomes a matrix, called by the editor's
+    /// The one place a camera component becomes a matrix, called by the editor's
     /// Scene view, its Game view, each render target and the runtime. Four
     /// copies of `if ortho { … } else { … }` is how a game ends up orthographic
     /// in Play and perspective in a build — or, worse, orthographic on the
@@ -98,7 +98,7 @@ impl Projection {
     /// perspective one.
     ///
     /// The question [`fov_y`](Self::fov_y) cannot answer. Its orthographic
-    /// stand-in is an angle that covers the height ONE unit away, which reads
+    /// stand-in is an angle that covers the height one unit away, which reads
     /// correctly right up until somebody multiplies it by a distance — and
     /// "how many pixels is a metre" is exactly that calculation.
     pub fn ortho_height(&self) -> Option<f32> {
@@ -205,7 +205,7 @@ mod tests {
         assert!(!visible(p, glam::Vec3::new(0.0, 6.0, -500.0)));
     }
 
-    /// A perspective camera keeps its near plane in FRONT of the eye — moving it
+    /// A perspective camera keeps its near plane in front of the eye — moving it
     /// behind would wreck depth precision for every 3D game.
     #[test]
     fn a_perspective_camera_keeps_its_near_plane_where_it_was() {

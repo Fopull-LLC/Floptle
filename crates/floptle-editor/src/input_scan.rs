@@ -219,7 +219,7 @@ fn collect_calls(line: &str, call: &str, kind: UsageKind, out: &mut Vec<(String,
         from = at + call.len();
         // Word boundary before: `justPressed` must not match inside
         // `myJustPressed`, and the bare `action` must not match `reaction`.
-        // A `.` before is fine — that IS the method-call form.
+        // A `.` before is fine — that is the method-call form.
         if at > 0 {
             let prev = line.as_bytes()[at - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' {

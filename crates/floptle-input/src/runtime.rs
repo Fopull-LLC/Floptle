@@ -104,7 +104,7 @@ impl ActionRuntime {
             }
             for b in &action.bindings {
                 // A binding scoped to another local player contributes nothing here —
-                // this is what lets ONE `Light` action be `J` for P1 and `1` for P2 on
+                // this is what lets one `Light` action be `J` for P1 and `1` for P2 on
                 // the same keyboard instead of needing a duplicate `Light2`.
                 if !b.serves(slot) || !modifiers_held(b, raw, slot) {
                     continue;
@@ -160,7 +160,7 @@ impl ActionRuntime {
                         best = v;
                     }
                 }
-                // No blanket clamp: each binding bounds ITSELF (a key pair is
+                // No blanket clamp: each binding bounds itself (a key pair is
                 // ±1, an analog source is bounded by its sensitivity), while a
                 // rate-style source such as the wheel legitimately exceeds 1.
                 best
@@ -182,7 +182,7 @@ impl ActionRuntime {
                     let mag = (v.0 * v.0 + v.1 * v.1).sqrt();
                     // Strictly greater, so an exact tie (full stick vs a held
                     // key — both magnitude 1) keeps the earlier binding. The
-                    // property that matters is that ONE source wins whole:
+                    // property that matters is that one source wins whole:
                     // summing them would let a brushed key deaden the stick.
                     if mag > best_mag {
                         best_mag = mag;
@@ -240,7 +240,7 @@ fn socd_axis(neg: bool, pos: bool, mode: Socd, memory: &mut i8) -> f32 {
             Socd::Neutral => 0.0,
             Socd::Positive => 1.0,
             Socd::Negative => -1.0,
-            // Whichever was pressed FIRST is the one being overridden, so the
+            // Whichever was pressed first is the one being overridden, so the
             // remembered direction is the older one and the other wins.
             Socd::LastWins => match *memory {
                 1 => -1.0,
@@ -345,7 +345,7 @@ fn resolve_axis2(
             let y =
                 socd_axis(raw.held(*down, slot, t), raw.held(*up, slot, t), socd, &mut memory.1);
             // Unit disk, not unit square: holding W+D must not travel faster
-            // than holding W. Done HERE rather than across the whole axis, so a
+            // than holding W. Done here rather than across the whole axis, so a
             // rate-style mouse binding on the same axis stays unclamped.
             let mag = (x * x + y * y).sqrt();
             if mag > 1.0 { (x / mag, y / mag) } else { (x, y) }
@@ -355,7 +355,7 @@ fn resolve_axis2(
             if player.is_some_and(|p| p != slot) {
                 return (0.0, 0.0);
             }
-            // A player-scoped `Any` means THIS player's own pad, not "any
+            // A player-scoped `Any` means this player's own pad, not "any
             // player's pad" — otherwise a second player with no pad of their
             // own silently mirrors the first player's stick. floptle/0043.
             let id = if player.is_some() && *id == crate::source::PadId::Any {
@@ -487,7 +487,7 @@ mod tests {
 
     /// floptle/0043: two pads, two players, one axis. Before `Stick` carried a
     /// `player`, the obvious map — `Slot(0)` and `Slot(1)` side by side — made
-    /// BOTH sticks contribute to BOTH players, and largest-magnitude-wins meant
+    /// both sticks contribute to both players, and largest-magnitude-wins meant
     /// whichever stick was pushed harder drove both characters at once.
     #[test]
     fn a_player_scoped_stick_reads_only_that_players_pad() {
@@ -524,7 +524,7 @@ mod tests {
         assert!(p1x < -0.5, "player one reads their OWN pad (left), got {p1x}");
         assert!(p2x > 0.5, "player two reads their OWN pad (right), got {p2x}");
 
-        // The bug, demonstrated: the SAME map with the scope dropped — which is
+        // The bug, demonstrated: the same map with the scope dropped — which is
         // all that could be written before — leaks both pads into both players,
         // so they read identically and one stick drives both fighters.
         let unscoped = |id: PadId| Axis2Binding::Stick {
@@ -569,7 +569,7 @@ mod tests {
             invert_y: false,
             curve: Curve::Linear,
         };
-        // ONE pad, in slot 0.
+        // one pad, in slot 0.
         let mut raw = RawInput::default();
         raw.pad_mut(0).connected = true;
         raw.pad_mut(0).axes[PadAxis::LeftStickX.index()] = 1.0;
@@ -700,7 +700,7 @@ mod tests {
         assert!((pad.1 - 1.0).abs() < 1e-5 && pad.0.abs() < 1e-5, "{pad:?}");
     }
 
-    /// Two players on ONE keyboard. A binding scoped to a slot fires only for that
+    /// Two players on one keyboard. A binding scoped to a slot fires only for that
     /// slot, so a single action name serves both fighters instead of the map having to
     /// carry a duplicate `Light2` (floptle/0028).
     #[test]
@@ -749,7 +749,7 @@ mod tests {
     }
 
     /// One `Move` axis, WASD for P1 and the arrows for P2 — which is what makes the
-    /// map-level motion axis (`dir()`, `qcf`, …) correct for BOTH local players instead
+    /// map-level motion axis (`dir()`, `qcf`, …) correct for both local players instead
     /// of feeding player 1's stick into everyone's history.
     #[test]
     fn one_axis_can_carry_a_different_key_set_per_player() {

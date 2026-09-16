@@ -8,7 +8,7 @@
 //! wrong surfaces. Dropping it instead is honest, and infuriating: touching one
 //! wall would clear a level's shading.
 //!
-//! So the editor keeps a DURABLE NAME for every render vertex and triangle:
+//! So the editor keeps a DURABLE name for every render vertex and triangle:
 //!
 //! * a face is named by the (sorted) set of mesh vertices it uses, hashed —
 //!   stable through face reindexing, which `delete_faces` and `knife` both do;
@@ -134,7 +134,7 @@ impl Editor {
     ///
     /// Cheap enough to run before every discrete geometry op: a blockout is a
     /// few hundred faces, and this only ever runs on painted ones.
-    /// `mesh` is the geometry the LIVE paint sits on — the mesh as it was at the
+    /// `mesh` is the geometry the live paint sits on — the mesh as it was at the
     /// last GPU build, i.e. the pre-edit one at an edit's push site. (The cached
     /// `paint_ident` only exists once a painted mesh has been rebuilt at least
     /// once, so naming it here is what makes "paint a wall, extrude it, undo"
@@ -417,7 +417,7 @@ mod tests {
         ident_of(m, &floptle_map::triangulate(m))
     }
 
-    /// Moving a vertex must NOT change any name — that is what stops a gizmo
+    /// Moving a vertex must not change any name — that is what stops a gizmo
     /// drag from rebuilding (and losing) the paint 60 times a second.
     #[test]
     fn moving_a_vertex_leaves_every_name_alone() {

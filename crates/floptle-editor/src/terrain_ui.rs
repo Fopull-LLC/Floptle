@@ -31,7 +31,7 @@ pub(crate) struct TerrainBrush {
 
 /// Rough sparse-field cost a "New terrain" config will produce — `(surface chunks,
 /// resident MB)`, shown live in the dialog. Terrain 2.0: memory scales with the slab's
-/// SURFACE (the narrow band), not its volume, and there is no size cap to warn about.
+/// surface (the narrow band), not its volume, and there is no size cap to warn about.
 pub(crate) fn new_terrain_preview(size_xz: f32, thickness: f32, voxel: f32) -> (u64, f64) {
     let v = voxel.clamp(0.25, 16.0);
     let chunk_units = floptle_field::CHUNK as f32 * v;
@@ -174,7 +174,7 @@ impl EditorTabViewer<'_> {
         let terrain_present = self.terrain_present;
         let terrain_stats = self.terrain_stats;
 
-        // Voxel density for NEW terrains — an honest units-per-voxel (Terrain 2.0),
+        // Voxel density for new terrains — an honest units-per-voxel (Terrain 2.0),
         // not a cell count. Cells are always cubic; existing terrains keep theirs.
         ui.horizontal(|ui| {
             ui.label("voxel");
@@ -286,7 +286,7 @@ impl EditorTabViewer<'_> {
                     if ui.selectable_label(sel, format!("🖊 {label}")).clicked() {
                         terrain_brush.tex_slot = slot as i32;
                     }
-                    // The SAME picker every other texture field in the editor
+                    // The same picker every other texture field in the editor
                     // uses: search, folders, thumbnails, drag-and-drop from the
                     // Assets tab. This row had a bare ComboBox listing every
                     // image in the project in tree order with no way to filter,
@@ -389,7 +389,7 @@ impl EditorTabViewer<'_> {
 mod tests {
     use super::new_terrain_preview;
 
-    /// The dialog estimate scales with the slab's SURFACE (chunks over the footprint),
+    /// The dialog estimate scales with the slab's surface (chunks over the footprint),
     /// never its volume, and stays sane across sizes and densities. Historical note:
     /// the dense grid's cell-count policy shipped an 18:1 stretched terrain and a
     /// 384-cell cap — both retired by the sparse field, cells are cubic by
@@ -405,7 +405,7 @@ mod tests {
         let (fine, mb_f) = new_terrain_preview(578.0, 12.0, 0.75);
         assert!(fine > coarse, "finer voxels must cost more chunks ({fine} vs {coarse})");
         assert!(mb_f > mb_c && mb_f.is_finite() && mb_c > 0.0);
-        // Ty's real 578-unit map at the default density: single-digit-to-tens of MB
+        // A real 578-unit map at the default density: single-digit-to-tens of MB
         // resident — versus the 192 MB the dense field cost.
         let (_, mb) = new_terrain_preview(578.0, 12.0, 1.5);
         assert!(mb < 64.0, "{mb:.0} MB estimate is too much for one terrain");

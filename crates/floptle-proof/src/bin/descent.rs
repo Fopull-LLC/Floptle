@@ -31,7 +31,7 @@ const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
 // ---- the map is a morphing, POROUS rounded MENGER SPONGE (LOCK-STEP with descent.wgsl).
-// Measured walkable AND delvable: ~88% open (tunnels + chambers you go INSIDE),
+// Measured walkable and delvable: ~88% open (tunnels + chambers you go inside),
 // ~17deg surface-normal rotation per step, |grad|~0.71. "Down" is -grad f (toward
 // the nearest wall), and you SHRINK as you descend so sub-tunnels open up forever.
 const MBS: f32 = 45.0; // scale the sponge up to a COLOSSAL ~45-radius fractal planet
@@ -48,7 +48,7 @@ const DIVE_MAX: f32 = 7.0; // descent floor — past here iters cap (4+7=11) and
 // rebase (ADR-0020), which the rem_euclid Menger can't do cleanly (measured).
 const AUTO_DIVE_RATE: f32 = 1.4; // octaves/sec auto-descent at full gate (open void)
 // Clearance-gated, self-regulating: zoom fast in a big open void, but as you fall
-// TOWARD a wall the clearance drops and the gate closes so you actually LAND;
+// toward a wall the clearance drops and the gate closes so you actually LAND;
 // walk off into the next void and it re-opens. Units are capsule-radii.
 const AUTO_DIVE_NEAR: f32 = 8.0; // below this clearance: no auto-descent (you can land)
 const AUTO_DIVE_FAR: f32 = 40.0; // above this clearance: full-rate auto-descent
@@ -139,7 +139,7 @@ fn roty(p: Vec3, a: f32) -> Vec3 {
     Vec3::new(c * p.x - s * p.z, p.y, s * p.x + c * p.z)
 }
 
-/// ROUNDED Menger sponge: a porous fractal of tunnels + chambers you go INSIDE.
+/// ROUNDED Menger sponge: a porous fractal of tunnels + chambers you go inside.
 /// Smooth (smin/smax) carves => organic walls, not boxy. `iters` grows with the
 /// dive to unfold finer sub-tunnels. Signed: f<0 inside the solid walls.
 fn menger(p0: Vec3, iters: i32) -> f32 {
@@ -329,7 +329,7 @@ impl Character {
 
     /// Generous, ceiling-safe ground test for jumping: only the LOWER half of the
     /// capsule counts, and the contact must face up (so you can't jump off a
-    /// ceiling strut when walking UNDER a bridge).
+    /// ceiling strut when walking under a bridge).
     fn can_jump(&self, time: f32) -> bool {
         let up = self.up_smooth;
         let s = cur_scale();
@@ -353,12 +353,12 @@ impl Character {
         let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
 
         // INFINITE DESCENT. dive ↑ => you SHRINK (scale s) and the Menger unfolds
-        // another iteration of finer sub-tunnels, so the world scales UP around you
-        // — an infinite zoom INTO the porous fractal. Three drivers:
+        // another iteration of finer sub-tunnels, so the world scales up around you
+        // — an infinite zoom into the porous fractal. Three drivers:
         //   • hold C : deliberate dive (also UN-STICKS you from the surface so you
         //              sink into the opening instead of riding the receding wall)
         //   • hold X : ascend back out
-        //   • FREE-FALL THROUGH A VOID : auto-descend, so jumping into a hole opens
+        //   • FREE-FALL through A VOID : auto-descend, so jumping into a hole opens
         //              it up and you keep falling deeper, recursively. This is the
         //              "jump into a hole and the world scales around you" effect.
         let s_prev = cur_scale(); // scale BEFORE this frame's dive update (for vel rescale)
@@ -590,7 +590,7 @@ impl Character {
                 }
             }
 
-            // up target: auto-correct to the surface normal ONLY while grounded
+            // up target: auto-correct to the surface normal only while grounded
             // (so you can walk up walls). In the AIR your orientation is fully your
             // own — gravity never snaps the camera back — and you steer it with
             // Ctrl+mouse (free-orient) or just keep whatever you had. RATE-LIMITED
@@ -1166,7 +1166,7 @@ impl State {
             let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
             (self.cc.pos + up * EYE * sc, look)
         } else {
-            // third person: orbit ABOVE and BEHIND, looking down at the player.
+            // third person: orbit above and behind, looking down at the player.
             let target = self.cc.pos + up * ((CAP_HH + 0.3) * sc);
             let e = (0.55 - self.cam_pitch * 0.5).clamp(0.15, 1.3);
             let (se, ce) = e.sin_cos();

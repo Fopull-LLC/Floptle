@@ -68,7 +68,7 @@ fn by_default_everyone_hears_a_speaker_except_the_speaker() {
     assert_eq!(heard[2], vec![speaker]);
 }
 
-/// THE one. Peer 3 is out of earshot, so peer 3 is never sent the bytes — not
+/// the one. Peer 3 is out of earshot, so peer 3 is never sent the bytes — not
 /// sent them quietly.
 #[test]
 fn a_peer_out_of_range_is_never_sent_the_audio_at_all() {
@@ -121,7 +121,7 @@ fn a_game_can_route_a_speaker_to_an_arbitrary_set() {
     assert_eq!(heard[2], vec![peers[0]], "the dead hear each other");
 }
 
-/// A client cannot put words in another player's mouth: the SERVER stamps the
+/// A client cannot put words in another player's mouth: the server stamps the
 /// speaker. In a hidden-role game that is not a prank, it is a win condition.
 #[test]
 fn the_speaker_is_stamped_by_the_server_not_claimed_by_the_client() {

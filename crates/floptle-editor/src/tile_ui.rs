@@ -6,7 +6,7 @@
 //! title, equal-width chips for anything that picks a mode, equal-width buttons
 //! for anything that acts).
 //!
-//! ## The palette IS the tileset editor
+//! ## The palette is the tileset editor
 //!
 //! There is no separate "tileset properties" window. Click a tile in the palette
 //! and its collision, tags and autotile mask are right there under it. That is
@@ -14,7 +14,7 @@
 //! and autotiling": both are per-tile facts, the palette is where you are looking
 //! at a tile, so both are one click from the tile.
 //!
-//! The palette also DRAWS what it knows, over the art:
+//! The palette also draws what it knows, over the art:
 //!
 //! * a solid tile gets a collision overlay in the shape of its collider (so a
 //!   half-tile collider looks like a half tile, not like a tick);
@@ -76,7 +76,7 @@ pub(crate) enum TileCmd {
     /// Point a page at an image and a cut. Page 0 is the layer's material and
     /// is not settable here.
     SetPage(u32, String, u32, u32),
-    /// Drop the LAST page. Only the last, because removing one from the middle
+    /// Drop the last page. Only the last, because removing one from the middle
     /// would renumber nothing (the stride is fixed) but would leave every
     /// square placed from it drawing a hole with no way back.
     RemoveLastPage,
@@ -155,7 +155,7 @@ fn labelled(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
 ///    beats any inference — a 64×64 sheet of 32-px tiles and one of 16-px tiles
 ///    are the same image to everything except that name.
 /// 2. **The pixel size**, taking the largest common cell from 64 down to 8 that
-///    divides both sides and yields at least a 2×2 grid. Preferring LARGE cells
+///    divides both sides and yields at least a 2×2 grid. Preferring large cells
 ///    is deliberate: guessing 8 px on a sheet of 32-px tiles gives a palette of
 ///    sixteen meaningless quarter-tiles, while guessing 32 on a sheet of 8s
 ///    gives four tiles that are visibly wrong. The first reads as a broken
@@ -234,7 +234,7 @@ fn short_texture(tex: &str, page: u32) -> String {
 
 /// The line that stands in for a whole section when the layer has no tileset.
 ///
-/// The sections BELOW the tileset used to vanish entirely without one — no TILE
+/// The sections below the tileset used to vanish entirely without one — no tile
 /// heading, no AUTOTILE heading, nothing. Which is indistinguishable from an
 /// engine that does not have per-tile collision or autotiling, and is exactly
 /// what one was reported as: "there isn't a way to build the collision shape for
@@ -541,8 +541,8 @@ impl TileCtx<'_> {
     fn tileset_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TILESET");
         // `editing` is what every section below points at, and it used to be set
-        // and never cleared — so selecting a layer with no tileset left the TILE
-        // and AUTOTILE editors quietly writing to the PREVIOUS layer's tileset.
+        // and never cleared — so selecting a layer with no tileset left the tile
+        // and AUTOTILE editors quietly writing to the previous layer's tileset.
         // It is derived from the layer, so derive it here, every frame, both ways.
         let Some(e) = self.tools.layer else {
             self.tools.editing = None;
@@ -615,7 +615,7 @@ impl TileCtx<'_> {
         });
         // The two-cuts warning only applies to a tileset that names no sheet of
         // its own and is therefore still borrowing the layer's material. When
-        // the tileset HAS a sheet it is the authority for both the image and the
+        // the tileset has a sheet it is the authority for both the image and the
         // cut, and there is nothing left for the material to disagree with.
         if set.texture.trim().is_empty() {
             let (msc, msr) = self.sheet_size();
@@ -712,7 +712,7 @@ impl TileCtx<'_> {
         let (mut path, mut cols, mut rows) = (tex.to_string(), c, r);
         let mut changed = false;
         // Wrapped: a path field and two cut fields is more than a narrow dock can
-        // hold on one line, and this row is the FIRST thing in the tab — an
+        // hold on one line, and this row is the first thing in the tab — an
         // over-wide row here grows the content region and every paragraph below
         // it then wraps against an edge that is off-screen (see
         // `responsive::usable_width`).

@@ -10,7 +10,7 @@
 //! obtain.
 //!
 //! It also blocks the smaller thing that happens every time somebody overrides
-//! one part of a model: an override is a whole material, so a part that HAD a
+//! one part of a model: an override is a whole material, so a part that had a
 //! texture and whose override names none draws untextured. Extracting first
 //! means the override can start as what the part already looked like.
 //!
@@ -40,13 +40,13 @@ fn safe_stem(name: &str) -> String {
 }
 
 /// The file stem one material's texture is written under — derived from the
-/// material NAME ALONE, so that asking where a texture went and putting it there
+/// material name ALONE, so that asking where a texture went and putting it there
 /// cannot disagree.
 ///
 /// `safe_stem` maps arbitrary glTF names onto safe file names and is not
 /// injective: `Body/Skin` and `Body_Skin` are two materials and one file name.
 /// Resolving that by numbering collisions as they are met would make the answer
-/// depend on the ORDER the parts were walked — and `extracted_file`, which looks
+/// depend on the order the parts were walked — and `extracted_file`, which looks
 /// a texture up later to seed an override with it, has no order to walk. It
 /// would hand the second material the first one's picture.
 ///
@@ -141,7 +141,7 @@ pub(crate) fn extracted_file(project_root: &Path, model_rel: &str, material: &st
 mod tests {
     use super::*;
 
-    /// Two materials whose names sanitise to one file name get one file EACH.
+    /// Two materials whose names sanitise to one file name get one file each.
     ///
     /// `safe_stem` is not injective — `Body/Skin` and `Body_Skin` are different
     /// materials and the same file name — and two materials silently sharing one
@@ -150,7 +150,7 @@ mod tests {
     fn two_materials_never_share_one_file() {
         // A name that needs no sanitising keeps it…
         assert_eq!(unique_stem("Body_Skin"), "Body_Skin");
-        // …and one that does gets a tag from its ORIGINAL name, so the two
+        // …and one that does gets a tag from its original name, so the two
         // cannot collide however they are ordered.
         assert_ne!(unique_stem("Body/Skin"), unique_stem("Body_Skin"));
         assert!(unique_stem("Body/Skin").starts_with("Body_Skin-"));

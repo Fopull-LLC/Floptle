@@ -10,7 +10,7 @@ use crate::EditorTabViewer;
 
 impl EditorTabViewer<'_> {
     pub(crate) fn scene_ui(&mut self, ui: &mut egui::Ui, game: bool) {
-        // This tab's rect IS the 3D viewport. The Scene tab caches it for picking / gizmo
+        // This tab's rect is the 3D viewport. The Scene tab caches it for picking / gizmo
         // gating; the Game tab caches its own rect (so the editor can size the offscreen
         // Game target to it) and, when split, paints that offscreen render over itself.
         let rect = ui.max_rect();
@@ -21,7 +21,7 @@ impl EditorTabViewer<'_> {
             // egui_dock insets every tab body by `spacing.window_margin`, which
             // is right for a panel of widgets and wrong for a view: the Game tab
             // is transparent so the 3D can show through, so a four-pixel band of
-            // the EDITOR's render of the scene was left showing all the way
+            // the editor's render of the scene was left showing all the way
             // round the game. It read as an ugly border that moved with the
             // editor camera, because that is exactly what it was.
             //
@@ -40,7 +40,7 @@ impl EditorTabViewer<'_> {
             *self.game_rect = Some(rect);
             if self.game_offscreen
                 && let Some(tex) = self.game_tex {
-                    // Painted through a painter with its OWN clip rect: the ui
+                    // Painted through a painter with its own clip rect: the ui
                     // clips to the inset body, so anything drawn through `ui`
                     // would be trimmed back to the very margin this is covering.
                     ui.painter().with_clip_rect(rect).image(
@@ -105,8 +105,8 @@ impl EditorTabViewer<'_> {
                     if resp.hovered() || resp.dragged() {
                         self.cmd.ui_hot = true;
                     }
-                    // A click — or the START of a drag on an unselected element —
-                    // selects it. So you can grab ANY element and move it in one
+                    // A click — or the start of a drag on an unselected element —
+                    // selects it. So you can grab any element and move it in one
                     // gesture (no click-to-select first), with any tool including
                     // Rect. drag_started fires before the first drag delta.
                     if (resp.clicked() || (resp.drag_started() && !selected))
@@ -198,12 +198,12 @@ impl EditorTabViewer<'_> {
         }
 
         // PLAY banner (`floptle/0110`). Persistent, not a toast: the whole
-        // failure is that a Play-time edit LOOKS like it worked — the gizmo
+        // failure is that a Play-time edit looks like it worked — the gizmo
         // moves, the Inspector shows the new number — and Stop throws it away
         // with nothing ever said. `push_history` no-ops while playing, so the
         // edit is not undoable and never marks the scene unsaved either.
         //
-        // Deliberately NOT a refusal. Nudging a camera while watching a cutscene
+        // Deliberately not a refusal. Nudging a camera while watching a cutscene
         // run is how you find the framing; taking that away would cost more than
         // the trap does. What was missing is the readback, and the Inspector's
         // "copy to the stopped scene" button beside it is what turns a value
@@ -216,7 +216,7 @@ impl EditorTabViewer<'_> {
         // Never in a shipped build. `player_mode` is permanently "playing", so
         // an unqualified `self.playing` pinned this banner across a whole game
         // — telling a player their edits are discarded on a Stop they have no
-        // button for. The banner is about the EDITOR's play/stop cycle, so it
+        // button for. The banner is about the editor's play/stop cycle, so it
         // belongs only where that cycle exists.
         if self.playing && !self.player_mode {
             egui::Area::new(egui::Id::new(if game { "play_banner_game" } else { "play_banner" }))
@@ -243,7 +243,7 @@ impl EditorTabViewer<'_> {
 
         // Overlay toolbar: tools + resolution simulator. Editor view only.
         //
-        // A `viewport_panel`, not a bare Area: it is placed against THIS tab's
+        // A `viewport_panel`, not a bare Area: it is placed against this tab's
         // rect, it can be dragged anywhere in the view, docked to any corner,
         // and folded down to a tab when it is in the way of the thing it exists
         // to edit. Its rect comes back so the ▦ Model strip can stack under it
@@ -260,7 +260,7 @@ impl EditorTabViewer<'_> {
                 "Tools",
                 &mut self.panels.tools,
                 |ui| {
-                    // Ordered by Tool::ALL — i.e. by keybind, so what you see
+                    // Ordered by Tool::all — i.e. by keybind, so what you see
                     // left-to-right is what 1..7 select.
                     for t in Tool::ALL {
                         let hit = ui.selectable_label(self.tool == t, t.label());
@@ -291,7 +291,7 @@ impl EditorTabViewer<'_> {
         // covering the scene. `⏷` opens the same chips for anyone who would
         // rather switch from here.
         //
-        // It rides UNDER the tool strip wherever that has been put, rather than
+        // It rides under the tool strip wherever that has been put, rather than
         // at a fixed 46 points down the left edge — a strip docked bottom-right
         // would otherwise leave this stranded on its own in the corner it used
         // to share. Below normally; above when the strip is near the floor and
@@ -314,7 +314,7 @@ impl EditorTabViewer<'_> {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                         let k = |c: crate::map_keys::MapCmd| self.map_keys.label(c);
-                        // The sub-object mode gets THREE chips, not one cycling
+                        // The sub-object mode gets three chips, not one cycling
                         // label: the mode you want is one click, and the two you
                         // aren't in are visible instead of being somewhere in a
                         // rotation. This is the control you touch most, and it
@@ -729,7 +729,7 @@ impl EditorTabViewer<'_> {
         }
 
         // Vertex-paint telegraph: a ring on the surface under the cursor, so a dab is
-        // never a surprise. Magenta, to read as clearly NOT the terrain brush.
+        // never a surprise. Magenta, to read as clearly not the terrain brush.
         if let Some(viz) = self.paint_viz.filter(|_| !game) {
             let painter = ui
                 .ctx()
@@ -907,7 +907,7 @@ impl EditorTabViewer<'_> {
             // drawn as a RING on an existing corner and a dot mid-edge, so you
             // can see before you click whether the cut reuses a corner or makes
             // a new one.
-            // A cut that WOULD be refused draws grey and says why, right at the
+            // A cut that would be refused draws grey and says why, right at the
             // cursor — the answer arrives while you are still aiming instead of
             // after a click that appeared to do nothing.
             let refused = viz.knife_why.is_some();
@@ -1020,7 +1020,7 @@ impl EditorTabViewer<'_> {
                 for b in &r.bones {
                     // A Blender-style octahedron: four edges fanning from the
                     // head out to a belt, the belt ring, and four more closing on
-                    // the tail. The belt is squared to the bone's OWN frame, so
+                    // the tail. The belt is squared to the bone's own frame, so
                     // the shape twists when the bone rolls — the thing a bare
                     // line could never show.
                     let (head, tail) = (pt(b.head), pt(b.tail));
@@ -1140,7 +1140,7 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        // The baked navmesh — where characters can walk. Coloured PER REGION,
+        // The baked navmesh — where characters can walk. Coloured per REGION,
         // because the question people actually have is "why will it not walk
         // over there", and two colours meeting at a doorway answers it on
         // sight: that gap is too narrow for the character it was baked for.
@@ -1197,12 +1197,12 @@ impl EditorTabViewer<'_> {
 
         // Package Scene-view overlays: a panel of widgets pinned inside the
         // viewport, the way an authoring tool's own toolbars are. Laid out down
-        // the RIGHT edge so they do not collide with the viewport toolbar, and
+        // the right edge so they do not collide with the viewport toolbar, and
         // each one carries its package's name so a stack of them can be told
         // apart.
         if !game && !self.ext.overlays.is_empty() {
             // Two stacks. The right one is where overlays have always gone. The
-            // left one starts BELOW the viewport toolbar — wherever the user
+            // left one starts below the viewport toolbar — wherever the user
             // dragged it to, which is why `tools_rect` is read rather than a
             // constant guessed at.
             let mut y_right = rect.top() + 8.0;

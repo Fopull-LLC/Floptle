@@ -235,7 +235,7 @@ fn main() {
             );
             shot.push((quad, Some(sheet), instance_of_mat(t, &mp)));
         }
-        // CLEAR for the picture. `None` means LoadOp::Load for colour AND
+        // CLEAR for the picture. `None` means LoadOp::Load for colour and
         // depth, so a shot drawn after the timing loops would be depth-rejected
         // against 48 frames of stale depth and composited onto whatever was
         // already there — which is a blank image that still benchmarks fine.

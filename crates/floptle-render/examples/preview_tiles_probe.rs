@@ -18,7 +18,7 @@ fn main() {
         ("water", src_of("water.flsl")),
         ("wobbleOrb", src_of("wobbleOrb.flsl")),
         // A sky example, and deliberately the node-heaviest one: exercises the
-        // SkyPreview emit path AND the tile-budget priority (output + named
+        // SkyPreview emit path and the tile-budget priority (output + named
         // lets must all land tiles even on a ~100-node graph).
         ("starryNight", src_of("starryNight.flsl")),
     ];

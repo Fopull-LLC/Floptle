@@ -1,5 +1,5 @@
 //! Regression probe for the flsl × depth-prepass seam: a big floor with a
-//! custom `.flsl` material, drawn EXACTLY like the editor frame — depth
+//! custom `.flsl` material, drawn exactly like the editor frame — depth
 //! prepass (which includes opaque flsl draws) copied over the main depth,
 //! then the color pass loading that depth under LessEqual.
 //!
@@ -102,7 +102,7 @@ fn main() {
     )];
 
     // The editor's frame order: prepass (instances + opaque flsl) primes the
-    // main depth, then the color pass LOADS it (raster_clear = None) — except
+    // main depth, then the color pass loads it (raster_clear = None) — except
     // here nothing raymarches in between, isolating the mesh seam.
     raster.depth_prepass_with(&gpu, globals, &instances, &flsl, &[], gpu.depth_texture());
     // draw_scene_with clears color itself when given a clear; pass one for

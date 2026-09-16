@@ -17,7 +17,7 @@
 //! * leaves **strings, long strings and comments byte-identical**, and never
 //!   reorders, splits or joins a line.
 //!
-//! What it deliberately does NOT do: insert or remove spaces inside a line, align
+//! What it deliberately does not do: insert or remove spaces inside a line, align
 //! anything, add `then`/`end`, or reformat comment text. Your line stays your line.
 //!
 //! `--@noformat` anywhere in the file opts the whole file out (a generated or
@@ -94,7 +94,7 @@ fn words(code: &str) -> Vec<&str> {
 }
 
 /// How much this line changes block depth, and how much of that applies to the
-/// line ITSELF (a leading `end` / `else` / `}` outdents its own line).
+/// line itself (a leading `end` / `else` / `}` outdents its own line).
 fn depth_delta(code: &str) -> (i32, i32) {
     let ws = words(code);
     let mut delta = 0i32;
@@ -120,7 +120,7 @@ fn depth_delta(code: &str) -> (i32, i32) {
     delta += code.matches('{').count() as i32 - code.matches('}').count() as i32;
     delta += code.matches('(').count() as i32 - code.matches(')').count() as i32;
 
-    // Does this line START with something that closes the enclosing block?
+    // Does this line start with something that closes the enclosing block?
     let first = ws.first().copied().unwrap_or("");
     let trimmed = code.trim_start();
     let own = i32::from(
@@ -261,13 +261,13 @@ end
         );
     }
 
-    /// `for … do` is ONE block, not two — the classic double-indent bug in naive
+    /// `for … do` is one block, not two — the classic double-indent bug in naive
     /// re-indenters (`while … do` likewise).
     #[test]
     fn a_loops_do_is_not_a_second_block() {
         let src = "for i = 1, 3 do\nprint(i)\nend\nwhile a do\nb()\nend\n";
         assert_eq!(format(src), "for i = 1, 3 do\n  print(i)\nend\nwhile a do\n  b()\nend\n");
-        // A bare `do … end` block IS a level.
+        // A bare `do … end` block is a level.
         assert_eq!(format("do\nx()\nend\n"), "do\n  x()\nend\n");
     }
 

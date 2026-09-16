@@ -91,7 +91,7 @@ pub(crate) fn run(root: &Path, script: &Path, json: bool) -> i32 {
     // write that succeeded. The first version of this compared the world
     // revision either side of the script against a "a save happened at some
     // point" latch, and that is wrong in both directions a mutating script
-    // actually goes: an edit made AFTER the save is lost in silence, and so is
+    // actually goes: an edit made after the save is lost in silence, and so is
     // an edit in a second scene the script opened — because commands apply in
     // order and the save is one of them, not a line drawn under all of them.
     //

@@ -1,9 +1,9 @@
 //! Headless probe for SDF sun shadows — the full receive/cast matrix on one scene:
 //! a tall western hill (field matter) casting east across flat ground with the sun
-//! low in the west, a raster cube parked INSIDE that shadow band (meshes RECEIVE
+//! low in the west, a raster cube parked inside that shadow band (meshes RECEIVE
 //! field shadows), a standing capsule on open ground casting via its collider
 //! proxy (dynamic meshes CAST), a blob (field matter) shadowing terrain, and a
-//! floating SHADOW-ONLY occluder slab (a baked mesh volume, `bake_occluder`) —
+//! floating shadow-only occluder slab (a baked mesh volume, `bake_occluder`) —
 //! invisible in every frame, but the blue cube + ground under it go dark, the
 //! way a level mesh's roof darkens its interior. Rendered as a style matrix:
 //!
@@ -58,7 +58,7 @@ fn main() {
     let mut raymarch = Raymarch::new(&gpu);
     raymarch.set_terrain_textures(&gpu, &[white256()]);
 
-    // A shadow-ONLY occluder: a flat slab mesh baked into an unsigned distance
+    // A shadow-only occluder: a flat slab mesh baked into an unsigned distance
     // volume (the level-mesh path). It never renders — but everything under it
     // must go dark, like the interior of a mapped building.
     let slab_mesh = cube(0.7);

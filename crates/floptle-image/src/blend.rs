@@ -1,4 +1,4 @@
-//! Blend modes — the ONE definition of what "Multiply" means.
+//! Blend modes — the one definition of what "Multiply" means.
 //!
 //! The 3D vertex/texture brush already speaks Mix / Multiply / Add / Subtract /
 //! Lighten / Darken (`paint_ui.rs`). Those six keep their names and their maths
@@ -257,7 +257,7 @@ mod tests {
         assert!(s[0] > 128, "screen must lighten: {s:?}");
     }
 
-    /// The transparency gotcha: a Multiply layer over EMPTY canvas must show its
+    /// The transparency gotcha: a Multiply layer over empty canvas must show its
     /// own colour, not black. (W3C's `cs = s + da*(B(b,s) - s)`.)
     #[test]
     fn blend_over_empty_backdrop_is_the_source() {

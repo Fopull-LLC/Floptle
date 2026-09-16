@@ -3,7 +3,7 @@
 //! list (assign faces to slots; override each slot's material per node).
 //!
 //! Laid out as titled sections in the order you work in — DRAW, SELECT,
-//! TRANSFORM, MODIFY, SHAPE, SIZE, FACE MATERIALS — with one visual language
+//! TRANSFORM, MODIFY, shape, SIZE, FACE MATERIALS — with one visual language
 //! throughout: a rule under each section title, equal-width chips for anything
 //! that picks a mode, equal-width buttons for anything that acts, and a left
 //! label column so controls line up down the panel. Rarely-touched knobs live
@@ -154,7 +154,7 @@ impl MapCtx<'_> {
         ui.add_space(12.0);
     }
 
-    // ---- DRAW ---------------------------------------------------------------
+    // ---- draw ---------------------------------------------------------------
 
     fn map_draw_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "DRAW");
@@ -293,7 +293,7 @@ impl MapCtx<'_> {
 
     fn map_select_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "SELECT");
-        // Each chip carries its OWN key, not just "Tab cycles" — the direct
+        // Each chip carries its own key, not just "Tab cycles" — the direct
         // binds existed all along and nothing said so. Under pressure the chip
         // falls back to the glyph, which is the one part of the label that is
         // still unambiguous at 30 pixels.
@@ -654,7 +654,7 @@ impl MapCtx<'_> {
         );
     }
 
-    // ---- SHAPE --------------------------------------------------------------
+    // ---- shape --------------------------------------------------------------
 
     /// Shape parameters for a node that is still the primitive it was drawn as
     /// — step count, sides, arch opening — plus the facing controls. Editing
@@ -783,7 +783,7 @@ impl MapCtx<'_> {
     // ---- SIZE ---------------------------------------------------------------
 
     /// The numeric half of a modeling tool. Editing geometry is how a map mesh
-    /// gets sized — scaling the NODE would stretch the box-projected UVs and
+    /// gets sized — scaling the node would stretch the box-projected UVs and
     /// detune every texture on it.
     fn map_size_section(&mut self, ui: &mut egui::Ui, id: u32) {
         let Some(mesh) = self.maps.meshes.get(&id) else { return };
@@ -900,7 +900,7 @@ impl MapCtx<'_> {
                         // Plain flow, not `right_to_left`. A right-aligned run
                         // pins itself to the REGION's right edge and grows
                         // leftwards from there, so in a narrow panel it walks off
-                        // the LEFT side instead of the right — same bug, harder
+                        // the left side instead of the right — same bug, harder
                         // to recognise. These two buttons read fine in order.
                         {
                             if ui
@@ -1060,7 +1060,7 @@ impl MapCtx<'_> {
                     // and falls through to a wrapped flow when the dock is too
                     // thin for two columns. A bare `egui::Grid` sizes itself from
                     // its content and grows past the panel — and the panel then
-                    // wraps everything AFTER it against an edge off screen.
+                    // wraps everything after it against an edge off screen.
                     crate::responsive::grid(ui, ("map_keys_grid", group), |ui| {
                         for cmd in MapCmd::ALL.into_iter().filter(|c| c.group() == group) {
                             // `para`, not `label`: below two columns this grid
@@ -1240,7 +1240,7 @@ mod tests {
                 map_opts: &mut opts,
                 map_size_buf: &mut size_buf,
                 map_spec_buf: &mut spec_buf,
-                // Armed, so the DRAW strip renders in its selected state and the
+                // Armed, so the draw strip renders in its selected state and the
                 // "stop (Esc)" row is on screen too.
                 map_arm: Some(MapShape::Arch),
                 map_knife_on: true,

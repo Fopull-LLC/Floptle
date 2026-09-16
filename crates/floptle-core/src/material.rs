@@ -37,7 +37,7 @@ impl Tiling {
 /// measured roughness. Neither is a degraded version of the other, so neither is
 /// simulated with the other's knobs.
 ///
-/// **A normal map, an AO map and the retro flags apply to BOTH** — they describe
+/// **A normal map, an AO map and the retro flags apply to both** — they describe
 /// the surface, not the shading model. Only roughness and metallic are
 /// [`Physical`](Shading::Physical)-only, because only there do they mean
 /// anything.
@@ -88,7 +88,7 @@ pub struct Retro {
     /// swimming textures on large near-camera polygons. Correct perspective is
     /// the default.
     pub affine_uv: bool,
-    /// Light per VERTEX and interpolate the result, instead of lighting per
+    /// Light per vertex and interpolate the result, instead of lighting per
     /// pixel. Highlights become faceted and slide across a face as it turns —
     /// the Gouraud look. Normal maps are ignored while this is on (there is no
     /// per-pixel normal to map).
@@ -114,7 +114,7 @@ impl Retro {
         self.jitter > 0.0 || self.affine_uv || self.vertex_lit || self.dither_alpha
     }
 
-    /// This material's artefacts once the PROJECT's are folded in.
+    /// This material's artefacts once the project's are folded in.
     ///
     /// The rule, in one place because it is the kind of rule that otherwise
     /// gets written twice and drifts:
@@ -167,11 +167,11 @@ impl Retro {
 /// component kept losing to [`Material`] for the job it was written for. Give a
 /// character a team colour on a mid-toned, ambient-lit model and a "crimson"
 /// arrives as a slightly warm grey: the eye reads lightness long before hue, so
-/// the one thing the tint exists to say — WHICH PLAYER IS THIS — is the thing
+/// the one thing the tint exists to say — which player is this — is the thing
 /// it says worst. The way out was always a Material, which says it perfectly
 /// and costs the model every texture it was imported with.
 ///
-/// So a Tint also carries the two knobs that ADD light rather than removing it,
+/// So a Tint also carries the two knobs that add light rather than removing it,
 /// and neither of them replaces anything:
 ///
 ///   * [`rim`](Self::rim) — an additive fresnel edge in its own colour. It adds,
@@ -248,7 +248,7 @@ impl Tint {
     /// This tint's rim over the one a surface already had.
     ///
     /// Returns rather than writing through a reference because the renderer
-    /// keeps a rim's colour and its strength in two lanes of two DIFFERENT
+    /// keeps a rim's colour and its strength in two lanes of two different
     /// arrays — and `floptle-core` sits under the renderer and should not know
     /// that anyway. The caller does the assigning.
     ///
@@ -297,7 +297,7 @@ pub struct Material {
     /// Whether the scene's fog reaches this surface. `true` (fogged) is the
     /// default and is what every surface did before there was a choice.
     ///
-    /// Turning it off exempts the surface from BOTH fog modes — the distance
+    /// Turning it off exempts the surface from both fog modes — the distance
     /// ramp and the marched volumetric layer — so it draws at its own colour
     /// however far away it is. What it is for: the things that are not really
     /// in the world at that distance. A first-person weapon sits a metre from
@@ -307,7 +307,7 @@ pub struct Material {
     /// through the weather that is the point of the scene.
     ///
     /// Aerial perspective from a [`CelestialBody`](crate::CelestialBody)'s
-    /// atmosphere is a separate effect with its own controls and is NOT
+    /// atmosphere is a separate effect with its own controls and is not
     /// affected — a planet seen from orbit still hazes.
     pub fog: bool,
     /// Multiplier on the scene ambient term (0 = pure black shadows).
@@ -320,7 +320,7 @@ pub struct Material {
     // Every one of these is `None`/neutral by default and its default binding is
     // the value that changes nothing: a flat normal, white roughness, white
     // metallic (× a 0 scalar), white occlusion. So a material that names no map
-    // shades EXACTLY as it did before, with no branch in the shader to get wrong.
+    // shades exactly as it did before, with no branch in the shader to get wrong.
     /// A tangent-space normal map (project-relative path). RGB = the perturbed
     /// normal, the usual `(0.5, 0.5, 1.0)` = flat. Works under both shading
     /// models; ignored when [`Retro::vertex_lit`] is on (no per-pixel normal).
@@ -371,7 +371,7 @@ pub struct Material {
     /// term to weight an environment by, so a project that never opted into
     /// physical shading is untouched by this.
     pub reflectivity: f32,
-    /// **Glass**: how much light passes THROUGH this surface instead of
+    /// **Glass**: how much light passes through this surface instead of
     /// stopping at it. `0` (the default) is a solid surface; `1` is clear glass.
     ///
     /// This is what a window, a bottle, a gem or a crystal ball is made of, and
@@ -421,7 +421,7 @@ pub struct Material {
     /// relative texture path). Absent slots bind a 1×1 white.
     pub shader_textures: std::collections::BTreeMap<String, String>,
     /// How the base `texture` tiles (`None` = plain mesh UVs, exactly as
-    /// before). Applies to the built-in look AND a shader's `baseTexture()`.
+    /// before). Applies to the built-in look and a shader's `baseTexture()`.
     pub tiling: Option<Tiling>,
     /// **Spritesheet**: the base `texture` is a `sheet_cols` × `sheet_rows` grid
     /// of frames and the surface draws exactly one of them — [`Material::cell`],
@@ -669,7 +669,7 @@ mod tests {
     /// The packed tiling must reproduce the cell rect through the renderer's
     /// centre-scaled transform: `uv' = (uv - 0.5) * count + 0.5 + offset` has to
     /// carry the quad's corners onto the cell's corners.
-    /// The inset must stay INSIDE the cell and must not survive on a
+    /// The inset must stay inside the cell and must not survive on a
     /// single-cell texture, where there is no neighbour to bleed from.
     #[test]
     fn a_cell_pulls_in_by_half_a_texel_but_a_whole_texture_does_not() {
@@ -738,7 +738,7 @@ mod tests {
     }
 
     /// The project sets the look and a material that never mentioned it follows
-    /// — which is the entire point of the setting. A material that WAS dialled
+    /// — which is the entire point of the setting. A material that was dialled
     /// in keeps its own number, because somebody chose it against that surface.
     #[test]
     fn the_project_supplies_what_a_material_left_alone() {
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(m.jitter, 80.0);
     }
 
-    /// The escape hatch takes NOTHING from the project — not the jitter, not
+    /// The escape hatch takes nothing from the project — not the jitter, not
     /// the switches. A first-person weapon in a wobbling world is the case, and
     /// "mostly exempt" would be no use at all.
     #[test]
@@ -772,7 +772,7 @@ mod tests {
             Retro { jitter: 160.0, affine_uv: true, vertex_lit: true, dither_alpha: true, exempt: false };
         let m = Retro { exempt: true, ..Retro::default() };
         assert_eq!(m.under(project), m, "an exempt material picked something up");
-        // …and it still shows its OWN artefacts, so exempt means "alone", not "off".
+        // …and it still shows its own artefacts, so exempt means "alone", not "off".
         let own = Retro { jitter: 40.0, exempt: true, ..Retro::default() };
         assert_eq!(own.under(project).jitter, 40.0);
     }
@@ -780,7 +780,7 @@ mod tests {
 
 /// Per-sub-object material overrides on a Mesh node (a component): object name
 /// (or, for a flattened single-object model, material name) ⏵ the Material that
-/// part draws with — so ONE object inside a multi-part model can be re-skinned
+/// part draws with — so one object inside a multi-part model can be re-skinned
 /// without touching its siblings. A node-level [`Material`] still overrides the
 /// whole model; entries here win for their object.
 #[derive(Clone, Debug, Default, PartialEq)]

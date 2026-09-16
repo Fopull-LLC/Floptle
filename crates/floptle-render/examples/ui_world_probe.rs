@@ -2,7 +2,7 @@
 //! through `Ui::draw_world` into a scene-format attachment.
 //!
 //! This exists because of a crash that reached a user. A screen layer draws
-//! onto the window (8-bit sRGB); a world layer draws into the SCENE target,
+//! onto the window (8-bit sRGB); a world layer draws into the scene target,
 //! which is HDR and a different format — and a render pipeline built for one
 //! format is a hard validation error in a pass using the other. The built-in
 //! element pipelines had a world variant with the right format; the pipeline
@@ -29,9 +29,9 @@ const H: u32 = 320;
 const FLAT: &str = "shader flat {\n  stage ui\n  output color = vec4(0.1, 0.9, 0.2, 1.0)\n}\n";
 
 fn main() {
-    // `headless_hdr`, NOT `headless`: the plain one keeps the 8-bit surface
+    // `headless_hdr`, not `headless`: the plain one keeps the 8-bit surface
     // format for the scene too, which makes both pipelines agree and the bug
-    // this probe exists for unreproducible. The mismatch IS the subject.
+    // this probe exists for unreproducible. The mismatch is the subject.
     let gpu = Gpu::headless_hdr(W, H);
     let raster = Raster::new(&gpu);
     let mut ui = Ui::new(&gpu);
@@ -46,7 +46,7 @@ fn main() {
     let shader = ui.register_ui_shader(&gpu, &chunk, None);
     let binding = ui.set_ui_shader_binding(&gpu, &compiled.pack_params(&|_| None), None);
 
-    // The scene target: `scene_format`, NOT the window's format. Getting this
+    // The scene target: `scene_format`, not the window's format. Getting this
     // wrong in the probe would hide the very bug it is here to catch.
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("probe-scene-color"),

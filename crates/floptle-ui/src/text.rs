@@ -5,7 +5,7 @@
 //! The first cut gave a run `size`, `color`, `align`, `valign`, `fit`, `font` —
 //! which means every project's text sits at the font's default tracking, with
 //! no way to make it legible over a bright background short of writing a
-//! shader. Both of Ty's projects run all of their text that way, and it shows.
+//! shader. Real projects run all of their text that way, and it shows.
 //!
 //! Nothing here needs a new pipeline. Strokes and shadows are extra glyph
 //! instances the packer emits from the same atlas; tracking, line height, case

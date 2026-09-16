@@ -2,7 +2,7 @@
 //!
 //! Timers are TICK-driven and deterministic: the clock advances only when the
 //! host's global `run_fixed` pass runs, by the constant tick delta. It must
-//! NEVER advance in the targeted replay paths (`run_fixed_for`, prediction
+//! never advance in the targeted replay paths (`run_fixed_for`, prediction
 //! replays) — those re-run one entity's tick after a net correction, and a
 //! scheduler that advanced there would double-fire every pending timer.
 //!
@@ -71,7 +71,7 @@ struct Entry {
 pub(crate) struct SchedState {
     entries: Vec<Entry>,
     next_id: u64,
-    /// The scheduler clock, in seconds of GAME TICKS — not wall time.
+    /// The scheduler clock, in seconds of game ticks — not wall time.
     now: f64,
 }
 
@@ -92,7 +92,7 @@ fn log_err(logs: &Rc<RefCell<Vec<ScriptLog>>>, what: &str, e: &mlua::Error) {
 }
 
 /// Advance the clock one tick and fire what came due. Called from the host's
-/// global `run_fixed` ONLY (see module docs), after `sync_scene` — callbacks
+/// global `run_fixed` only (see module docs), after `sync_scene` — callbacks
 /// use node handles — and before the script pass, so a timer's effects are
 /// visible to the same tick's `fixedUpdate`s.
 pub(crate) fn tick(

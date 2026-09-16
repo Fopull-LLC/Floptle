@@ -11,7 +11,7 @@
 //! script that only knew about the first, the two disagree and the map draws
 //! garbage that looks like an art bug.
 //!
-//! So the square is ONE number, and every path that already carried a cell
+//! So the square is one number, and every path that already carried a cell
 //! index carries the orientation for free — including a `.ron` scene written
 //! before this existed, because an unrotated tile's flag bits are zero.
 //!
@@ -150,7 +150,7 @@ impl TileXform {
 
 /// The cell index a packed square draws, orientation stripped.
 ///
-/// Note this does NOT tell you whether the square is empty — an index past the
+/// Note this does not tell you whether the square is empty — an index past the
 /// end of the sheet is empty too, which is how [`crate::EMPTY_TILE`] works
 /// without a special case. Use [`tile_is_empty`].
 pub fn tile_index(packed: u32) -> u32 {
@@ -196,7 +196,7 @@ pub fn tile_is_empty(packed: u32, cells: u32) -> bool {
 
 // --- pages: more than one image behind one grid (`floptle/0092`) ------------
 
-/// How many low bits of the cell index address a cell WITHIN one sheet. The
+/// How many low bits of the cell index address a cell within one sheet. The
 /// bits above it are the sheet — the "page" — the cell lives on.
 ///
 /// ## Why a fixed stride rather than packing the pages end to end
@@ -267,14 +267,14 @@ pub fn tile_corner(s: u8, t: u8, xf: TileXform) -> (u8, u8) {
     (s, t)
 }
 
-/// Where the art's corner `(a, b)` is DRAWN under `xf` — the forward direction
+/// Where the art's corner `(a, b)` is drawn under `xf` — the forward direction
 /// of [`tile_corner`], which is the one a diagram or a collision shape needs.
 pub fn tile_corner_drawn(a: u8, b: u8, xf: TileXform) -> (u8, u8) {
     let (s, t) = tile_point_drawn(a as f32, b as f32, xf);
     (s as u8, t as u8)
 }
 
-/// Where a point inside the tile is DRAWN under `xf`, in the unit square.
+/// Where a point inside the tile is drawn under `xf`, in the unit square.
 ///
 /// The continuous version of [`tile_corner_drawn`], and the reason it exists is
 /// collision: a tile whose collider is the bottom half must collide across the
@@ -363,7 +363,7 @@ mod tests {
         }
     }
 
-    /// `↻` must turn what is ON SCREEN clockwise, whether or not the tile is
+    /// `↻` must turn what is on screen clockwise, whether or not the tile is
     /// mirrored. This is the bug where flipping the stamp silently reverses the
     /// rotate button — the two states where `rot` has to count *down* to keep
     /// the picture turning the same way.

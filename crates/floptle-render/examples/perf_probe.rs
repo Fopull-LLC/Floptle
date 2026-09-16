@@ -1,7 +1,7 @@
 //! Headless render-performance probe — times the heavy scene passes (raymarch,
 //! raster-with-field-shadows) at a full-res gameplay framing: a sculpted terrain,
 //! a couple of blobs, and a field of shadow-casting cubes seen from eye height.
-//! This is the "retro OFF" cost the editor/game pays per frame.
+//! This is the "retro off" cost the editor/game pays per frame.
 //!
 //! Run: cargo run -p floptle-render --release --example perf_probe
 

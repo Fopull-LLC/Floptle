@@ -64,11 +64,11 @@ pub(crate) struct MapStore {
     /// the live paint has nothing for — so undoing an extrude repaints the face
     /// the extrude took away, and leaves everything painted since alone.
     pub(crate) paint_restore: HashMap<u32, crate::map_paint::MapPaintStash>,
-    /// Set when the sidecar for this scene exists but could NOT be read/parsed.
-    /// While it is set the store is NOT the authority: unknown ids keep their
+    /// Set when the sidecar for this scene exists but could not be read/parsed.
+    /// While it is set the store is not the authority: unknown ids keep their
     /// nodes empty instead of being healed into boxes, and `save_maps` refuses
     /// to write (a save would otherwise replace a whole level with 1x1 cubes —
-    /// the failure mode that ate Ty's vertex paint in July). Cleared by a
+    /// the failure mode that ate a project's vertex paint in July). Cleared by a
     /// successful adopt.
     pub(crate) load_failed: bool,
 }
@@ -214,7 +214,7 @@ impl MapShape {
         self.sized(floptle_core::math::Vec3::ONE, opts)
     }
 
-    /// The shape built to exact HALF-extents — the draw tool's output, and what
+    /// The shape built to exact half-extents — the draw tool's output, and what
     /// the Map tab's spawn buttons use. The mesh comes back TAGGED with the
     /// spec, so its parameters stay editable until the geometry is touched.
     pub(crate) fn sized(self, half: floptle_core::math::Vec3, opts: MapOpts) -> MapMesh {
@@ -276,7 +276,7 @@ pub(crate) fn map_collision_geometry(
         let base = verts.len() as u32;
         verts.extend(sm.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p))));
         indices.extend(sm.indices.iter().map(|i| i + base));
-        // `triangulate` groups BY slot, so every triangle in this run carries
+        // `triangulate` groups by slot, so every triangle in this run carries
         // the run's slot. Counted off `indices`, not off `tri_faces`, so a
         // triangulation that ever stops filling that field cannot silently
         // shift every label after it.
@@ -315,7 +315,7 @@ impl Editor {
         self.project_root.join("maps").join(format!("{}.map.ron", self.scene_name))
     }
 
-    /// A fresh stable map-mesh id: one past the max over the store AND live
+    /// A fresh stable map-mesh id: one past the max over the store and live
     /// components (orphans included — never re-issue a key still on disk).
     pub(crate) fn next_map_id(&self) -> u32 {
         let live = self
@@ -349,7 +349,7 @@ impl Editor {
         self.maps.dirty.insert(id);
         self.add_node_at(name, MatterDoc::MapMesh { id, geo: None }, at);
         let e = self.primary();
-        // Blockout geometry is WORLD geometry: a wall you can walk through is
+        // Blockout geometry is world geometry: a wall you can walk through is
         // never what you meant. `Collidable` bakes the exact triangulation into
         // the static trimesh on Play; untick it in the Inspector for decoration.
         if let Some(e) = e {
@@ -366,7 +366,7 @@ impl Editor {
     /// of the texture and we couldn't seed one — a shape with no Material draws
     /// flat grey, which is far better than one carrying a dangling reference.
     ///
-    /// It is a node-level `Material`, so it covers every slot AND stays out of
+    /// It is a node-level `Material`, so it covers every slot and stays out of
     /// the way: a per-slot override (Map tab → "New material for selected
     /// faces") still wins for its own faces.
     fn map_default_material(&mut self) -> Option<floptle_core::Material> {
@@ -404,7 +404,7 @@ impl Editor {
     }
 
     /// Per-frame sync (called before the render gather): self-heal duplicated
-    /// ids (duplicate/paste copies the component verbatim — the LATER node
+    /// ids (duplicate/paste copies the component verbatim — the later node
     /// gets a fresh id + its own copy of the geometry, so map meshes edit
     /// independently), materialize store entries for unknown ids (cross-scene
     /// paste), and rebuild dirty geometry into the registry's dynamic parts.
@@ -427,7 +427,7 @@ impl Editor {
                     // hand-written .ron). Give it a box so it is visible and
                     // editable rather than an invisible nothing.
                     //
-                    // When the sidecar FAILED to load we do the opposite: leave it
+                    // When the sidecar failed to load we do the opposite: leave it
                     // empty and let `save_maps` refuse to write, so a transient IO
                     // error can't turn a level into cubes and then persist them.
                     let seed = MapShape::Box.mesh(self.map_opts);
@@ -591,7 +591,7 @@ impl Editor {
         let text = match floptle_vfs::read_to_string(&path) {
             Ok(t) => t,
             // No file is the normal case for a scene with no map meshes. A file
-            // that exists but won't open is NOT — poison the store so the next
+            // that exists but won't open is not — poison the store so the next
             // save can't overwrite it.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -669,7 +669,7 @@ impl Editor {
         drop.len()
     }
 
-    /// Import a map sidecar's geometry into the OPEN scene (the Assets browser's
+    /// Import a map sidecar's geometry into the open scene (the Assets browser's
     /// `maps/*.map.ron` files — drag one into the viewport, or right-click →
     /// Add to scene). Every shape arrives as a fresh map node (new ids, its own
     /// copy of the geometry — nothing aliases the source scene), grouped under
@@ -692,7 +692,7 @@ impl Editor {
             .file_name()
             .map(|n| n.to_string_lossy().trim_end_matches(".map.ron").to_string())
             .unwrap_or_else(|| "map".into());
-        // Read through the SAME reader the Inspector's preview used, so what
+        // Read through the same reader the Inspector's preview used, so what
         // was drawn is exactly what arrives.
         let (entries, owner) = match read_map_file(&self.project_root, path) {
             Ok(v) => v,
@@ -720,7 +720,7 @@ impl Editor {
         }
         let imported = entries.len();
         // Anchor: the combined footprint's XZ center at its lowest point, so
-        // the group sits ON the drop point instead of hanging off it.
+        // the group sits on the drop point instead of hanging off it.
         let mut lo = floptle_core::math::DVec3::splat(f64::INFINITY);
         let mut hi = floptle_core::math::DVec3::splat(f64::NEG_INFINITY);
         for en in &entries {
@@ -900,7 +900,7 @@ pub(crate) fn read_map_file(
     }
 }
 
-/// The scene's map nodes married to the sidecar's geometry, each with its WORLD
+/// The scene's map nodes married to the sidecar's geometry, each with its world
 /// transform (composed through the doc's parent links, so a shape nested under
 /// an Empty imports where it actually sat). Ids the scene no longer references
 /// are left behind on purpose: a save keeps deleted nodes' geometry so undo can
@@ -1147,7 +1147,7 @@ impl MapSubMode {
 
 /// What a click or a box drag does to the existing sub-object selection.
 ///
-/// Shift ADDS and Ctrl SUBTRACTS, which is the convention every modeling tool
+/// Shift adds and Ctrl SUBTRACTS, which is the convention every modeling tool
 /// shares — and the reason both used to mean "toggle" was that there was only
 /// one code path for them. Toggling is fine for one click and useless for a
 /// box: dragging a box over a region you have half-selected would flip the
@@ -1357,7 +1357,7 @@ impl MapDraw {
 
 /// How wide the Bevel takes a corner off, in the mesh's own local units.
 ///
-/// A newtype purely so it can carry a sensible DEFAULT: `Editor` derives
+/// A newtype purely so it can carry a sensible default: `Editor` derives
 /// `Default`, and a bare `f32` would start at 0 — which `bevel_edges` correctly
 /// treats as "do nothing", so the button would have shipped inert.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1382,7 +1382,7 @@ pub(crate) struct MapSel {
     /// anchor a shortest-path pick measures from.
     ///
     /// A set has no order, so without this there is nothing for "the path
-    /// between the two selected things" to start at. Deliberately NOT updated by
+    /// between the two selected things" to start at. Deliberately not updated by
     /// box select, grow, loop or any other bulk verb: those select a region, and
     /// which member of it the path should run from is not a question they answer.
     pub(crate) anchor: Option<MapHover>,
@@ -1518,7 +1518,7 @@ pub(crate) struct MapViz {
     /// …and the live dimension readout, anchored near the cursor.
     pub(crate) label: Option<(floptle_core::math::Vec2, String)>,
     /// Which way a stair/ramp climbs: `(low end, high end)` on the base, drawn
-    /// as an arrow. Shown while drawing AND for a selected rising shape, so
+    /// as an arrow. Shown while drawing and for a selected rising shape, so
     /// "which way is up" is never a guess.
     pub(crate) arrow: Option<(floptle_core::math::Vec2, floptle_core::math::Vec2)>,
     /// Knife: where the pending cut starts (`None` before the first click),
@@ -1592,7 +1592,7 @@ pub(crate) enum MapOp {
     PivotToSelection,
     AssignSlot(u16),
     AddSlot(String),
-    /// Add a slot AND give it a fresh material override in one step — the
+    /// Add a slot and give it a fresh material override in one step — the
     /// "make these faces a different material" button.
     MaterialFromSelection(String),
     SelectAll,
@@ -1840,9 +1840,9 @@ impl Editor {
             }
         }
         sel.anchor = Some(hit);
-        // Shift ADDS, Ctrl SUBTRACTS — but a Shift-click on something already
+        // Shift adds, Ctrl SUBTRACTS — but a Shift-click on something already
         // in the selection still toggles it off, because that is the only way
-        // to drop ONE item without a box, and every tool does it.
+        // to drop one item without a box, and every tool does it.
         match hit {
             MapHover::Vert(v) => match how {
                 SelectMode::Subtract => {
@@ -1991,7 +1991,7 @@ impl Editor {
     ///
     /// `lock` is the face a cut is already under way on. **Once the first point
     /// is placed, the face is decided** — the second point is solved against
-    /// THAT face's plane, whatever the ray happens to hit first. Re-picking the
+    /// that face's plane, whatever the ray happens to hit first. Re-picking the
     /// face every click is what made the knife feel unreliable: aim near a box's
     /// corner and the second click lands on the neighbouring face, so instead of
     /// cutting, the tool silently threw the anchor away and started again. Which
@@ -2014,7 +2014,7 @@ impl Editor {
         let (ro, rd) = self.map_local_ray(e, cursor)?;
         // Locked: the chosen face's plane, unbounded, so the cursor may drift
         // past an edge or behind another face and the aim still tracks. Free:
-        // whatever the ray hits, which is how the FIRST point picks its face.
+        // whatever the ray hits, which is how the first point picks its face.
         let (fi, at) = match lock.filter(|&f| (f as usize) < mesh.faces.len()) {
             Some(f) => (f, floptle_map::face_plane_hit(mesh, f, ro, rd)?),
             None => {
@@ -2168,7 +2168,7 @@ impl Editor {
             .translation
             .as_vec3();
         let (vert_front, edge_front) = floptle_map::front_facing(mesh, cam_local);
-        // Depth normalised over THIS mesh's own extent, so the fade reads the
+        // Depth normalised over this mesh's own extent, so the fade reads the
         // same on a doorframe and on a hangar (an absolute scale would make one
         // of them uniformly bright and the other uniformly dim).
         let dist = |p: floptle_core::math::Vec3| -> f32 {
@@ -2279,7 +2279,7 @@ impl Editor {
             viz.rect = Some((anchor, cur));
         }
         // Knife: the anchor, and the point the next click would cut to. Drawn
-        // live so the cut is aimed BEFORE it is made, not discovered after.
+        // live so the cut is aimed before it is made, not discovered after.
         if self.map_knife_on {
             let pending = self.map_knife;
             viz.knife_from = pending.and_then(|k| k.at.position(mesh)).and_then(&project);
@@ -2287,7 +2287,7 @@ impl Editor {
                 && let Some((face, at)) = self.map_knife_pick(cursor, pending.map(|k| k.face))
                 && let Some(p) = at.position(mesh).and_then(&project)
             {
-                // Ask the CUT ITSELF whether it would happen, every frame, so
+                // Ask the CUT itself whether it would happen, every frame, so
                 // the line greys out and says why while you are still aiming
                 // instead of after you have clicked and nothing moved.
                 viz.knife_why = pending
@@ -2301,7 +2301,7 @@ impl Editor {
 
     /// The in-progress shape's overlay: its full wireframe, the footprint ring,
     /// the height axis, and the size readout. Everything is rebuilt from the
-    /// gesture each frame, so the preview IS the geometry that will be built.
+    /// gesture each frame, so the preview is the geometry that will be built.
     fn map_draw_viz(&self) -> MapViz {
         use floptle_core::math::{Vec2, Vec3};
         let mut viz = MapViz::default();
@@ -2369,7 +2369,7 @@ impl Editor {
     ///
     /// The orientation is the difference between a modeling tool and a toy: on
     /// `Normal` a face's handles point straight out of that face, so a diagonal
-    /// wall pushes out in ONE drag instead of two axis drags that only
+    /// wall pushes out in one drag instead of two axis drags that only
     /// approximate it.
     pub(crate) fn map_gizmo_xf(&self) -> Option<floptle_core::Transform> {
         use floptle_core::math::{Quat, Vec3};
@@ -2486,7 +2486,7 @@ impl Editor {
     ///
     /// The gizmo's own start/new transforms describe a world-space motion
     /// (translate for Move, rotate about the centroid for Rotate, scale about
-    /// it for Scale), so ONE piece of math covers all three modes: send each
+    /// it for Scale), so one piece of math covers all three modes: send each
     /// vert to world, through the gizmo's delta, and back into node-local.
     /// Absolute-from-start, so nothing drifts over a long drag.
     pub(crate) fn map_apply_drag(&mut self, start: floptle_core::Transform, new: floptle_core::Transform) {
@@ -2617,7 +2617,7 @@ impl Editor {
             Vec3::Y.cross(normal).normalize()
         };
         let v = u.cross(normal);
-        // Snap IN THE PLANE only: rounding the normal component too would lift
+        // Snap in the PLANE only: rounding the normal component too would lift
         // the origin off the surface you aimed at (a wall at x = 2.5 would
         // start building 0.5 units inside or outside itself).
         let snapped = self.map_snap_world(hit);
@@ -2740,7 +2740,7 @@ impl Editor {
     }
 
     /// Console feedback for the Map tool. Every op that declines to do
-    /// something says WHY — a modeling tool that silently no-ops reads as
+    /// something says why — a modeling tool that silently no-ops reads as
     /// broken.
     pub(crate) fn map_note(&mut self, level: floptle_script::LogLevel, msg: impl Into<String>) {
         self.console.push(level, format!("▦ {}", msg.into()), None);
@@ -2818,7 +2818,7 @@ impl Editor {
                 if !f.is_empty() {
                     if f.len() >= mesh.faces.len() {
                         // Deleting every face would leave an invisible node
-                        // with no way back except undo — delete the NODE.
+                        // with no way back except undo — delete the node.
                         declined = Some(
                             "that is every face — delete the node itself (Del in the Hierarchy) instead".into(),
                         );
@@ -2963,7 +2963,7 @@ impl Editor {
                     declined = Some(format!("this mesh already has a slot called \"{name}\""));
                     changed = false;
                 } else {
-                    // The slot list is part of the mesh, so adding one IS an
+                    // The slot list is part of the mesh, so adding one is an
                     // undoable change — banking it keeps undo in step with the
                     // per-slot material override that may key off the name.
                     mesh.slots.push(name.clone());
@@ -3116,7 +3116,7 @@ impl Editor {
                 changed = false;
             }
             MapOp::LoopCut(t) => {
-                // One seed edge: a loop cut is a cut through ONE strip, and
+                // One seed edge: a loop cut is a cut through one strip, and
                 // taking "all of them at once" from a multi-edge selection would
                 // make a mesh nobody asked for.
                 match sel.edges.iter().next().copied() {
@@ -3506,7 +3506,7 @@ mod tests {
         d
     }
 
-    /// A sidecar we could not read must NEVER be overwritten: the store is
+    /// A sidecar we could not read must never be overwritten: the store is
     /// empty in that state, so a save would replace the whole level with
     /// nothing (and `sync_map_meshes` would have healed every node into a box).
     #[test]
@@ -3548,7 +3548,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Geometry carried inline by a prefab / clipboard doc must land in THIS
+    /// Geometry carried inline by a prefab / clipboard doc must land in this
     /// scene's store under a fresh id — two pastes of the same doc are two
     /// independent meshes, and neither can hijack an existing node's id.
     #[test]
@@ -3669,7 +3669,7 @@ mod tests {
         });
         ed.world.insert(b, floptle_core::Parent(holder));
         // Orphan geometry (a deleted node's) stays in the file on purpose —
-        // and must NOT come back through an import.
+        // and must not come back through an import.
         ed.maps.meshes.insert(77, MapShape::Sphere.mesh(MapOpts::default()));
         let doc = floptle_scene::to_doc("level", &ed.world);
         floptle_scene::save(&doc, &dir.join("scenes/level.ron")).unwrap();
@@ -3911,7 +3911,7 @@ mod tests {
         assert!((back.translation - start.translation).length() < 1e-9);
     }
 
-    /// A quarter turn while drawing spins the shape INSIDE the footprint you
+    /// A quarter turn while drawing spins the shape inside the footprint you
     /// dragged: it re-fits (X/Z extents swap) instead of poking out of it.
     #[test]
     fn a_quarter_turn_refits_the_drawn_footprint() {
@@ -4030,7 +4030,7 @@ mod tests {
         assert!((x.cross(y) - z).length() < 1e-5);
     }
 
-    /// "Select every face" has to mean the mode you are IN, and inverting has
+    /// "Select every face" has to mean the mode you are in, and inverting has
     /// to be the exact complement of it — including the empty and full cases,
     /// which are the two people actually reach for.
     #[test]
@@ -4099,7 +4099,7 @@ mod tests {
         assert!(!SelectMode::Replace.keeps_existing());
         assert!(SelectMode::Add.keeps_existing());
         assert!(SelectMode::Subtract.keeps_existing());
-        // A path ADDS to what is there — it is a bigger selection, never a
+        // A path adds to what is there — it is a bigger selection, never a
         // replacement for the one you built it from.
         assert!(SelectMode::Path.keeps_existing());
     }

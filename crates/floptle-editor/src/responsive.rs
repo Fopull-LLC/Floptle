@@ -172,7 +172,7 @@ pub(crate) fn header_text(ui: &Ui, title: &str) -> String {
 /// editor. Those are a page of controls each, and "this panel fits" meant "its
 /// triangles fit".
 ///
-/// Only the DEFAULT is forced, so nothing about the product changes and a
+/// Only the default is forced, so nothing about the product changes and a
 /// person's own choice to fold a section shut is still remembered.
 pub(crate) fn start_open(when: bool) -> bool {
     when || cfg!(test)
@@ -237,7 +237,7 @@ pub(crate) fn check(ui: &mut Ui, on: &mut bool, text: &str) -> egui::Response {
 /// draws 119 px of track and then puts a 40 px number past the edge. What
 /// bounds it is `spacing.slider_width`, which measures the track alone.
 ///
-/// `text` is the SAME caption passed to the `Slider`'s own `.text(...)` (pass
+/// `text` is the same caption passed to the `Slider`'s own `.text(...)` (pass
 /// `""` for a slider with none, e.g. one that already has its caption drawn as
 /// a separate `ui.label` before it). It has to be handed in separately because
 /// `egui::Slider` draws that caption as a THIRD thing after the track and the
@@ -268,7 +268,7 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>, text: &str) -> egui::Resp
     //
     // The obvious alternative — filling the rest of the line first — does not
     // work and was tried: the fill lands, the cursor ends at the line's end, and
-    // the slider is then measured against ZERO remaining width. It took the
+    // the slider is then measured against zero remaining width. It took the
     // panel's region from 160 px to 239 px, and the give-away was that 200 px
     // and 120 px both passed while 160 px failed. A layout bug that is not
     // monotonic in width is a threshold being crossed, not a size being wrong.
@@ -286,7 +286,7 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>, text: &str) -> egui::Resp
         fit(ui, f32::INFINITY)
     };
 
-    // The caption is the one part of a slider that CAN shrink without going
+    // The caption is the one part of a slider that can shrink without going
     // unusable — the track already has its own floor above, and the number
     // box is egui's own fixed width. So it gets whatever's left of `w` after
     // both of those, elided rather than truncated by the renderer's clip rect:
@@ -529,7 +529,7 @@ pub(crate) fn row_with<R>(
         })
         .inner
     } else {
-        // ONE wrapped horizontal with the caption as its first item, rather
+        // one wrapped horizontal with the caption as its first item, rather
         // than a caption plus a nested wrapped row. The nesting is what makes
         // the geometry unreliable: the inner layout's region and the position
         // its widgets actually land at stop agreeing, so anything sizing itself
@@ -622,7 +622,7 @@ pub(crate) mod tests {
     ///
     /// The exemption has to be written this way round. Measuring the visible
     /// part (rect ∩ clip) against the panel reads as the obvious simplification
-    /// and is **wrong**: where nothing clipped early the clip rect IS the panel,
+    /// and is **wrong**: where nothing clipped early the clip rect is the panel,
     /// so the intersection is inside the panel by definition and the guard can
     /// never fire at all. That mistake was caught by
     /// `the_old_fixed_width_layout_does_not_fit_and_the_harness_says_so`, which
@@ -662,7 +662,7 @@ pub(crate) mod tests {
         // view — the failures worth catching arrive at thirty to a hundred
         // pixels, and every real one found so far did.
         //
-        // 2 px on the LEFT, because a glyph's ink is allowed to sit left of its
+        // 2 px on the left, because a glyph's ink is allowed to sit left of its
         // own origin — an em dash and an italic `j` both do — and a paragraph
         // starting at x = 0 therefore reports a bounding box starting at −1
         // while being entirely visible. Only the right edge is where a panel
@@ -678,7 +678,7 @@ pub(crate) mod tests {
             }
             let clip = cs.clip_rect;
             // Deliberate local truncation, not a panel overflow.
-            // A shape under a clip NARROWER THAN THE PANEL, where that clip is
+            // A shape under a clip NARROWER than the PANEL, where that clip is
             // itself inside the panel, is a widget truncating its own text — a
             // combo button clipping a long asset path. Nothing it draws reaches
             // the panel edge, which is the behaviour we want, not an overflow.
@@ -790,7 +790,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_sliver_of_a_panel_gets_a_sliver_of_a_chip() {
-        // Narrower than the floor: one column, the full width, and NOT a chip
+        // Narrower than the floor: one column, the full width, and not a chip
         // that reaches past the edge. The user is allowed to do this.
         let (n, w) = columns(20.0, 4.0, 4, 74.0, 30.0);
         assert_eq!(n, 1);

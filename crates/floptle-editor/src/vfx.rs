@@ -35,7 +35,7 @@ pub(crate) const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
 
 /// The live scene gravity field, handed to `advance` so `GravityMode::Field` effects
 /// (debris, dust, embers near a planet) fall toward the ground beneath them instead of
-/// world −Y. Sampled at each emitter's world position via the SAME field the
+/// world −Y. Sampled at each emitter's world position via the same field the
 /// rigidbodies use (radial volumes + celestial µ/r²). `WorldDown` effects ignore it.
 pub struct VfxGravity<'a> {
     pub field: &'a floptle_physics::GravityField,
@@ -228,7 +228,7 @@ impl VfxSystem {
 
     /// Spawn a fire-and-forget one-shot at a world point (`spawnEffect(...)` from a
     /// script). It plays once and is reaped when it finishes — no node needed. `vel` is
-    /// the emitter's world velocity for inherit-velocity tracks (ZERO if the caller has none).
+    /// the emitter's world velocity for inherit-velocity tracks (zero if the caller has none).
     pub fn spawn_detached(&mut self, key: &str, pos: DVec3, vel: Vec3) {
         if let Some(fx) = self.effect(key) {
             // Fire-and-forget contract: coerce to a self-destructing one-shot even if
@@ -398,7 +398,7 @@ impl VfxSystem {
                         inst.set_intensity(i);
                     }
                 }
-                // Aim every Beam track at a WORLD point: convert to effect-local
+                // Aim every Beam track at a world point: convert to effect-local
                 // (undo the emitter's rotation/scale) so the beam keeps tracking the
                 // target as the node moves — the sim/draw side only knows local.
                 floptle_script::VfxCmd::SetBeamEnd(p) => {
@@ -443,7 +443,7 @@ impl VfxSystem {
             collect_billboards(
                 inst, local_xf, world_xf, fwd, cam_right, cam_up, out_instances, &mut draws,
             );
-            // Trails + beams fold into the SAME instance/batch stream — the render
+            // Trails + beams fold into the same instance/batch stream — the render
             // pass draws ribbons as ordinary oriented quads, no extra pipeline.
             collect_trails(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
             collect_beams(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
@@ -1019,9 +1019,9 @@ mod tests {
     }
 
     // Regression guard for the solar demo's ship VFX: the real Flame + Explosion
-    // effects must resolve out of the project registry AND actually emit. If this
+    // effects must resolve out of the project registry and actually emit. If this
     // ever fails, the plume/explosion "disappeared" bug is in load/registration —
-    // if it PASSES (as it does), a runtime absence is scene/script/anchor, not data.
+    // if it passes (as it does), a runtime absence is scene/script/anchor, not data.
     #[test]
     fn solar_demo_ship_effects_resolve_and_emit() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar");
@@ -1054,7 +1054,7 @@ mod tests {
 ///
 /// The sim is deterministic given `(effect.seed, instance_seed, step sizes)`, so
 /// this profile is what the game will get and not an estimate. It is measured on
-/// its OWN instance rather than the live preview, which is scrubbable and can be
+/// its own instance rather than the live preview, which is scrubbable and can be
 /// mid-re-simulation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VfxProfile {

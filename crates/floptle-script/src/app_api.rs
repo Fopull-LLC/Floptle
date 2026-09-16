@@ -24,7 +24,7 @@
 //! and then had nothing at all for the two things a player looks for first, and
 //! no way to close the game.
 //!
-//! ## The settings here are the PROJECT's, and a change is for this session only
+//! ## The settings here are the project's, and a change is for this session only
 //!
 //! Vsync and the retro presentation live in `project.ron`, which ships to
 //! everybody who plays. So a script changing one changes it **for the run**, and
@@ -109,7 +109,7 @@ pub struct AppInfo {
 /// inside a Lua call.
 #[derive(Clone, Debug, Default)]
 pub struct AppRequests {
-    /// End the game. What that MEANS is the driver's call — see the module docs
+    /// End the game. What that means is the driver's call — see the module docs
     /// in the editor's `app_settings`.
     pub quit: bool,
     pub vsync: Option<Vsync>,

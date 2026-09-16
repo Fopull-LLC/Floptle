@@ -26,9 +26,9 @@ use mlua::{Lua, RegistryKey, Table, Value};
 #[derive(Clone, Debug, Default)]
 pub struct AssemblyInfo {
     pub mass: f32,
-    /// Center of mass, WORLD space.
+    /// Center of mass, world space.
     pub com: [f64; 3],
-    /// The assembly ORIGIN (the root's authored pose), WORLD space — the
+    /// The assembly ORIGIN (the root's authored pose), world space — the
     /// PHYSICS-fresh anchor for force-application math. Node transforms lag
     /// a rails carry behind the sim inside `fixedUpdate`; computing engine
     /// offsets from the node pose applied thrust ~a tick's orbit off the
@@ -53,7 +53,7 @@ pub struct AssemblyImpact {
     pub impulse: f32,
     /// Peak NORMAL closing speed the part hit at this tick (m/s). Budgeted
     /// depenetration flattens `impulse` on a fast crash, but this reports the
-    /// true normal impact speed. NOTE: this is only the component ALONG the
+    /// true normal impact speed. NOTE: this is only the component along the
     /// contact normal — it collapses on a glancing hit or a hit against a curved
     /// surface (a fast ram into a planet reads a small `speed`). Judge crash
     /// severity by `speedAbs`; keep `speed` for square-on touchdown feel.
@@ -76,7 +76,7 @@ pub enum AssemblyCmd {
     /// Detach `parts` (entity indices) into a new vessel; `cb` (if any) is
     /// called with the new root's node table. `prefab` roots the detached half
     /// at a fresh instance of that prefab instead of a bare node — that's how a
-    /// detached half comes away ALIVE (its scripts run), rather than as debris.
+    /// detached half comes away alive (its scripts run), rather than as debris.
     Split { root: u32, parts: Vec<u32>, cb: Option<RegistryKey>, prefab: Option<String> },
     /// Absorb the assembly rooted at `other` into the one rooted at `root`:
     /// one rigid body, combined momentum, `other`'s root retired (a docking
@@ -102,12 +102,12 @@ pub enum AssemblyCmd {
 
 /// A `vec3(...)`-ish argument: the `vec3()` value itself, in either backing, or
 /// any table with `x`/`y`/`z` fields. Rejecting the actual `vec3()` type here
-/// was the bug that silently killed EVERY scripted thrust/torque/teleport call.
+/// was the bug that silently killed every scripted thrust/torque/teleport call.
 ///
 /// It went through the shared reader after that bug returned by a second route:
 /// a private copy of "is this a vector" borrowed one concrete userdata type,
 /// and `fast` mode's vectors are not userdata at all (ADR-0028 Phase 3). Ask
-/// [`crate::math_api::vec3_of`] — it is the ONE place that knows every spelling.
+/// [`crate::math_api::vec3_of`] — it is the one place that knows every spelling.
 fn v3(v: &Value, what: &str) -> mlua::Result<[f64; 3]> {
     if let Some(p) = crate::math_api::vec3_of(v) {
         return Ok([p.x, p.y, p.z]);
@@ -196,11 +196,11 @@ pub(crate) fn install_assembly_api(
         t.set("impulseAt", f)?;
     }
     // assembly.split(node, parts [, fn] [, prefab]) — detach part nodes (a node
-    // or a list of nodes) into a NEW vessel. The detach happens after this
+    // or a list of nodes) into a new vessel. The detach happens after this
     // script pass; fn(newRoot) is called with the fresh vessel's node when it
     // exists. Pass a PREFAB name and the detached half is rooted at a fresh
     // instance of it (which must carry an assembly RigidBody) instead of a bare
-    // node — so the half that comes away is a LIVE, scripted craft (an undocked
+    // node — so the half that comes away is a live, scripted craft (an undocked
     // lander that can fly home), not inert debris. Give it a BARE root: the
     // detached parts are the compound's shapes, and any RigidBody the prefab
     // brings of its own would sit outside it.
@@ -239,7 +239,7 @@ pub(crate) fn install_assembly_api(
         t.set("split", f)?;
     }
     // assembly.merge(node, other) — LATCH `other`'s assembly onto this one: the
-    // two compounds become ONE rigid body with their combined momentum, the
+    // two compounds become one rigid body with their combined momentum, the
     // absorbed part nodes re-parent under this root (world pose kept), and
     // `other`'s root node is retired. The inverse of `assembly.split`; this is
     // how a docking port, a crane hook or a construction weld closes. Aim for
@@ -256,7 +256,7 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("merge", f)?;
     }
-    // assembly.rebuild(node) — re-gather the compound from the root's CURRENT
+    // assembly.rebuild(node) — re-gather the compound from the root's current
     // part children. Call once after spawning parts under an assembly root
     // (script-assembled vessels: blueprint spawners, procgen structures).
     {
@@ -295,7 +295,7 @@ pub(crate) fn install_assembly_api(
         t.set("keepLive", f)?;
     }
     // assembly.syncColliders(node) — re-pose the compound's collision shapes to
-    // match its part nodes' CURRENT transforms. Call it after moving articulated
+    // match its part nodes' current transforms. Call it after moving articulated
     // parts (a folding landing leg) so their colliders follow the geometry:
     // deployed legs actually hold the ship up, retracted ones tuck away. Mass
     // properties stay as baked (a leg's mass is negligible), so it's cheap.
@@ -311,7 +311,7 @@ pub(crate) fn install_assembly_api(
     // assembly.teleport(node, pos) — move the assembly origin to a world
     // position without touching velocity. The compound writeback owns the
     // root node's transform, so plain node position writes are overwritten —
-    // this is THE way to place a live assembly (pad pinning, save restores).
+    // this is the way to place a live assembly (pad pinning, save restores).
     {
         let q = cmds.clone();
         let f = lua.create_function(move |_, (node, pos): (Value, Value)| {
@@ -354,7 +354,7 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("info", f)?;
     }
-    // assembly.impacts(node) — the LAST TICK's per-part contact loads: an
+    // assembly.impacts(node) — the last tick's per-part contact loads: an
     // array of { part, impulse, speed, speedAbs, x, y, z } (part = the part
     // node's entity id, impulse = total normal impulse it absorbed, speed = peak
     // NORMAL closing speed, speedAbs = peak TOTAL closing speed = the energy
@@ -394,7 +394,7 @@ mod tests {
     use super::*;
 
     /// The documented contract: every `assembly.*` vector argument accepts the
-    /// `vec3()` value itself (a userdata) AND plain `{x,y,z}` tables. The
+    /// `vec3()` value itself (a userdata) and plain `{x,y,z}` tables. The
     /// userdata path regressing is what silently killed all scripted thrust —
     /// every call errored on arg validation, so ships "just wouldn't thrust".
     #[test]

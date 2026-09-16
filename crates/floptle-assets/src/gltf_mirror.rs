@@ -57,7 +57,7 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
     let eps = size * 0.02;
     // A mirror SEAM sits on the plane (Blender welds it to x=0); a lateral limb's
     // inner edge is measurably offset. So the closest vertex approach to the plane —
-    // NOT the min x — is what separates a half-head (seam at 0) from a leg (gap).
+    // not the min x — is what separates a half-head (seam at 0) from a leg (gap).
     let seam_eps = size * 0.002;
 
     let mut out_nodes: Vec<WriteNode> = Vec::new();
@@ -69,7 +69,7 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
         let touches_plane = min_abs_x <= seam_eps;
 
         // Idempotency: an object already produced by a previous mirror pass (its name
-        // ends in `.L`/`.R`) is one half of a pair that ALREADY exists in the model —
+        // ends in `.L`/`.R`) is one half of a pair that already exists in the model —
         // re-splitting it just stacks a second overlapping copy on each side (the
         // "duplicate limbs" bug from running Mirror-apply twice). Keep it as-is.
         let already_mirrored =

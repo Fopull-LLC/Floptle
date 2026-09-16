@@ -102,7 +102,7 @@ pub struct UserInfo {
 /// had been guessed.
 ///
 /// It was cosmetic while the free tier was `max_ccu: 0`, because falling back to
-/// it looked broken enough to notice. It stopped being cosmetic on 2026-09-06,
+/// it looked broken enough to notice. It stopped being cosmetic
 /// when free gained a real 20-CCU allowance and Floptle Cloud became something
 /// people pay for: the fallback now looks like a working plan that is simply
 /// smaller, which is a billing complaint rather than an outage report.
@@ -477,7 +477,7 @@ impl Session {
 
     /// What a **game** shows: the player's name, falling back to the email and then the
     /// subject id. Different from [`display_name`](Self::display_name) on purpose — a
-    /// fighting game's win screen should say "Ty", not an email address, and putting
+    /// fighting game's win screen should say a name, not an email address, and putting
     /// somebody's email on a screen they might be streaming is its own small harm.
     pub fn player_name(&self) -> &str {
         match self.name.as_deref() {
@@ -583,7 +583,7 @@ impl TokenStore for KeyringStore {
 /// the strongest thing a page can reach — there is no browser API that keeps a
 /// secret from the page it belongs to. It is a trade, not an equivalence.
 ///
-/// Per-origin, so a game on `itch.io` and a game on your own domain do NOT
+/// Per-origin, so a game on `itch.io` and a game on your own domain do not
 /// share a session the way the Hub and a desktop game do. That is the browser's
 /// rule, not a choice made here.
 ///

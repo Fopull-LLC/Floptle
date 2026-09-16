@@ -142,7 +142,7 @@ impl FieldSaver {
 
 impl ChunkField {
     /// An empty field of open air. `voxel` is the cubic voxel edge in world units — the
-    /// ONE density knob (the dense grid's "detail" was a cell *count* that silently
+    /// one density knob (the dense grid's "detail" was a cell *count* that silently
     /// meant nothing as terrain grew; this is a real density).
     pub fn new(voxel: f32) -> Self {
         Self { chunks: HashMap::new(), voxel: voxel.max(1e-3), base_color: [128, 128, 128, 255] }
@@ -176,14 +176,14 @@ impl ChunkField {
         self.data_chunks() * CHUNK_VOXELS * (4 + 4)
     }
 
-    /// Every stored chunk coordinate — data AND uniform sentinels. The undo-snapshot
+    /// Every stored chunk coordinate — data and uniform sentinels. The undo-snapshot
     /// set for whole-field ops (Fill), where any stored chunk may change.
     pub fn all_chunk_coords(&self) -> Vec<[i32; 3]> {
         self.chunks.keys().copied().collect()
     }
 
     /// Every chunk coordinate overlapping a world-space AABB (present or absent) —
-    /// the undo-snapshot set for ops that may CREATE chunks inside a known box.
+    /// the undo-snapshot set for ops that may create chunks inside a known box.
     pub fn chunks_in_world_box(&self, min: Vec3, max: Vec3) -> Vec<[i32; 3]> {
         let (c0, c1) = (
             chunk_of([
@@ -285,11 +285,11 @@ impl ChunkField {
     /// Field gradient (the surface normal direction) at a world position, by central
     /// differences one voxel wide.
     ///
-    /// This is THE reason terrain stops looking faceted: on the GPU the normal was
+    /// This is the reason terrain stops looking faceted: on the GPU the normal was
     /// re-derived per pixel from a trilinearly-filtered f16 texture, and trilinear
     /// interpolation is only C⁰ — its gradient jumps at every cell face, so the lattice
     /// showed through the shading no matter how cubic the voxels were. Here the gradient
-    /// is computed once per VERTEX in f32 and then interpolated across the triangle by
+    /// is computed once per vertex in f32 and then interpolated across the triangle by
     /// the rasterizer, exactly like an imported mesh's normals.
     pub fn grad(&self, p: Vec3) -> Vec3 {
         let h = self.voxel;
@@ -438,7 +438,7 @@ impl ChunkField {
     }
 
     /// Collapse chunks whose voxels are all one value back to a sentinel — this is what
-    /// keeps a large map's memory proportional to its SURFACE rather than its volume.
+    /// keeps a large map's memory proportional to its surface rather than its volume.
     fn compact(&mut self, coords: &[[i32; 3]]) {
         for c in coords {
             let uniform = match self.chunks.get(c) {
@@ -532,7 +532,7 @@ impl ChunkField {
     /// solid, `clamp(0.5 - d/voxel, 0, 1)` — differenced across the write. That
     /// makes it additive by construction: sum the reports over a shaft and you
     /// get the volume that actually left the field, because every voxel is
-    /// counted once and monotonically. Slots are read BEFORE the write, so the
+    /// counted once and monotonically. Slots are read before the write, so the
     /// material reported is the material that was there.
     pub fn sculpt_measured(
         &mut self,
@@ -758,10 +758,10 @@ impl ChunkField {
         // Write the slab's BOX SDF, not a plane clipped to a region.
         //
         // The obvious version — `d = p.y - top_y` inside the box, air outside — makes
-        // the field jump from -band (solid) to +band (air) across ONE voxel at the
+        // the field jump from -band (solid) to +band (air) across one voxel at the
         // slab's rim, because nothing ever wrote the ramp between them. Measured: worst
         // |∇d| = 4.36 on a bare slab, before any brush touched it. That is the same
-        // mistake the dense `grow()` made (a cliff in the FIELD rather than in the
+        // mistake the dense `grow()` made (a cliff in the field rather than in the
         // geometry), and it is why sculpting looked broken near terrain edges.
         //
         // A box SDF is exact and 1-Lipschitz everywhere, including outside, so the rim
@@ -846,7 +846,7 @@ impl ChunkField {
         sdf: impl Fn(Vec3) -> f32,
         color: impl Fn(Vec3) -> [f32; 3],
     ) {
-        // Alpha 255 is the legacy "no slot" sentinel (untextured), NOT slot 255 —
+        // Alpha 255 is the legacy "no slot" sentinel (untextured), not slot 255 —
         // generators that want textured voxels use `fill_with_rgba` and author the
         // palette slot in the alpha byte themselves.
         self.fill_with_rgba(min, max, sdf, |p| {
@@ -913,7 +913,7 @@ impl ChunkField {
     /// This exists for one reason: **speed**. Sampling through [`Self::voxel_at`] costs a
     /// HashMap lookup per voxel, and the mesher needs ~48 per vertex for the gradient
     /// alone — measured at 11 ms/chunk, 11× over budget. Here the ≤27 overlapping chunks
-    /// are visited ONCE each and their rows copied, so the mesher's inner loops become
+    /// are visited once each and their rows copied, so the mesher's inner loops become
     /// array indexing. Same values, same global-voxel addressing, no lookups.
     pub fn gather(&self, lo: [i32; 3], dim: usize, dist: &mut Vec<f32>, color: &mut Vec<[u8; 4]>) {
         let band = self.band();
@@ -1029,7 +1029,7 @@ impl ChunkField {
     /// store, resampling onto this field's voxel lattice.
     ///
     /// Existing projects must just open. The dense grid's values are trilinearly
-    /// resampled and band-clamped; uniform regions collapse. Ty's 192 MB field imports to
+    /// resampled and band-clamped; uniform regions collapse. a 192 MB field imports to
     /// single-digit MB precisely because everything outside the band was never worth
     /// storing.
     pub fn from_dense(baked: &crate::mesh2sdf::BakedSdf, voxel: f32) -> Self {
@@ -1077,7 +1077,7 @@ impl ChunkField {
             (max.y / v).ceil() as i32 + 1,
             (max.z / v).ceil() as i32 + 1,
         ];
-        // Regional refresh WRITES air (a dig turned solid into air — the voxels that were
+        // Regional refresh writes air (a dig turned solid into air — the voxels that were
         // rock must be erased, or the old surface lingers) but only over already-touched
         // chunks; empty ones compact away.
         self.resample_dense(baked, ilo, ihi, true)
@@ -1139,7 +1139,7 @@ impl ChunkField {
                     // band below the real one — meshed vertices sat -0.935 units inside the
                     // dense field). Deep-solid voxels cost nothing: `compact` collapses a
                     // saturated chunk to a `Uniform(-band)` sentinel. (Clamping against the
-                    // source box SDF was tried and made it WORSE: 4.8% -> 18.5%.)
+                    // source box SDF was tried and made it worse: 4.8% -> 18.5%.)
                     if dv >= band {
                         // Regional refresh: overwrite air so a DIG (solid→air) actually
                         // erases the old surface. Full import: skip — the chunk is already
@@ -1183,7 +1183,7 @@ impl ChunkField {
         }
     }
 
-    /// Fill the WHOLE terrain with a texture palette `slot` (1-based; 0 = untextured).
+    /// Fill the whole terrain with a texture palette `slot` (1-based; 0 = untextured).
     /// The slot rides the colour alpha channel — same convention as the dense field
     /// and the splat shader. Leaves shape + RGB tint.
     pub fn fill_texture(&mut self, slot: u8) {
@@ -1230,7 +1230,7 @@ impl ChunkField {
         touched
     }
 
-    /// Lay flat ground across the field's CURRENT bounds ("fill bounds"): a solid slab
+    /// Lay flat ground across the field's current bounds ("fill bounds"): a solid slab
     /// from `floor_y` up to `top_y`, inset from the X/Z rim, unioned with what's there.
     pub fn fill_bounds(&mut self, top_y: f32, floor_y: f32, inset: f32, color: [f32; 3]) {
         let Some((lo, hi)) = self.bounds() else { return };
@@ -1242,7 +1242,7 @@ impl ChunkField {
         self.fill_slab(min, max, top_y.max(floor_y), color);
     }
 
-    /// World-space AABB of everything stored (data chunks AND solid interior
+    /// World-space AABB of everything stored (data chunks and solid interior
     /// sentinels), or `None` for an empty field. This is the box the shadow proxy,
     /// the collider wireframe, and camera framing use — an unbounded field still has
     /// bounded *content*.
@@ -1274,7 +1274,7 @@ impl ChunkField {
 
     // ---- undo: per-stroke chunk snapshots -------------------------------------
 
-    /// Every chunk coordinate a brush of `radius` at `center` COULD touch (its voxel
+    /// Every chunk coordinate a brush of `radius` at `center` could touch (its voxel
     /// range, chunk-rounded, plus the one-chunk ring `renormalize` may write into) —
     /// the pre-dab snapshot set. Includes absent coords: undo must also remember that
     /// a chunk did not exist.
@@ -1335,7 +1335,7 @@ impl ChunkField {
     /// channels RLE-encode, so the band's saturated plateaus cost almost nothing.
     /// Air-uniform chunks are implicit (absent == air) and never written.
     ///
-    /// This walks EVERY stored voxel — a dug-up planet takes hundreds of ms.
+    /// This walks every stored voxel — a dug-up planet takes hundreds of ms.
     /// Anything that runs per-frame must use [`Self::begin_save`] /
     /// [`Self::save_step`] instead and spread the walk across frames.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -1347,7 +1347,7 @@ impl ChunkField {
     /// Start an incremental save: captures the chunk list + header. Encode with
     /// [`Self::save_step`] a budget at a time, then [`FieldSaver::finish`].
     ///
-    /// The field MAY mutate between steps: each chunk encodes atomically from
+    /// The field may mutate between steps: each chunk encodes atomically from
     /// its state at its step (a chunk dug to air since `begin_save` is simply
     /// skipped), so the finished blob is always a VALID field — at worst a
     /// torn snapshot mixing edit generations. Callers detect that (edit stamp)
@@ -1667,7 +1667,7 @@ impl ChunkUndo {
         self.entries.iter().map(|(c, _)| *c).collect()
     }
 
-    /// Fold another snapshot in, keeping the FIRST-seen entry per coord — later dabs
+    /// Fold another snapshot in, keeping the first-seen entry per coord — later dabs
     /// of the same stroke must not overwrite the pre-stroke state already captured.
     pub fn merge(&mut self, other: ChunkUndo) {
         for (c, ch) in other.entries {
@@ -1785,7 +1785,7 @@ mod tests {
         f
     }
 
-    /// The incremental saver IS `to_bytes`, just spread across calls: tiny
+    /// The incremental saver is `to_bytes`, just spread across calls: tiny
     /// per-step budgets must produce the byte-identical blob (autosaves stream
     /// through it every few frames — any drift silently corrupts save slots).
     /// And a field edited MID-SAVE must still finish into a parseable blob:
@@ -1833,7 +1833,7 @@ mod tests {
         println!("after Flatten        : worst {w:.2}  bad {:.1}%", b * 100.0);
     }
 
-    /// THE invariant. |∇d| ≤ 1 is what sphere tracing, gradient normals, SDF AO and sun
+    /// the invariant. |∇d| ≤ 1 is what sphere tracing, gradient normals, SDF AO and sun
     /// shadows all assume. The dense field's `grow()` broke it by SUMMING two distance
     /// terms and shipped 11.1% of near-surface voxels bad, worst |∇d| = 12.00 — the
     /// symptom was blotchy AO, not a crash. Every write path here must hold the line.
@@ -1860,7 +1860,7 @@ mod tests {
         // redistance (fast-marching) pass reseeded from the zero crossing would, and that
         // is deliberately not in P1.
         //
-        // It is tolerable for now because of WHO reads the field: the mesher normalizes
+        // It is tolerable for now because of who reads the field: the mesher normalizes
         // the gradient (magnitude irrelevant) and trusts the zero crossing (unmoved), and
         // `raycast` half-steps. It must be fixed before P5 puts this field under GPU AO
         // and sun shadows — that is exactly what |∇d| = 12 did to the dense grow().
@@ -1873,10 +1873,10 @@ mod tests {
         );
     }
 
-    /// Lower must carve THE BALL and nothing else. The shipped bug computed
+    /// Lower must carve the BALL and nothing else. The shipped bug computed
     /// `max(cur, ball)` instead of `max(cur, -ball)` — keep-the-ball-carve-the-box —
     /// so every dig blasted a write-box-sized square crater ("massive squares",
-    /// Ty's solar playtest). The dab: radius 1.3, strength 0.6 — the dig_tool defaults.
+    /// a Solar playtest). The dab: radius 1.3, strength 0.6 — the dig_tool defaults.
     #[test]
     fn lower_carves_a_ball_not_the_write_box() {
         let mut f = ChunkField::new(0.75);
@@ -1915,7 +1915,7 @@ mod tests {
     /// The collider-mirror primitive: after sculpting an authority field, copying
     /// the touched chunks + one renormalize ring into a stale clone makes the two
     /// agree byte-for-byte (renormalize spills constraint writes one chunk out —
-    /// copying only `touched` leaves ring chunks stale, which IS a divergence).
+    /// copying only `touched` leaves ring chunks stale, which is a divergence).
     #[test]
     fn copy_chunks_from_syncs_a_stale_mirror_exactly() {
         let mut authority = rolling_terrain();
@@ -1948,7 +1948,7 @@ mod tests {
         );
     }
 
-    /// Sparsity is the whole point: memory must track the SURFACE, not the volume.
+    /// Sparsity is the whole point: memory must track the surface, not the volume.
     #[test]
     fn a_big_field_stores_only_its_surface() {
         let f = rolling_terrain();
@@ -1995,7 +1995,7 @@ mod tests {
         );
     }
 
-    /// Existing projects must just open — Ty's 192 MB field included.
+    /// Existing projects must just open — a 192 MB field included.
     #[test]
     fn dense_tfield_migrates_into_chunks() {
         let mut t = Terrain::flat([64, 40, 64], [0.0; 3], [24.0, 12.0, 24.0], 0.0, [0.4, 0.6, 0.3]);
@@ -2030,7 +2030,7 @@ mod tests {
 
         // ...and the ground must be SOLID all the way down, not a shell.
         //
-        // The raycast above cannot see this: it comes from ABOVE and stops at the first
+        // The raycast above cannot see this: it comes from above and stops at the first
         // surface, which was always the right one. Underneath it, the import was leaving
         // every voxel deeper than the band as the air a fresh chunk starts out as — so the
         // field held a hollow crust with a spurious inner surface a band below the real
@@ -2050,18 +2050,18 @@ mod tests {
             sparse as f32 / 1.0e6,
             f.data_chunks()
         );
-        // NOT asserting "sparse < dense" here, because on a TOY field it isn't true and
+        // not asserting "sparse < dense" here, because on a TOY field it isn't true and
         // saying so would be a lie: a 32³ chunk is 256 KB, so a 48-unit test terrain
         // rounds up to a few chunks and can cost more than the dense grid it came from.
         // Sparsity is a SCALE property — it wins when the volume grows and the surface
-        // doesn't (Ty's 433×406×460-unit field is 192 MB dense; only its band is worth
+        // doesn't (a 433×406×460-unit field is 192 MB dense; only its band is worth
         // storing). What must hold at every scale is an absolute ceiling.
         assert!(
             sparse < 8_000_000,
             "migrated field is {:.1} MB — far more than its band can justify",
             sparse as f32 / 1.0e6
         );
-        // The SOURCE field is itself not a distance field: the dense brushes never
+        // The source field is itself not a distance field: the dense brushes never
         // enforced |∇d| ≤ 1 either (they nudge voxels by weight, the same mistake this
         // module's first cut made). A faithful import cannot be cleaner than its input,
         // so this asserts "no worse than the source", not "correct" — the redistance pass
@@ -2095,7 +2095,7 @@ mod tests {
             t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 5.0, 1.0, BrushProfile::default());
         }
 
-        // Refresh ONLY the box the dab touched — the whole field must NOT be re-imported.
+        // Refresh only the box the dab touched — the whole field must not be re-imported.
         let touched = f.refresh_from_dense_region(
             &t.baked,
             Vec3::new(-6.0, -2.0, -6.0),
@@ -2117,7 +2117,7 @@ mod tests {
         let dd = t.baked_distance_at([after.x, after.y, after.z]);
         assert!(dd.abs() < 1.5, "refreshed surface drifts {dd:.2} from the dense field");
 
-        // Ground OUTSIDE the refreshed box is untouched — the refresh was regional, not a
+        // Ground outside the refreshed box is untouched — the refresh was regional, not a
         // silent full rebuild (which would defeat the whole point on a large terrain).
         let far = f
             .raycast(Vec3::new(18.0, 20.0, 18.0), Vec3::NEG_Y, 100.0)
@@ -2254,7 +2254,7 @@ mod tests {
         assert_eq!(plain.color(hit)[3], 255, "fill_with keeps the untextured sentinel");
     }
 
-    /// `bounds` covers data AND solid interior, and grows when sculpting outward —
+    /// `bounds` covers data and solid interior, and grows when sculpting outward —
     /// the proxy/framing box for an unbounded field.
     #[test]
     fn bounds_track_content() {
@@ -2357,7 +2357,7 @@ mod yield_tests {
         assert!(y.slots.contains_key(&4), "so is the rock around it: {:?}", y.slots);
     }
 
-    /// A dab that changes nothing reports ZERO, not nothing — "I dug air" has to
+    /// A dab that changes nothing reports zero, not nothing — "I dug air" has to
     /// be distinguishable from "the report has not arrived".
     #[test]
     fn a_dab_that_moves_nothing_reports_zero() {

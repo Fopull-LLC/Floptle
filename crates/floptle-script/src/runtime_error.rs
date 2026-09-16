@@ -99,7 +99,7 @@ struct NilExpr {
 /// actually knows — and both are resolved against the same source line, so the
 /// answer comes out identical.
 fn nil_expression(msg: &str, line: &str) -> Option<NilExpr> {
-    // Luau: `attempt to index nil with 'x'`. It names the field being READ; the
+    // Luau: `attempt to index nil with 'x'`. It names the field being read; the
     // nil is whatever precedes it in the source.
     if let Some(field) = quoted_after(msg, "attempt to index nil with ") {
         let recv = receiver_of(line, &field)?;
@@ -208,7 +208,7 @@ fn chain_ending_at(line: &str, end: usize) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Both VMs' phrasings of the SAME mistake must come out as the same
+    /// Both VMs' phrasings of the same mistake must come out as the same
     /// sentence. This is the property the whole module exists for: the dual-VM
     /// diff harness compares what a game prints, and a message that differs by
     /// VM is a difference a player would see.
@@ -229,7 +229,7 @@ mod tests {
         assert!(luajit.contains("node.pos = node.postion.x"), "{luajit}");
     }
 
-    /// A missing global and a nil local are DIFFERENT bugs, and Luau gives them
+    /// A missing global and a nil local are different bugs, and Luau gives them
     /// one message. The line tells them apart.
     #[test]
     fn a_missing_global_and_a_nil_local_stop_reading_alike() {
@@ -252,7 +252,7 @@ mod tests {
         assert!(out.starts_with(raw), "{out}");
     }
 
-    /// A stack traceback stays attached, and stays BELOW the explanation — the
+    /// A stack traceback stays attached, and stays below the explanation — the
     /// sentence a reader needs must not be buried under twenty frames.
     #[test]
     fn a_traceback_is_kept_and_stays_underneath() {

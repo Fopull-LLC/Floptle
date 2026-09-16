@@ -1,7 +1,7 @@
 //! The Lua `net.*` API + `synced` vars (`docs/multiplayer.md` §8) — the
 //! script-facing face of `floptle-net`. Follows the host's queue-drain shape:
 //! `net.host{}` / `net.rpc(...)` / `net.spawn(...)` queue [`NetCmd`]s the
-//! editor drains each tick; session state (role/peers/ping) is mirrored IN via
+//! editor drains each tick; session state (role/peers/ping) is mirrored in via
 //! [`NetState`]; received RPCs/events dispatch back through
 //! `ScriptHost::dispatch_rpc` / `fire_net_event`.
 
@@ -17,7 +17,7 @@ use crate::{LogLevel, ScriptLog};
 /// Every key each `net.*` options table reads (`floptle/0082`).
 ///
 /// A misspelled networking option is the worst possible silent default: it takes
-/// effect on the SERVER, so the symptom is a session that behaves differently
+/// effect on the server, so the symptom is a session that behaves differently
 /// from every local test — `interestBudget` typo'd is a lobby that stutters for
 /// nobody who can reproduce it.
 pub(crate) const HOST_KEYS: &[&str] =
@@ -41,7 +41,7 @@ pub(crate) const SPAWN_KEYS: &[&str] = &["x", "y", "z", "owner"];
 pub enum NetCmd {
     /// `net.host{ maxPlayers = n, port = p, relay = "addr" }` — become the
     /// authoritative host. With a `relay`, host through a rendezvous relay
-    /// (lobby code, no port-forwarding); with a `port`, a REAL session on UDP
+    /// (lobby code, no port-forwarding); with a `port`, a real session on UDP
     /// (QUIC) that other machines join with `net.join("quic://ip:port")`;
     /// with neither, the in-editor loopback harness.
     Host {
@@ -56,7 +56,7 @@ pub enum NetCmd {
         /// `interestBudget = <bytes per second>` — per-client snapshot budget.
         /// Only meaningful alongside `interest`.
         interest_budget: Option<u32>,
-        /// `interestOcclusion = "Level"` — also require LINE OF SIGHT, tested
+        /// `interestOcclusion = "Level"` — also require LINE of SIGHT, tested
         /// against that collision layer. Only meaningful alongside `interest`.
         ///
         /// A radius bounds a leak; it does not remove one. This is the part a
@@ -69,9 +69,9 @@ pub enum NetCmd {
         /// default: a LAN or friends game with nobody signed in has to keep
         /// working exactly as it does. floptle/0183.
         require_identity: bool,
-        /// `allow = { ids }` — if non-empty, ONLY these accounts may join.
+        /// `allow = { ids }` — if non-empty, only these accounts may join.
         allow: Vec<String>,
-        /// `deny = { ids }` — these accounts may never join. Consulted BEFORE
+        /// `deny = { ids }` — these accounts may never join. Consulted before
         /// the join is accepted, because kicking someone every time they
         /// reconnect is a chore, not a ban.
         deny: Vec<String>,
@@ -85,7 +85,7 @@ pub enum NetCmd {
         /// number is exposed and chosen instead.
         input_delay: Option<u8>,
     },
-    /// `net.setInputDelay(n)` — change it BETWEEN matches. The roster
+    /// `net.setInputDelay(n)` — change it between matches. The roster
     /// re-announce restarts the driver on a fresh origin, so there is a natural
     /// seam; a rematch after "that was rough, put it up to 5" should not need
     /// a new lobby.
@@ -163,7 +163,7 @@ pub struct RollbackInfo {
 #[derive(Clone, Debug)]
 pub struct NetState {
     pub role: NetRoleState,
-    /// **What the relay last told the HOST about this session**, or `None`
+    /// **What the relay last told the host about this session**, or `None`
     /// (`floptle/0194`).
     ///
     /// Today that is one message: the account is at its player ceiling, joins
@@ -182,7 +182,7 @@ pub struct NetState {
     /// queried, because a script reads it inside a tick and the session is
     /// behind a borrow by then.
     ///
-    /// `verified` is what matters: an unverified entry is what the CLIENT
+    /// `verified` is what matters: an unverified entry is what the client
     /// said, and a game that bans on it is banning a string.
     pub identities: std::collections::HashMap<u64, PeerIdentity>,
     /// Client: our peer id once welcomed (`net.isMine` needs it).
@@ -190,7 +190,7 @@ pub struct NetState {
     /// Client: how the join attempt is going — `"connecting"`, `"joined"`, or
     /// `"refused"`, with `join_error` carrying the relay's own words.
     ///
-    /// A relay HOST uses it too, for the one state it can be in that is not
+    /// A relay host uses it too, for the one state it can be in that is not
     /// simply "hosting": `"reconnecting"` while its relay is unreachable, so a
     /// lobby screen can say the code is not usable rather than showing one that
     /// refuses everybody (`floptle/0210`).
@@ -210,7 +210,7 @@ pub struct NetState {
     /// `None` offline, on a client, and on a direct/LAN host (there is no code
     /// to show — joiners use the address).
     pub lobby_code: Option<String>,
-    /// **Is this a server with NOBODY SITTING AT IT?**
+    /// **Is this a server with NOBODY SITTING at it?**
     ///
     /// `net.isServer()` is true for both shapes of host and that is usually the
     /// right question — the simulation does not care who started it. This is the
@@ -280,7 +280,7 @@ pub struct RewindScope {
     /// (entity index, world position) per networked body at the rewound tick.
     pub poses: Vec<(u32, [f64; 3])>,
     /// (entity index, script kind, vars) — `synced` values at the rewound tick,
-    /// so combat flags (parrying!) are judged at the SAME instant as the poses.
+    /// so combat flags (parrying!) are judged at the same instant as the poses.
     pub synced: RewoundVars,
 }
 
@@ -372,10 +372,10 @@ pub fn input_to_net(
 }
 
 /// The wire form back into a resolved action state — what the server (and the
-/// client's replay) feed `fixedUpdate` so the SAME controller runs on both
+/// client's replay) feed `fixedUpdate` so the same controller runs on both
 /// sides (`docs/multiplayer.md` §6, the one-script model).
 ///
-/// `held_secs` is NOT transmitted: it's derivable and would cost 4 bytes per
+/// `held_secs` is not transmitted: it's derivable and would cost 4 bytes per
 /// action every tick. It is reconstructed by the receiver advancing its own
 /// timer, which is exact as long as the tick stream is (and if it isn't, the
 /// hold time is the least of the problems).
@@ -418,7 +418,7 @@ pub(crate) fn lua_to_netvalue_max(
             format!("value nests deeper than {max_depth} levels (or is cyclic)")
         });
     }
-    // A vector in EITHER backing — `exact`'s userdata, `fast`'s native vector
+    // A vector in either backing — `exact`'s userdata, `fast`'s native vector
     // — is refused by the name the author wrote, with the fix. The fall-through
     // arms below would say "userdata" and "vector", and neither is the word
     // `vec3`, nor says what to send instead. Tables are excluded from the check
@@ -487,7 +487,7 @@ fn checked_netvalue(net: &SharedNet, ctx: &str, v: &Value) -> Option<NetValue> {
 /// Install the `net` global table. `hulls`/`sim_origin`/`synced_stores` are
 /// the host's shared frame state — `net.rewind` re-poses the hulls and swaps
 /// historical `synced` values in around a lag-compensated handler.
-/// `net.host{ allow = … }` / `deny` — a LIST of account ids, and nothing else.
+/// `net.host{ allow = … }` / `deny` — a list of account ids, and nothing else.
 ///
 /// These were read with `.ok().flatten().unwrap_or_default()`, so a string, or
 /// a table written with named keys, produced an **empty list** and no message
@@ -538,7 +538,7 @@ pub(crate) fn install_net_api(
         // ticks it already ran (`docs/multiplayer.md` §4). The
         // engine already discards the side-effect queues a replay re-fires;
         // this is for the cosmetics it cannot see, like a script poking a
-        // material or a UI label. Simulation code must NOT branch on it: a
+        // material or a UI label. Simulation code must not branch on it: a
         // replayed tick that computes something different from the live tick
         // is the definition of a desync.
         let r = replaying.clone();
@@ -591,7 +591,7 @@ pub(crate) fn install_net_api(
         let rb = net.rollback.clone();
         let draws = net.random_draws.clone();
         let logs = net.logs.clone();
-        // Said ONCE per session, not once per call: a fighter that rolls a
+        // Said once per session, not once per call: a fighter that rolls a
         // number in `fixedUpdate` calls this 60 times a second, and a note
         // repeated 60 times a second is not a note, it is a broken console.
         let warned = Rc::new(Cell::new(false));
@@ -691,7 +691,7 @@ pub(crate) fn install_net_api(
             "join",
             lua.create_function(
                 move |_, (addr, opts): (String, Option<mlua::Table>)| {
-                    // Read BY NAME and strictly: a present-but-wrong `timeout`
+                    // Read by name and strictly: a present-but-wrong `timeout`
                     // raises here rather than silently becoming the default,
                     // because a lobby screen that waits ninety seconds when the
                     // developer asked for ten looks like the engine ignoring
@@ -765,11 +765,11 @@ pub(crate) fn install_net_api(
     // net.joinState() — "offline" | "connecting" | "joined" | "refused" |
     // "reconnecting" | "starting".
     // "starting" means the lobby is real and its dedicated server is waking
-    // up; the second return carries words to show. It is NOT "refused", which
+    // up; the second return carries words to show. It is not "refused", which
     // means the attempt will never succeed, and it is kept apart from
     // "connecting" because that one resolves in a relay round trip while a cold
     // start can take tens of seconds.
-    // A lobby screen should wait on THIS rather than on net.role(): joining
+    // A lobby screen should wait on this rather than on net.role(): joining
     // does not block, so role says "client" from the frame you called join,
     // whether or not the code was real. Second return is the reason on
     // "refused" — the relay's own words, e.g. "no lobby QK7RM".
@@ -783,7 +783,7 @@ pub(crate) fn install_net_api(
             })?,
         )?;
     }
-    // net.traffic() — what this peer has SENT, broken down by message kind
+    // net.traffic() — what this peer has sent, broken down by message kind
     // (`floptle/0218`).
     //
     // ⚠ A real match measured 487 bytes per frame per player. A rollback
@@ -812,7 +812,7 @@ pub(crate) fn install_net_api(
             })?,
         )?;
     }
-    // net.notice() — what the relay last told this HOST about the session, or
+    // net.notice() — what the relay last told this host about the session, or
     // nil. Today: the account is at its player ceiling and joins are being
     // turned away, said once per episode. A lobby screen that shows it turns
     // "my friends cannot join and I do not know why" into a sentence.
@@ -836,7 +836,7 @@ pub(crate) fn install_net_api(
     // net.isMine(node): is this node under MY control on this machine?
     // Offline / non-networked → true. On the server: true unless a remote
     // peer owns it. On a client: true only for my own predicted node(s).
-    // THE way for shared scripts (cameras, HUDs) to pick the local player
+    // the way for shared scripts (cameras, HUDs) to pick the local player
     // out of many identical avatars.
     {
         let n = net.clone();
@@ -1134,7 +1134,7 @@ pub(crate) fn install_net_api(
 
 /// Build the per-instance `synced` proxy from a script's top-level
 /// `replicated = { ... }` declaration: reads/writes land in a hidden store
-/// table (returned, for host collection); on a CLIENT, writes warn — the
+/// table (returned, for host collection); on a client, writes warn — the
 /// server owns these values and will overwrite them.
 pub(crate) fn build_synced_proxy(
     lua: &Lua,

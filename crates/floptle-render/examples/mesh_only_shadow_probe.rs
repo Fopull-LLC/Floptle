@@ -1,4 +1,4 @@
-//! Sun shadows in a scene made of NOTHING BUT MESHES — no terrain, no blobs,
+//! Sun shadows in a scene made of nothing BUT MESHES — no terrain, no blobs,
 //! no baked occluder volumes. A flat plane and a character standing on it, both
 //! casting through their collider proxies, which is what an ordinary game scene
 //! actually looks like.
@@ -47,7 +47,7 @@ fn main() {
     let cube_id = raster.register(&gpu, &cube(0.7), None);
     let capsule_id = raster.register(&gpu, &capsule(0.5, 0.55, 16, 24), None);
     let raymarch = Raymarch::new(&gpu);
-    // NO `set_volumes` call at all. `params.w` stays 0, so the field holds
+    // no `set_volumes` call at all. `params.w` stays 0, so the field holds
     // nothing and every shadow ray's only possible occluder is a proxy.
 
     // Looking down at the ground from in front of the character, the way the
@@ -98,7 +98,7 @@ fn main() {
     ];
 
     // Both colliders, exactly as the editor harvests them: a box for the plane,
-    // a capsule segment for the body. The PLANE'S OWN PROXY is the part that
+    // a capsule segment for the body. The PLANE'S own PROXY is the part that
     // matters — every fragment of the ground starts its shadow ray inside it.
     let mut prox_a = [[0.0f32; 4]; 32];
     let mut prox_b = [[0.0f32; 4]; 32];
@@ -169,7 +169,7 @@ fn patch(px: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> f32 {
     sum / n.max(1.0)
 }
 
-/// The two claims, both read from the SAME render — so a software rasteriser
+/// The two claims, both read from the same render — so a software rasteriser
 /// answers them the way a real card does, and neither depends on an exact shade.
 fn check(px: &[u8], name: &str) {
     // Open ground, front-left, nowhere near the character or its shadow. Read

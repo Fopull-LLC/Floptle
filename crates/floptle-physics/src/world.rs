@@ -8,7 +8,7 @@ use crate::compound::{Compound, CompoundContact};
 use crate::gravity::{GravityField, GravitySource};
 use crate::shapes::CollisionShape;
 
-/// Sleeping (`floptle/0143`). Below this speed AND grounded, consecutively,
+/// Sleeping (`floptle/0143`). Below this speed and grounded, consecutively,
 /// for [`SLEEP_SETTLE_TIME`] and a body stops integrating.
 ///
 /// 0.05 m/s: slow enough that nothing that reads as "moving" ever crosses it
@@ -24,7 +24,7 @@ pub const SLEEP_LINEAR_SPEED: f32 = 0.05;
 pub const SLEEP_SETTLE_TIME: f32 = 0.5;
 /// How often `PhysicsWorld::step` re-validates every sleeping body's cached
 /// support against the current colliders — the safety net for geometry that
-/// changes IN PLACE (terrain sculpting, a map edit) rather than through
+/// changes in PLACE (terrain sculpting, a map edit) rather than through
 /// `set_colliders`'s wholesale replacement. Not gameplay-latency-sensitive
 /// (nothing is waiting on this to feel instant, unlike waking on contact),
 /// so it can be coarser than [`SLEEP_SETTLE_TIME`].
@@ -57,7 +57,7 @@ pub struct AnchoredCollider {
 }
 
 impl AnchoredCollider {
-    /// A collider whose data is in ABSOLUTE world coordinates (anchor = 0) — the
+    /// A collider whose data is in absolute world coordinates (anchor = 0) — the
     /// right frame for data that's already near the world origin, and for tests.
     pub fn world(shape: Box<dyn CollisionShape>) -> Self {
         Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, offset: Vec3::ZERO }
@@ -93,7 +93,7 @@ impl AnchoredCollider {
         self.shape.normal_reliable(p - self.offset)
     }
 
-    /// Move the collider: a body ON RAILS (an orbiting planet) re-anchors its
+    /// Move the collider: a body on RAILS (an orbiting planet) re-anchors its
     /// terrain every tick. `origin` must be the owning world's current origin.
     pub fn re_anchor(&mut self, anchor: DVec3, origin: DVec3) {
         self.anchor = anchor;
@@ -184,7 +184,7 @@ pub struct PhysicsWorld {
     resting: Vec<Vec<(usize, Vec3, Vec3)>>,
     /// Seconds since the last periodic re-check of every sleeping body's
     /// support (`floptle/0143`). `Self::set_colliders` already catches a
-    /// collider LIST replacement (a streamed chunk unloading); this is the
+    /// collider list replacement (a streamed chunk unloading); this is the
     /// safety net for geometry that changes in place instead — terrain
     /// sculpting mutates a `ChunkField` a collider already points at, a map
     /// edit rewrites mesh data the same way, and neither is a call this
@@ -299,7 +299,7 @@ pub fn raycast_colliders(
 }
 
 /// A raycastable snapshot of a dynamic body, in the sim frame. Lent to the
-/// script layer alongside the colliders so rays can hit players/crates AND
+/// script layer alongside the colliders so rays can hit players/crates and
 /// identify which node they hit — and the thing `net.rewind` re-poses for
 /// lag-compensated combat queries (`docs/multiplayer.md` §7): rewinding
 /// moves these copies, never the bodies themselves.
@@ -449,7 +449,7 @@ pub fn overlap_sphere_colliders(
     out
 }
 
-/// Everything a sphere of `radius` at `center` intersects among BODY hulls.
+/// Everything a sphere of `radius` at `center` intersects among body hulls.
 ///
 /// This is the half a melee hitbox cares about, and the half lag compensation
 /// moves: inside `net.rewind` the hulls handed in are the rewound ones, so an
@@ -485,7 +485,7 @@ pub fn overlap_sphere_hulls(
 ///
 /// The same march `raycast_colliders` runs, with the radius subtracted from
 /// every distance — which is what makes a swept sphere free here: an SDF's
-/// `d - r` IS the sphere's distance field. `exclude` and `mask` behave exactly
+/// `d - r` is the sphere's distance field. `exclude` and `mask` behave exactly
 /// as they do for a ray, so `{layers = …}` means the same thing for both.
 #[allow(clippy::too_many_arguments)]
 pub fn spherecast(
@@ -585,7 +585,7 @@ impl PhysicsWorld {
     }
 
     /// Add a collider whose data is expressed relative to `anchor` (a world point,
-    /// full `f64`). Bake geometry near ITS OWN anchor and pass the anchor here —
+    /// full `f64`). Bake geometry near its own anchor and pass the anchor here —
     /// that's what keeps collision exact for content placed far from the world origin.
     pub fn add_collider_at(&mut self, anchor: DVec3, shape: Box<dyn CollisionShape>) -> usize {
         self.add_collider_on(anchor, shape, 0)
@@ -697,7 +697,7 @@ impl PhysicsWorld {
         // a returned list from a replaced one. The grid does not need to: it is
         // a pure function of the `(centre, radius)` sequence, so the sequence
         // is hashed and an equal hash is an equal grid. Hashing what the index
-        // is BUILT from — rather than, say, the list's pointer — is what makes
+        // is built from — rather than, say, the list's pointer — is what makes
         // this safe: a replaced list that happens to land on the same address
         // would fool a pointer, and a rebase (which moves every centre) or a
         // shape edit that changed a bound cannot fool this.
@@ -720,7 +720,7 @@ impl PhysicsWorld {
     }
 
     /// Replace the static collider set — a scene reload, or a chunk streaming
-    /// in or out — and wake any sleeping body whose ground this MAY have
+    /// in or out — and wake any sleeping body whose ground this may have
     /// pulled out from under it (`floptle/0143`).
     ///
     /// A chunk unloading its colliders out from under a sleeping mug must not
@@ -730,7 +730,7 @@ impl PhysicsWorld {
     /// wake costs one ordinary step; a missed one costs a floating prop
     /// nobody notices until they walk past it.
     pub fn set_colliders(&mut self, colliders: Vec<AnchoredCollider>) {
-        // Called once per REAL frame regardless of whether anything actually
+        // Called once per real frame regardless of whether anything actually
         // streamed — the caller reclaims whatever the script host held for
         // raycasts, which is the same list it was lent unless a chunk
         // actually (un)loaded this frame. Without this length check, every
@@ -753,7 +753,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Re-derive every sleeping body's `resting` cache against the CURRENT
+    /// Re-derive every sleeping body's `resting` cache against the current
     /// collider set, waking any body that finds nothing there any more
     /// (`floptle/0143`).
     ///
@@ -763,16 +763,16 @@ impl PhysicsWorld {
     /// notices until they walk past it. A no-op when nobody is asleep.
     ///
     /// Called from two places for two different reasons a body's ground can
-    /// change: `Self::set_colliders` (the collider LIST was replaced — a
+    /// change: `Self::set_colliders` (the collider list was replaced — a
     /// streamed chunk) and `Self::step`'s periodic safety net (geometry
-    /// changed IN PLACE — terrain sculpting, a map edit — which nothing
+    /// changed in PLACE — terrain sculpting, a map edit — which nothing
     /// "replaced" for this to see any other way).
     ///
     /// **Non-driven bodies only.** A driven (rollback-owned) body is stepped
     /// exclusively through `PhysicsWorld::step_body`, reached directly by
-    /// `Sim::step_body_tick` — which is the ONLY per-tick point a live tick
+    /// `Sim::step_body_tick` — which is the only per-tick point a live tick
     /// and its later resimulation are both guaranteed to call, since this
-    /// function is only ever reached from the once-per-REAL-frame code (this
+    /// function is only ever reached from the once-per-real-frame code (this
     /// struct's own doc comment on `Self::set_colliders`) or `Self::step`'s
     /// periodic timer, neither of which a resimulation ever runs. `step_body`
     /// re-derives a driven body's resting cache itself, every asleep tick,
@@ -814,9 +814,9 @@ impl PhysicsWorld {
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);
         }
-        // Safety net for geometry that changed IN PLACE under a sleeping
+        // Safety net for geometry that changed in PLACE under a sleeping
         // body — terrain sculpting, a map edit — which `set_colliders`
-        // cannot see because nothing replaced the collider LIST
+        // cannot see because nothing replaced the collider list
         // (`floptle/0143`). Only sleeping bodies are checked, at most once
         // per `SLEEP_REVALIDATE_INTERVAL`.
         self.resting_check_elapsed += dt;
@@ -832,8 +832,8 @@ impl PhysicsWorld {
         self.compounds.len() - 1
     }
 
-    /// Step ONE compound by `dt` — same solo-equals-full contract as
-    /// [`Self::step_body`] (compounds couple to nothing dynamic). Does NOT
+    /// Step one compound by `dt` — same solo-equals-full contract as
+    /// [`Self::step_body`] (compounds couple to nothing dynamic). Does not
     /// clear `compound_contacts`; the frame driver owns that.
     ///
     /// Motion model: semi-implicit Euler for both linear and angular state
@@ -867,7 +867,7 @@ impl PhysicsWorld {
                     crate::ShapeGeom::Capsule { radius, half_height } => radius + half_height,
                     crate::ShapeGeom::Box { half } => half.length(),
                 };
-                // The shape's share of the body's mass decides whether IT
+                // The shape's share of the body's mass decides whether it
                 // floats — a heavy engine block low in a hull should pull that
                 // end down even when the light nose is buoyant.
                 (s.offset, r, s.mass.max(1e-4))
@@ -945,9 +945,9 @@ impl PhysicsWorld {
             c.force = Vec3::ZERO;
             c.torque = Vec3::ZERO;
         }
-        // WATER, per SHAPE. A hull that lands flat floats; the same hull
+        // WATER, per shape. A hull that lands flat floats; the same hull
         // nose-down sinks its nose and rights itself — and that difference is
-        // entirely about WHERE the displaced volume is, so each shape's push is
+        // entirely about where the displaced volume is, so each shape's push is
         // applied at its own position and the inertia tensor turns the
         // asymmetry into torque. One force at the centre of mass gives a craft
         // that bobs but never rights itself, which reads as a trampoline.
@@ -969,7 +969,7 @@ impl PhysicsWorld {
             let g = self.gravity.accel_at(self.compounds[ci].pos, &self.colliders);
             if g.length_squared() > 1e-6 { Some(-g.normalize()) } else { None }
         };
-        // Per-STEP correction budget across ALL of this compound's contacts:
+        // Per-step correction budget across all of this compound's contacts:
         // the per-resolve caps bound each sample, but a many-part assembly
         // deep inside geometry touches dozens of samples × two passes — the
         // sum ejected buried vessels at astronautical speed. Once the budget
@@ -1001,7 +1001,7 @@ impl PhysicsWorld {
                         // A reliable surface normal where the field resolves one;
                         // deep in a saturated SDF interior (a fast ram that
                         // tunnelled past the narrow band) the gradient is zero, so
-                        // fall back to the body's OWN travel direction at this
+                        // fall back to the body's own travel direction at this
                         // point. That makes the contact report the true closing
                         // speed (and shove it back the way it came) instead of the
                         // bogus straight-up normal that read a lithobrake as ~0 m/s.
@@ -1030,7 +1030,7 @@ impl PhysicsWorld {
                         // meters-deep corner sample yields a huge λ, the
                         // rotation correction flips the body, the next sample
                         // reads even deeper, and the assembly explodes off
-                        // into the sky (Ty's "cloud of scattered parts").
+                        // into the sky ("cloud of scattered parts").
                         let lambda = pen / w;
                         let push = (lambda / c.mass).min(push_budget);
                         push_budget -= push;
@@ -1047,7 +1047,7 @@ impl PhysicsWorld {
                         // Velocity: normal impulse (restitution) + friction.
                         let v_p = c.vel + c.ang_vel.cross(r);
                         let vn = v_p.dot(n);
-                        // Incoming closing speed, captured BEFORE the impulse is
+                        // Incoming closing speed, captured before the impulse is
                         // applied (negative vn = approaching). Not subject to the
                         // depenetration budget, so it reports true crash speed.
                         let speed = (-vn).max(0.0);
@@ -1099,7 +1099,7 @@ impl PhysicsWorld {
         // Rest threshold: a grounded compound whose residual motion is below
         // perceptibility comes fully to rest. Without this, corner-contact
         // micro-impulses make a parked assembly creep ~cm/s forever. Gravity
-        // re-adds ~g·dt (≈0.08 at 120 Hz) each step BEFORE contacts resolve,
+        // re-adds ~g·dt (≈0.08 at 120 Hz) each step before contacts resolve,
         // so anything genuinely sliding (a slope, ice) stays above the
         // threshold and keeps sliding — only true rest gets clamped.
         let c = &mut self.compounds[ci];
@@ -1154,7 +1154,7 @@ impl PhysicsWorld {
         }
         let s = 0.5 * (a + z);
         let d = d_at(s);
-        // Only worth a contact when it beats BOTH ends — otherwise the end
+        // Only worth a contact when it beats both ends — otherwise the end
         // sphere already covers it and a duplicate push would double-count.
         if d < c.distance(lo) && d < c.distance(hi) && s > 1e-3 && s < 1.0 - 1e-3 {
             centers[2] = lo.lerp(hi, s);
@@ -1265,7 +1265,7 @@ impl PhysicsWorld {
     /// surface (`ground_normal`) and the steepest one (`wall_normal`).
     ///
     /// Extremes rather than "the last one seen", because a character standing
-    /// at the foot of a cliff touches BOTH, and which arrived last is just
+    /// at the foot of a cliff touches both, and which arrived last is just
     /// collider order. Both use the same 0.5 (60°) cut that decides `grounded`,
     /// so "grounded" and "has a ground normal" are one fact, and a surface is
     /// never reported as both floor and wall.
@@ -1322,12 +1322,12 @@ impl PhysicsWorld {
         self.bodies[bi].vel = vt * ((len - dv) / len) + n * vn;
     }
 
-    /// Step ONE body by `dt`. Because the solver has no body-vs-body pass
+    /// Step one body by `dt`. Because the solver has no body-vs-body pass
     /// (bodies collide only with static colliders), a single body's step is
-    /// EXACTLY the trajectory it takes inside a full [`Self::step`] — the
+    /// exactly the trajectory it takes inside a full [`Self::step`] — the
     /// property prediction replay depends on (`docs/multiplayer.md` §6:
     /// replay touches only the predicted body, and it's exact, not
-    /// approximate). Does NOT clear `contacts`; the frame driver owns that.
+    /// approximate). Does not clear `contacts`; the frame driver owns that.
     pub fn step_body(&mut self, bi: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         if !self.index_fresh {
@@ -1353,13 +1353,13 @@ impl PhysicsWorld {
             // change under a body whose ground has not itself changed.
             //
             // Still tested against `kin_hulls` (moving platforms, a grabbed
-            // prop, a player capsule): those are the one thing that CAN
+            // prop, a player capsule): those are the one thing that can
             // touch a sleeping body without anything about the body itself
             // changing first, and — same as every other body-to-body
             // relationship this solver has — they are externally driven
             // inputs, not another dynamic body's own simulated state, so
             // testing them here does not touch the "a single body's step is
-            // EXACTLY the trajectory in a full step" contract this function's
+            // exactly the trajectory in a full step" contract this function's
             // own doc comment states.
             //
             // Also self-wakes on velocity: `Body::vel` is a public field on
@@ -1430,7 +1430,7 @@ impl PhysicsWorld {
             // machines, and exactly the machinery a fighting game replaces with
             // integer frame data anyway (`docs/multiplayer.md` §3).
             //
-            // Not `kinematic`: this body still MOVES under its own velocity, so
+            // Not `kinematic`: this body still moves under its own velocity, so
             // the controller's whole existing velocity channel keeps working.
             // It just moves without being negotiated with.
             let b = &mut self.bodies[bi];
@@ -1479,7 +1479,7 @@ impl PhysicsWorld {
             }
             // ---- friction, part one: the weight the floor is holding up -----
             //
-            // BEFORE the move, against the floor found last step. A body parked
+            // before the move, against the floor found last step. A body parked
             // on a ramp gains `g_t · dt` of downhill speed from the gravity line
             // above; removing it here means the body never travels that
             // distance. Doing it after the move instead leaves `g_t · dt²` of
@@ -1492,7 +1492,7 @@ impl PhysicsWorld {
             }
             let v = self.bodies[bi].vel;
             self.bodies[bi].pos += v * dt;
-            // Whether it stood on something LAST step, and on what — what
+            // Whether it stood on something last step, and on what — what
             // lets the feet pull a body down onto ground it is walking over
             // rather than only pushing it up out of ground it is walking into.
             let was_grounded = self.bodies[bi].grounded;
@@ -1515,7 +1515,7 @@ impl PhysicsWorld {
             // Coulomb — bounded by the load the surface is actually carrying —
             // so this is what a hard landing has that a gentle touchdown does
             // not, and it is why you skid when you land fast and stick when you
-            // don't. Accumulated here and spent ONCE below.
+            // don't. Accumulated here and spent once below.
             let mut impact_dv = 0.0f32;
             for _ in 0..passes {
                 // Broadphase (`floptle/0076`): ask the index which colliders can
@@ -1614,7 +1614,7 @@ impl PhysicsWorld {
                     let (up, radius) = (self.bodies[bi].up, self.bodies[bi].radius);
                     let pen = radius - t;
                     let vel = self.bodies[bi].vel;
-                    // A jump is BOTH: away from the floor it stood on, along
+                    // A jump is both: away from the floor it stood on, along
                     // that floor's normal, and upward. Either alone is
                     // ordinary walking — up a slope the velocity rises but
                     // stays in the floor; coasting over a crest it is level
@@ -1632,7 +1632,7 @@ impl PhysicsWorld {
                         self.bodies[bi].vel = vt - n * vn * rest;
                         impact_dv += -vn * (1.0 + rest);
                     } else if snap {
-                        // Kept on the ground, so it moves ALONG the ground:
+                        // Kept on the ground, so it moves along the ground:
                         // the component away from the new floor goes, or a
                         // body carried up a ramp would leave the top of it at
                         // the ramp's angle and land some way off.
@@ -1691,7 +1691,7 @@ impl PhysicsWorld {
 
             // ---- friction, part two: what the contacts just absorbed --------
             //
-            // Spent ONCE, on the surface actually underfoot, however many
+            // Spent once, on the surface actually underfoot, however many
             // colliders the body turned out to be touching. This is the part
             // that makes a fast landing skid and a gentle one stick, and the
             // reason a wall does not slow a body sliding down it: a wall you are
@@ -1732,7 +1732,7 @@ impl PhysicsWorld {
                     // sub-threshold creep survive into a woken body's first
                     // moment awake.
                     self.bodies[bi].vel = Vec3::ZERO;
-                    // Cache what it is resting on NOW, while a real query is
+                    // Cache what it is resting on now, while a real query is
                     // still cheap to justify (this tick already paid for the
                     // full step) — every subsequent asleep tick re-pushes
                     // this instead of asking the broadphase again.
@@ -1748,7 +1748,7 @@ impl PhysicsWorld {
     /// capsule) touch body `bi` right now? Read-only — no push, no state
     /// change — for [`Self::step_body`]'s sleeping branch to decide whether
     /// to wake it. Same distance test the real kinematic pass below uses,
-    /// against the SAME `kin_hulls`, so "would the ordinary step have found
+    /// against the same `kin_hulls`, so "would the ordinary step have found
     /// a contact" and "does this say so" cannot disagree.
     fn touches_a_kinematic_hull(&self, bi: usize) -> bool {
         let row = self.matrix[self.bodies[bi].layer as usize];
@@ -1760,8 +1760,8 @@ impl PhysicsWorld {
     }
 
     /// What [`Self::step_body`]'s sleeping branch calls instead of the real
-    /// depenetration passes: the SAME candidate-bounded broadphase query and
-    /// the SAME per-candidate distance test the ordinary step uses, so it
+    /// depenetration passes: the same candidate-bounded broadphase query and
+    /// the same per-candidate distance test the ordinary step uses, so it
     /// finds exactly the contacts a full step would — but no position push,
     /// no velocity reflection, no friction, because a body that is genuinely
     /// asleep has nothing to correct. `note_body_contact` does the same
@@ -1773,7 +1773,7 @@ impl PhysicsWorld {
     /// **No query.** Just replays `Body::resting`, cached the moment this
     /// body fell asleep (or last refreshed by `Self::set_colliders`) — the
     /// broadphase cost this whole feature exists to avoid would otherwise be
-    /// paid every asleep TICK instead of once per nap.
+    /// paid every asleep tick instead of once per nap.
     fn report_resting_contacts(&mut self, bi: usize) {
         self.bodies[bi].contact = None;
         self.bodies[bi].ground_normal = None;
@@ -1793,7 +1793,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// The query-based version: what a sleeping body is ACTUALLY resting on
+    /// The query-based version: what a sleeping body is actually resting on
     /// right now, freshly asked of the broadphase. Read-only. Used exactly
     /// twice — caching `Body::resting` the moment a body falls asleep (this
     /// tick already paid for the real step, so one more query is free by
@@ -1868,7 +1868,7 @@ mod step_body_tests {
     }
 
     /// `floptle/0143`, the rollback-safety half: a body that falls asleep
-    /// during a full-`step()` run must fall asleep on the EXACT SAME TICK
+    /// during a full-`step()` run must fall asleep on the exact same tick
     /// when replayed solo (`step_body`, the path a rollback resimulation
     /// uses) — the same contract `single_body_step_matches_full_step` pins
     /// for position/velocity/grounded, now for sleep state too. If this ever
@@ -1998,7 +1998,7 @@ mod step_body_tests {
 
 
     /// Criterion 4, as a `spawn_scaling.rs`-style ratio guard: a room of
-    /// resting Dynamic props costs approximately what the SAME props cost
+    /// resting Dynamic props costs approximately what the same props cost
     /// once they have settled and gone to sleep — the property this whole
     /// card is about, measured rather than assumed. `SLEEP_SETTLE_TIME` at
     /// 120 Hz is 60 ticks, so ticks 0..59 are the "still deciding" window
@@ -2156,7 +2156,7 @@ mod hull_tests {
 
     #[test]
     fn exclusion_skips_the_caster_own_body() {
-        // The ray STARTS INSIDE hull 7 (a swing from the character's center).
+        // The ray starts inside hull 7 (a swing from the character's center).
         let hulls = [capsule_at(7, 0.0), capsule_at(9, 10.0)];
         let (eid, _) = raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[7], !0)
             .expect("must hit the other hull");
@@ -2212,7 +2212,7 @@ mod shape_query_tests {
         BodyHull { eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0 }
     }
 
-    /// The question `raycast` could not answer: what is INSIDE this volume. A
+    /// The question `raycast` could not answer: what is inside this volume. A
     /// fan of rays misses anything thinner than the fan and cannot report depth.
     #[test]
     fn overlap_sphere_finds_every_body_inside_it_and_nothing_outside() {
@@ -2454,7 +2454,7 @@ mod ray_identity_tests {
     /// mesh, names the node, and the collider it named can then be asked what
     /// the surface at that point is made of.
     ///
-    /// The lookup is deliberately NOT part of the hit — it costs a
+    /// The lookup is deliberately not part of the hit — it costs a
     /// closest-point search of its own, and a line-of-sight ray that never asks
     /// must not pay for it.
     #[test]
@@ -2594,7 +2594,7 @@ mod feet {
             assert!(b.grounded, "feet={feet}: must be standing on the slope");
             slope().distance(feet_of(b))
         };
-        // Feet: the point under the centre is ON the drawn surface.
+        // Feet: the point under the centre is on the drawn surface.
         let with = rest(true);
         assert!(with.abs() < 5e-3, "with feet the feet sit on the slope, got {with}");
         // Rounded bottom: a sphere touches a 30° slope off to one side, so the
@@ -2619,7 +2619,7 @@ mod feet {
             settle(&mut w, 3.0);
             assert!(w.bodies[0].grounded, "feet={feet}: must be standing in the crease");
             let f = feet_of(&w.bodies[0]);
-            // Signed distance to the V (solid where EITHER side is): the
+            // Signed distance to the V (solid where either side is): the
             // nearer face. Zero means the feet are on the drawn ground.
             let on_ground = w.colliders.iter().map(|c| c.distance(f)).fold(f32::MAX, f32::min);
             (f.y, on_ground)
@@ -2674,7 +2674,7 @@ mod feet {
     fn a_ledge_is_left_to_the_rounded_bottom() {
         // A block whose top is y = 0 for x ≤ 0; the capsule's centre is 0.2
         // past the edge, hanging by its rim — a classic "toes over the drop"
-        // stance that a probe straight down from the centre must NOT turn into
+        // stance that a probe straight down from the centre must not turn into
         // a fall (there is a floor 2 units below).
         let rest = |feet: bool| {
             let mut w = world();

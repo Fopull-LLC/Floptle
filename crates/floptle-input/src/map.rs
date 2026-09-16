@@ -1,7 +1,7 @@
 //! The **action map** — the project's whole public input model, as RON.
 //!
 //! Digital [`Action`]s and analog [`Axis1`]/[`Axis2`]es, each fed by a list of
-//! bindings. Any binding fires its action (an OR), which is exactly how one
+//! bindings. Any binding fires its action (an or), which is exactly how one
 //! "Jump" answers to both Space and a pad's South button, and how one "Move"
 //! answers to both WASD and the left stick.
 //!
@@ -60,7 +60,7 @@ pub struct Binding {
     /// Where an analog source starts counting as pressed.
     #[serde(default = "default_threshold", skip_serializing_if = "is_default_threshold")]
     pub threshold: f32,
-    /// Restrict this binding to ONE local player slot (0-based). `None` — the
+    /// Restrict this binding to one local player slot (0-based). `None` — the
     /// overwhelming default — means every slot, which is right for a pad binding
     /// (`PadId::Any` already resolves per slot) and for single-player.
     ///
@@ -96,7 +96,7 @@ impl Binding {
 
     /// Same physical input, regardless of which player it is scoped to.
     ///
-    /// "Do I already have this bound" is a question about the SOURCE. Whole-value
+    /// "Do I already have this bound" is a question about the source. Whole-value
     /// equality answered a different question and so treated a binding the user
     /// had deliberately scoped as absent, duplicating it with an unscoped copy
     /// that then served every local player. floptle/0044.
@@ -211,7 +211,7 @@ impl Axis1Binding {
 /// One contributor to a 2D axis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Axis2Binding {
-    /// WASD-style: four digital sources. Scoping these to a slot is what lets ONE
+    /// WASD-style: four digital sources. Scoping these to a slot is what lets one
     /// `Move` axis carry WASD for player 1 and the arrow keys for player 2 — which in
     /// turn makes the map-level motion axis (`dir()`, `qcf`, …) correct for both.
     Keys {
@@ -232,7 +232,7 @@ pub enum Axis2Binding {
         ///
         /// Without this a two-player map could not express "P1 on pad 1, P2 on
         /// pad 2" at all: `PadId::Slot(n)` names a DEVICE, not a player, so two
-        /// slot-named stick bindings each contributed to BOTH players and
+        /// slot-named stick bindings each contributed to both players and
         /// largest-magnitude-wins meant whichever stick was pushed harder drove
         /// both characters. The `Keys` arm beside it had the field all along,
         /// so a D-pad scoped correctly while the stick on the same pad did not.
@@ -269,7 +269,7 @@ pub enum Axis2Binding {
         /// Contribute only while all of these are held — typically the right
         /// mouse button, for a "hold to look" camera.
         ///
-        /// This is what lets ONE `Look` axis serve both devices honestly: the
+        /// This is what lets one `Look` axis serve both devices honestly: the
         /// mouse contributes only while you're dragging (so the view never
         /// spins on its own with a free cursor), while a right-stick binding on
         /// the same axis stays live at all times, because a stick already
@@ -331,7 +331,7 @@ pub struct Motion {
     pub dirs: Vec<u8>,
     /// How many ticks the whole sequence may span.
     pub window: u16,
-    /// Optional charge: the FIRST direction must be held this many ticks before
+    /// Optional charge: the first direction must be held this many ticks before
     /// the rest of the sequence counts (a Guile-style charge move).
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub charge: u16,
@@ -405,7 +405,7 @@ impl InputMap {
     /// The netcode wire indexes actions by declaration order, so a client and
     /// server running differently-ordered maps would decode each other's inputs
     /// as the wrong actions and desync silently. The session handshake compares
-    /// this and refuses a mismatch. Bindings deliberately do NOT contribute —
+    /// this and refuses a mismatch. Bindings deliberately do not contribute —
     /// a player rebinding Jump to their own liking must not lock them out.
     pub fn hash(&self) -> u64 {
         // FNV-1a, spelled out so no dependency (and no hasher-version drift)
@@ -444,7 +444,7 @@ impl InputMap {
     ///
     /// Returns how many entries and bindings were added.
     /// Top up a project's map with anything from `starter` it has **no entry
-    /// for at all**, matching by NAME. Returns the names added.
+    /// for at all**, matching by name. Returns the names added.
     ///
     /// This is what a version upgrade may do to a project, and it is
     /// deliberately blunter than [`Self::merge_missing`]: it never adds a
@@ -455,7 +455,7 @@ impl InputMap {
     /// the project never had this binding, the project **deleted** it on
     /// purpose, and the project **kept it but scoped it to one player**. The
     /// last two were silently undone on every version bump — re-adding an
-    /// unscoped `Keys(WASD)` and `Key(Space)` that then moved and jumped BOTH
+    /// unscoped `Keys(WASD)` and `Key(Space)` that then moved and jumped both
     /// local players, and shipping that into two builds before anyone re-read
     /// the file. An action the project has an opinion about is an action it has
     /// considered. floptle/0044.
@@ -579,7 +579,7 @@ impl InputMap {
     /// scripts (`freelook`, `first_person`, `third_person`, …) are written
     /// against.
     ///
-    /// **Every entry is bound on both a keyboard/mouse AND a gamepad**, so a
+    /// **Every entry is bound on both a keyboard/mouse and a gamepad**, so a
     /// fresh project plays with either, with both plugged in, or with a pad
     /// connected halfway through. That is the whole point: a script written
     /// against these names never asks which device it is on.
@@ -728,7 +728,7 @@ impl InputMap {
                     socd: Socd::Neutral,
                     bindings: vec![
                         // Gated on the right mouse button: a free cursor must
-                        // never spin the view. The stick below is NOT gated.
+                        // never spin the view. The stick below is not gated.
                         // Sensitivity converts pixels-per-second into
                         // radians-per-second, so it lands in the same range as
                         // the stick below and a script's `* dt` is correct for
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(map, back);
     }
 
-    /// Scoping a binding to a local player must NOT move the handshake hash — the wire
+    /// Scoping a binding to a local player must not move the handshake hash — the wire
     /// indexes actions by position, and a per-player BINDING doesn't change the action
     /// list. Round-tripping it through RON matters for the same reason: a hand-edit that
     /// silently dropped `player` would put both fighters back on one set of keys.
@@ -859,7 +859,7 @@ mod tests {
     /// The three states whole-value equality could not tell apart: never had
     /// it, deleted it on purpose, kept it but scoped it to one player. The last
     /// two were silently reverted on every upgrade — and an unscoped binding
-    /// serves EVERY local slot, so the re-seeded Space jumped both fighters.
+    /// serves every local slot, so the re-seeded Space jumped both fighters.
     #[test]
     fn topping_up_a_project_never_undoes_a_deliberate_edit() {
         let starter = InputMap::starter();
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn merge_fills_gaps_without_touching_what_is_there() {
         // The real case: someone added "Move" from the used-but-unbound warning
-        // (so it exists with NO bindings), bound Jump to Space only, and has
+        // (so it exists with no bindings), bound Jump to Space only, and has
         // their own "Punch". Merging the starter must bind Move, add Jump's pad
         // binding, and leave Punch and their SOCD choice alone.
         let mut mine = InputMap {
@@ -1030,12 +1030,12 @@ mod tests {
     fn hash_tracks_shape_not_bindings() {
         let a = InputMap::starter();
         let mut b = a.clone();
-        // A player rebinding Jump must NOT invalidate their multiplayer session.
+        // A player rebinding Jump must not invalidate their multiplayer session.
         b.actions[0].bindings =
             vec![Binding::new(Source::Pad { id: PadId::Any, ctrl: PadControl::Button(PadButton::North) })];
         assert_eq!(a.hash(), b.hash());
 
-        // Reordering actions DOES change it — that's the desync the hash exists
+        // Reordering actions does change it — that's the desync the hash exists
         // to catch, since the wire indexes by position.
         let mut c = a.clone();
         c.actions.swap(0, 1);

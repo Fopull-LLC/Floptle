@@ -3,7 +3,7 @@
 //! Two node kinds that exist so a 2D game does not have to build a renderer out
 //! of scene nodes:
 //!
-//! * **[`Matter::Tilemap`]** — a grid of sheet cells as ONE mesh. Built here,
+//! * **[`Matter::Tilemap`]** — a grid of sheet cells as one mesh. Built here,
 //!   uploaded as a dynamic mesh, and rebuilt only when the grid actually
 //!   changes. The reason it is a mesh at all rather than one instance per tile
 //!   is the seam: see [`floptle_render::mesh::tilemap`].
@@ -27,7 +27,7 @@ use floptle_render::{InstanceRaw, MaterialParams, MeshId, TexId, instance_of_mat
 
 use crate::Editor;
 
-/// One page's uploaded geometry: the squares of a grid that come from ONE
+/// One page's uploaded geometry: the squares of a grid that come from one
 /// sheet, welded into one mesh, plus the sheet they sample.
 pub(crate) struct TilePageGpu {
     pub(crate) mesh: MeshId,
@@ -123,7 +123,7 @@ fn animate(data: &[u32], set: &floptle_tiles::TileSet, t: f32) -> Option<Vec<u32
 /// into one number for the rebuild signature.
 ///
 /// One number rather than per-tile phases because the signature only has to
-/// CHANGE when the picture does. Two tiles at different rates both advance it
+/// change when the picture does. Two tiles at different rates both advance it
 /// whenever either ticks, which rebuilds a few times more than strictly needed
 /// and never fewer — the safe direction.
 fn anim_step(set: &floptle_tiles::TileSet, t: f32) -> u32 {
@@ -218,7 +218,7 @@ impl Editor {
                 }
             };
             // The texel size is what the half-texel inset is measured in, and it
-            // has to be measured on the sheet page 0 ACTUALLY draws. An unloaded
+            // has to be measured on the sheet page 0 actually draws. An unloaded
             // texture reports nothing, and the mesh is rebuilt when it arrives
             // because the signature covers it.
             let texel = self
@@ -241,9 +241,9 @@ impl Editor {
             if self.tilemaps.get(&e).is_some_and(|t| t.sig == sig) {
                 continue;
             }
-            // The grid AS DRAWN: the stored squares, with each animated tile's
+            // The grid AS drawn: the stored squares, with each animated tile's
             // current frame swapped in. `data` on the component is untouched —
-            // animation is a VIEW of the map, not an edit to it, and writing the
+            // animation is a view of the map, not an edit to it, and writing the
             // frame back would make a saved scene record whichever moment the
             // artist happened to hit Ctrl-S on.
             let animated = set.and_then(|s| animate(&data, s, now));
@@ -259,7 +259,7 @@ impl Editor {
                 let Some(page_data) = page_squares(draw, page, pc * pr) else {
                     continue; // nothing on this page — no mesh, no draw call
                 };
-                // Each page's inset is measured in ITS OWN texels; page 0's was
+                // Each page's inset is measured in its own texels; page 0's was
                 // measured above, on whichever sheet it resolved to.
                 let ptexel = if page == 0 {
                     texel
@@ -307,7 +307,7 @@ impl Editor {
     }
 }
 
-/// The squares of `data` that live on `page`, remapped to that page's OWN cell
+/// The squares of `data` that live on `page`, remapped to that page's own cell
 /// numbering so the ordinary mesh builder can be handed them unchanged. `None`
 /// when the page has nothing on it.
 ///
@@ -355,7 +355,7 @@ pub(crate) fn tilemap_draws(
     let mut mp = mat.map(crate::shading::material_params).unwrap_or_else(|| {
         MaterialParams::flat([1.0, 1.0, 1.0])
     });
-    // The cell UVs are baked into the mesh, so the instance must NOT also carry
+    // The cell UVs are baked into the mesh, so the instance must not also carry
     // the material's sheet window — applying the cell twice would show every
     // tile a sliver of cell 0.
     mp.tile_mode = 0;
@@ -474,7 +474,7 @@ pub(crate) fn sprite_draws(
 /// of its origin, and vanished at the screen edge while most of it was still on
 /// screen.
 ///
-/// The size of ONE CELL, not of the whole image — a sheet's cell is what a
+/// The size of one cell, not of the whole image — a sheet's cell is what a
 /// sprite draws, and measuring the sheet makes every sprite in a 4×4 sheet come
 /// out four times too big. With no texture yet there is nothing to measure, so
 /// `size` is the answer, which is also the escape hatch for art that is not
@@ -524,7 +524,7 @@ pub(crate) fn sprite_one_draw(
         mp.tile_rotation = packed.tile_rotation;
     }
 
-    // Flipping is a negative SCALE ON THE QUAD, not on the node: a negative node
+    // Flipping is a negative SCALE on the QUAD, not on the node: a negative node
     // scale would mirror the node's children and invert its normals too, and
     // "face the other way" must not do either.
     let sx = if flip_x { -w } else { w };
@@ -625,7 +625,7 @@ mod tests {
         assert!((h - 3.0).abs() < 1e-4, "{h}");
     }
 
-    /// **Pixels per unit measures ONE CELL, not the whole sheet.** A 128×128
+    /// **Pixels per unit measures one cell, not the whole sheet.** A 128×128
     /// image cut 4×4 is a 32-pixel cell, so at 32 ppu it is one unit — and
     /// re-slicing the sheet finer must not resize every sprite on it.
     #[test]
@@ -664,7 +664,7 @@ mod tests {
         );
         let mid = |raw: &InstanceRaw| Mat4::from_cols_array_2d(&raw.model).w_axis.y;
         // Origin at the bottom of the sprite = the picture sits a half-height
-        // ABOVE the node.
+        // above the node.
         assert!((mid(&feet) - mid(&centre) - 1.0).abs() < 1e-4, "{} {}", mid(&feet), mid(&centre));
         // …and it is still the same size.
         assert_eq!(drawn_extent(&centre), drawn_extent(&feet));
@@ -797,7 +797,7 @@ mod tests {
 
     use floptle_core::{tile_cell_of, tile_pack, EMPTY_TILE};
 
-    /// Each page draws its OWN squares and leaves the rest as holes, so the
+    /// Each page draws its own squares and leaves the rest as holes, so the
     /// pages composite into one grid at one set of coordinates.
     #[test]
     fn a_page_takes_its_own_squares_and_holes_the_rest() {
@@ -881,7 +881,7 @@ pub(crate) fn draw_offsets(
     use floptle_core::{SORT_LAYER_STEP, SortMode, Sorting, rank_offset, sorting_offset};
 
     let mut out: HashMap<Entity, DVec3> = HashMap::new();
-    // Parallax first: it moves a node ACROSS the screen and sorting moves it
+    // Parallax first: it moves a node across the screen and sorting moves it
     // through the stack, so the two never write the same axis and can share one
     // map without either having to know about the other.
     for (e, p) in world.query::<floptle_core::Parallax>() {
@@ -1049,7 +1049,7 @@ mod sort_tests {
         (world, es, floptle_scene::ProjectConfigDoc::default())
     }
 
-    /// Lower on the screen draws in FRONT — the whole claim of the feature,
+    /// Lower on the screen draws in front — the whole claim of the feature,
     /// at one order so nothing else is deciding.
     #[test]
     fn a_lower_node_gets_a_nearer_z() {
@@ -1122,7 +1122,7 @@ mod sort_tests {
             world.insert(e, Sorting { layer: String::new(), order, mode: SortMode::Y });
             e
         };
-        // Right at the bottom of the screen (so Y wants it in FRONT of
+        // Right at the bottom of the screen (so Y wants it in front of
         // everything) but on the order below.
         let shadow = put(&mut world, -100.0, -1);
         // Right at the top (so Y wants it at the BACK) but on the order above.
@@ -1185,7 +1185,7 @@ mod sort_tests {
     /// The bug: the ranked branch re-spaces a layer by ordinal position, so a
     /// node left out of the ranking sat in the MIDDLE of the span everything
     /// else was spread across. Switching one node in the layer to Y-sorting
-    /// therefore pushed a sprite at `order = -1` in FRONT of the tilemap it was
+    /// therefore pushed a sprite at `order = -1` in front of the tilemap it was
     /// authored behind — with nothing about either of them having changed.
     #[test]
     fn un_layered_ground_stays_behind_what_was_put_behind_it() {
@@ -1289,7 +1289,7 @@ mod sort_tests {
     }
 
     /// A node on a layer further forward is in front of a Y-sorted node on a
-    /// layer behind it, whatever their Ys are. Y-sorting orders WITHIN a layer;
+    /// layer behind it, whatever their Ys are. Y-sorting orders within a layer;
     /// it does not let anything climb out of one.
     #[test]
     fn y_sorting_cannot_climb_out_of_its_layer() {

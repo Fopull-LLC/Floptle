@@ -101,7 +101,7 @@ fn glsl_refusal(source: &str) -> Option<String> {
             Ok(mut w) => w.write().err().map(|e| e.to_string()),
             Err(e) => Some(e.to_string()),
         };
-        // A stage GL cannot express AT ALL is not a finding — the engine's
+        // A stage GL cannot express at all is not a finding — the engine's
         // compute passes never run there. Only refusals about the shader.
         if let Some(why) = refused
             && !why.contains("not supported")

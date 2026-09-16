@@ -94,7 +94,7 @@ impl StreamRing {
     ///
     /// A full ring means the far end is sending faster than this machine plays,
     /// which is a clock-drift problem rather than a moment's congestion. The
-    /// oldest audio is NOT discarded to make room: dropping the front would
+    /// oldest audio is not discarded to make room: dropping the front would
     /// skip the listener forward through the middle of a word. The newest is
     /// refused instead, the count is kept, and the jitter buffer above shrinks
     /// its target so the backlog drains.

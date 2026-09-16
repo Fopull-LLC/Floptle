@@ -28,7 +28,7 @@ pub struct RaymarchGlobals {
     /// w = uploaded volume count (patched by the renderer at draw time).
     pub params: [f32; 4],
     /// Up to [`MAX_VOLUMES`] baked volumes: each xyz camera-relative box center,
-    /// w = present (1.0/0.0). Every terrain volume renders at its OWN native
+    /// w = present (1.0/0.0). Every terrain volume renders at its own native
     /// resolution — no shared combined grid (ADR-0015 / multi-volume terrain).
     pub vol_center: [[f32; 4]; 16],
     /// Per volume: xyz half-extent, w = volume↔volume fuse blend radius k.
@@ -104,7 +104,7 @@ pub struct RaymarchGlobals {
     pub prox_b: [[f32; 4]; 32],
     /// Per proxy: the box's orientation quaternion (xyzw); unused otherwise.
     pub prox_rot: [[f32; 4]; 32],
-    /// Depth fog: rgb = color (w unused). Appended at the END to stay byte-identical
+    /// Depth fog: rgb = color (w unused). Appended at the end to stay byte-identical
     /// to `struct Globals` in field.wgsl (which this uniform feeds).
     pub fog_color: [f32; 4],
     /// Depth fog: x = start dist, y = end dist, z = enabled (0/1), w unused.
@@ -114,7 +114,7 @@ pub struct RaymarchGlobals {
     /// voxels at upload (renderer-patched at draw time; callers leave the default).
     /// A generous terrain box is mostly empty air above the hills; bounding the
     /// marches with the content box instead of the brick is what keeps a camera
-    /// standing INSIDE the box from paying for all that air.
+    /// standing inside the box from paying for all that air.
     pub vol_tight_c: [[f32; 4]; 16],
     /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
     pub vol_tight_h: [[f32; 4]; 16],
@@ -139,7 +139,7 @@ pub struct RaymarchGlobals {
     /// The Sky shader's exposed uniforms (`G.sky_uniforms[i]`), packed by the editor.
     pub sky_uniforms: [[f32; 4]; 16],
     /// S8 atmospheres: x = active body count (0..=4). Up to four bodies get
-    /// full shell scattering — visible from INSIDE (tinted sky) and from
+    /// full shell scattering — visible from inside (tinted sky) and from
     /// SPACE (limb halo, aerial haze + clouds over the disc).
     pub atmo_meta: [f32; 4],
     /// Per body: rgb = sky color, w = density (0 = none).
@@ -158,11 +158,11 @@ pub struct RaymarchGlobals {
     /// (K = luminosity × 1e6; capped in-shader near the star).
     pub star_color: [[f32; 4]; 4],
     /// Volumetric fog (Lighting.fog_volumetric): x = density/unit, y = layer top
-    /// (WORLD y), z = top falloff, w = noise amount 0..1. Appended at the END to
+    /// (world y), z = top falloff, w = noise amount 0..1. Appended at the end to
     /// keep the WGSL `Globals` byte-identical.
     pub vol_fog_a: [f32; 4],
     /// Volumetric fog: x = noise scale (world units), y = time (s, drifts the
-    /// noise), z = camera WORLD y, w = enabled (0/1).
+    /// noise), z = camera world y, w = enabled (0/1).
     pub vol_fog_b: [f32; 4],
     /// Baked GI (`Matter::LightProbes`): x = on (0/1), y = leak rejection
     /// (multiples of the probe spacing, 0 = off), z = normal bias (ditto),
@@ -170,7 +170,7 @@ pub struct RaymarchGlobals {
     /// are measured in, resolved once here so the shader never has to derive it
     /// from the grid.
     ///
-    /// Intensity is NOT here: it is baked into the probe texels on upload, so a
+    /// Intensity is not here: it is baked into the probe texels on upload, so a
     /// shading point pays for it zero times per pixel instead of once.
     pub gi_meta: [f32; 4],
     /// Baked GI: xyz = the probe lattice's counts, w = unused.
@@ -224,7 +224,7 @@ pub struct RaymarchGlobals {
     /// the walls and mark which surfaces the probe covers, w = how far outside
     /// that box its influence fades before the sky takes over.
     pub probe_half: [[f32; 4]; crate::reflect::MAX_PROBES],
-    /// Each point light's CONE, when it is aimed. Appended at the END so this
+    /// Each point light's CONE, when it is aimed. Appended at the end so this
     /// struct stays byte-identical to the WGSL one.
     ///
     /// `x` = cosine of the half angle where the light reaches zero, `y` =
@@ -238,7 +238,7 @@ pub struct RaymarchGlobals {
     pub point_cone: [[f32; 4]; 16],
     /// Depth fog, the lanes that did not fit in `fog_color`/`fog_params`:
     /// **x = how much of the flat ramp the SKY also takes at the horizon**
-    /// (0..1), yzw spare. Appended at the END so this struct stays
+    /// (0..1), yzw spare. Appended at the end so this struct stays
     /// byte-identical to the WGSL one.
     ///
     /// Zero is the behaviour fog had before this lane existed — surfaces
@@ -252,7 +252,7 @@ pub struct RaymarchGlobals {
     /// One scale for the whole palette meant matching a fine gravel to a broad
     /// rock face was a job for an image editor. `0.0` reads as `1.0` in the
     /// shader, so a globals block built from [`Default`] tiles exactly as it
-    /// always did. Appended at the END so this struct stays byte-identical to
+    /// always did. Appended at the end so this struct stays byte-identical to
     /// the WGSL one.
     pub terrain_scale: [[f32; 4]; 8],
 }
@@ -456,12 +456,12 @@ pub struct Raymarch {
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
-    /// The SHARED field bind group (globals uniform + distance atlas + sampler)
+    /// The shared field bind group (globals uniform + distance atlas + sampler)
     /// the raster pass binds at group(2), so mesh fragments march the same field
     /// (shadows received + true SDF AO). Rebuilt with the atlas.
     field_layout: wgpu::BindGroupLayout,
     field_bind: wgpu::BindGroup,
-    /// The scene's baked GI, if any — owned here because it rides the SHARED
+    /// The scene's baked GI, if any — owned here because it rides the shared
     /// field bind group, which is what lets one upload light the raymarch pass,
     /// every raster mesh and every `.flsl` material at once.
     gi: crate::gi::GiVolume,
@@ -475,16 +475,16 @@ pub struct Raymarch {
     /// `bind` with the real prepass depth at binding 7 — what
     /// [`draw_into_primed`](Self::draw_into_primed) uses.
     bind_primed: Option<wgpu::BindGroup>,
-    /// The scene's spliced custom code, KEPT so either half can change independently and
+    /// The scene's spliced custom code, kept so either half can change independently and
     /// the pipeline rebuild still carries both. `field_code` = Field Shapes `(field, color)`;
-    /// `sky_fn` = a Sky shader's `flsl_sky`. Both splice into the ONE raymarch module, so a
+    /// `sky_fn` = a Sky shader's `flsl_sky`. Both splice into the one raymarch module, so a
     /// change to either re-assembles from both. `custom_support` is the shared stdlib the
     /// editor supplies (same string for both — appended once).
     field_code: Option<(String, String)>,
     sky_fn: Option<String>,
     custom_support: String,
     /// The captured sky + its roughness chain. Owned here for the same reason
-    /// the baked GI is: it rides the SHARED field bind group, so one capture
+    /// the baked GI is: it rides the shared field bind group, so one capture
     /// reaches every raster mesh and every `.flsl` material at once.
     env: crate::env::EnvMap,
     env_pipeline: wgpu::RenderPipeline,
@@ -504,7 +504,7 @@ pub struct Raymarch {
 }
 
 /// Layers in the terrain texture palette + the size each is stored at. 12 layers:
-/// enough for a planet's biomes + strata + cave materials AND a moon's, in one scene
+/// enough for a planet's biomes + strata + cave materials and a moon's, in one scene
 /// palette (the palette is per-scene, shared by every terrain volume in it).
 pub const TERRAIN_SLOTS: u32 = 32;
 const TERRAIN_TEX_SIZE: u32 = 256;
@@ -561,7 +561,7 @@ impl Raymarch {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // The same palette sampled NEAREST — `triplanar` selects per slot from
+                // The same palette sampled nearest — `triplanar` selects per slot from
                 // the mask in terrain_tint.w, so a texture marked Pixelated in the
                 // Assets panel looks pixelated on terrain, exactly as it does on a mesh.
                 wgpu::BindGroupLayoutEntry {
@@ -596,7 +596,7 @@ impl Raymarch {
                 },
                 // Baked GI probes — the same entry the shared field group uses.
                 crate::gi::probe_tex_entry(9),
-                // Binding 10: the terrain palette AGAIN, so binding 8's nearest
+                // Binding 10: the terrain palette again, so binding 8's nearest
                 // sampler has an image of its own. OpenGL's combined sampler
                 // type is the reason; see `raymarch.wgsl`.
                 wgpu::BindGroupLayoutEntry {
@@ -636,7 +636,7 @@ impl Raymarch {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        // Repeating sampler for the triplanar terrain palette, so textures TILE
+        // Repeating sampler for the triplanar terrain palette, so textures tile
         // across the surface instead of stretching once over the whole terrain.
         let tile_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raymarch-terrain-tile"),
@@ -771,7 +771,7 @@ impl Raymarch {
         let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
         self.pipeline = pipeline;
         self.mask_pipeline = mask_pipeline;
-        // …and the capture, from the SAME module: a spliced Sky shader that did
+        // …and the capture, from the same module: a spliced Sky shader that did
         // not reach the environment map would leave every reflection showing
         // the sky the scene used to have.
         self.env_pipeline = Self::build_env_pipeline(gpu, &self.pipeline_layout, &module);
@@ -920,7 +920,7 @@ impl Raymarch {
     }
 
     /// The exact source [`set_custom_field`](Self::set_custom_field) would
-    /// build — for the editor to naga-validate BEFORE swapping pipelines.
+    /// build — for the editor to naga-validate before swapping pipelines.
     pub fn preview_custom_source(code: Option<(&str, &str, &str)>) -> String {
         Self::assembled_source(code.map(|(f, c, _)| (f, c)), None, code.map_or("", |(_, _, s)| s))
     }
@@ -930,11 +930,11 @@ impl Raymarch {
         Self::assembled_source(None, Some(sky_fn), support)
     }
 
-    /// Rebuild `bind` (fallback prime), `bind_primed` when primed, AND the shared
+    /// Rebuild `bind` (fallback prime), `bind_primed` when primed, and the shared
     /// field bind — after any bound resource (atlas, palette, sky, prime, GI)
     /// changes.
     ///
-    /// The field bind is rebuilt HERE rather than at each caller because it now
+    /// The field bind is rebuilt here rather than at each caller because it now
     /// carries the depth prepass, which changes on window resize through a path
     /// (`set_depth_prime`) that has nothing to do with the atlas or the probes.
     /// Three callers each remembering to rebuild it is the kind of rule that
@@ -1007,7 +1007,7 @@ impl Raymarch {
     /// detect whether the sky changed. Skies animate; a cached one would be
     /// wrong exactly when it mattered.
     ///
-    /// The environment map is bound into the SHARED field group, so the capture
+    /// The environment map is bound into the shared field group, so the capture
     /// reaches everything the moment it lands. Nothing needs rebinding: the
     /// texture is created once at a fixed size and only its contents change.
     pub fn capture_env(&self, gpu: &Gpu) {
@@ -1064,7 +1064,7 @@ impl Raymarch {
         &self.gi
     }
 
-    /// Write `globals` (atlas slots patched) WITHOUT drawing — for frames where no
+    /// Write `globals` (atlas slots patched) without drawing — for frames where no
     /// SDF matter renders but the raster pass still marches the field via
     /// [`field_bind`](Self::field_bind) (mesh-only scenes casting proxy shadows).
     pub fn upload_globals(&self, gpu: &Gpu, mut globals: RaymarchGlobals) {
@@ -1083,7 +1083,7 @@ impl Raymarch {
         self.rebuild_binds(&gpu.device);
     }
 
-    /// Bind BOTH per-view frame targets at once: the depth prepass and the scene
+    /// Bind both per-view frame targets at once: the depth prepass and the scene
     /// colour history.
     ///
     /// One call because a bind group is immutable and rebuilding it is the whole
@@ -1158,7 +1158,7 @@ impl Raymarch {
         self.set_volumes(gpu, &[baked]);
     }
 
-    /// Upload a set of baked volumes into one shared 3D atlas, EACH at its native
+    /// Upload a set of baked volumes into one shared 3D atlas, each at its native
     /// voxel resolution — far-apart terrains no longer share a coarse combined grid
     /// (the old resolution-spread limit). Volumes stack along the atlas Z axis; the
     /// per-slot offsets/dims are patched into the globals at draw time. Returns how
@@ -1216,7 +1216,7 @@ impl Raymarch {
     /// Upload only the sub-box `[min, max)` (voxel coords) of `baked` into atlas slot
     /// `slot` — the fast path for a brush dab, so painting/editing a huge terrain
     /// doesn't re-convert and re-upload the whole volume every frame. `baked.dims`
-    /// MUST match the slot's dims (caller falls back to [`set_volumes`] on a resize).
+    /// must match the slot's dims (caller falls back to [`set_volumes`] on a resize).
     pub fn set_volume_region(
         &mut self,
         gpu: &Gpu,
@@ -1326,7 +1326,7 @@ impl Raymarch {
 
     /// Like [`draw_into`](Self::draw_into) but marching against the depth prepass
     /// set via [`set_depth_prime`](Self::set_depth_prime): the depth buffer is
-    /// LOADED (the prepass copy already primed + cleared it) and each ray stops
+    /// loaded (the prepass copy already primed + cleared it) and each ray stops
     /// at the nearest opaque mesh. Falls back to the unprimed draw when no prime
     /// is bound.
     pub fn draw_into_primed(
@@ -1437,7 +1437,7 @@ impl Raymarch {
     }
 }
 
-/// The bind group layout for the SHARED distance field (uniform globals +
+/// The bind group layout for the shared distance field (uniform globals +
 /// distance atlas + sampler) — what `field.wgsl` declares. Created identically by
 /// the raymarch pass (which owns the resources) and the raster pipeline (which
 /// binds them at group(2)); wgpu deduplicates structurally-equal layouts, so the
@@ -1467,7 +1467,7 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             // splat shader textureLoads it so texture transitions blend WEIGHTS of
             // real slots instead of interpolating slot indices.
             vol_tex_entry(3),
-            // Baked GI probes. Part of the FIELD group rather than a group of its
+            // Baked GI probes. Part of the field group rather than a group of its
             // own because the bounce belongs to the same shared shading model as
             // the shadows and the AO: one bind, and raster meshes, terrain, blobs
             // and .flsl materials all get it at the same moment.
@@ -1845,7 +1845,7 @@ fn f32_to_f16(v: f32) -> u16 {
 /// The WGSL every raymarch module starts from: the pass shader + the shared
 /// distance-field module. The mirror of [`crate::raster::pass_prelude`], and
 /// public for the same reason — something outside this file needs to validate
-/// the REAL seam rather than a reconstruction of it.
+/// the real seam rather than a reconstruction of it.
 pub fn prelude() -> &'static str {
     concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"))
 }

@@ -50,7 +50,7 @@
 //! of ~5100 over 8 ms, which is a tail, not a mean. The max is printed for the
 //! same reason.
 //!
-//! ## What it measured, 2026-09-01 (frame p95, ms, release)
+//! ## What it measured (frame p95, ms, release)
 //!
 //! | shape | luajit | luau | luau + codegen |
 //! | --- | --- | --- | --- |
@@ -123,7 +123,7 @@ end
     ),
     (
         "scalars",
-        // No vectors, no allocation. Deliberately SHORT — 40 iterations is
+        // No vectors, no allocation. Deliberately short — 40 iterations is
         // under LuaJIT's hotloop threshold, so this is the interpreter on both
         // VMs, and it is what most game code actually looks like.
         r#"

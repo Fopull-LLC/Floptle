@@ -1,4 +1,4 @@
-//! SCRIPT METADATA — what a `.lua` script tells the Inspector about its own
+//! script METADATA — what a `.lua` script tells the Inspector about its own
 //! tunables, read straight from the source.
 //!
 //! A script's `defaults` table already declares its params; this module reads the
@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ParamMeta {
     pub(crate) name: String,
-    /// Section header to draw ABOVE this row (`--@header`).
+    /// Section header to draw above this row (`--@header`).
     pub(crate) header: Option<String>,
     /// Tooltip: `--@desc`, or the plain `--` comment lines directly above the key.
     pub(crate) desc: Option<String>,
@@ -56,7 +56,7 @@ pub(crate) struct ParamMeta {
     pub(crate) slider: bool,
     /// `--@step n` — drag speed / slider granularity.
     pub(crate) step: Option<f32>,
-    /// `--@options a|b|c` — a dropdown. On a STRING param the labels are the
+    /// `--@options a|b|c` — a dropdown. On a string param the labels are the
     /// values; on a NUMBER param they're indices 0..n-1.
     pub(crate) options: Vec<String>,
     /// A checkbox: `--@bool`, or inferred from a `true` / `false` default.
@@ -69,7 +69,7 @@ pub(crate) struct ParamMeta {
     pub(crate) units: Option<String>,
     /// `--@hidden` — a tunable the Inspector shouldn't show at all.
     pub(crate) hidden: bool,
-    /// The value the SCRIPT declares, as it is written in the file.
+    /// The value the script declares, as it is written in the file.
     ///
     /// Kept so the Inspector can tell a row that is overriding it from a row
     /// that is merely showing it. A scene's stored param wins over the script's
@@ -179,7 +179,7 @@ pub(crate) fn parse(src: &str) -> ScriptMeta {
     let mut pending = ParamMeta::default();
     let mut comment_lines: Vec<String> = Vec::new();
     let mut about: Vec<String> = Vec::new();
-    // Brace depth INSIDE the defaults table (0 = not in it yet / done).
+    // Brace depth inside the defaults table (0 = not in it yet / done).
     let mut depth = 0usize;
     let mut in_defaults = false;
 
@@ -208,7 +208,7 @@ pub(crate) fn parse(src: &str) -> ScriptMeta {
             if code_t.starts_with("defaults") && code_t.contains('=') && code_t.contains('{') {
                 in_defaults = true;
                 depth = 1;
-                // Comments above `defaults` describe the SCRIPT, not a param.
+                // Comments above `defaults` describe the script, not a param.
                 if meta.about.is_none() && !comment_lines.is_empty() {
                     about.append(&mut comment_lines);
                 }
@@ -393,7 +393,7 @@ function roll(node) end
         assert_eq!(walk.range, Some((0.0, 20.0)));
         assert_eq!(walk.units.as_deref(), Some("m/s"), "two annotations can share a line");
 
-        // Annotations never leak onto the NEXT param.
+        // Annotations never leak onto the next param.
         let run = m.param("run").unwrap();
         assert_eq!(run.header, None);
         assert_eq!(run.desc, None);
@@ -410,7 +410,7 @@ function roll(node) end
         assert!(m.param("invert").unwrap().boolean, "a `= false` default is a checkbox");
         assert!(m.param("tint").unwrap().color);
         assert!(m.param("debugScale").unwrap().hidden);
-        // A comment describing a nested table doesn't become the NEXT param's tooltip.
+        // A comment describing a nested table doesn't become the next param's tooltip.
         assert_eq!(m.param("after").unwrap().desc, None);
 
         assert_eq!(m.buttons, [("Generate roll".to_string(), "roll".to_string())]);

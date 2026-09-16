@@ -22,7 +22,7 @@
 //!   before the bake found its own links.
 //!
 //! The level is deliberately awkward: a floor with a hole, a ramp up to a
-//! mezzanine, and a flight of steps. A plain floor bakes into ONE rectangle and
+//! mezzanine, and a flight of steps. A plain floor bakes into one rectangle and
 //! looks fine either way, which is exactly how the unreadable version survived
 //! so long — every simple test scene hid it.
 
@@ -234,7 +234,7 @@ fn main() {
         let mut edges: Vec<LineVertex> = Vec::new();
 
         if cells {
-            // The OLD picture: every rectangle outlined, nothing filled.
+            // The old picture: every rectangle outlined, nothing filled.
             for e in &overlay.cells {
                 let c = hue(e.island);
                 let c = [c[0], c[1], c[2], 1.0];

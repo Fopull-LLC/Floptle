@@ -52,7 +52,7 @@ pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
         }
         Vec3Mode::Fast => {
             lua.set_app_data(Vec3Mode::Fast);
-            // The editor keeps ONE host across project opens, so this can be
+            // The editor keeps one host across project opens, so this can be
             // called more than once on the same state. Installing twice would
             // wrap the wrapper — every field read paying for another Rust
             // closure, forever — so it happens once and the marker says so.
@@ -82,7 +82,7 @@ fn far_from_origin(v: glam::DVec3) -> bool {
 /// Where a `fast`-mode precision warning goes, and what has already been said.
 ///
 /// Installed by the host, so a state nobody wired one into simply never warns
-/// rather than having to invent somewhere to write. Keyed by SCRIPT: a game
+/// rather than having to invent somewhere to write. Keyed by script: a game
 /// that is genuinely far from the origin would otherwise emit this once per
 /// vector per frame, and a warning at that rate is noise somebody turns off.
 pub(crate) struct PrecisionWatch {
@@ -375,9 +375,9 @@ impl mlua::FromLua for LuaVec3 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LuaVec2(pub glam::DVec2);
 
-/// Read a 3-vector out of a Lua value: a `vec3` in EITHER backing, a `vec2`
+/// Read a 3-vector out of a Lua value: a `vec3` in either backing, a `vec2`
 /// (z = 0), or any table with numeric `x`/`y`(/`z`) fields — which includes
-/// NODE HANDLES, so vector APIs accept nodes directly.
+/// node HANDLES, so vector APIs accept nodes directly.
 ///
 /// The single read path, which is why `fast` mode did not need several hundred
 /// call sites edited: a native vector arrives here like anything else.
@@ -465,7 +465,7 @@ impl UserData for ExactVec3 {
         });
         // ---- the orientation methods ----------------------------------------
         // `v:flatten(up)` — the part of `v` that lies in the plane ⟂ `up`,
-        // renormalised. THE planet-safe move: "forward along the ground" is
+        // renormalised. the planet-safe move: "forward along the ground" is
         // `node.forward:flatten(node.up)` whatever the local vertical is, and on
         // a flat world `flatten(vec3(0,1,0))` is the familiar "drop the Y".
         // Straight up/down (nothing left after the projection) → vec3(0,0,0),
@@ -492,7 +492,7 @@ impl UserData for ExactVec3 {
                 -v.0.x * s + v.0.z * c,
             )))
         });
-        // `v:rotatedAround(axis, rad)` — Rodrigues about ANY axis, which is what
+        // `v:rotatedAround(axis, rad)` — Rodrigues about any axis, which is what
         // a planet camera's yaw actually is (about the local up, not about Y).
         methods.add_method("rotatedAround", |_, v, (axis, rad): (Value, f64)| {
             let a = vec3_of(&axis)
@@ -702,7 +702,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
-    // distance(a, b) — vectors, plain {x=,y=,z=} tables, or NODE HANDLES (so
+    // distance(a, b) — vectors, plain {x=,y=,z=} tables, or node HANDLES (so
     // `distance(node, target)` reads both nodes' positions directly). Also
     // distance(x1,y1,z1, x2,y2,z2) for raw numbers.
     lua.globals().set(
@@ -851,7 +851,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set("color", helpers)?;
     }
 
-    // ---- deterministic noise + RNG (floptle-core::noise — the SAME numbers the
+    // ---- deterministic noise + RNG (floptle-core::noise — the same numbers the
     // Rust generators produce, on every machine; the substrate for replicated
     // procgen and netcode-safe gameplay randomness) ------------------------------
 
@@ -880,12 +880,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // rng([seed]) — a deterministic random stream: same seed, same sequence,
     // every machine. r:next() [0,1), r:range(a,b), r:int(a,b) inclusive,
-    // r:pick(list). NO seed = seeded from the clock — a fresh stream every
+    // r:pick(list). no seed = seeded from the clock — a fresh stream every
     // call (procgen "surprise me" rolls); print/store r.seed to reproduce.
     // Under a run seed (`ScriptHost::set_seed`, `floptle run --seed`) the
     // no-seed form draws its seed from that stream instead, so the run
     // reproduces while every call still gets a stream of its own.
-    // (`math.random` stays for throwaway randomness; THIS is for gameplay
+    // (`math.random` stays for throwaway randomness; this is for gameplay
     // that must reproduce — loot, procgen, anything a server might replay.)
     lua.globals().set(
         "rng",
@@ -1123,7 +1123,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
     // dirTo(from, to) — the unit direction from one thing to another. Both
-    // arguments may be a vec3, a {x=,y=,z=} table, or a NODE HANDLE, so
+    // arguments may be a vec3, a {x=,y=,z=} table, or a node HANDLE, so
     // `dirTo(node, target)` is the whole sentence. Same point twice →
     // vec3(0,0,0), never a NaN that quietly poisons a transform.
     g.set(
@@ -1163,7 +1163,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
             Ok(LuaVec3(dir_from_yaw(yaw, pitch.unwrap_or(0.0))))
         })?,
     )?;
-    // lookRotation(dir [, up]) -> yaw, pitch, roll — the angles WITHOUT applying
+    // lookRotation(dir [, up]) -> yaw, pitch, roll — the angles without applying
     // them (node:lookAt applies them). Three returns, so
     // `node.yaw, node.pitch, node.roll = lookRotation(f, up)` is one line.
     g.set(
@@ -1182,7 +1182,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     // ease(a, b, rate, dt) — the frame-rate-independent exponential ease three
-    // camera scripts each defined privately. Works on numbers AND vectors, so a
+    // camera scripts each defined privately. Works on numbers and vectors, so a
     // follow position and a follow distance ease the same way.
     g.set(
         "ease",
@@ -1442,7 +1442,7 @@ mod helper_tests {
     /// Every question the two backings must answer identically.
     ///
     /// One script, run in both modes, compared answer for answer. Written as a
-    /// SHARED corpus rather than two test bodies on purpose: the promise Phase 3
+    /// shared corpus rather than two test bodies on purpose: the promise Phase 3
     /// makes is that the documented surface does not depend on the setting, and
     /// two separately-maintained lists of assertions is exactly how that promise
     /// rots — one gains a case, the other does not, and the difference is
@@ -1476,7 +1476,7 @@ mod helper_tests {
         ("towards", "local v = vec3(0,0,0):towards(vec3(10,0,0), 3) return ('%.4f'):format(v.x)"),
         ("angleTo", "return ('%.4f'):format(vec3(1,0,0):angleTo(vec3(0,1,0)))"),
         ("tostring", "return tostring(vec3(1,2,3))"),
-        // A method's argument accepts every spelling in BOTH modes.
+        // A method's argument accepts every spelling in both modes.
         ("arg as table", "return ('%.4f'):format(vec3(0,0,0):distance({x=3,y=4,z=0}))"),
         ("arg as vec3", "return ('%.4f'):format(vec3(0,0,0):distance(vec3(3,4,0)))"),
         // Constructor forms.
@@ -1498,7 +1498,7 @@ mod helper_tests {
         // fields read as nil; `fast` inherits Luau's own raise, because its
         // `__index` falls back to the VM's rather than answering nil itself.
         //
-        // This is also the case that corrected a wrong assumption about WHY
+        // This is also the case that corrected a wrong assumption about why
         // that fallback is kept. It is not that the fallback resolves `.x` —
         // the VM does that natively, ahead of any metatable, and components
         // keep working with `__index` deleted outright. It is this: drop the
@@ -1544,7 +1544,7 @@ mod helper_tests {
                 disagreed.join("\n")
             );
 
-            // And the differences that ARE real are still the ones expected.
+            // And the differences that are real are still the ones expected.
             for (name, src, want_exact, want_fast) in DIVERGENT {
                 let e: String = exact.load(*src).eval().expect(name);
                 let f: String = fast.load(*src).eval().expect(name);
@@ -1614,14 +1614,14 @@ mod helper_tests {
             "the warning must name the script that built the vector"
         );
 
-        // Said ONCE for that script. A game genuinely out there would otherwise
+        // Said once for that script. A game genuinely out there would otherwise
         // emit this per vector per frame, which is a warning somebody turns off.
         for _ in 0..50 {
             run("local v = vec3(500000, 0, 0) return v.x", "far");
         }
         assert_eq!(sink.borrow().len(), 1, "the warning repeated: {}", sink.borrow().len());
 
-        // …but a DIFFERENT script gets told too. Per script, not per state:
+        // …but a different script gets told too. Per script, not per state:
         // whoever is reading the Console is looking at one file at a time.
         run("local v = vec3(500000, 0, 0) return v.x", "elsewhere");
         assert_eq!(sink.borrow().len(), 2, "a second script was never warned");
@@ -1637,7 +1637,7 @@ mod helper_tests {
     /// future change that quietly reintroduces an allocation has to fail here
     /// rather than in somebody's frame graph.
     ///
-    /// The collector is STOPPED across the measured loop. Leaving it running
+    /// The collector is stopped across the measured loop. Leaving it running
     /// lets an incremental collection eat the delta and produces numbers that
     /// look like per-op differences and are noise — the same artefact the card
     /// records having chased once already.
@@ -1806,7 +1806,7 @@ mod helper_tests {
         // The result is always unit length…
         let l = n("return vec3(0.3, -9, -0.1):flatten(vec3(0,1,0)):length()");
         assert!((l - 1.0).abs() < 1e-12, "flatten renormalises: {l}");
-        // …on ANY up, which is what makes it planet-safe.
+        // …on any up, which is what makes it planet-safe.
         let d = n("return vec3(1, 0, 0):flatten(vec3(1, 0, 0):normalized()):length()");
         assert_eq!(d, 0.0, "straight along up leaves nothing in the plane");
         let up = "vec3(0.6, 0.8, 0)";
@@ -1865,7 +1865,7 @@ mod helper_tests {
              return x",
         );
         assert!((v - 5.0).abs() < 1e-6, "smoothDamp should settle on the target: {v}");
-        // It has momentum, so it is NOT the same curve as ease — if it were,
+        // It has momentum, so it is not the same curve as ease — if it were,
         // there would be no reason for both.
         let sd = n("local x, v = 0, 0 x, v = smoothDamp(x, 1, v, 0.2, 1/60) return x");
         assert!(sd > 0.0 && sd < 0.1, "first smoothDamp step is gentle: {sd}");
@@ -1906,7 +1906,7 @@ mod helper_tests {
     }
 
     /// `magnitude` is `length` under the name most other engines use for it.
-    /// The guard is that the two are the SAME number on BOTH vector types — an
+    /// The guard is that the two are the same number on both vector types — an
     /// alias that has drifted from the call it aliases is worse than no alias.
     #[test]
     fn magnitude_is_length_on_both_vector_types() {

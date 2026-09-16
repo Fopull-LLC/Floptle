@@ -53,7 +53,7 @@ pub(crate) type WorldCanvas = (
 /// Draw world-space UI canvases into `color`/`depth` through `view_proj`.
 ///
 /// A free function taking its pieces, not a method, because the two callers
-/// hold the GPU stack differently — and it has to be ONE function: while the
+/// hold the GPU stack differently — and it has to be one function: while the
 /// main surface pass was the only place that drew these, a diegetic panel was
 /// invisible in the docked Game tab and still perfectly clickable there.
 #[allow(clippy::too_many_arguments)]
@@ -152,7 +152,7 @@ pub(crate) enum AddUi {
     Tooltip,
 }
 
-/// Resolve each scrollbar's `target` NAME to the scroll view it drives, within
+/// Resolve each scrollbar's `target` name to the scroll view it drives, within
 /// this layer. Same name-scoping rule as masks: first match in scene order.
 fn layer_scrollbars(
     world: &floptle_core::World,
@@ -215,7 +215,7 @@ pub(crate) fn nudge_place(place: &mut floptle_ui::Place, d: [f32; 2]) {
     }
 }
 
-/// Put an element AT a position in design units, whatever its placement mode.
+/// Put an element at a position in design units, whatever its placement mode.
 ///
 /// The absolute twin of [`nudge_place`], for the one caller that knows where a
 /// thing should be rather than how far to move it: the tooltip follower.
@@ -230,7 +230,7 @@ pub(crate) fn set_place(place: &mut floptle_ui::Place, at: [f32; 2]) {
     }
 }
 
-/// A radius/border row: ONE drag value while all four entries agree, four when
+/// A radius/border row: one drag value while all four entries agree, four when
 /// they don't (or when you click ⋯ to split them).
 ///
 /// The point is that the common case stays a single number — per-corner radii
@@ -294,7 +294,7 @@ fn quad_row(
 }
 
 /// Resolve a layer's mask pairs `(mask id, target id)` in scene order: every
-/// element with a MaskSpec claims its targets BY NAME within this layer (first
+/// element with a MaskSpec claims its targets by name within this layer (first
 /// name match in scene order). Order in = order out, so "earliest mask wins"
 /// in [`floptle_ui::draw_list`] means earliest in the scene.
 fn layer_masks(
@@ -354,7 +354,7 @@ impl Editor {
     /// Pre-register every font any UI text references (before the immutable
     /// renderer borrow the measure callback needs).
     pub(crate) fn ensure_ui_fonts(&mut self) {
-        // The project's own font first (`floptle/0124`) — it is what an EMPTY
+        // The project's own font first (`floptle/0124`) — it is what an empty
         // font name resolves to, so it has to be registered before anything
         // measures with one, which is most things.
         let project_font = self.project.ui_font.clone();
@@ -430,7 +430,7 @@ impl Editor {
         // A one-key typo must not cost the whole look. One file failing to parse
         // used to drop every style in the project — thirty styles inert because
         // of one line — which reads as "the restyle did nothing" rather than as
-        // a parse error. Keep the last sheet that DID load, and say so, the way
+        // a parse error. Keep the last sheet that did load, and say so, the way
         // the input map already does (floptle/0051).
         if styles_failed && !self.ui_styles.styles.is_empty() {
             self.console.push(
@@ -467,7 +467,7 @@ impl Editor {
     }
 
     /// Every `*.tokens.ron` / `*.uistyle.ron` under the project, sorted, with
-    /// its mtime — the load list AND the hot-reload signature.
+    /// its mtime — the load list and the hot-reload signature.
     fn scan_ui_style_files(
         root: &std::path::Path,
     ) -> Vec<(std::path::PathBuf, Option<floptle_core::time::SystemTime>)> {
@@ -530,13 +530,13 @@ impl Editor {
     /// play-time hover can't end up in a saved scene, and why this needs no
     /// cooperation from the play-snapshot machinery.
     ///
-    /// EVERY pass that builds a tree must call this before laying it out. A
+    /// every pass that builds a tree must call this before laying it out. A
     /// style can set `pad`, `gap` and `text_size`, so an unstyled solve puts
     /// the rects somewhere other than where they are drawn — which as a hit
     /// test reads exactly like the mouse being offset from the cursor. The
     /// frame's `dt` is safe to hand to all of them (see `Editor::ui_style_dt`).
     fn style_layer(&mut self, roots: &mut [floptle_ui::Node]) {
-        // The player's text scale, applied BEFORE the solver measures anything —
+        // The player's text scale, applied before the solver measures anything —
         // which is what makes it reflow instead of clip (`floptle/0079`). It runs
         // whether or not the project has styles, because a game with no style
         // sheet still has text somebody may need bigger.
@@ -552,7 +552,7 @@ impl Editor {
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
         let dt = self.ui_style_dt;
         // Reduced motion snaps every transition to its target (`floptle/0079`) —
-        // a hover still CHANGES, it just does not slide, because a 40 ms slide is
+        // a hover still changes, it just does not slide, because a 40 ms slide is
         // still a slide.
         self.ui_style_rt.reduced_motion = self.access.reduced_motion;
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
@@ -623,7 +623,7 @@ impl Editor {
             if roots.is_empty() {
                 continue;
             }
-            // BEFORE layout, always: a style can set padding, gap and text
+            // before layout, always: a style can set padding, gap and text
             // size, all of which change what the solver measures.
             self.style_layer(&mut roots);
             out.push((*e, layer, roots));
@@ -634,7 +634,7 @@ impl Editor {
 
     /// Solve every UI layer for this frame: (draw list, px-per-design-unit),
     /// z-sorted. Pre-resolves image textures into the registry (needs
-    /// `&mut self`, so this runs BEFORE the draw core's field borrows).
+    /// `&mut self`, so this runs before the draw core's field borrows).
     pub(crate) fn gather_game_ui(&mut self, viewport: [f32; 2]) -> Vec<(floptle_ui::DrawList, f32)> {
         if viewport[0] <= 1.0 || viewport[1] <= 1.0 {
             return Vec::new();
@@ -662,7 +662,7 @@ impl Editor {
             }
             out.push((dl, scale));
         }
-        // `draw.text` — measured HERE with the real font, so the script only ever
+        // `draw.text` — measured here with the real font, so the script only ever
         // says where the anchor is and which edge it is. A run laid out in a rect
         // exactly its own size can't wrap or clip, whatever the string turns out
         // to be. Measured while the font stack is still borrowed, drawn below.
@@ -670,7 +670,7 @@ impl Editor {
             .script_texts
             .iter()
             .map(|t| {
-                // The font the script named, or the PROJECT's (`floptle/0124`)
+                // The font the script named, or the project's (`floptle/0124`)
                 // — measured with the very same one it is drawn in, or a
                 // centred run would be centred against Roboto's widths and land
                 // somewhere else entirely.
@@ -699,7 +699,7 @@ impl Editor {
         for t in textures {
             let _ = self.ensure_texture(&t);
         }
-        // Immediate-mode screen rects (`draw.rect` / `draw.rectOutline`), LAST so
+        // Immediate-mode screen rects (`draw.rect` / `draw.rectOutline`), last so
         // they sit over the HUD — a selection marquee is drawn on top of
         // everything, by definition. Their pixels are `input.mouse()`'s (window
         // space); the UI pass works in the viewport's own, hence the offset.
@@ -724,7 +724,7 @@ impl Editor {
             }
             out.push((dl, 1.0));
         }
-        // Captions (`floptle/0079`), drawn by the ENGINE so every game gets the
+        // Captions (`floptle/0079`), drawn by the engine so every game gets the
         // same readable placement: bottom-centre, on a dark plate, oldest first,
         // and scaled by the same text scale as the rest of the UI. A game that
         // hand-rolls this gets it subtly wrong — too high, too small, or behind
@@ -778,7 +778,7 @@ impl Editor {
     ///
     /// One function, three callers: the docked Game view, and `floptle shot`
     /// (`floptle/0224`). Before it was shared, `shot` ran the world passes,
-    /// post and the retro upscale and stopped — so a project whose scenes ARE
+    /// post and the retro upscale and stopped — so a project whose scenes are
     /// screens (a main menu, a character creator, a dialogue box) had no
     /// headless way to be looked at, and `run` reported "nothing raised" for
     /// a `ui.make` tree that had put four buttons in one corner. The value of
@@ -845,7 +845,7 @@ impl Editor {
 
     /// **Draw the world-space UI canvases into the scene** — real geometry,
     /// so they go into the scene target with its depth, before post. Only
-    /// [`UiSpace::World`] layers: this is a BUILD's view, and screen-space
+    /// [`UiSpace::World`] layers: this is a build's view, and screen-space
     /// layers belong in the flat overlay ([`Self::draw_game_ui_overlay`]),
     /// not hanging in the world as authoring holograms. Shared by the docked
     /// Game view and `floptle shot` for the reason the overlay is.
@@ -879,13 +879,13 @@ impl Editor {
         );
     }
 
-    /// UI layers rendered as WORLD CANVASES — a flat quad at each layer node's
+    /// UI layers rendered as world CANVASES — a flat quad at each layer node's
     /// transform: origin = translation (canvas top-left), plane axes from its
     /// rotation, `canvas_scale` world units per design unit. Returns per layer:
     /// (draw list, solved rects in design units, origin, right, down, design_vp).
     ///
     /// `include_screen` picks which layers qualify:
-    /// - `true` (Scene authoring view): EVERY enabled layer, so a screen-space
+    /// - `true` (Scene authoring view): every enabled layer, so a screen-space
     ///   layer still shows as a movable hologram you can arrange.
     /// - `false` (in-game): only [`UiSpace::World`] layers — screen-space ones
     ///   are drawn as the flat overlay instead.
@@ -930,7 +930,7 @@ impl Editor {
         out
     }
 
-    /// Build ONE layer's element tree, in draw order.
+    /// Build one layer's element tree, in draw order.
     ///
     /// The ◫ UI tab needs a single layer rather than the whole frame's worth,
     /// and needs it without the gather pass's z-sorting and texture
@@ -985,7 +985,7 @@ impl Editor {
     /// the cursor locked away) still needs its menu solved so navigation has
     /// rects to move between.
     fn ui_viewport(&self) -> Option<[f32; 2]> {
-        // Keyed on where the game is DRAWN, never on which tab has focus. A
+        // Keyed on where the game is drawn, never on which tab has focus. A
         // docked Game tab is focused *and* drawn into its own rect, so asking
         // `game_view()` here sized the UI to the whole window while the player
         // was looking at a panel a third of that — every click out by the
@@ -1026,7 +1026,7 @@ impl Editor {
         if p[0] < 0.0 || p[1] < 0.0 || p[0] > size[0] || p[1] > size[1] {
             return None;
         }
-        // …and whatever egui put ON TOP of the tab owns the pointer. A context
+        // …and whatever egui put on top of the tab owns the pointer. A context
         // menu or a floating window over the Game view is a thing you clicked,
         // not a hole you clicked through. (Keyboard focus is a separate
         // question — `game_view()` — so a menu doesn't stop the game reading
@@ -1041,7 +1041,7 @@ impl Editor {
         Some((p, size))
     }
 
-    /// Whether the GAME actually holds the OS cursor right now — its standing
+    /// Whether the game actually holds the OS cursor right now — its standing
     /// `setMouseLocked` wish, minus any editor override.
     ///
     /// `script_mouse_lock` on its own answers "what does the game want", which
@@ -1117,14 +1117,14 @@ impl Editor {
     }
 
     /// The game-UI interaction pass (buttons + draggable sliders), run each
-    /// frame while playing, BEFORE the scripts (so a slider's new value is
+    /// frame while playing, before the scripts (so a slider's new value is
     /// visible to this frame's `update`). Detected hook events land in
     /// `self.ui_events`, dispatched to Lua after the script run.
     pub(crate) fn ui_interact(&mut self) {
         self.ui_events.clear();
         let down = self.input_buttons[0];
         // Edges come from banked EVENTS (never missed, even when a whole click
-        // fits inside one slow frame) OR the sampled state transition.
+        // fits inside one slow frame) or the sampled state transition.
         let pressed_edge = std::mem::take(&mut self.ui_lmb_pressed_evt) || (down && !self.ui_lmb_was);
         let released_edge =
             std::mem::take(&mut self.ui_lmb_released_evt) || (!down && self.ui_lmb_was);
@@ -1158,7 +1158,7 @@ impl Editor {
         }
         let pointer = self.ui_pointer();
         // Collect every interactive element in draw order (later = on top). Each
-        // item carries the pointer's position IN THAT LAYER'S design units, so
+        // item carries the pointer's position in that LAYER'S design units, so
         // screen-space (pointer px / scale) and world-space (camera ray → panel
         // plane) hit-test through one uniform `contains`: (id, rect, pointer
         // design-units or None if off-panel, slider spec).
@@ -1185,7 +1185,7 @@ impl Editor {
         type BarHit = (u32, u32, usize, [f32; 4], [f32; 2]);
         let mut bar_hits: Vec<BarHit> = Vec::new();
         // Every `drop_target` the pointer is inside, in draw order. Kept apart
-        // from `hover` because a drop target is usually the slot BEHIND the
+        // from `hover` because a drop target is usually the slot behind the
         // item you are carrying it onto — taking only the topmost hit would
         // mean an inventory that never accepts anything.
         let mut drop_hits: Vec<u32> = Vec::new();
@@ -1320,7 +1320,7 @@ impl Editor {
                         let clip = clips.get(&pl.id).map(|c| c.rect);
                         let slider = spec.slider.filter(|s| s.interact);
                         // Everything the pointer can do something with. A
-                        // tooltip counts: hovering IS the interaction.
+                        // tooltip counts: hovering is the interaction.
                         pointer_wanted |= spec_wants_pointer(spec);
                         if spec.button
                             || slider.is_some()
@@ -1339,7 +1339,7 @@ impl Editor {
                         }
                         // Wheel over a scroll view (respecting its own clip if
                         // nested): later layers/elements are on top, so the
-                        // LAST match wins.
+                        // last match wins.
                         if wheel != 0.0
                             && let Some(sc) = spec.scroll
                             && ptr_design.is_some_and(|p| {
@@ -1363,7 +1363,7 @@ impl Editor {
                             wheel_target = Some((pl.id, next));
                         }
                         // Drag-to-scroll + scrollbar hit records, both of which
-                        // need the travel and the pointer in THIS layer's units.
+                        // need the travel and the pointer in this layer's units.
                         if spec.scroll.is_some()
                             && ptr_design.is_some_and(|p| {
                                 in_rect(&pl.rect, &p) && clip.is_none_or(|c| in_rect(&c, &p))
@@ -1406,7 +1406,7 @@ impl Editor {
             self.input_scroll = 0.0;
             self.tick_scroll = 0.0;
         }
-        // Keyboard / gamepad navigation, BEFORE the pointer pass so a pad press
+        // Keyboard / gamepad navigation, before the pointer pass so a pad press
         // and a mouse click land in the same queue in the same order.
         self.ui_navigate(&nav_layers, self.ui_frame_dt);
         let contains = |r: &[f32; 4], p: &[f32; 2]| {
@@ -1570,7 +1570,7 @@ impl Editor {
             self.ui_active = None;
         }
         // ---- drag and drop ---------------------------------------------------
-        // The drop target is the LAST `drop_target` under the pointer rather
+        // The drop target is the last `drop_target` under the pointer rather
         // than the topmost hit: the slot you are aiming at is usually behind
         // the item sitting in it.
         self.ui_drag_report = None;
@@ -1585,14 +1585,14 @@ impl Editor {
         self.ui_tick_tooltip_timer(hover, self.ui_frame_dt);
         // Publish this frame's solved screen rects for `node:uiRect()` — fed
         // here (right before scripts run) so a script's mouse hit-test uses
-        // the panel's ACTUAL rendered position.
+        // the panel's actual rendered position.
         self.script_host.set_ui_rects(solved_rects);
         // …and the focus, so `node.focused` / `ui.focused()` read this frame's
         // truth rather than last frame's.
         self.script_host.set_ui_focus(self.ui_focus);
         self.script_host.set_ui_drag(self.ui_drag_report);
         // …and this frame's interaction events, so `ui.clicked(el)` in an
-        // `update` answers about THIS frame — the same list that dispatches as
+        // `update` answers about this frame — the same list that dispatches as
         // hooks after the run. Hover and the held element ride along: they are
         // states rather than events, and every screen that asks about one asks
         // about the others.
@@ -3226,7 +3226,7 @@ impl Editor {
                         *target = pick.unwrap_or_default();
                         c = true;
                     }
-                    // Conflict: the FIRST mask in scene order claiming a name
+                    // Conflict: the first mask in scene order claiming a name
                     // wins — warn when that isn't this one.
                     if !target.is_empty() {
                         let winner = world
@@ -3326,7 +3326,7 @@ mod tests {
         assert!(placed.is_empty(), "a hidden panel places nothing, itself included");
     }
 
-    /// The bug from the ledger, as a state machine: trapped with no UI up, then
+    /// The reported bug, as a state machine: trapped with no UI up, then
     /// the shop opens.
     #[test]
     fn a_menu_opening_mid_play_takes_the_cursor_back() {
@@ -3378,7 +3378,7 @@ mod tests {
         assert!(ed.script_mouse_lock, "but the game never stopped asking");
 
         // Ten more frames of `update` saying "lock it". Each one is the branch
-        // in render_frame that only acts when the wish CHANGES — which it
+        // in render_frame that only acts when the wish changes — which it
         // doesn't, so nothing takes the cursor back.
         for _ in 0..10 {
             let want = true;

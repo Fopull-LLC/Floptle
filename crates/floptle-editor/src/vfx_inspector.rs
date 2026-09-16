@@ -134,7 +134,7 @@ impl EditorTabViewer<'_> {
     }
 }
 
-/// The selected clip's editor: placement (start + length, where length IS the particle
+/// The selected clip's editor: placement (start + length, where length is the particle
 /// lifetime), lifetime jitter, and its emission mode — a continuous stream (rate) or a
 /// burst-train (count ± jitter, repeated `pulses` times every `interval` ± jitter).
 fn clip_burst_detail(
@@ -350,7 +350,7 @@ fn look_section(
             ui.small("mesh particles are lit + sun-shadowed like scene meshes");
         }
     }
-    // Blend applies to the particle pass — billboards AND beams (mesh particles
+    // Blend applies to the particle pass — billboards and beams (mesh particles
     // composite through the raster transparent pass by alpha).
     if !is_mesh {
         egui::ComboBox::from_id_salt("vfx_blend")
@@ -421,7 +421,7 @@ fn orient_label(o: VfxOrientDoc) -> (&'static str, &'static str) {
 }
 
 /// Billboard alignment picker + aspect + (for velocity) stretch. This is what makes
-/// a quad NOT face the camera.
+/// a quad not face the camera.
 fn orient_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
     const ALL: [VfxOrientDoc; 5] = [
         VfxOrientDoc::FaceCamera,
@@ -617,7 +617,7 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
     // Rate / lifetime / burst counts are per CLIP now (a clip is one emission, its length
     // is the particle lifetime). Select a clip on the timeline to edit them; the emit
-    // SHAPE below is shared by every clip on the track.
+    // shape below is shared by every clip on the track.
     ui.small("⏱ Emission is per clip — click a clip on the timeline to set its rate/burst, length (= lifetime) & jitter.");
     shape_editor(ui, ti, track, dirty);
 }

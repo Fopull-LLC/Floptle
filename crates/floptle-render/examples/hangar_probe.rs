@@ -1,8 +1,8 @@
 //! Hangar-corner lighting/texture probe — a stand-in for the solar builder
-//! scene's shell (floor + wall + pad + emissive strip) with the REAL pattern
+//! scene's shell (floor + wall + pad + emissive strip) with the real pattern
 //! textures and hangar-ish lights, so material colors, triplanar densities and
 //! light balance get tuned by LOOKING at a PNG instead of guessing in RON.
-//! Also proves the scale-aware triplanar fix: tiles must repeat in WORLD
+//! Also proves the scale-aware triplanar fix: tiles must repeat in world
 //! units on transform-scaled primitives (a 48-unit floor shows ~16 tiles at
 //! scale 3, not one grotesquely stretched tile).
 //!

@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(r.errors(), 1, "{:?}", r.findings);
         assert!(r.findings[0].message.contains("renamed"));
 
-        // …and naming the scene that IS there passes, by stem as well as by path.
+        // …and naming the scene that is there passes, by stem as well as by path.
         for spelling in ["scenes/first.ron", "first"] {
             std::fs::write(
                 d.join("project.ron"),
@@ -677,7 +677,7 @@ mod tests {
         .unwrap();
         std::fs::write(d.join("textures/hero.png"), []).unwrap();
 
-        // A ▫ Sprite keeps its OWN cell, so the check has to read that one.
+        // A ▫ Sprite keeps its own cell, so the check has to read that one.
         std::fs::write(
             d.join("scenes/first.ron"),
             scene(
@@ -754,7 +754,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// …and a reference that IS there is left alone, through the editor's own
+    /// …and a reference that is there is left alone, through the editor's own
     /// resolver rather than a second guess at what a path means. A checker that
     /// cries wolf is one nobody runs twice.
     #[test]

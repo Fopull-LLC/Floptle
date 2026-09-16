@@ -52,7 +52,7 @@ pub(crate) fn material_draw(
 
 /// The default look for a Blob with no Material: neutral tint plus the subtle blue
 /// rim the blob shipped with, so material-less blobs render exactly as before while a
-/// blob that DOES carry a Material is fully driven by it.
+/// blob that does carry a Material is fully driven by it.
 pub(crate) fn blob_default_material() -> MaterialParams {
     let mut m = MaterialParams::flat([1.0, 1.0, 1.0]);
     m.rim = [0.5, 0.6, 0.8];
@@ -80,7 +80,7 @@ pub(crate) fn blob_mat_arrays(set: &[(DVec3, f32, MaterialParams)]) -> BlobMatAr
     (tint, emissive, specular, params, rim)
 }
 
-/// One side of the light split: how many, where, what colour, what SURFACE each
+/// One side of the light split: how many, where, what colour, what surface each
 /// one emits from, and — for the 2D side — which sorting layers it reaches and
 /// how its falloff is shaped.
 ///
@@ -185,13 +185,13 @@ pub(crate) fn split_point_lights(
         };
         // A light turned off does not take a slot. Keeping N lights and parking
         // the spare ones at zero is the standard way to pool a capped resource —
-        // and scripts cannot create a PointLight, so it is the ONLY way. A
+        // and scripts cannot create a PointLight, so it is the only way. A
         // parked light holding a slot would mean a pool exhausts the budget and
         // lights nothing (`floptle/0116`).
         if *intensity <= 0.0 || *range <= 0.0 {
             continue;
         }
-        // …and neither does a light on a node that is SWITCHED OFF, or under
+        // …and neither does a light on a node that is SWITCHED off, or under
         // one that is. `Disabled` takes a node out of physics and stops its
         // scripts, and a water volume beside this one already goes with it —
         // a lamp prefab you disabled still lighting the room is the reading
@@ -234,7 +234,7 @@ pub(crate) fn split_point_lights(
 /// and a lamp with it behaves as an omnidirectional light *by arithmetic*
 /// rather than by a branch somebody could forget.
 ///
-/// The angle is the FULL cone, so both are halved here. That conversion happens
+/// The angle is the full cone, so both are halved here. That conversion happens
 /// exactly once, in this function, because a half angle and a full angle look
 /// identical in a struct field and telling them apart later means measuring a
 /// light in the viewport.
@@ -243,7 +243,7 @@ fn cone_lane(spot_angle: f32, spot_softness: f32) -> [f32; 4] {
         return [-1.0, -1.0, 0.0, 0.0];
     }
     let outer = spot_angle.clamp(floptle_core::MIN_SPOT_ANGLE, floptle_core::OMNI_ANGLE) * 0.5;
-    // Softness is a fraction OF the cone, so a spot keeps the edge it was given
+    // Softness is a fraction of the cone, so a spot keeps the edge it was given
     // when somebody widens it. Capped just below 1 so the inner and outer angles
     // can never coincide, which would make the smoothstep divide by zero and
     // put a hard ring where a soft edge was asked for.
@@ -318,7 +318,7 @@ fn contribution(distance: f32, range: f32, color: [f32; 3], intensity: f32) -> f
 
 /// Take the best sixteen, in a stable order, into the slots the shader reads.
 ///
-/// Ranking only happens when there ARE more than sixteen: under the cap every
+/// Ranking only happens when there are more than sixteen: under the cap every
 /// light gets in whatever order it was found, which is exactly what this did
 /// before and what nearly every scene sees.
 fn fill(mut lights: Vec<Candidate>) -> LightSlots {
@@ -367,7 +367,7 @@ fn layer_mask(lit: &floptle_core::Lighting2D, sorting_names: &[String]) -> [u32;
     mask
 }
 
-/// The key light as the `light_dir` uniform vec4 for THIS camera. Directional:
+/// The key light as the `light_dir` uniform vec4 for this camera. Directional:
 /// xyz = the normalized direction, w = 0. Stars mode: xyz = the BRIGHTEST
 /// star's camera-relative position, w = 1 — single-light consumers (atmosphere
 /// daylight, sky glow) follow it; the full per-star loop is `key_light` in the
@@ -483,7 +483,7 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
     )
 }
 
-/// The contact-shadow lane. Reported OFF when the sun's shadows are off, because
+/// The contact-shadow lane. Reported off when the sun's shadows are off, because
 /// a contact shadow is the same shadow: leaving it running under a scene whose
 /// shadows are switched off would mean "shadows off" did not mean off.
 pub(crate) fn contact_uniform(l: &Light) -> [f32; 4] {
@@ -525,11 +525,11 @@ pub(crate) fn reflection_clamp(l: &Light) -> f32 {
 /// The depth-fog uniforms for the Lighting node: `(fog_color, fog_params)` where
 /// `fog_params = [start, end, on, dither_mode]` and the spare `fog_color.w` carries
 /// the effective dither strength (0 = off). Fed to the raymarch/raster field globals
-/// AND the particle globals so meshes, matter, terrain and particles fog together —
+/// and the particle globals so meshes, matter, terrain and particles fog together —
 /// and band-break identically. Packing into the two already-spare `.w` lanes keeps
 /// the uniform layout (and its byte-sync with the WGSL structs) unchanged.
 /// Volumetric-fog uniform lanes (`vol_fog_a/b`): densities/heights straight off
-/// the Lighting node, `time` drifting the noise, and the camera's WORLD height
+/// the Lighting node, `time` drifting the noise, and the camera's world height
 /// so the shader can map camera-relative positions back to world y.
 /// The third lane carries the light injection: amount, phase anisotropy, march
 /// steps, and whether each step marches the sun shadow (the shafts). `fog_shafts`
@@ -630,7 +630,7 @@ pub(crate) fn underwater_at(
     best.map(|(_, tint, vis)| (tint, vis))
 }
 
-/// Mirror the scene's WaterVolume nodes for scripts, in WORLD coordinates.
+/// Mirror the scene's WaterVolume nodes for scripts, in world coordinates.
 ///
 /// The transform is folded in here rather than in Lua so the script answer and
 /// the solver's come from the same geometry — a scaled or rotated tank is one
@@ -879,7 +879,7 @@ pub(crate) type MotionHistory = (floptle_core::math::Mat4, DVec3);
 /// about the scene rather than about the origin.
 ///
 /// With no history — the first frame after a load, a scene switch, a camera cut
-/// — the previous matrix IS the current one, so every pixel reports zero motion
+/// — the previous matrix is the current one, so every pixel reports zero motion
 /// and the frame is left sharp. That is the right answer for a cut, and the only
 /// safe one: the alternative is one frame smeared by whatever the camera used to
 /// be looking at.
@@ -909,7 +909,7 @@ pub(crate) fn motion_frame(
 /// camera, or `None` when the scene isn't using one.
 ///
 /// Separate from [`post_process_uniforms`] because it is the one post setting
-/// that depends on where the camera IS, and the editor renders the same scene
+/// that depends on where the camera is, and the editor renders the same scene
 /// from more than one — the Scene view, the Game view, a camera preview. Folding
 /// it into the settings would pick one of those cameras and be wrong in the
 /// others: the Scene view would show the game camera's focus while you fly
@@ -941,7 +941,7 @@ pub(crate) fn dof_focus_distance(
 
 pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_render::PostSettings, [f32; 4]) {
     use floptle_core::AoMode;
-    // `PostSettings::default()` IS off, and is the one definition of what the
+    // `PostSettings::default()` is off, and is the one definition of what the
     // identity values are — half of them are 1.0, and writing them out a second
     // time here is how the two drift.
     let off = floptle_render::PostSettings::default();
@@ -1045,7 +1045,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 dof_quality: *dof_quality,
                 dof_show_focus: *dof_show_focus,
                 // The shutter comes from the scene; the two matrices and the
-                // streak ceiling come from the FRAME (and only the game view
+                // streak ceiling come from the frame (and only the game view
                 // fills them — see `motion_frame`).
                 motion_blur: *motion_blur,
                 motion_samples: *motion_samples,
@@ -1087,7 +1087,7 @@ mod light_split_tests {
         vec!["Default".into(), "Terrain".into(), "Characters".into()]
     }
 
-    /// A light belongs to exactly ONE system. A 2D torch that also lit meshes
+    /// A light belongs to exactly one system. A 2D torch that also lit meshes
     /// would wash over any 3D prop that wandered into a flat scene, and the
     /// whole point of the flag is that the two are separable.
     #[test]
@@ -1118,7 +1118,7 @@ mod light_split_tests {
         assert_eq!(col[0], [2.0, 1.0, 0.5, 0.0], "colour times intensity");
     }
 
-    /// Naming no layers is EVERY layer, all the way to the GPU. A default that
+    /// Naming no layers is every layer, all the way to the GPU. A default that
     /// arrived as a zero mask would light nothing, which is the same bug as a
     /// light that lit nothing until a list was filled in — just further away
     /// from where anybody would look for it.
@@ -1187,7 +1187,7 @@ mod light_split_tests {
         assert_eq!(s.three_d.pos[0][0], 2.0, "…and the wrong one survived");
     }
 
-    /// A node you switched OFF is off. `Disabled` already takes a node out of
+    /// A node you switched off is off. `Disabled` already takes a node out of
     /// physics, stops its scripts and stops it drawing — a lamp prefab you
     /// disabled that still lit the room is the one reading nobody expects, and
     /// it spent a slot doing it.
@@ -1285,7 +1285,7 @@ mod light_split_tests {
         );
     }
 
-    /// The FULL angle is halved exactly once, and the cosine runs the right way
+    /// The full angle is halved exactly once, and the cosine runs the right way
     /// round. Both are invisible mistakes: a spot twice as wide as its number
     /// still looks like a spot, and an inverted cosine lights everything the
     /// cone should have excluded.

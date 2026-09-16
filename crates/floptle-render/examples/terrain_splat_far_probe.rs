@@ -1,8 +1,8 @@
 //! Far-slot splat transition probe: a boundary between palette slots 1 and 7 must
-//! crossfade the TWO textures actually painted — never march through the layers in
+//! crossfade the two textures actually painted — never march through the layers in
 //! between. The old shader lerped the interpolated slot INDEX (`floor(a)`↔`ceil(a)`),
 //! so a 1↔7 seam sampled layers 2–6 across the transition ("two other textures
-//! transitioning between them" — Ty, 2026-07-20).
+//! transitioning between them").
 //!
 //! Palette: slot 1 = solid RED, slots 2–6 = solid GREEN (the tell), slot 7 = solid
 //! BLUE. The left half is painted slot 1, the right half slot 7. Any green on the

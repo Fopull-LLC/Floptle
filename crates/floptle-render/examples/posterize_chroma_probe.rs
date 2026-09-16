@@ -126,7 +126,7 @@ fn main() {
     let preserved = report("chroma", true, &mut raster);
 
     // The control, and it is the whole reason this probe is trustworthy: if the
-    // default quantizer did NOT produce split steps in this scene, a passing
+    // default quantizer did not produce split steps in this scene, a passing
     // assertion below would mean nothing at all. The card this came from records
     // a first attempt whose threshold was loose enough that the test passed with
     // the bug still wired up.

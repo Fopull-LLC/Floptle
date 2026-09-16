@@ -131,7 +131,7 @@ mod flex {
     /// hands one row's remembered measurement to a different row — and a
     /// trailing width that is too small by twenty pixels overflows by twenty,
     /// which `Resize` banks permanently. Checking that the leading width still
-    /// matches is how a measurement is known to belong to THIS row.
+    /// matches is how a measurement is known to belong to this row.
     #[derive(Clone, Copy)]
     struct Row {
         leading: f32,
@@ -393,7 +393,7 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             })
         })?,
     )?;
-    // The third argument asks for the keyboard THIS frame. A panel that opens
+    // The third argument asks for the keyboard this frame. A panel that opens
     // on a shortcut and cannot be typed into until you click it is a panel that
     // gets clicked into every single time.
     t.set(
@@ -914,7 +914,7 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     // `W` by a lot, so the drift shows up as emphasis landing in the wrong
     // place and a ragged right edge that reads as a layout bug.
     //
-    // Measured in the SAME font `textAt` would draw with, including the
+    // Measured in the same font `textAt` would draw with, including the
     // enclosing `gui.font` scope — a measurement taken in a different face than
     // the drawing is worse than no measurement, because it looks right until
     // somebody changes the type.
@@ -958,7 +958,7 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
                 //
                 // `min_rect` is a record of the widgets already added, and it is
                 // the wrong question by construction: a package hit-testing
-                // something it is ABOUT to draw asks before drawing it, so the
+                // something it is about to draw asks before drawing it, so the
                 // pointer is over a region `min_rect` does not cover yet and
                 // `inside` came back false exactly where the control was. A
                 // painted button at the right-hand end of a row was unclickable

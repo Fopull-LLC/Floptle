@@ -35,19 +35,19 @@
 //!
 //! **Friend ids (`steam.friends`, `steam.friendRichPresence`) are strings**,
 //! same reasoning as `localUserId`. `steam.friends()` returns the CALLER's
-//! friend list; `steam.friendRichPresence(id, key)` reads one of THAT
+//! friend list; `steam.friendRichPresence(id, key)` reads one of that
 //! friend's own rich-presence values, set by their own game calling
 //! `steam.setRichPresence` — different from reading your own.
 //!
 //! **Leaderboards are asynchronous, and their callback always runs exactly
 //! once.** `steam.findLeaderboard`, `findOrCreateLeaderboard`, `uploadScore`
-//! and `downloadScores` each hand their answer to a callback on a LATER frame
+//! and `downloadScores` each hand their answer to a callback on a later frame
 //! — never inline — and they do so in every session, including one with no
 //! Steam at all, where the callback gets `(nil, "Steam isn't available…")`.
 //! That is deliberate: the alternative is a call that answers `(false, err)`
 //! immediately when there's no backend and through a callback when there is,
 //! which gives a game two failure paths where the second is the one nobody
-//! writes. A board handle is a STRING (`localUserId`'s reasoning again) and
+//! writes. A board handle is a string (`localUserId`'s reasoning again) and
 //! lasts only for the session that resolved it — Steam can read a handle's raw
 //! value but cannot construct one back from it, so there is nothing useful to
 //! persist.
@@ -58,7 +58,7 @@
 //! (disabled in Steam's settings, not hooked into this renderer, no Steam at
 //! all), where the SDK's own call would silently do nothing — so a game can
 //! fall back to showing the URL or the invite code instead. Page and dialog
-//! names are checked against the SDK's own list BEFORE any backend is asked,
+//! names are checked against the SDK's own list before any backend is asked,
 //! so a typo fails in every session, not only on a machine with Steam. While
 //! the overlay is up the engine feeds scripts neutral input, the same way it
 //! does when the Game view isn't focused: a key held through Shift+Tab is
@@ -69,7 +69,7 @@
 //! is always safe to call. What varies is only what `platform` currently
 //! points at: `NullPlatform` by default, swapped for a real
 //! `floptle_steam::SteamPlatform` by `ScriptHost::set_platform` when (and
-//! only when) the caller has decided this session IS the game — see
+//! only when) the caller has decided this session is the game — see
 //! the Steam integration plan's "Where Steam activates".
 
 use std::cell::RefCell;
@@ -161,7 +161,7 @@ fn log(logs: &Rc<RefCell<Vec<ScriptLog>>>, level: LogLevel, msg: String) {
 
 /// Runs `f` against the current backend's `Achievements` surface, or answers
 /// a plain "not available" error when there is none — every achievement/stat
-/// WRITE call here goes through this, so `steam.unlockAchievement(...)`
+/// write call here goes through this, so `steam.unlockAchievement(...)`
 /// against `NullPlatform` (no Steam) answers `(false, "...")`, not a crash on
 /// calling a method that doesn't exist.
 fn achievements_call(
@@ -319,7 +319,7 @@ fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Resu
     };
     match t.get::<Value>(key)? {
         Value::Nil => Ok(default),
-        // The range check is REAL on LuaJIT, where a Lua integer is 64-bit, and a
+        // The range check is real on LuaJIT, where a Lua integer is 64-bit, and a
         // no-op on Luau, where it is already 32-bit (ADR-0028). Written as the
         // intent — "refuse anything an i32 cannot hold" — and allowed rather
         // than branched, because a `#[cfg]` here would give the two VMs two
@@ -340,7 +340,7 @@ fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Resu
     }
 }
 
-/// A board handle as a script carries it: a STRING, same reasoning as
+/// A board handle as a script carries it: a string, same reasoning as
 /// `localUserId` — a handle is a full `u64` and a Lua number would round it.
 fn parse_board_id(id: &str) -> Option<u64> {
     id.parse::<u64>().ok()
@@ -449,7 +449,7 @@ fn member_change_str(c: LobbyMemberChange) -> &'static str {
     }
 }
 
-/// A lobby id as a script carries it: a STRING, same reasoning as
+/// A lobby id as a script carries it: a string, same reasoning as
 /// `localUserId` — a Steam lobby id is a full `u64`.
 fn parse_lobby_id(id: &str) -> Option<u64> {
     id.parse::<u64>().ok()
@@ -1243,7 +1243,7 @@ pub(crate) fn install_steam_api(
     )?;
 
     // ---- overlay (Phase 3) ----
-    // Page/dialog names are validated BEFORE the backend is consulted, so a
+    // Page/dialog names are validated before the backend is consulted, so a
     // typo is caught in every session — including one with no Steam at all,
     // where every open would otherwise answer only "not available" and the
     // misspelling would surface on some other machine, in someone else's
@@ -1412,7 +1412,7 @@ fn bad_handle(call: &str, board: &str) -> String {
 /// `steam.onPersonaChanged` if the local user's persona changed, and delivers
 /// every leaderboard request that finished.
 ///
-/// Called from the host's FRAME pass, never the tick pass — same rule as
+/// Called from the host's frame pass, never the tick pass — same rule as
 /// `http.*`: a backend reply arrives when it arrives, so a rollback replay
 /// must never see one.
 pub(crate) fn drain(
@@ -1422,7 +1422,7 @@ pub(crate) fn drain(
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
 ) {
     // `pump` is what runs the backend's own callbacks, so leaderboard results
-    // land DURING this borrow and are waiting by the time it is released.
+    // land during this borrow and are waiting by the time it is released.
     let (changed, results, lobby_results, lobby_events, overlay_flips) = {
         let backend = platform.borrow();
         backend.pump();
@@ -1435,7 +1435,7 @@ pub(crate) fn drain(
         )
     };
 
-    // Match results to callbacks with the state borrow held, and CALL with it
+    // Match results to callbacks with the state borrow held, and call with it
     // released — a callback that starts another request re-borrows the state.
     let ready: Vec<(mlua::Function, LeaderboardOutcome)> = {
         let mut s = state.borrow_mut();
@@ -1559,7 +1559,7 @@ fn deliver(lua: &Lua, cb: &mlua::Function, outcome: LeaderboardOutcome) -> mlua:
         LeaderboardOutcome::Failed(why) => {
             cb.call::<()>((Value::Nil, lua.create_string(why)?))
         }
-        // A board that simply doesn't exist is nil with NO error: the backend
+        // A board that simply doesn't exist is nil with no error: the backend
         // answered the question successfully, and "no such board" is a normal
         // answer a script branches on rather than an failure it reports.
         LeaderboardOutcome::Board(None) => cb.call::<()>((Value::Nil, Value::Nil)),
@@ -1775,7 +1775,7 @@ mod tests {
     }
 
     /// Installs a Lua callback that appends `(value, err)` to a global `seen`
-    /// list, so a test can assert both what arrived and HOW MANY times.
+    /// list, so a test can assert both what arrived and how many times.
     fn recorder(f: &Fixture) {
         f.lua
             .load(
@@ -1831,7 +1831,7 @@ mod tests {
         assert!(f.logs.borrow().is_empty());
     }
 
-    /// Every achievement/stat READ is nil, and `statsReady` is false, under
+    /// Every achievement/stat read is nil, and `statsReady` is false, under
     /// `NullPlatform` — the ordinary "not on Steam" branch, not an error.
     #[test]
     fn achievement_and_stat_reads_are_nil_under_null_platform() {
@@ -1851,7 +1851,7 @@ mod tests {
         }
     }
 
-    /// Every achievement/stat WRITE answers `(false, "not available")`
+    /// Every achievement/stat write answers `(false, "not available")`
     /// under `NullPlatform`, rather than raising on a method that doesn't
     /// exist — a script can check `ok` without wrapping every call in
     /// `pcall`.
@@ -1875,7 +1875,7 @@ mod tests {
         f.lua.load("steam.flushStats()").exec().unwrap();
     }
 
-    /// Every cloud READ is nil under `NullPlatform` — the ordinary "not on
+    /// Every cloud read is nil under `NullPlatform` — the ordinary "not on
     /// Steam" branch.
     #[test]
     fn cloud_reads_are_nil_under_null_platform() {
@@ -1892,7 +1892,7 @@ mod tests {
         }
     }
 
-    /// Every cloud WRITE — including `cloudRead`, which answers `(nil, err)`
+    /// Every cloud write — including `cloudRead`, which answers `(nil, err)`
     /// rather than plain `nil` when the file can't be reached — carries a
     /// real error under `NullPlatform`, never raises.
     #[test]
@@ -1960,7 +1960,7 @@ mod tests {
         }
     }
 
-    /// A resolved board reaches Lua as a table, with its id a STRING — a
+    /// A resolved board reaches Lua as a table, with its id a string — a
     /// handle is a full `u64` and a Lua number would round it.
     #[test]
     fn a_resolved_board_arrives_as_a_table_with_a_string_id() {
@@ -1992,7 +1992,7 @@ mod tests {
         assert_eq!((sort.as_str(), display.as_str()), ("ascending", "seconds"));
     }
 
-    /// "No board by that name" is nil with NO error — the backend answered
+    /// "No board by that name" is nil with no error — the backend answered
     /// the question successfully, and a script branches on it rather than
     /// reporting a failure that didn't happen.
     #[test]
@@ -2193,7 +2193,7 @@ mod tests {
         assert_eq!(n, 1, "one answered, one still waiting");
     }
 
-    /// An options table is read BY NAME, so a typo must be refused rather than
+    /// An options table is read by name, so a typo must be refused rather than
     /// silently taking the default (`floptle/0082`).
     #[test]
     fn an_unknown_option_key_is_refused() {
@@ -2210,7 +2210,7 @@ mod tests {
     }
 
     /// An enumerated value that isn't one of the names is refused, naming what
-    /// IS accepted — the same rule as the key check, one level down.
+    /// is accepted — the same rule as the key check, one level down.
     #[test]
     fn an_unknown_enum_value_is_refused() {
         let (f, _boards) = with_boards();
@@ -2396,7 +2396,7 @@ mod tests {
         assert!(e.contains("skill") && e.contains(">="), "{e}");
     }
 
-    /// An unknown comparison operator is refused naming what IS accepted.
+    /// An unknown comparison operator is refused naming what is accepted.
     #[test]
     fn an_unknown_comparison_operator_is_refused() {
         let (f, _l) = with_lobbies();
@@ -2428,7 +2428,7 @@ mod tests {
         assert_eq!((mode.as_str(), map.as_str()), ("coop", "dust"));
     }
 
-    /// Setting a lobby value to nil DELETES it, matching how the rest of this
+    /// Setting a lobby value to nil deletes it, matching how the rest of this
     /// engine treats "set it to nothing".
     #[test]
     fn setting_lobby_data_to_nil_deletes_it() {
@@ -2458,7 +2458,7 @@ mod tests {
     }
 
     /// A lobby event reaches `steam.onLobbyEvent` once per event, and a data
-    /// change says WHOSE data it was rather than making the caller compare
+    /// change says whose data it was rather than making the caller compare
     /// two ids to find out.
     #[test]
     fn lobby_events_reach_the_handler_and_name_whose_data_changed() {
@@ -2646,7 +2646,7 @@ mod tests {
     }
 
     /// A misspelt page/dialog name, or a URL with no protocol, is refused
-    /// with the valid spellings named — and it is refused in the SAME
+    /// with the valid spellings named — and it is refused in the same
     /// words whether or not there is a backend, so the developer without
     /// Steam on their desk finds out on their desk. The backend is never
     /// asked.

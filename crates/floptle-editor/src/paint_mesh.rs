@@ -8,7 +8,7 @@
 //!    dab, so painted meshes get a retained cache here.
 //! 2. **Nothing in the engine casts a ray at a triangle.** `pick()` tests analytic
 //!    primitives; `TriMeshCollider` is an unsigned closest-point spatial hash. So this
-//!    adds Möller–Trumbore plus an acceleration structure — deliberately the SAME
+//!    adds Möller–Trumbore plus an acceleration structure — deliberately the same
 //!    uniform-spatial-hash shape `TriMeshCollider` uses, ray-walked instead of
 //!    sphere-queried, rather than introducing a second spatial-structure concept.
 //!
@@ -23,7 +23,7 @@
 //!    the common case (most of the scene isn't under the cursor) and must cost one slab
 //!    test.
 //! 2. **`build` sends huge triangles to `oversized` instead of bucketing them.** Cell
-//!    size comes from the MEAN edge, so one big floor quad among fine detail spans
+//!    size comes from the mean edge, so one big floor quad among fine detail spans
 //!    `(extent/cell)³` cells. This is not hypothetical: `RetroMap.glb` has exactly one
 //!    such triangle. `cell` is also floored at `extent/MAX_CELLS_PER_AXIS`.
 //! 3. **`in_radius` falls back to a linear scan** when the cell sweep `(2r+1)³` would
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use floptle_core::math::{Vec2, Vec3};
 use floptle_render::{MeshData, Vertex};
 
-/// A ray hit on ONE part (before the part index is known).
+/// A ray hit on one part (before the part index is known).
 #[derive(Clone, Copy)]
 struct PartHit {
     t: f32,
@@ -43,7 +43,7 @@ struct PartHit {
     normal: Vec3,
 }
 
-/// A ray hit on a mesh part. The brush only needs WHERE (`pos`) and on WHICH node/part —
+/// A ray hit on a mesh part. The brush only needs where (`pos`) and on which node/part —
 /// texture paint works in world space off the atlas geometry, not the hit's UV/triangle.
 pub(crate) struct MeshHit {
     /// Distance along the ray.
@@ -67,7 +67,7 @@ pub(crate) struct PaintPart {
     grid: HashMap<[i32; 3], Vec<u32>>,
     cell: f32,
     /// Triangles whose AABB spans too many cells to bucket sanely (a ground quad
-    /// among fine detail). They are tested on EVERY raycast instead. Without this
+    /// among fine detail). They are tested on every raycast instead. Without this
     /// escape hatch, one big triangle in a finely-tessellated mesh registers into
     /// `(extent/cell)³` cells — which is how `build` turns into a hang.
     oversized: Vec<u32>,
@@ -113,7 +113,7 @@ pub(crate) struct MeshAtlas {
     pub(crate) mesh: MeshData,
     pub(crate) edge: u32,
     pub(crate) cells: Vec<AtlasCell>,
-    /// The ORIGINAL vertex id behind each atlas vertex (atlas vertices are unshared, three
+    /// The original vertex id behind each atlas vertex (atlas vertices are unshared, three
     /// per triangle, so this is the part's index list in order). This is what lets a painted
     /// node keep its per-vertex colors: the node's vertex-paint block is remapped through it
     /// into an atlas-ordered mirror block (see `paint_tex`'s mirror sync).
@@ -123,7 +123,7 @@ pub(crate) struct MeshAtlas {
 /// Visit every texel the render mesh can sample for this triangle. Calls
 /// `f(pixel_byte_index, [wa, wb, wc])` with the barycentric weights of the three vertices.
 ///
-/// This is the seam fix. A brush dab paints in WORLD space — for each texel it reconstructs
+/// This is the seam fix. A brush dab paints in world space — for each texel it reconstructs
 /// the surface point (`wa·p0 + wb·p1 + wc·p2`) and weights by world distance to the cursor.
 /// Two texels on either side of a shared edge reconstruct (nearly) the same world point, so
 /// they get the same colour: the paint flows across the edge with no visible seam, even
@@ -323,7 +323,7 @@ impl PaintPart {
 
     /// Nearest ray hit, or `None`. `ro`/`rd` are in the mesh's local space.
     fn raycast(&self, ro: Vec3, rd: Vec3, max_t: f32) -> Option<PartHit> {
-        // Clip to the part's bounds FIRST. This is what makes the cost proportional to
+        // Clip to the part's bounds first. This is what makes the cost proportional to
         // the mesh rather than to `max_t`: a ray that misses (the common case — most of
         // the scene isn't under the cursor) pays one slab test and leaves.
         let (mut t0, t1) = ray_aabb(ro, rd, self.min - self.cell, self.max + self.cell)?;
@@ -701,7 +701,7 @@ mod tests {
         assert!(h.normal.z.abs() > 0.9, "normal should face ±Z, got {:?}", h.normal);
     }
 
-    /// THE repeating fix: every triangle owns a UNIQUE, non-overlapping patch of the atlas,
+    /// the repeating fix: every triangle owns a UNIQUE, non-overlapping patch of the atlas,
     /// so a dab on one triangle can never land on another — even when the mesh's own UVs tile.
     #[test]
     fn atlas_gives_each_triangle_a_disjoint_uv_cell() {
@@ -750,7 +750,7 @@ mod tests {
         for (j, &vid) in atlas.orig_vids.iter().enumerate() {
             assert_eq!(colors[j], src_colors[vid as usize], "atlas vert {j} color");
         }
-        // And a mesh WITHOUT colors must not fabricate any (register would alloc a block).
+        // And a mesh without colors must not fabricate any (register would alloc a block).
         let mut cache2 = PaintMeshCache::default();
         cache2.get_or_build("p", || vec![quad()]);
         assert!(cache2.atlas_mesh("p", 0).unwrap().mesh.colors.is_none());
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn ray_takes_the_nearest_of_two_surfaces() {
         // Two quads: one at z = 0, one at z = 2. A ray from z = 5 must strike the far
-        // one FIRST (z = 2) — a nearest-hit bug would sail through to z = 0.
+        // one first (z = 2) — a nearest-hit bug would sail through to z = 0.
         let mut d = quad();
         let base = d.vertices.len() as u32;
         for i in 0..4 {
@@ -837,7 +837,7 @@ mod tests {
                     "{:?}: PaintPart::build took {build_ms:.0}ms",
                     path.file_name().unwrap()
                 );
-                // 60 casts ≈ a second of hovering. Misses AND hits, at the real max_t.
+                // 60 casts ≈ a second of hovering. Misses and hits, at the real max_t.
                 let t0 = floptle_core::time::Instant::now();
                 for i in 0..60 {
                     let a = i as f32 * 0.1;
@@ -902,7 +902,7 @@ mod tests {
         let p = PaintPart::build(&d);
         let t0 = floptle_core::time::Instant::now();
         for _ in 0..100 {
-            // Aimed well away from the mesh, with the SAME max_t the brush passes.
+            // Aimed well away from the mesh, with the same max_t the brush passes.
             assert!(p.raycast(Vec3::new(0.0, 900.0, 5.0), Vec3::new(0.0, 0.0, -1.0), 1e5).is_none());
         }
         let ms = t0.elapsed().as_secs_f32() * 1000.0;

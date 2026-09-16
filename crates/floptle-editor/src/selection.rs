@@ -63,7 +63,7 @@ impl Editor {
     ///
     /// A locked selection ignores viewport picks, Hierarchy clicks, select-all
     /// and the arrow-key step — see [`Editor::selection_locked`]. It
-    /// deliberately does NOT gate the world changing underneath: undo/redo
+    /// deliberately does not gate the world changing underneath: undo/redo
     /// restoring what was selected at the time, a scene switch dropping a dead
     /// entity, an extension setting the selection through its own API. Those
     /// are not somebody clicking, and a lock that swallowed them would leave
@@ -72,7 +72,7 @@ impl Editor {
         self.selection_locked
     }
 
-    /// Toggle the selection lock. Refuses to lock an EMPTY selection: the only
+    /// Toggle the selection lock. Refuses to lock an empty selection: the only
     /// switch is on the Inspector's name row, which is drawn for the selected
     /// node, so a lock held over nothing would hide its own release.
     pub(crate) fn toggle_selection_lock(&mut self) {
@@ -105,13 +105,13 @@ impl Editor {
     /// bone click, which made it useless for the one job it was most wanted for.
     /// A bone is part of the model the lock is holding, not a way out of it, so
     /// clicking one is not the gesture the lock exists to refuse. A bone
-    /// belonging to some OTHER model still is, and is still refused.
+    /// belonging to some other model still is, and is still refused.
     ///
     /// Unlocked, a bone selection REPLACES the node selection — the two are
     /// mutually exclusive and the Inspector switches to the bone editor. Locked,
     /// the model stays selected, because it must: the lock has nothing to hold
     /// otherwise (`enforce_selection_lock` would release it a frame later) and
-    /// the rig is only drawn for a mesh that IS selected, so clearing it would
+    /// the rig is only drawn for a mesh that is selected, so clearing it would
     /// take the bones off the screen the moment you picked one.
     ///
     /// Returns whether the bone was taken.
@@ -269,7 +269,7 @@ impl Editor {
                 self.tick_buttons_pressed[i] = true;
             }
             // Game-UI edges bank as EVENTS, not sampled state: at a low frame
-            // rate a quick click's press AND release land inside one frame's
+            // rate a quick click's press and release land inside one frame's
             // event batch, and a sampled edge (down && !was) misses it — the
             // player "can't click" buttons exactly when the game struggles.
             if i == 0 {
@@ -295,7 +295,7 @@ impl Editor {
     /// Frame the selected object in the viewport (the F key): keep the view angle,
     /// move the camera so the object is centered at a size-appropriate distance.
     ///
-    /// **Reads the node's WORLD placement, not its local `Transform`.** A local
+    /// **Reads the node's world placement, not its local `Transform`.** A local
     /// translation is an offset from a parent, so pressing `F` on a door inside
     /// a building used to fly to wherever `(0.4, 0, 1.2)` happens to be in the
     /// world — usually the origin, occasionally somewhere with nothing in it.
@@ -340,7 +340,7 @@ impl Editor {
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px).
-    /// Casts a ray and tests each object's EXACT primitive in its own local space
+    /// Casts a ray and tests each object's exact primitive in its own local space
     /// (box for a cube, sphere for a sphere/blob), so picking stays accurate however
     /// the object is rotated or non-uniformly scaled. `None` = empty space.
     pub(crate) fn pick(&self, cursor: Vec2) -> Option<Entity> {
@@ -362,7 +362,7 @@ impl Editor {
         let draws = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
         let mut best: Option<(Entity, f32)> = None;
         for (e, m) in self.world.query::<Matter>() {
-            // Ray-test against the node's WORLD placement (so parented nodes pick).
+            // Ray-test against the node's world placement (so parented nodes pick).
             let mut t = floptle_core::world_transform(&self.world, e);
             t.translation += draws.get(&e).copied().unwrap_or_default();
             let hit = match m {
@@ -439,13 +439,13 @@ impl Editor {
                 }
                 // One sprite is a quad, and clicking it should feel like
                 // clicking the picture — so pick against a sphere around where
-                // the picture IS, at the size it is actually drawn.
+                // the picture is, at the size it is actually drawn.
                 //
                 // Two things that are easy to leave out and both make a sprite
                 // unclickable where it can plainly be seen: a `ppu` sprite's
                 // size comes from its texture, not from `size`; and the pivot
                 // moves the quad off the origin, so a feet-pivoted character is
-                // drawn entirely ABOVE the point a naive sphere is centred on.
+                // drawn entirely above the point a naive sphere is centred on.
                 Matter::Sprite { ppu, size, pivot, .. } => {
                     let mat = self.world.get::<floptle_core::Material>(e);
                     let px = mat
@@ -488,7 +488,7 @@ impl Editor {
         best.map(|(e, _)| e)
     }
 
-    /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
+    /// Apply a gizmo drag for the grabbed handle, as an absolute transform from the
     /// start-of-drag snapshot (no per-event accumulation ⏵ no drift).
     pub(crate) fn gizmo_drag(&mut self) {
         let (Some(drag), Some(cursor)) = (self.drag, self.cursor) else {
@@ -814,8 +814,8 @@ impl Editor {
         Some((mesh, idx, Transform::from_matrix(world_m)))
     }
 
-    /// Apply a gizmo drag to an armature bone: convert the desired WORLD transform
-    /// back to the bone's LOCAL pose (relative to its parent bone) and auto-key it
+    /// Apply a gizmo drag to an armature bone: convert the desired world transform
+    /// back to the bone's local pose (relative to its parent bone) and auto-key it
     /// into the open clip at the playhead — exactly what the bone Inspector's numeric
     /// editor writes, so posing a bone with the gizmo == keying it.
     #[cfg(feature = "editor-ui")]
@@ -851,7 +851,7 @@ impl Editor {
         };
         let Some(bone_name) = bone_name else { return };
         let mesh_world = floptle_core::world_transform(&self.world, mesh).world_matrix();
-        // Parent frame in SCENE space. bone_scene = mesh_world · poses[bone] and
+        // Parent frame in scene space. bone_scene = mesh_world · poses[bone] and
         // poses[bone] = poses[parent] · local (the offset cancels), so the parent
         // scene frame is mesh_world · poses[parent], or mesh_world · offset at a root.
         let parent_scene = match parent {
@@ -994,7 +994,7 @@ pub(crate) fn rect_base_half(
 mod focus_tests {
     use super::*;
 
-    /// A child node's `Transform.translation` is an offset from its PARENT.
+    /// A child node's `Transform.translation` is an offset from its parent.
     /// Framing on it flies the camera to wherever that offset happens to land in
     /// world space — for a door at `(0.4, 0, 1.2)` inside a building parked a
     /// kilometre away, that is the origin, and it reads as the `F` key having
@@ -1027,7 +1027,7 @@ mod focus_tests {
              this to be able to fail"
         );
         // The claim: the door ends up straight ahead of where the camera stopped.
-        // Framing on the LOCAL offset would leave the camera near the origin,
+        // Framing on the local offset would leave the camera near the origin,
         // pointing at a door a kilometre away.
         let forward = (ed.camera.rotation() * Vec3::NEG_Z).as_dvec3();
         let to_door = world - anim.to;
@@ -1096,7 +1096,7 @@ mod focus_tests {
         assert_eq!(ed.selection, vec![b], "released, the same gesture works again");
     }
 
-    /// **A held selection holds the SCENE, not the rig.**
+    /// **A held selection holds the scene, not the rig.**
     ///
     /// Locking is most wanted for exactly the job it used to make impossible:
     /// posing one model without a stray click taking you off it. Every bone
@@ -1104,7 +1104,7 @@ mod focus_tests {
     /// tab could not be used together at all.
     ///
     /// A bone of the held model is part of that model, not a way out of it. A
-    /// bone of some OTHER model still is, and is still refused — otherwise the
+    /// bone of some other model still is, and is still refused — otherwise the
     /// lock leaks through the one panel that lists every rig in the scene.
     #[test]
     fn a_held_selection_still_lets_you_pick_the_model_s_own_bones() {
@@ -1117,7 +1117,7 @@ mod focus_tests {
 
         assert!(ed.select_bone(mine, 3), "a bone of the held model was refused");
         assert_eq!(ed.bone_selection, Some((mine, 3)));
-        // The model STAYS selected. It has to: the lock has nothing to hold
+        // The model stays selected. It has to: the lock has nothing to hold
         // otherwise (`enforce_selection_lock` would release it next frame) and
         // the rig is only drawn for a mesh that is selected, so clearing it
         // would take the bones off the screen the instant one was picked.

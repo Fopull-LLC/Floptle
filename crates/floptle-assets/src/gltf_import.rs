@@ -306,7 +306,7 @@ fn add_primitives(m: &gltf::Mesh, world: Mat4, buffers: &[gltf::buffer::Data], p
             part.mesh.indices.push(base + idx);
         }
 
-        // Parts accumulate MANY primitives, and COLOR_0 is per-primitive — so a part can
+        // Parts accumulate many primitives, and COLOR_0 is per-primitive — so a part can
         // mix painted and unpainted prims. The colors stream must stay exactly parallel to
         // `vertices` (the renderer drops a mismatched one), so back-fill earlier unpainted
         // prims with white and pad this one if it came up short. White is the identity for

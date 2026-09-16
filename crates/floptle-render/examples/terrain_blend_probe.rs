@@ -1,5 +1,5 @@
 //! Headless probe for MULTI-TERRAIN rendering: build two terrains (each a flat
-//! slab with a hill), placed so their boxes overlap, upload BOTH as separate
+//! slab with a hill), placed so their boxes overlap, upload both as separate
 //! volumes (each at native resolution — no combined grid), and raymarch to a PNG.
 //! The GPU fuses them with the same smin the old CPU combine used — validates the
 //! seam blends smoothly (one fused surface, no shell, no double).

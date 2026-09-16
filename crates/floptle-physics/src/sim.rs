@@ -38,8 +38,8 @@ struct BodyLink {
     height_set: Option<f32>,
 }
 
-/// One compound assembly's link back to its ROOT entity. Shape ids inside the
-/// compound are the PART entities' indices (see `Sim::build`'s assembly pass).
+/// One compound assembly's link back to its root entity. Shape ids inside the
+/// compound are the part entities' indices (see `Sim::build`'s assembly pass).
 struct CompoundLink {
     entity: Entity,
     compound: usize,
@@ -57,7 +57,7 @@ pub struct Sim {
     pub world: PhysicsWorld,
     map: Vec<BodyLink>,
     cmap: Vec<CompoundLink>,
-    /// Each compound's (CoM pos, orient) at the START of the last gameplay
+    /// Each compound's (CoM pos, orient) at the start of the last gameplay
     /// tick — the interpolation anchor, like `tick_prev` for bodies.
     tick_prev_c: Vec<(Vec3, Quat)>,
     /// Scripted forces held on compounds for the current tick (re-armed each
@@ -72,7 +72,7 @@ pub struct Sim {
     /// Rebase policy (ADR-0015): when the focus (active camera) drifts past the
     /// threshold, the sim's local frame recenters on it between fixed steps.
     fo: floptle_core::FloatingOrigin,
-    /// Each body's position at the START of the last gameplay tick (sim frame),
+    /// Each body's position at the start of the last gameplay tick (sim frame),
     /// aligned with `world.bodies` — [`Self::writeback_interpolated`] lerps
     /// `tick_prev → pos` so rendered motion spans the whole tick, not just the
     /// final physics substep. Empty until [`Self::step_tick`] first runs.
@@ -84,7 +84,7 @@ pub struct Sim {
     /// Events produced by the most recent tick(s), drained by the driver via
     /// [`Self::take_touch_events`] and dispatched to scripts.
     events: Vec<TouchEvent>,
-    /// Every compound contact resolved during the LAST gameplay tick (the
+    /// Every compound contact resolved during the last gameplay tick (the
     /// per-substep lists clear on each `world.step`; this accumulates them
     /// across the tick) — the raw material for per-part impact attribution.
     tick_cc: Vec<crate::compound::CompoundContact>,
@@ -130,7 +130,7 @@ pub struct TouchEvent {
     pub a: u32,
     pub b: u32,
     pub phase: TouchPhase,
-    /// Contact point, ABSOLUTE world coordinates.
+    /// Contact point, absolute world coordinates.
     pub point: DVec3,
     /// Contact normal (unit), pointing out of the surface that was hit.
     pub normal: Vec3,
@@ -148,7 +148,7 @@ pub struct TerrainVolume<'a> {
     pub eid: Option<u32>,
     pub rot: Quat,
     pub scale: f32,
-    /// Collide with the DRAWN triangles (`ChunkTerrain::mesh_accurate`) rather
+    /// Collide with the drawn triangles (`ChunkTerrain::mesh_accurate`) rather
     /// than the field — `Matter::Terrain::collision`.
     pub drawn: bool,
 }
@@ -161,12 +161,12 @@ impl<'a> TerrainVolume<'a> {
     }
 }
 
-/// One body's full dynamic state, in ABSOLUTE world coordinates (f64 position,
+/// One body's full dynamic state, in absolute world coordinates (f64 position,
 /// floating-origin safe) — the serializable capture the netcode snapshots and
 /// prediction rollback restore. See `docs/multiplayer.md` §2/§6.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodySnapshot {
-    /// World-space position (absolute — NOT sim-frame/origin-relative).
+    /// World-space position (absolute — not sim-frame/origin-relative).
     pub pos: DVec3,
     pub vel: Vec3,
     pub grounded: bool,
@@ -192,7 +192,7 @@ pub struct BodyReport {
     pub grounded: bool,
     /// Total standing height (a controller writes it to crouch).
     pub height: f32,
-    /// The body's own position, absolute world coordinates (NOT the node's
+    /// The body's own position, absolute world coordinates (not the node's
     /// interpolated render transform).
     pub pos: DVec3,
     /// The floor it is standing on — `Some` exactly when `grounded`.
@@ -207,11 +207,11 @@ pub struct BodyReport {
 /// while keeping the normal component for square-on landing feel.
 pub type CompoundImpact = (u32, u32, f32, f32, f32, DVec3);
 
-/// The LOCAL translation that puts `e` at `world_pos`.
+/// The local translation that puts `e` at `world_pos`.
 ///
-/// A body is built from its node's WORLD transform and its position comes
+/// A body is built from its node's world transform and its position comes
 /// back as a world point — but `Transform::translation` is the node's
-/// position in its PARENT's frame. Writing the world point straight into it
+/// position in its parent's frame. Writing the world point straight into it
 /// was right only for a node at the scene root; a body under a group node
 /// was displaced by the group's whole transform every frame, so its model
 /// (a child, drawn where the node says) stood beside and above the capsule
@@ -228,7 +228,7 @@ fn local_translation_for(ecs: &World, e: Entity, world_pos: DVec3) -> DVec3 {
     }
 }
 
-/// The LOCAL translation and rotation that put `e` at `world_pos` facing
+/// The local translation and rotation that put `e` at `world_pos` facing
 /// `world_rot` — see [`local_translation_for`].
 fn local_pose_for(ecs: &World, e: Entity, world_pos: DVec3, world_rot: Quat) -> (DVec3, Quat) {
     match ecs.get::<floptle_core::Parent>(e) {
@@ -309,7 +309,7 @@ impl Sim {
             .collect();
         // ASSEMBLY pass first: a Dynamic RigidBody with `assembly` set roots a
         // COMPOUND built from its RigidBody-bearing descendants — those part
-        // nodes become the compound's shapes and are claimed OUT of the plain
+        // nodes become the compound's shapes and are claimed out of the plain
         // body/static pass below (a part is not its own body).
         let mut cmap = Vec::new();
         let claimed = Self::build_assemblies(&mut world, ecs, &found, &layers, &mut cmap);
@@ -379,7 +379,7 @@ impl Sim {
         for (root, _) in &roots {
             claimed.insert(root.index());
         }
-        // Assign each non-root RigidBody node to its NEAREST assembly-root
+        // Assign each non-root RigidBody node to its nearest assembly-root
         // ancestor (if any) by walking Parent links (bounded like
         // `world_transform`'s cycle guard).
         let mut parts: Vec<Vec<(Entity, RigidBody)>> = vec![Vec::new(); roots.len()];
@@ -416,8 +416,8 @@ impl Sim {
     }
 
     /// Build one assembly's [`Compound`] from its root pose + part nodes. Each
-    /// part contributes its RigidBody shape at its offset/orientation RELATIVE
-    /// TO THE ROOT, weighted by its `mass`; the shape id is the part entity's
+    /// part contributes its RigidBody shape at its offset/orientation relative
+    /// to the root, weighted by its `mass`; the shape id is the part entity's
     /// index (how contacts/splits name parts back to nodes).
     fn compound_from(
         ecs: &World,
@@ -484,7 +484,7 @@ impl Sim {
         layers: &floptle_core::Layers,
     ) -> (Body, Quat) {
         let wt = world_transform(ecs, e);
-        // Sim frame: subtract the origin in f64 FIRST, then narrow — the residual
+        // Sim frame: subtract the origin in f64 first, then narrow — the residual
         // is small and exact no matter how far out the node sits.
         let pos = (wt.translation - origin).as_vec3();
         let r = rb.radius.max(0.01);
@@ -505,7 +505,7 @@ impl Sim {
         b.lock_pos = rb.locks_pos();
         b.layer = layers.index_for(ecs, e);
         b.kinematic = rb.mode == floptle_core::BodyMode::Kinematic;
-        // A Trigger on a rigidbody node makes the BODY a sensor: it never
+        // A Trigger on a rigidbody node makes the body a sensor: it never
         // blocks or gets blocked, but overlap fires the trigger hooks —
         // moving pickups, projectiles that pass through, sweeping zones.
         b.sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
@@ -580,7 +580,7 @@ impl Sim {
         }
         let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
         // Assembly roots register via `add_compound_for`, and a part node
-        // under an assembly root is a compound SHAPE, not its own body.
+        // under an assembly root is a compound shape, not its own body.
         if rb.assembly && rb.mode == floptle_core::BodyMode::Dynamic {
             return false;
         }
@@ -653,7 +653,7 @@ impl Sim {
 
     /// Register a static triangle-mesh collider — e.g. an imported map model the player
     /// can walk on. `anchor` is the mesh node's world translation (full `f64`); `verts`
-    /// are baked RELATIVE to it, so a map placed a million units out collides exactly.
+    /// are baked relative to it, so a map placed a million units out collides exactly.
     /// `tag` carries the node's layer bit / entity / trigger flag ([`Self::tag_for`]).
     /// Call after [`build`](Self::build).
     pub fn add_static_mesh(
@@ -796,7 +796,7 @@ impl Sim {
     /// Cast a ray against the colliders on `mask`'s layers only. World-space
     /// origin, as [`Self::raycast`].
     ///
-    /// Whether a point can be SEEN from another is a different question from
+    /// Whether a point can be seen from another is a different question from
     /// whether something is in the way — a trigger volume, a water surface and
     /// a player's own capsule are all "in the way" and none of them is a wall.
     /// So the caller names the layers that count as opaque rather than getting
@@ -839,16 +839,16 @@ impl Sim {
             self.accum -= self.fixed_dt;
             iters += 1;
         }
-        // How far into the NEXT step real time has progressed (0..1): render that
+        // How far into the next step real time has progressed (0..1): render that
         // fraction of the way from each body's previous step position to its current.
         let alpha = (self.accum / self.fixed_dt).clamp(0.0, 1.0);
         self.writeback_transforms(ecs, alpha);
     }
 
-    /// Advance exactly ONE gameplay tick (`tick_dt`, e.g. 1/60): rebase the floating
+    /// Advance exactly one gameplay tick (`tick_dt`, e.g. 1/60): rebase the floating
     /// origin if the focus drifted, capture each body's tick-start position (the render
     /// interpolation anchor), then run the whole number of internal physics substeps
-    /// that make up the tick (e.g. 2 × 1/120). NO transform writeback — the caller runs
+    /// that make up the tick (e.g. 2 × 1/120). no transform writeback — the caller runs
     /// every banked tick, then calls [`Self::writeback_interpolated`] once per frame.
     ///
     /// This is the netcode-era driver (`docs/multiplayer.md` §3): the gameplay tick
@@ -869,7 +869,7 @@ impl Sim {
                 self.world.rebase(new_origin);
             }
         }
-        // Anchor AFTER any rebase so tick_prev and pos share the same frame.
+        // Anchor after any rebase so tick_prev and pos share the same frame.
         self.tick_prev.clear();
         self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
         self.tick_prev_c.clear();
@@ -882,7 +882,7 @@ impl Sim {
         self.tick_cc.clear();
         for _ in 0..n {
             // Held forces (scripted thrust/RCS/aero on compounds) act through
-            // EVERY substep of this tick — the accumulators clear per step, so
+            // every substep of this tick — the accumulators clear per step, so
             // re-arm them each substep. World→sim conversion happens here,
             // after any rebase, so held entries survive an origin shift.
             for h in &self.held {
@@ -907,7 +907,7 @@ impl Sim {
         self.detect_touches(&tick_contacts, &tick_kin);
     }
 
-    /// Hold a force on the compound rooted at `eid` for the NEXT tick: `force`
+    /// Hold a force on the compound rooted at `eid` for the next tick: `force`
     /// (sim-scale newtons, world axes) acting at world point `at` (`None` =
     /// through the CoM), plus an optional pure `torque`. Scripts re-arm this
     /// every tick they're thrusting; it applies through every substep and
@@ -931,7 +931,7 @@ impl Sim {
         self.cmap.iter().map(|l| (l.entity.index(), &self.world.compounds[l.compound]))
     }
 
-    /// Every compound's root entity index + ABSOLUTE world CoM position (the
+    /// Every compound's root entity index + absolute world CoM position (the
     /// rails carry pass — same contract as [`Self::body_positions`]).
     pub fn compound_positions(&self) -> Vec<(u32, DVec3)> {
         self.cmap
@@ -1041,11 +1041,11 @@ impl Sim {
     /// crash metric), and the world point of its hardest contact.
     /// The raw material for damage/stress systems — a lander's legs report a
     /// touchdown's impulse; a tank slammed into a cliff reports the slam.
-    /// EVERY penetrating contact is reported, even a purely tangential SCRAPE
+    /// every penetrating contact is reported, even a purely tangential SCRAPE
     /// that carried no normal impulse (its speed reads ~0): a body dragging along
     /// terrain must still show up as "in contact" so a damage system can grind it
     /// down by the craft's own slide speed. (Filtering by impulse hid scrapes
-    /// entirely — Ty could belly-slide a ship along a planet with zero effect.)
+    /// entirely — a ship could belly-slide along a planet with zero effect.)
     /// Tuple: `(root entity index, part = shape_id, sum impulse, peak NORMAL
     /// speed, peak TOTAL speed, world point)`. `peak total speed` (`speed_abs`)
     /// is the energy metric — the normal component alone collapses on a glancing
@@ -1111,7 +1111,7 @@ impl Sim {
     /// the solver's resolved contacts (body vs solid collider), body-vs-SENSOR
     /// overlap (triggers — the solver never resolves those), and body-vs-body
     /// hull overlap (the solver has no body-body response, but games still
-    /// need to KNOW two bodies met). Costs O(contacts + bodies×sensors +
+    /// need to know two bodies met). Costs O(contacts + bodies×sensors +
     /// bodies²) per tick — trivial at gameplay body counts.
     fn detect_touches(
         &mut self,
@@ -1199,7 +1199,7 @@ impl Sim {
                 }
             }
         }
-        // 2b. A trigger BODY overlapping SOLID static geometry — the solver
+        // 2b. A trigger body overlapping SOLID static geometry — the solver
         // skips sensors entirely (they never block), so a kinematic trigger
         // sweeping through a wall/terrain still gets its events here.
         for (bi, body) in self.world.bodies.iter().enumerate() {
@@ -1309,7 +1309,7 @@ impl Sim {
     }
 
     /// Write interpolated body transforms to the ECS: `alpha` in `[0,1)` is how far
-    /// render time has progressed into the CURRENT gameplay tick, so each body renders
+    /// render time has progressed into the current gameplay tick, so each body renders
     /// `lerp(tick_start, tick_end, alpha)`. Pair with [`Self::step_tick`]; frames where
     /// no tick ran keep interpolating along the same span (alpha keeps growing).
     pub fn writeback_interpolated(&self, ecs: &mut World, alpha: f32) {
@@ -1370,7 +1370,7 @@ impl Sim {
         self.world.compounds.get_mut(link.compound)
     }
 
-    /// Split parts (by their entity indices) OUT of the compound rooted at
+    /// Split parts (by their entity indices) out of the compound rooted at
     /// `root_eid`, binding the detached half to `new_root` (a node the caller
     /// just spawned; its transform is written immediately so the caller can
     /// re-parent the detached part nodes under it without a one-frame pop).
@@ -1559,7 +1559,7 @@ impl Sim {
         self.tick_prev_c.clear();
     }
 
-    /// Advance ONE body by one gameplay tick (the prediction-replay driver,
+    /// Advance one body by one gameplay tick (the prediction-replay driver,
     /// `docs/multiplayer.md` §6): runs the tick's physics substeps for just
     /// that body — exact, because the solver has no body-vs-body pass. No
     /// floating-origin rebase, no transform writeback. The render anchor
@@ -1587,7 +1587,7 @@ impl Sim {
     /// becomes the only thing that advances them. Bodies not named here are
     /// handed back.
     ///
-    /// This is what lets the rollback driver run the SAME integration live and
+    /// This is what lets the rollback driver run the same integration live and
     /// during a re-simulation (`docs/multiplayer.md` §7 P3). If the
     /// live tick used the whole-world step and the replay used per-body steps,
     /// the two would have to agree by coincidence rather than by construction —
@@ -1643,7 +1643,7 @@ impl Sim {
     /// height for crouching; the two normals say what it is standing on and
     /// what it is pressed against).
     ///
-    /// The position is the body's own, in absolute world coordinates — NOT the
+    /// The position is the body's own, in absolute world coordinates — not the
     /// node's transform, which between ticks holds the *interpolated render
     /// pose* (`docs/multiplayer.md` §3). Reading the render pose
     /// inside `fixedUpdate` is an alpha-dependent read, which is a
@@ -1676,7 +1676,7 @@ impl Sim {
     /// Active bodies report the body's own position; INACTIVE bodies (networked
     /// authority nodes on a client — snapshots drive their transforms, the body
     /// is frozen) report the entity's interpolated transform instead, so rays
-    /// hit them where the player actually SEES them.
+    /// hit them where the player actually sees them.
     pub fn body_hulls(&self, ecs: &World) -> Vec<BodyHull> {
         self.map
             .iter()
@@ -1730,9 +1730,9 @@ impl Sim {
         }
     }
 
-    /// Translate one body by `delta` WITHOUT touching its velocity — the
+    /// Translate one body by `delta` without touching its velocity — the
     /// dominant-frame carry: when an on-rails moon moves, everything inside its
-    /// sphere of influence moves WITH it (patched conics: you're simulated in
+    /// sphere of influence moves with it (patched conics: you're simulated in
     /// the dominant body's frame). The render anchor shifts too, so the carry
     /// never smears interpolation.
     pub fn shift_body(&mut self, eid: u32, delta: DVec3) {
@@ -1769,7 +1769,7 @@ impl Sim {
         }
     }
 
-    /// Every dynamic body's entity index + ABSOLUTE world position (carry pass).
+    /// Every dynamic body's entity index + absolute world position (carry pass).
     pub fn body_positions(&self) -> Vec<(u32, DVec3)> {
         self.map
             .iter()
@@ -1816,10 +1816,10 @@ impl Sim {
     }
 
     /// Re-read each dynamic body's tunable RigidBody params from the ECS (shape/size,
-    /// friction, restitution, gravity on/off, position/rotation locks), WITHOUT resetting
+    /// friction, restitution, gravity on/off, position/rotation locks), without resetting
     /// position or velocity. Lets the Inspector edit these live while playing — including
     /// dragging the radius/height/half-extents or switching shapes — with no teleport/reset.
-    /// A lock that turns ON here freezes the body where it IS: the restored position/
+    /// A lock that turns on here freezes the body where it is: the restored position/
     /// rotation re-captures from the current state, so toggling a lock mid-play (Inspector
     /// or a script's `rig.lock_y = true`) never teleports the body back to its spawn.
     pub fn sync_dynamic_params(&mut self, ecs: &World) {
@@ -1846,7 +1846,7 @@ impl Sim {
                 // KINEMATIC bodies follow their node's transform (scripts and
                 // animation move the node; the sim just tracks it) — origin-
                 // relative in f64 so far-out platforms stay exact. On clients,
-                // snapshots drive the transform, so this ALSO keeps a
+                // snapshots drive the transform, so this also keeps a
                 // replicated platform's hull where players see it.
                 let kin_pos = kinematic.then(|| {
                     (world_transform(ecs, ent).translation - self.world.origin).as_vec3()
@@ -2118,7 +2118,7 @@ mod runtime_body_tests {
     /// floor out from under a resting body through `terrain_field_mut` (the
     /// exact mirror path `terrain.dig` takes) and the body must fall into the
     /// hole — "standing on the invisible old surface" is the shipped bug this
-    /// pins down (Ty's solar playtest).
+    /// pins down (a Solar playtest).
     #[test]
     fn digging_under_a_body_updates_collision() {
         use floptle_field::{Brush, BrushProfile, ChunkField};
@@ -2195,7 +2195,7 @@ mod runtime_body_tests {
         // Enough grip to stand on a 30° pitch: friction is Coulomb, so a ramp
         // holds while `tan(angle) ≤ friction` and tan(30°) ≈ 0.58. The default
         // 0.3 slides off it, correctly — and this test is about where the
-        // surface IS, not about whether the body stays on it.
+        // surface is, not about whether the body stays on it.
         ecs.insert(e, RigidBody { gravity: true, friction: 0.8, ..Default::default() });
         let mut sim = Sim::build_layered(
             &ecs,
@@ -2210,7 +2210,7 @@ mod runtime_body_tests {
         let rest = sim.body_snapshot(e.index()).unwrap();
         // The unrotated, unscaled slab top is y = 0. Pitched 30° about X, the
         // surface under z = 4 rises/falls by tan(30°)·z·…; just assert the body
-        // rests ABOVE the untransformed surface and ON the transformed one:
+        // rests above the untransformed surface and on the transformed one:
         // distance-to-surface through the collider ≈ its capsule radius.
         let d = {
             let f = sim.terrain_field_mut(u32::MAX);
@@ -2233,8 +2233,8 @@ mod runtime_body_tests {
         );
     }
 
-    /// A body coasting in a circular orbit under `InvSq` gravity must STAY
-    /// bound and near-circular for many orbits at the 60 Hz tick — Ty's report
+    /// A body coasting in a circular orbit under `InvSq` gravity must stay
+    /// bound and near-circular for many orbits at the 60 Hz tick — the report
     /// ("perfect orbit… then it just ends up escaping") is exactly what secular
     /// energy injection by the integrator would look like.
     #[test]
@@ -2275,7 +2275,7 @@ mod runtime_body_tests {
              (started {r0}) — the integrator is injecting/removing energy"
         );
 
-        // The SHIP SCRIPT's cycle: every tick it reads the velocity and writes
+        // The SHIP script's cycle: every tick it reads the velocity and writes
         // it back (+ zero thrust) through set_body_velocity before the step —
         // that loop must be exactly lossless or orbits decay/escape in game
         // while the bare sim stays clean.
@@ -2312,7 +2312,7 @@ mod runtime_body_tests {
         let after = sim.body_snapshot(spawned.index()).unwrap();
         assert!(after.pos.y < y0, "the spawned body must FALL (it simulates)");
 
-        // Despawn the FIRST body: the swap-remove must not corrupt the others.
+        // Despawn the first body: the swap-remove must not corrupt the others.
         let survivor_before = sim.body_snapshot(ents[1].index()).unwrap();
         sim.remove_body(ents[0].index());
         assert!(sim.body_snapshot(ents[0].index()).is_none(), "removed body is gone");
@@ -2351,7 +2351,7 @@ mod runtime_body_tests {
             sim.step_body_tick(e.index(), step);
         }
         let end = sim.body_snapshot(e.index()).unwrap().pos;
-        // Render at alpha 0 = the anchor itself. It must sit within ONE tick
+        // Render at alpha 0 = the anchor itself. It must sit within one tick
         // of travel behind the final pose, not back at the restored pose
         // (6 ticks × 30 m/s = 3 m behind — the blip this guards against).
         sim.writeback_interpolated(&mut ecs, 0.0);
@@ -2387,7 +2387,7 @@ mod runtime_body_tests {
         assert_eq!(snap.sleep_time, 0.37);
 
         // A fresh sim (a resimulation restoring from a saved tick) starts
-        // awake — restoring must actually SET the sleep state, not merely
+        // awake — restoring must actually set the sleep state, not merely
         // agree with it by coincidence.
         let mut fresh =
             Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)), DVec3::ZERO);
@@ -2498,13 +2498,13 @@ mod runtime_body_tests {
             DVec3::ZERO,
             floptle_core::Layers::default(),
         );
-        // Static mode: NO body registered (that's the compute saving)…
+        // Static mode: no body registered (that's the compute saving)…
         assert!(sim.body_snapshot(floor.index()).is_none(), "static mode must not be a body");
         // …but its collider exists and names the node.
         assert!(sim.world.colliders.iter().any(|c| c.eid == Some(floor.index())));
 
-        // Run 2 s: the ball must come to rest ON the static box (y ≈ 1.0),
-        // the platform must NOT fall, and the rider must rest on the platform.
+        // Run 2 s: the ball must come to rest on the static box (y ≈ 1.0),
+        // the platform must not fall, and the rider must rest on the platform.
         for _ in 0..120 {
             sim.sync_dynamic_params(&ecs);
             sim.step_tick(1.0 / 60.0, None);
@@ -2554,7 +2554,7 @@ mod runtime_body_tests {
             floptle_core::Layers::default(),
         );
         // A solid floor box (node #100) and a trigger box (node #200) hanging
-        // in the fall path at y ≈ 2 — the body must pass THROUGH the trigger.
+        // in the fall path at y ≈ 2 — the body must pass through the trigger.
         sim.add_static_box(
             DVec3::new(0.0, 0.0, 0.0),
             Vec3::new(50.0, 0.5, 50.0),
@@ -2623,7 +2623,7 @@ mod runtime_body_tests {
 
     /// A `Trigger` on a RIGIDBODY node makes the body a sensor: a kinematic
     /// trigger never blocks the player but their overlap fires trigger
-    /// events, and a dynamic trigger falls straight THROUGH solid geometry
+    /// events, and a dynamic trigger falls straight through solid geometry
     /// while still firing trigger events against it.
     #[test]
     fn trigger_rigidbodies_are_sensors() {
@@ -2696,11 +2696,11 @@ mod runtime_body_tests {
         assert!((coin_y - 1.0).abs() < 1e-3, "the kinematic trigger stays put, at y = {coin_y}");
     }
 
-    /// The floating-origin rebase must be INVISIBLE to rendering: a body
+    /// The floating-origin rebase must be invisible to rendering: a body
     /// cruising past the threshold renders at exactly `velocity × dt`
     /// increments straight through the rebase tick — never a snap. (The
     /// "world moves around the player" feature: a threshold rebase onto
-    /// whole-number origins is EXACT in f32 — bodies, anchors, and the
+    /// whole-number origins is exact in f32 — bodies, anchors, and the
     /// interpolation span all shift together, and the ECS stays absolute
     /// f64. This guards that contract.)
     #[test]
@@ -2745,7 +2745,7 @@ mod parented_bodies {
     use super::*;
     use floptle_core::Parent;
 
-    /// A body under a group node lands where its WORLD position says, not
+    /// A body under a group node lands where its world position says, not
     /// where that position would put it if it were the node's local one.
     /// Broken (world written into the local translation) the node stands the
     /// group's whole transform away from its own body: on KnightFight, a

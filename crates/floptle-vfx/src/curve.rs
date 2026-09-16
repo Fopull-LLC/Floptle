@@ -1,6 +1,6 @@
 //! The value-or-curve property type and its baked lookup tables.
 //!
-//! Every particle property is a constant OR a hand-drawn curve (`ValueOrCurve`).
+//! Every particle property is a constant or a hand-drawn curve (`ValueOrCurve`).
 //! Curves are authored as keyframes with per-key interpolation (constant / linear /
 //! bezier-tangent) and evaluated analytically only at **bake time**: the runtime
 //! samples a fixed-size LUT (`LUT_N` entries), so the hot loop is one lerp per
@@ -32,7 +32,7 @@ impl Value {
     }
 }
 
-/// How a key reaches the NEXT key.
+/// How a key reaches the next key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Interp {
     /// Hold this key's value until the next key (stepped).
@@ -61,9 +61,9 @@ pub struct Key {
     pub t: f32,
     pub v: Value,
     pub interp: Interp,
-    /// Incoming tangent (slope), used when the PREVIOUS segment is `Bezier`.
+    /// Incoming tangent (slope), used when the previous segment is `Bezier`.
     pub in_tan: f32,
-    /// Outgoing tangent (slope), used when THIS segment is `Bezier`.
+    /// Outgoing tangent (slope), used when this segment is `Bezier`.
     pub out_tan: f32,
 }
 
@@ -108,7 +108,7 @@ impl Curve {
         let (va, vb) = (a.v.channels(), b.v.channels());
         let mut out = [0.0f32; 4];
         match a.interp {
-            // Hold `a` across the segment; exactly ON the next key returns it.
+            // Hold `a` across the segment; exactly on the next key returns it.
             Interp::Constant => out = if u >= 1.0 { vb } else { va },
             Interp::Linear => {
                 for c in 0..4 {
@@ -135,7 +135,7 @@ impl Curve {
 }
 
 /// A property that is a single constant, a per-particle random between two bounds,
-/// OR a drawn curve. `Const` is the default; the inspector promotes it to a `Range`
+/// or a drawn curve. `Const` is the default; the inspector promotes it to a `Range`
 /// (🎲) or a `Curve` (∿). A `Range` value is drawn once at the particle's birth from
 /// its seed and held for its whole life — "random size 0.1–0.4 per spark".
 #[derive(Clone, Debug, PartialEq)]

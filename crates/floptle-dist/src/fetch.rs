@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
 
-/// True when `url`'s host is GitHub — the ONLY place it's safe to attach a private-repo
+/// True when `url`'s host is GitHub — the only place it's safe to attach a private-repo
 /// token (so a manifest/artifact URL pointing elsewhere can't exfiltrate it). Covers the
 /// asset CDN (`*.githubusercontent.com`) that release downloads redirect to.
 pub fn is_github_host(url: &str) -> bool {

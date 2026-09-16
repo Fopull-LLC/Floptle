@@ -1,6 +1,6 @@
 //! Post-processing stack — full-screen color effects that run at the same
 //! resolution the scene was composited at: full frame res normally, the retro
-//! internal res in retro mode (the chain runs BEFORE the nearest-neighbor
+//! internal res in retro mode (the chain runs before the nearest-neighbor
 //! upscale, so every effect goes chunky with the same pixels as the scene). The
 //! chain is **SSAO** (screen-space ambient occlusion from the depth buffer,
 //! half-res + blur, multiplied over the scene), **bloom** (bright-pass →
@@ -153,9 +153,9 @@ pub struct PostSettings {
     /// Depth of field: distance from the camera, in world units, that is sharp.
     /// 0 = off (there is no meaningful "focus at the camera").
     pub dof_focus: f32,
-    /// How far BEYOND `dof_focus` stays acceptably sharp.
+    /// How far beyond `dof_focus` stays acceptably sharp.
     pub dof_range: f32,
-    /// How far IN FRONT of it does. 0 = half of `dof_range` — the old single-range
+    /// How far in front of it does. 0 = half of `dof_range` — the old single-range
     /// behaviour, and roughly what a lens does.
     pub dof_near_range: f32,
     /// The widest the blur gets, in pixels.
@@ -186,7 +186,7 @@ pub struct PostSettings {
     /// Clip → **camera-relative world** for the frame being drawn. Identity
     /// means "no camera information", which reads as no motion.
     pub motion_inv_view_proj: [[f32; 4]; 4],
-    /// Camera-relative world (THIS frame's origin) → the PREVIOUS frame's clip.
+    /// Camera-relative world (this frame's origin) → the previous frame's clip.
     ///
     /// Both this and `motion_inv_view_proj` are per-frame camera facts rather
     /// than artist settings, and they live here for the same reason `time`
@@ -271,7 +271,7 @@ impl PostSettings {
     /// Posterize counts even though the chain no longer applies it, and that is
     /// load-bearing: it is what makes the caller render the scene into a post
     /// target instead of straight at the swapchain, and the palette pass has to
-    /// be able to READ the frame it quantizes. A swapchain texture cannot be
+    /// be able to read the frame it quantizes. A swapchain texture cannot be
     /// sampled.
     pub fn any(&self) -> bool {
         self.bloom
@@ -297,7 +297,7 @@ impl PostSettings {
 
     /// Is the colour grade doing anything?
     ///
-    /// Asked in ONE place so a caller cannot half-remember which of eight knobs
+    /// Asked in one place so a caller cannot half-remember which of eight knobs
     /// has which identity value — and it matters, because a grade pass that
     /// runs at identity is not free: it is a full-screen read and write, and on
     /// a retro target it is also a round trip through a scratch texture.
@@ -318,7 +318,7 @@ impl PostSettings {
         self.aberration != 0.0 || self.distortion != 0.0
     }
 
-    /// Is depth of field doing anything? Needs a focus distance AND a blur to
+    /// Is depth of field doing anything? Needs a focus distance and a blur to
     /// reach; either at zero is the identity.
     pub fn dof_on(&self) -> bool {
         self.dof_focus > 0.0 && self.dof_max_blur > 0.0
@@ -399,7 +399,7 @@ struct SsaoParams {
     params: [f32; 4],
 }
 
-/// The three bind-group layouts a post pass uses, built in ONE place.
+/// The three bind-group layouts a post pass uses, built in one place.
 ///
 /// One builder rather than a descriptor per call site because a bind group is
 /// only usable with a *structurally equal* layout: the moment a hand-copied
@@ -504,7 +504,7 @@ struct CustomPost {
 }
 
 /// One entry in the scene's ordered pass list: which shader, and the knob values
-/// for THIS occurrence of it.
+/// for this occurrence of it.
 ///
 /// Per-occurrence and not per-shader, because listing the same shader twice with
 /// different settings is a real thing to want — two outline passes at different
@@ -520,7 +520,7 @@ struct PassSlot {
 /// Every authored full-screen pass a project has compiled, and the pipelines
 /// behind them.
 ///
-/// Deliberately NOT owned by [`PostStack`]: a running editor holds several
+/// Deliberately not owned by [`PostStack`]: a running editor holds several
 /// chains (the surface, the docked Game view, each Inspector preview) and a
 /// scene's screen shaders belong to the scene, not to one of its viewports. One
 /// registry, and any chain can run any of its passes.
@@ -693,7 +693,7 @@ pub struct PostStack {
     ao_bind1: wgpu::BindGroup, // ao_a as the fs_ssao_apply group(1) input
     width: u32,
     height: u32,
-    /// Pixel-perfect mode (retro): the AO factor is computed at FULL chain res —
+    /// Pixel-perfect mode (retro): the AO factor is computed at full chain res —
     /// one value per (retro) pixel — with a tightened blur, instead of the
     /// half-res + wide-blur combo that suits big framebuffers. At retro sizes the
     /// half-res buffer is so coarse and the fixed ±4-texel blur so wide (in
@@ -786,7 +786,7 @@ impl PostStack {
         // the SSAO one because SSAO's uniform is a different (much larger)
         // struct, and a bind group whose buffer is the wrong shape is a
         // validation error at the moment of drawing rather than at build time.
-        // Depth of field's second group — the SAME shape an authored post pass
+        // Depth of field's second group — the same shape an authored post pass
         // reads its depth through (`layouts::depth`), so the two cannot drift.
         let dof_layout = layouts::depth(device, "post-dof");
         let ao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -816,7 +816,7 @@ impl PostStack {
             immediate_size: 0,
         });
 
-        // TWO formats, and the split is the whole point of the chain.
+        // two formats, and the split is the whole point of the chain.
         //
         // `chain` is the scene format — floating point when a window is driving
         // it — and every scratch target and every intermediate pass lives there,
@@ -875,7 +875,7 @@ impl PostStack {
                 alpha: wgpu::BlendComponent::REPLACE,
             }),
         );
-        // The ONE pass that writes the display format — the tonemap's home, and
+        // The one pass that writes the display format — the tonemap's home, and
         // therefore always the last thing that runs (see `run`).
         let finish_pipeline = {
             let layout_only = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1129,7 +1129,7 @@ impl PostStack {
 
     /// [`run`](Self::run), plus the scene's authored `stage post` passes.
     ///
-    /// They run after depth of field and the denoise and BEFORE the colour
+    /// They run after depth of field and the denoise and before the colour
     /// grade, and every part of that is a decision:
     ///
     /// - *after depth of field*, because focus is a property of the scene and an
@@ -1248,7 +1248,7 @@ impl PostStack {
 
         // ---- the look chain -------------------------------------------------
         //
-        // ORDER, and every step of it is a decision:
+        // order, and every step of it is a decision:
         //
         //   denoise → grade → [bloom, above] → lens → sharpen → finish(grain)
         //
@@ -1284,8 +1284,8 @@ impl PostStack {
             dst
         };
 
-        // Depth of field goes FIRST of the look chain, before even the denoise:
-        // it is the only pass here that is about the SCENE rather than about the
+        // Depth of field goes first of the look chain, before even the denoise:
+        // it is the only pass here that is about the scene rather than about the
         // picture, and it needs the frame's own depth to still describe what is
         // in the frame. Everything downstream — grade, bloom, lens, sharpen — is
         // then working on an image whose focus is already decided, which is the
@@ -1329,7 +1329,7 @@ impl PostStack {
                     0.0,
                 ],
                 // A near range of 0 means "half the far range" — the behaviour
-                // before there were two, resolved HERE so the shader never has
+                // before there were two, resolved here so the shader never has
                 // to know about the sentinel.
                 f: [
                     0.0,
@@ -1357,7 +1357,7 @@ impl PostStack {
         }
 
         // Motion blur sits directly after depth of field and before everything
-        // else, for the same reason: both are about the SCENE, and both need the
+        // else, for the same reason: both are about the scene, and both need the
         // frame's own depth to still describe what is in the frame. It goes
         // after DoF rather than before because a lens defocuses light and then
         // the shutter smears what the lens produced — that is the order the two
@@ -1426,7 +1426,7 @@ impl PostStack {
         }
         // ---- the scene's own screen shaders ---------------------------------
         if let Some(c) = custom {
-            // ONE depth bind for all of them. Without a frame (a 2D project, or
+            // one depth bind for all of them. Without a frame (a 2D project, or
             // a viewport that renders no depth) they get a 1×1 texture cleared
             // to far, so `sceneDepth` reads sky everywhere and `sceneNormal`
             // faces the camera: an outline finds no edges and quietly draws

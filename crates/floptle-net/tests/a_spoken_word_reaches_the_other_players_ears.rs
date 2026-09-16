@@ -109,7 +109,7 @@ fn converse(s: &mut Session, pcm: &[f32], listener_at: DVec3, speaker_at: DVec3)
         l.fill(0.0);
         r.fill(0.0);
         core.render(&mut l, &mut r);
-        // BOTH ears. A speaker off to one side pans almost entirely into one
+        // both ears. A speaker off to one side pans almost entirely into one
         // channel, so collecting the left alone would call a perfectly audible
         // voice silent.
         heard.extend(l.iter().zip(&r).map(|(a, b)| a.abs().max(b.abs())));

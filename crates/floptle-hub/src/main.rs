@@ -36,7 +36,7 @@ fn main() -> eframe::Result<()> {
         Paths::at(std::path::Path::new("./.floptle-hub"))
     });
 
-    // The desktop learns what this window is BEFORE it opens (Linux): a
+    // The desktop learns what this window is before it opens (Linux): a
     // Wayland compositor shows the icon of the `.desktop` entry whose name is
     // the window's app_id, and nothing else — a window icon handed to it is
     // ignored. The Hub is the thing that is installed, so it writes the

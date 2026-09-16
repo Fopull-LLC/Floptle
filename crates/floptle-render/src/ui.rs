@@ -1,6 +1,6 @@
 //! The game-UI render pass (docs/ui-make.md §10).
 //!
-//! Consumes a [`floptle_ui::DrawList`] (design units) and draws it in ONE
+//! Consumes a [`floptle_ui::DrawList`] (design units) and draws it in one
 //! instanced pipeline: solid rounded-rect shapes (SDF mask in the fragment),
 //! images (any raster-registered texture), and text (fontdue-rasterized glyphs
 //! from a shared R8 atlas). Batches switch only the bound texture, so a whole
@@ -103,7 +103,7 @@ pub struct UiBatch {
     pub range: std::ops::Range<u32>,
 }
 
-/// The wgpu blend state for each [`Blend`] mode. Premultiplication is NOT
+/// The wgpu blend state for each [`Blend`] mode. Premultiplication is not
 /// assumed anywhere in the UI pass — colours arrive straight, so `SrcAlpha`
 /// appears on the source factor of every mode that respects alpha.
 fn blend_state(b: Blend) -> wgpu::BlendState {
@@ -398,7 +398,7 @@ pub struct Ui {
     /// One pipeline per [`Blend`] mode, indexed by [`blend_index`].
     pipeline: [wgpu::RenderPipeline; 4],
     /// The world-canvas variants (Scene-view authoring): depth-tested against
-    /// the scene so the layer plane sits IN the world.
+    /// the scene so the layer plane sits in the world.
     pipeline_world: [wgpu::RenderPipeline; 4],
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
@@ -409,7 +409,7 @@ pub struct Ui {
     fonts: Vec<fontdue::Font>,
     /// Asset path → index into `fonts` (None = failed to parse, use fallback).
     font_ids: HashMap<String, Option<usize>>,
-    /// What an EMPTY font name resolves to — the project's font when it names
+    /// What an empty font name resolves to — the project's font when it names
     /// one, else 0 (`floptle/0124`). Project fonts append to the stack, so
     /// without this every unnamed string is the embedded Roboto forever.
     default_font: usize,
@@ -425,7 +425,7 @@ pub struct Ui {
     atlas_max: u32,
     /// Bumped by `set_time`, i.e. once per rendered frame.
     frame: u64,
-    /// Set when a glyph could not be placed. Resolved at the NEXT frame's first
+    /// Set when a glyph could not be placed. Resolved at the next frame's first
     /// `pack`, never mid-frame — glyphs already drawn this frame hold UVs into
     /// the current atlas, and repacking under them would smear the text.
     overflowed: bool,
@@ -445,7 +445,7 @@ pub struct Ui {
     // (kept for late pipeline builds), the registered pipelines, and the
     // per-element param bindings.
     globals_layout: wgpu::BindGroupLayout,
-    /// group(1): the RASTER SURFACE layout, so a registered project texture
+    /// group(1): the RASTER surface layout, so a registered project texture
     /// binds straight into a UI draw. See `Ui::new` — this is not the same
     /// shape as `tex_layout` and has not been since the surface grew its
     /// material maps.
@@ -551,7 +551,7 @@ impl Ui {
                 count: None,
             }],
         });
-        // Group 1 IS the raster material-texture layout, so project textures
+        // Group 1 is the raster material-texture layout, so project textures
         // bind here without re-registration (the same trick particles use).
         //
         // Taken from `raster::surface_bind_layout` rather than written out
@@ -899,9 +899,9 @@ impl Ui {
     }
 
     /// Capture the composited scene in `src_view` (the color target holding
-    /// everything drawn BEFORE this UI layer) into the backdrop texture, and
+    /// everything drawn before this UI layer) into the backdrop texture, and
     /// point `backdrop()` at it for this frame's draw. Records into `enc`; the
-    /// caller must run this BEFORE `draw`, and pass the same `src_view` its UI is
+    /// caller must run this before `draw`, and pass the same `src_view` its UI is
     /// about to be drawn on top of. `w`/`h` are the target's physical size.
     pub fn capture_backdrop(
         &mut self,
@@ -1016,8 +1016,8 @@ impl Ui {
 
     /// Register (or hot-replace) a `stage ui` .flsl pipeline from its WGSL
     /// chunk. Like the raster's `register_flsl_shader`, the field shim +
-    /// stdlib SUPPORT arrive INSIDE `chunk` (caller-assembled); the module is
-    /// `ui.wgsl + chunk`. Validate the assembly with naga BEFORE calling — a
+    /// stdlib SUPPORT arrive inside `chunk` (caller-assembled); the module is
+    /// `ui.wgsl + chunk`. Validate the assembly with naga before calling — a
     /// bad module aborts the device.
     pub fn register_ui_shader(
         &mut self,
@@ -1045,7 +1045,7 @@ impl Ui {
             immediate_size: 0,
         });
         // A screen layer draws onto the window; a world layer draws into the
-        // SCENE target, which is HDR and a different format. Built as a
+        // scene target, which is HDR and a different format. Built as a
         // function of which pass the pipeline is for, because sharing one
         // `targets` array between the two is exactly how the world pipeline
         // came to be built for the window's format — a hard validation error
@@ -1467,7 +1467,7 @@ impl Ui {
                 }
             };
             // A custom-shader face: unresolved (missing/broken .flsl) falls
-            // back to a plain quad, so the element still shows SOMETHING.
+            // back to a plain quad, so the element still shows something.
             let shader = q.shader.as_ref().and_then(|(p, owner)| resolve_shader(p, *owner));
             let (clip, clip_r) = clip_px(&q.clip);
             let kind = match q.kind {
@@ -1643,7 +1643,7 @@ impl Ui {
                 } else {
                     t.text.split('\n').map(str::to_string).collect()
                 };
-                // **Taken BEFORE any ellipsis.** An ellipsis truncates
+                // **Taken before any ellipsis.** An ellipsis truncates
                 // characters that were typed and appends one that was not, so a
                 // map derived afterwards would be looking for source characters
                 // that are no longer on the line — and, past a truncated line,
@@ -1681,7 +1681,7 @@ impl Ui {
                 let widths = lines.iter().map(|l| advance(l)).collect();
                 (lines, widths, glyph_src)
             };
-            // Per DRAWN character, the colour a span puts on it — `None` keeps
+            // Per drawn character, the colour a span puts on it — `None` keeps
             // the run's own. Flattened once here rather than searched per glyph.
             let span_color: Vec<Option<[f32; 4]>> = if t.spans.is_empty() {
                 Vec::new()
@@ -1719,7 +1719,7 @@ impl Ui {
             // approximate anyway at UI sizes.
             //
             // The third element says whether spans may recolour this pass. Only
-            // the run itself: a shadow and an outline are each ONE colour by
+            // the run itself: a shadow and an outline are each one colour by
             // definition, and tinting them per word would turn a legibility
             // outline into a second, blurrier copy of the coloured text.
             let mut passes: Vec<([f32; 2], [f32; 4], bool)> = Vec::new();
@@ -1823,7 +1823,7 @@ impl Ui {
                             }
                             _ => color,
                         };
-                        // Applied AFTER layout, so a displaced glyph never
+                        // Applied after layout, so a displaced glyph never
                         // re-wraps its line and never moves its neighbours —
                         // `pen_x` advances by the metrics either way.
                         let nudge = si
@@ -2178,7 +2178,7 @@ mod tests {
         const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
         // Narrow enough that this wraps several times — the whole question is
-        // whether it wraps the SAME way with a span in it.
+        // whether it wraps the same way with a span in it.
         let base = floptle_ui::TextRun {
             rect: [0.0, 0.0, 90.0, 200.0],
             text: "press the red button now".into(),
@@ -2245,7 +2245,7 @@ mod tests {
 
         // ---- per-glyph offsets: the half spans alone cannot do -------------
         //
-        // Displacing a glyph must move that glyph and NOTHING else: not its
+        // Displacing a glyph must move that glyph and nothing else: not its
         // neighbours, and not the line it is in. A hook that re-flowed the run
         // would make every wobble a re-wrap.
         let nudged = pack(
@@ -2274,7 +2274,7 @@ mod tests {
         assert!((b[1] - (a[1] - 5.0)).abs() < 1e-3, "by the amount it was pushed: {a:?} {b:?}");
     }
 
-    /// `floptle/0124`: an unnamed font is the PROJECT's, not the embedded one.
+    /// `floptle/0124`: an unnamed font is the project's, not the embedded one.
     ///
     /// Project fonts append to the stack, so slot 0 could never be theirs — and
     /// `draw.text` had no font argument at all, so a game whose UI is a pixel
@@ -2468,7 +2468,7 @@ mod tests {
             rows_1k * 2 < old_rows,
             "shelf packing must more than halve the footprint ({rows_1k} vs {old_rows})"
         );
-        // But it is NOT sufficient, and that is the point — a sixteen-size
+        // But it is not sufficient, and that is the point — a sixteen-size
         // project overruns 1024² however well it is packed. Growing the atlas
         // is what actually stops text disappearing.
         assert!(refused_1k > 0, "this set is genuinely too big for 1024 — that is the premise");

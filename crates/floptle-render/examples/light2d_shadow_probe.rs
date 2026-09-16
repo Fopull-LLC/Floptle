@@ -86,7 +86,7 @@ fn main() {
     );
     let view_proj = cam.view_proj(1.0);
 
-    // The light sits four units to the LEFT of the wall, so the wall's shadow
+    // The light sits four units to the left of the wall, so the wall's shadow
     // falls across the whole right-hand side of the frame.
     let base = |inner: f32, exponent: f32| {
         let mut u = Light2dUniform {

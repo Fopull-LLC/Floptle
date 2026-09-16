@@ -3,7 +3,7 @@
 //! Billboards bind textures registered by the raster pass, so the two group(1)
 //! layouts must be the same layout — not two hand-written copies that happen to
 //! match, which is what they were until the surface maps grew one side from two
-//! bindings to ten. A mismatch is a validation error at DRAW time, in a running
+//! bindings to ten. A mismatch is a validation error at draw time, in a running
 //! editor, on whichever scene happens to have an effect in it: exactly the
 //! failure a probe should catch first.
 //!

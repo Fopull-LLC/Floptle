@@ -120,7 +120,7 @@ mod tests {
 
     /// **A version from the network cannot become a path.**
     ///
-    /// It is used as a directory name AND a URL component, so the two escapes
+    /// It is used as a directory name and a URL component, so the two escapes
     /// worth refusing are a separator and a climb. The accepted half matters
     /// just as much: `0.85.0-rc6` is what production is on today, and a guard
     /// that refused a pre-release would refuse every deployment there is.
@@ -144,7 +144,7 @@ mod tests {
         }
     }
 
-    /// The box downloads the engine for its OWN architecture.
+    /// The box downloads the engine for its own architecture.
     ///
     /// The fleet box is aarch64 and `floptle-dist::PLATFORMS` has never carried
     /// a `linux-aarch64`; a binary built for the wrong one is an `Exec format

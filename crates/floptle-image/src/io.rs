@@ -23,7 +23,7 @@ use crate::vector::VPath;
 use crate::Blend;
 
 const MAGIC: &[u8; 4] = b"FLIM";
-/// The layout this build WRITES. Bump it together with a reader that still
+/// The layout this build writes. Bump it together with a reader that still
 /// handles every version back to [`MIN_VERSION`], and append new fields at the
 /// end so the older layout's byte offsets are untouched.
 ///
@@ -230,7 +230,7 @@ pub fn encode(img: &Image) -> Vec<u8> {
             }
         }
     }
-    // v2: the sheet cell grid, appended AFTER the layers so a v1 file's bytes
+    // v2: the sheet cell grid, appended after the layers so a v1 file's bytes
     // are unchanged up to here and the old reader's offsets all still hold.
     if let Some((sc, sr)) = img.sheet {
         put_u32(&mut o, sc);
@@ -382,7 +382,7 @@ pub fn load_document(path: &Path) -> Option<Image> {
     decode(&floptle_vfs::read(path).ok()?)
 }
 
-/// Open ANY image path as a document: the sibling `.flimg` if there is one,
+/// Open any image path as a document: the sibling `.flimg` if there is one,
 /// otherwise the image wrapped as a one-layer document. This is what
 /// double-clicking a PNG in the asset browser does.
 pub fn open_any(path: &Path, default_mode: Mode) -> Option<Image> {
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(back.layers.len(), img.layers.len());
     }
 
-    /// A document that uses nothing new is WRITTEN in the older layout, so it
+    /// A document that uses nothing new is written in the older layout, so it
     /// still opens in the build before this one. Adding a field should cost
     /// forward compatibility only for the files that use it.
     #[test]

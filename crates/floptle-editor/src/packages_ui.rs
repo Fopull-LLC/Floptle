@@ -132,7 +132,7 @@ pub(crate) struct PackagesState {
     /// Browse's search box.
     search: String,
     /// Which shelves are being asked for, and what a package must hold. Both
-    /// are AND: picking two narrows, it does not widen.
+    /// are and: picking two narrows, it does not widen.
     categories: Vec<floptle_package::Category>,
     contains: Vec<floptle_package::Facet>,
     sort: floptle_package::Sort,
@@ -158,7 +158,7 @@ pub(crate) struct PackagesState {
     reviews_for: Option<String>,
     reviews: ReviewsState,
     /// A package that arrived from somewhere else and asked for something. It is
-    /// installed but NOT enabled until the person who installed it has seen what
+    /// installed but not enabled until the person who installed it has seen what
     /// it wants — see `gate_remote_install`.
     awaiting_consent: Option<String>,
     /// A gallery image opened full size: its source, its caption, and the folder
@@ -369,7 +369,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                 on,
                             ) {
                                 Ok(()) => {
-                                    // Ticking the box IS the consent.
+                                    // Ticking the box is the consent.
                                     if on
                                         && state.awaiting_consent.as_deref()
                                             == Some(entry.id.as_str())
@@ -412,7 +412,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                     }
 
                     // Arrived from somewhere else and asked for something, so it
-                    // is sitting here NOT running. The manifest is read from
+                    // is sitting here not running. The manifest is read from
                     // disk rather than from the host, because a package that is
                     // not enabled was never loaded — and this has to say what it
                     // wants precisely when it is not yet allowed to have it.
@@ -934,7 +934,7 @@ fn toggle<T: PartialEq + Copy>(list: &mut Vec<T>, v: T) {
 /// warn about (`floptle/0137`).
 ///
 /// A pure function on purpose, separate from the `ui.label` call that paints
-/// it: the catalogue's own claim vs fact split means `None` covers TWO
+/// it: the catalogue's own claim vs fact split means `None` covers two
 /// different states that must not be conflated — "the registry did not say"
 /// (`Listing::permissions` is `None`) and "declares none" (`Some(vec![])`) —
 /// and neither one is a chip worth drawing. Only an author who actually
@@ -1289,8 +1289,8 @@ fn detail_panel(
     }
 
     ui.separator();
-    // The gate Ty asked for: you may review what you have actually run.
-    // Installed AND enabled — a package sitting there switched off has not been
+    // The gate: you may review what you have actually run.
+    // Installed and enabled — a package sitting there switched off has not been
     // tried.
     let mine = reviewable_version(have);
     if state.reviews_for.as_deref() != Some(listing.id.as_str()) {
@@ -1477,7 +1477,7 @@ fn non_empty(s: &str) -> Option<String> {
 
 /// The version you may review, or `None` if you may not.
 ///
-/// **Installed AND enabled.** Not installed is obvious; installed but switched
+/// **Installed and enabled.** Not installed is obvious; installed but switched
 /// off is the interesting one — a package sitting there disabled has not been
 /// tried, and since v0.55.3 that is exactly the state a package arrives in when
 /// it asks for a permission. Reviewing from that state would mean reviewing
@@ -1643,7 +1643,7 @@ fn reviews_section(
     // something is refused — a browser does all three properly, and it is the
     // one place the account already lives.
     //
-    // Not gated on being signed in HERE: the site will ask if it has to, and a
+    // Not gated on being signed in here: the site will ask if it has to, and a
     // button that refuses to open until you sign in twice is the friction this
     // replaced.
     ui.horizontal(|ui| {
@@ -1804,7 +1804,7 @@ mod consent_tests {
     use super::*;
 
     /// A score has to survive the trip to five characters, because for most
-    /// people the glyphs ARE the score — they never read the number.
+    /// people the glyphs are the score — they never read the number.
     #[test]
     fn a_score_reads_the_same_as_stars_as_it_does_as_a_number() {
         assert_eq!(stars(5.0).chars().filter(|c| *c == '★').count(), 5);
@@ -1904,7 +1904,7 @@ mod consent_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The manifest has to be readable with the package switched OFF — a
+    /// The manifest has to be readable with the package switched off — a
     /// disabled package is never loaded by the host, so the consent block cannot
     /// ask the host what it wants.
     #[test]

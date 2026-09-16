@@ -96,7 +96,7 @@ impl ConsoleState {
                 floptle_script::LogLevel::Warn => Some("warning"),
                 // `print` output is the game's own business; only problems are
                 // worth forcing onto a player's terminal.
-                // In a browser the console IS the terminal, and it is hidden
+                // In a browser the console is the terminal, and it is hidden
                 // from a player unless they open it — so a script's prints go
                 // there too; nobody is being spammed.
                 floptle_script::LogLevel::Debug => cfg!(target_arch = "wasm32").then_some("print"),
@@ -343,7 +343,7 @@ fn mirror_line(line: &str) {
     // The page's transcript first (`window.floptleLog`, which also echoes to
     // the browser console): that is what `tools/web/shot.py` collects, and a
     // spawn that failed or a shader a browser refused has to be READABLE from
-    // a headless run — 2026-09-05, two bugs sat behind an empty transcript.
+    // a headless run — two bugs once sat behind an empty transcript.
     // A page without the hook still gets the browser console.
     #[cfg(target_arch = "wasm32")]
     if !crate::player::web::log(line) {

@@ -178,8 +178,8 @@ pub struct NavMesh {
     #[serde(skip)]
     pub(crate) summary_cache: OnceLock<Summary>,
     /// Which island each polygon is on. Derived like the other two, and cached
-    /// for the same reason plus a sharper one: the Inspector asks for it EVERY
-    /// FRAME to fill in one label, and on a real level that is a union-find over
+    /// for the same reason plus a sharper one: the Inspector asks for it every
+    /// frame to fill in one label, and on a real level that is a union-find over
     /// seventy thousand polygons per frame.
     #[serde(skip)]
     pub(crate) island_index: OnceLock<Vec<u32>>,
@@ -499,7 +499,7 @@ impl NavMesh {
     ///
     /// A fully streamed level has no edit-time geometry to hand-bake, so the
     /// only route to ever having a mesh is splicing regions in as they
-    /// stream — and splicing needs a host to splice INTO. [`Self::empty_like`]
+    /// stream — and splicing needs a host to splice into. [`Self::empty_like`]
     /// makes the same shape but needs an existing mesh to copy `origin` /
     /// `cell_size` / `areas` from; this is the one for when there isn't one
     /// yet.
@@ -799,7 +799,7 @@ impl NavMesh {
         v: f32,
         filter: &QueryFilter,
     ) -> Option<[f32; 3]> {
-        // Thread-local so a one-shot draw still allocates nothing, and the SAME
+        // Thread-local so a one-shot draw still allocates nothing, and the same
         // gather-and-pick code as the held sampler, so the two cannot disagree
         // about where a given `u` lands.
         thread_local! {
@@ -886,7 +886,7 @@ impl NavMesh {
         };
         // The sort and the dedup stay. A polygon spanning several buckets is
         // handed back once per bucket, and the draw walks the cumulative areas —
-        // so the ORDER decides which polygon a given `u` lands on. Left in
+        // so the order decides which polygon a given `u` lands on. Left in
         // bucket order, the same seed would pick different points depending on
         // the grid, and this engine rolls back and re-simulates. Determinism is
         // the whole reason the caller supplies `u` and `v`; it would be a
@@ -1488,7 +1488,7 @@ mod tests {
         // Across one floor: nothing in the way.
         assert_eq!(mesh.raycast([1.0, 0.0, 3.0], [5.0, 0.0, 3.0], 1.0), None);
 
-        // Out over the gap: it stops, and it stops ON the floor rather than in
+        // Out over the gap: it stops, and it stops on the floor rather than in
         // the air over it.
         let hit = mesh
             .raycast([1.0, 0.0, 3.0], [14.0, 0.0, 3.0], 1.0)

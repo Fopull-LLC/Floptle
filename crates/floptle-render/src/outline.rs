@@ -4,7 +4,7 @@
 //! raster mask pipeline for meshes, or the raymarch mask pipeline for SDF matter).
 //! This pass edge-detects the mask and draws the outline color over the final frame.
 //! Because it operates on the rendered silhouette — not on geometry — one outline
-//! works for ANY shape: meshes, the blob, future sculpted terrain. The mask is at
+//! works for any shape: meshes, the blob, future sculpted terrain. The mask is at
 //! full frame resolution, so the outline stays crisp even over a low-res retro scene.
 
 use crate::device::Gpu;

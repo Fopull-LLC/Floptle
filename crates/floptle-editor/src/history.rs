@@ -48,7 +48,7 @@ impl Editor {
         }
     }
 
-    /// Record the current scene as an undo point (call BEFORE a discrete edit).
+    /// Record the current scene as an undo point (call before a discrete edit).
     /// A no-op during Play — see [`Self::push_history`].
     pub(crate) fn record(&mut self) {
         if self.playing {
@@ -64,7 +64,7 @@ impl Editor {
     pub(crate) fn begin_edit(&mut self) {
         if !self.editing {
             if let Some(snap) = self.frame_snapshot.take() {
-                // The baseline IS the frame-start selection — pair it with the
+                // The baseline is the frame-start selection — pair it with the
                 // frame-start scene so undoing the edit restores both.
                 let sel = self.refs_of(&self.sel_baseline);
                 self.push_history(Snapshot::Scene(snap, sel));
@@ -98,11 +98,11 @@ impl Editor {
         self.refs_of(&self.selection)
     }
 
-    /// Re-point the live selection at `refs`, resolved against the CURRENT
+    /// Re-point the live selection at `refs`, resolved against the current
     /// world (call after any restore). Order is kept — the last ref is the
     /// primary — and anything `restore` already re-selected isn't duplicated.
     ///
-    /// `replace` clears first: a Selection step IS the whole selection, while a
+    /// `replace` clears first: a Selection step is the whole selection, while a
     /// Scene step's refs are laid over what `restore` already re-selected (the
     /// map sub-object node it kept hold of).
     ///
@@ -129,7 +129,7 @@ impl Editor {
 
     /// Per-frame history boundary (call once, at the top of a frame): captures
     /// the pre-edit scene + selection that `begin_edit` coalesces against, and
-    /// turns a selection change since the LAST boundary into its own
+    /// turns a selection change since the last boundary into its own
     /// [`Snapshot::Selection`] step — unless something already on the history
     /// (or an undo/restore/load) explains it.
     pub(crate) fn begin_history_frame(&mut self) {
@@ -252,8 +252,8 @@ impl Editor {
         Some(cur)
     }
 
-    /// Bank a map-geometry edit: the pre-edit mesh AND the paint that was on it,
-    /// as ONE undo step. Call it with the mesh as it was before the op (the
+    /// Bank a map-geometry edit: the pre-edit mesh and the paint that was on it,
+    /// as one undo step. Call it with the mesh as it was before the op (the
     /// paint is still pre-edit at this point — it only re-attaches on the next
     /// `sync_map_paint`, which is a frame away).
     pub(crate) fn push_map_history(&mut self, id: u32, pre: floptle_map::MapMesh) {
@@ -372,7 +372,7 @@ impl Editor {
 
     /// Swap a texture-paint stroke's nodes between their snapshot state and the current
     /// one, returning the inverse snapshot (for the opposite stack). A `None` target for a
-    /// node = "no paint before this stroke", so it REMOVES that node's paint entirely —
+    /// node = "no paint before this stroke", so it removes that node's paint entirely —
     /// undoing a first-ever stroke reveals the untouched node, which is the point. Removed
     /// nodes have no inverse (redo can't recreate a dropped canvas); if the whole stroke
     /// was removals, there's nothing to redo at all.
@@ -487,7 +487,7 @@ mod tests {
         assert!(!ed.scene_dirty, "round-tripping picks still isn't an edit");
     }
 
-    /// A selection change that happened as PART of an edit (delete clears the
+    /// A selection change that happened as part of an edit (delete clears the
     /// selection) belongs to that edit's step — undoing brings the node back
     /// selected, and no extra Ctrl+Z is charged for the deselect.
     #[test]

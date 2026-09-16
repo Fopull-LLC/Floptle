@@ -239,7 +239,7 @@ fn guides_path(project_root: &std::path::Path, scene: &str) -> std::path::PathBu
     project_root.join(".floptle").join("guides").join(format!("{safe}.ron"))
 }
 
-/// Guides are keyed by the layer node's NAME, not its entity index: entity
+/// Guides are keyed by the layer node's name, not its entity index: entity
 /// indices are a runtime detail that changes when a scene is edited and
 /// reloaded, and guides that silently jump to another layer would be worse than
 /// guides that don't persist at all.
@@ -311,7 +311,7 @@ pub(crate) struct Row {
     pub order: i32,
 }
 
-/// Flatten a layer's element subtree in the SAME order the renderer walks it —
+/// Flatten a layer's element subtree in the same order the renderer walks it —
 /// `order` first, scene order breaking ties. The outline panel and the canvas
 /// must agree with the draw list or "in front" means two different things in
 /// two places.
@@ -367,7 +367,7 @@ pub(crate) fn reorder_run(sibs: &[u32], moved: u32, at: usize) -> Vec<(u32, i32)
     let mut sibs = sibs.to_vec();
     let Some(from) = sibs.iter().position(|id| *id == moved) else { return Vec::new() };
     sibs.remove(from);
-    // `at` indexes the ORIGINAL run; once `moved` is pulled out, every position
+    // `at` indexes the original run; once `moved` is pulled out, every position
     // after it shifts down by one.
     let at = if from < at { at.saturating_sub(1) } else { at };
     sibs.insert(at.min(sibs.len()), moved);
@@ -615,7 +615,7 @@ pub(crate) fn block_from(spec: &ElementSpec) -> floptle_ui::StyleBlock {
         });
         b.radius = Some(floptle_ui::CornerRef::Lit(sh.radius));
         b.border = Some(sh.border);
-        // Literal colours: this lifts what is ON the element, and the element
+        // Literal colours: this lifts what is on the element, and the element
         // never knew a token name. Swapping them for tokens afterwards is the
         // natural second step, and one the author has to choose.
         b.shadow = sh.shadow.map(|s| floptle_ui::StyleShadow {
@@ -809,7 +809,7 @@ mod tests {
             lines: [vec![200.0], vec![]],
             radius: 6.0,
         };
-        // A 50-wide box dragged so its RIGHT edge lands near 200.
+        // A 50-wide box dragged so its right edge lands near 200.
         let (d, _) = snap_delta([0.0, 0.0, 50.0, 20.0], [147.0, 0.0], &cfg);
         assert!((d[0] - 150.0).abs() < 0.01, "right edge snapped: {d:?}");
     }

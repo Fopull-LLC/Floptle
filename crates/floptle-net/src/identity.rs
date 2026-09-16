@@ -11,7 +11,7 @@
 //!
 //! A signed-in client presents its account's public claim — subject id, display
 //! name, tier. Anyone can send those bytes. Turning a claim into an identity
-//! needs a credential the SERVER can check with the provider, scoped so that
+//! needs a credential the server can check with the provider, scoped so that
 //! presenting it to a game server does not hand that server the account: a
 //! full-scope access token would let any server you join spend your Fobucks and
 //! read your mail.
@@ -98,7 +98,7 @@ impl Verifier for AssertedOnly {
     }
 }
 
-/// Who this server will admit, consulted BEFORE a join is accepted.
+/// Who this server will admit, consulted before a join is accepted.
 ///
 /// Before-not-after is the whole point of the allow/deny half: kicking somebody
 /// each time they reconnect is not a ban, it is a chore.
@@ -106,7 +106,7 @@ impl Verifier for AssertedOnly {
 pub struct JoinPolicy {
     /// Refuse anyone who presented no account claim at all.
     pub require_identity: bool,
-    /// If non-empty, ONLY these account ids may join.
+    /// If non-empty, only these account ids may join.
     pub allow: HashSet<String>,
     /// These account ids may never join.
     pub deny: HashSet<String>,
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn an_allow_list_is_only_a_list_when_it_has_something_in_it() {
         let mut p = JoinPolicy::default();
-        // An EMPTY allow list means "no allow list", not "nobody" — the other
+        // An empty allow list means "no allow list", not "nobody" — the other
         // reading turns a mistyped config into a server nobody can join, with
         // no message that says so.
         assert!(!p.is_active());

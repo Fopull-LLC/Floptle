@@ -6,7 +6,7 @@
 //!
 //! The behaviour hooks are why the parser exists at all rather than the scene
 //! format growing a "build from data" node. A described button carries its own
-//! `onClicked` closure — a screen's structure AND what it does in one place,
+//! `onClicked` closure — a screen's structure and what it does in one place,
 //! with no prefab and no second file. Those closures can't travel through
 //! `floptle-ui` (a leaf crate that has never heard of Lua), so they ride
 //! alongside the tree, addressed by path, and get bound to entities once the
@@ -63,7 +63,7 @@ pub fn hook_reaches(spec: &ElementSpec, hook: &str) -> bool {
         // A focused element answers a submit press with `clicked`, so a
         // pad-only menu is a legitimate reason to have no `button`.
         "clicked" | "pressed" | "released" => takes_pointer || spec.focusable,
-        // Hovering a tooltip element IS an interaction, and a draggable one is
+        // Hovering a tooltip element is an interaction, and a draggable one is
         // hovered before it's picked up.
         "hoverStart" | "hoverEnd" => {
             takes_pointer || spec.draggable || !spec.tooltip.is_empty() || spec.drop_target
@@ -112,7 +112,7 @@ pub struct MakeResult {
     /// queued closures find the elements they belong to.
     pub bound: Vec<(Vec<u16>, u32)>,
     /// Elements that are no longer described. Handed back rather than
-    /// despawned here so the driver's ONE destroy path runs: it also clears
+    /// despawned here so the driver's one destroy path runs: it also clears
     /// script environments and physics, which a made container's repeater rows
     /// may well have.
     pub destroy: Vec<u32>,
@@ -142,7 +142,7 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
     };
     let mut hooks = Vec::new();
     let mut roots = Vec::new();
-    // An EMPTY table describes nothing, which is how a screen is taken down:
+    // An empty table describes nothing, which is how a screen is taken down:
     // `ui.make(node, {})`. It used to fall through to "a table with no kind and
     // no properties", i.e. one anonymous box — so hiding a menu left an element
     // behind on every hide, and the call that most obviously means "clear" was
@@ -153,20 +153,20 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
     // A list of elements, or one element? Only a list starts with a table:
     // an element starts with its kind, or with nothing and some properties.
     if matches!(t.raw_get::<Value>(1)?, Value::Table(_)) {
-        // NOT `1..=raw_len()`. A screen with a section switched off is written
+        // not `1..=raw_len()`. A screen with a section switched off is written
         // `local dead = nil` and then `{ vitals, score, dead }`, which is the
         // obvious way to say it and leaves a HOLE in the array. Lua's length
         // operator is only defined up to a border, so a holed table reports
         // whatever its internal array happens to end at: sometimes the full
         // count, in which case the nil entry used to abort the whole screen —
-        // one absent section and the ENTIRE HUD is missing, with an error that
+        // one absent section and the entire HUD is missing, with an error that
         // names an index rather than the section — and sometimes the index
         // before the hole, in which case every later section was silently
         // dropped and nothing was reported at all.
         //
         // So walk the integer keys the table actually has, and treat nil as
         // what a person writing it means: no element here. A deferred child
-        // returning nil was ALREADY allowed for exactly this reason (see the
+        // returning nil was already allowed for exactly this reason (see the
         // function-child arm below); this is the same intent spelled the
         // shorter way, and it has to mean the same thing.
         let mut last = 0usize;
@@ -379,7 +379,7 @@ fn string_of(v: &Value) -> String {
 /// A property value as it should read back in an error message: quoted if it
 /// was a word, named by shape if it was not.
 ///
-/// The value has to be IN the message. "`pin` takes topLeft, top, …" leaves you
+/// The value has to be in the message. "`pin` takes topLeft, top, …" leaves you
 /// re-reading your own table to find which of five pins was the wrong one.
 fn describe(v: &PropVal) -> String {
     match v {

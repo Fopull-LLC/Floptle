@@ -139,7 +139,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             out.set("frozen", v.frozen)?;
             out.set("node", crate::env::new_node_handle(lua, v.entity)?)?;
             // "Up" out of the water: radial on a sea, the pool's own +Y. What a
-            // swim controller pushes along, and it is NOT −gravity in a tilted
+            // swim controller pushes along, and it is not −gravity in a tilted
             // tank.
             let up = if v.sea {
                 (glam::DVec3::from(p) - glam::DVec3::from(v.center))
@@ -243,7 +243,7 @@ mod tests {
         }
     }
 
-    /// The script-side answer must be the SAME rule the solver uses. A game
+    /// The script-side answer must be the same rule the solver uses. A game
     /// whose swim state disagreed with the physics floating it is the exact
     /// bug this API exists to remove — `climate.lua` re-deriving a sea radius
     /// it had to keep in step with the sphere the generator drew.

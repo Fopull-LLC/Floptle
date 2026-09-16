@@ -10,12 +10,12 @@
 //! scene twice, change one thing, and assert the specific thing it changes.
 //!
 //! **The scene is a wall with a bright half**, not a card on black, and that is
-//! deliberate. This is a *gather*: a pixel collects along its OWN velocity, so a
+//! deliberate. This is a *gather*: a pixel collects along its own velocity, so a
 //! moving thing softens inside its own footprint rather than throwing light
 //! outside it. Against black, a smeared card comes back the same size (its edge
 //! pixels reach out into black, and the black pixels have the sky's velocity, not
 //! the card's) and a width measurement reads "no blur" on a pass that is working
-//! perfectly. An edge between two surfaces at the SAME depth is the honest
+//! perfectly. An edge between two surfaces at the same depth is the honest
 //! subject: both sides share a velocity, and the blur is exactly the width of the
 //! ramp between them.
 //!
@@ -39,7 +39,7 @@ enum Edge {
     Vertical,
     /// A horizontal one — measured down a column.
     Horizontal,
-    /// A narrow bright strip hard against the LEFT border, for the frame-edge
+    /// A narrow bright strip hard against the left border, for the frame-edge
     /// check. The interesting geometry is outside the frame, which is the whole
     /// point of it.
     LeftStrip,
@@ -177,7 +177,7 @@ fn main() {
     // A gather has to decide what to do about taps that leave the picture, and
     // the obvious answer — clamp them back to the border — is wrong in a way
     // that only shows while the camera is moving. Every out-of-frame tap then
-    // returns the SAME border texel, so the outermost column is averaged mostly
+    // returns the same border texel, so the outermost column is averaged mostly
     // with itself and the columns beside it are dragged toward it: a band along
     // the edge that stays sharp while everything inboard of it smears, and
     // disappears the instant the camera stops. On a sky — at infinity, and so
@@ -241,7 +241,7 @@ impl Rig {
         Self { raster, post, mesh, out, out_view, proj: cam.proj_matrix(1.0) }
     }
 
-    /// Draw the wall from where the camera is NOW, and hand the pass a previous
+    /// Draw the wall from where the camera is now, and hand the pass a previous
     /// pose displaced by `moved` and rotated by `turned`.
     ///
     /// The scene is rendered once, which is what the real thing does — motion is
@@ -301,7 +301,7 @@ impl Rig {
 
         // The previous camera, expressed the way the editor expresses it: the
         // world is camera-relative, so the old view-projection is shifted by how
-        // far the camera itself travelled. `moved` is where the camera is NOW
+        // far the camera itself travelled. `moved` is where the camera is now
         // relative to where it was, so the shift is `+moved`.
         let prev_vp = camera(turned.inverse()).view_proj(1.0) * Mat4::from_translation(moved);
 

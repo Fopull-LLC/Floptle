@@ -15,7 +15,7 @@
 //!   the queue never refills. What began as one dropout becomes a permanent
 //!   flutter.
 //!
-//! Measured in a real window on 2026-09-05: a healthy lead of 85–93 ms, one
+//! Measured in a real window: a healthy lead of 85–93 ms, one
 //! stall around the 500th callback, and 8–40 ms for the rest of the run. That
 //! is the "flickery and odd" a player hears, and it never recovers.
 //!
@@ -226,7 +226,7 @@ mod imp {
         // not stays suspended, and the clock does not advance until it does,
         // so the pump simply has nothing to do until then.
         let _ = ctx.resume();
-        // The queue deliberately starts EMPTY. Opening the audio happens
+        // The queue deliberately starts empty. Opening the audio happens
         // partway through booting a game, and the rest of that boot — parsing
         // scenes, importing models, baking occluders — is one long task
         // holding the main thread. Filling the queue here would mean the

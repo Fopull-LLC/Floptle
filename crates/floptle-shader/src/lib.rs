@@ -265,7 +265,7 @@ shader gauge {
         assert_eq!(parse(&printed).unwrap().stage, Some(Stage::Ui));
     }
 
-    /// `floptle/0119`: the inverse trig, so a shader can READ an angle and not
+    /// `floptle/0119`: the inverse trig, so a shader can read an angle and not
     /// only produce one. Without `atan2` nothing could work in polar coordinates
     /// — no radial wipe, no cooldown dial, no swirl, no skyline laid out around
     /// a horizon — and the reported workaround was a diamond angle whose spacing
@@ -318,7 +318,7 @@ shader dial {
         }
     }
 
-    /// A Ui-stage shader can sample the ELEMENT'S OWN image via `baseTexture`
+    /// A Ui-stage shader can sample the ELEMENT'S own image via `baseTexture`
     /// (bound at group(1) like a material texture) — both with an explicit uv and
     /// with the default rect UV — and the result validates against the UI seam.
     #[test]

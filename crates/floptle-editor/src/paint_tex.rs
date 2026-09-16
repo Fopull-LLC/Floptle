@@ -2,7 +2,7 @@
 //!
 //! A brush stamps into a per-node paint texture that renders as a **transparent overlay**
 //! on top of the node, so painted detail is independent of the mesh's polygon count (fine
-//! detail on a flat low-poly wall) while the node underneath keeps rendering EXACTLY as it
+//! detail on a flat low-poly wall) while the node underneath keeps rendering exactly as it
 //! always did — same mesh, same UVs, same textures, same tiling, same vertex colors.
 //!
 //! # Why an overlay (and not a baked canvas)
@@ -10,13 +10,13 @@
 //! The first cut seeded a canvas by RESAMPLING the node's base texture into the paint
 //! atlas. That changes the base's look: the atlas texel grid is aligned per-triangle and
 //! sized per-world-area, so a nearest-sampled pixel-art texture came back with its texels
-//! at a different angle and scale (Ty: "the angle of the pixels seems completely
+//! at a different angle and scale ("the angle of the pixels seems completely
 //! different"). An overlay never touches the base render — the paint texture starts fully
 //! TRANSPARENT, dabs deposit color + alpha, and the GPU alpha-blends it over the ordinary
 //! draw. Unpainted texels contribute nothing, so the base is pixel-exact by construction.
 //!
 //! The overlay draws through the ordinary transparent pass: its instance alpha rides just
-//! under the opaque cutoff, and the transparent pipeline depth-tests LESS-EQUAL, so the
+//! under the opaque cutoff, and the transparent pipeline depth-tests less-equal, so the
 //! coplanar overlay (identical positions → byte-identical depth) lands exactly on its
 //! surface without z-fighting, and is still occluded by anything actually in front.
 //!
@@ -31,7 +31,7 @@
 //!
 //! # Smooth across faces
 //!
-//! A dab paints in WORLD space: for every texel of every triangle the brush sphere touches,
+//! A dab paints in world space: for every texel of every triangle the brush sphere touches,
 //! it reconstructs the surface point and weights by world distance to the cursor (see
 //! [`crate::paint_mesh::for_each_cell_texel`]). Texels on either side of a shared edge
 //! reconstruct the same world point, so paint flows across the edge with no visible seam.
@@ -72,7 +72,7 @@ const OVERLAY_ALPHA: f32 = 0.998;
 
 /// One part's paint image + its GPU texture + the atlas mesh it renders through.
 pub(crate) struct PaintPartTex {
-    /// CPU source of truth (RGBA, row-major, `edge²` texels). Alpha is REAL coverage:
+    /// CPU source of truth (RGBA, row-major, `edge²` texels). Alpha is real coverage:
     /// 0 = unpainted (base shows through), 255 = solid paint.
     pub(crate) pixels: Vec<u8>,
     pub(crate) edge: u32,
@@ -188,7 +188,7 @@ impl Editor {
     }
 
     /// Keep each texture-painted node's vertex paint shading its OVERLAY: the node's brush
-    /// block is indexed by ORIGINAL vertex id, but the atlas mesh has its own (unshared)
+    /// block is indexed by original vertex id, but the atlas mesh has its own (unshared)
     /// vertices — so an atlas-ordered MIRROR block is maintained per part and remapped
     /// through `orig_vids` whenever vertex paint changes (`vpaint_epoch` bumps on every
     /// mutation: dab, fill, clear, undo, reload). Runs once per frame; a no-op when nothing
@@ -243,10 +243,10 @@ impl Editor {
         }
     }
 
-    /// Stamp one texture-paint dab onto ONE node — but onto EVERY part and triangle the
+    /// Stamp one texture-paint dab onto one node — but onto every part and triangle the
     /// brush sphere (`center`, `radius`) touches, weighted by each texel's reconstructed
     /// surface point's distance to the cursor. Combined with the stroke driver calling this
-    /// for every node in the sphere, a dab at a wall-floor corner shades BOTH surfaces in
+    /// for every node in the sphere, a dab at a wall-floor corner shades both surfaces in
     /// one pass, darkest at the seam — painted ambient occlusion, the retro baked look.
     /// `center` is the cursor hit and `model` maps object → the same (camera-relative) space.
     ///
@@ -254,7 +254,7 @@ impl Editor {
     /// brush's back-faces switch is on), so the sphere can't bleed through a thin wall onto
     /// its far side — the same rule the vertex brush applies per vertex.
     ///
-    /// Paint deposits color AND alpha (coverage) — the overlay blends over the base by that
+    /// Paint deposits color and alpha (coverage) — the overlay blends over the base by that
     /// alpha, so a soft brush edge fades the paint out over the untouched surface. ⊘ Erase
     /// pulls the alpha back toward zero, revealing the live base.
     pub(crate) fn texture_paint_dab(
@@ -498,7 +498,7 @@ pub(crate) fn push_painted_node(
 ) {
     let Some(id) = world.get::<TexturePaint>(e).map(|p| p.id) else { return };
     let Some(pt) = paint_tex.get(&id) else { return };
-    // The atlas UVs are a direct 1:1 map, so any material tiling/triplanar must be OFF for
+    // The atlas UVs are a direct 1:1 map, so any material tiling/triplanar must be off for
     // the overlay (the base underneath keeps its own tiling). Colour / unlit stay, so the
     // paint shades like the surface it covers.
     let mut mp = *base_mat;
@@ -522,7 +522,7 @@ mod tests {
     use floptle_core::math::Vec3;
     use floptle_render::{MeshData, TextureData, Vertex};
 
-    /// A flat plane subdivided into `n × n` quads over world `[0, size]²`, with UVs that TILE
+    /// A flat plane subdivided into `n × n` quads over world `[0, size]²`, with UVs that tile
     /// (`uv = pos / tile`, so they exceed 1) — the exact case that made mesh-UV painting
     /// repeat. Triangles are varied in size across the plane so a single density couldn't
     /// suit them all.
@@ -547,7 +547,7 @@ mod tests {
         d
     }
 
-    /// A checkerboard base texture — pixel-art whose texel angle/scale must NOT change.
+    /// A checkerboard base texture — pixel-art whose texel angle/scale must not change.
     fn checker(edge: u32, cells: u32) -> TextureData {
         let mut pixels = vec![0u8; (edge * edge * 4) as usize];
         for y in 0..edge {
@@ -584,7 +584,7 @@ mod tests {
     }
 
     /// The seam fix, at the CPU level: a world-space dab straddling a shared triangle edge
-    /// must reach BOTH triangles' cells, so paint flows across the edge instead of stopping
+    /// must reach both triangles' cells, so paint flows across the edge instead of stopping
     /// at it.
     #[test]
     fn a_dab_on_a_shared_edge_reaches_both_triangles() {
@@ -599,7 +599,7 @@ mod tests {
             }]
         });
         let atlas = cache.atlas_mesh("q", 0).expect("atlas");
-        // The origin lies ON the shared diagonal edge. Both cells must have a texel whose
+        // The origin lies on the shared diagonal edge. Both cells must have a texel whose
         // reconstructed surface point sits (nearly) on it.
         let closest_to_origin = |cell: &AtlasCell| {
             let mut best = f32::MAX;
@@ -616,9 +616,9 @@ mod tests {
         assert!(d0 < 0.2 && d1 < 0.2, "shared edge unreachable from both cells: {d0}, {d1}");
     }
 
-    /// THE corner-shading case: a floor and a wall meeting at a right angle (two separate
-    /// parts, as they'd be two separate nodes). A brush sphere centred ON the seam must
-    /// reach texels of BOTH surfaces, with weight falling off symmetrically — that's what
+    /// the corner-shading case: a floor and a wall meeting at a right angle (two separate
+    /// parts, as they'd be two separate nodes). A brush sphere centred on the seam must
+    /// reach texels of both surfaces, with weight falling off symmetrically — that's what
     /// makes one stroke along the corner shade both sides like baked ambient occlusion.
     #[test]
     fn a_corner_dab_shades_both_the_floor_and_the_wall() {
@@ -665,7 +665,7 @@ mod tests {
             }
             best
         };
-        // Near-full weight on BOTH (the shortfall from 1.0 is texel granularity — the
+        // Near-full weight on both (the shortfall from 1.0 is texel granularity — the
         // nearest texel centre sits a fraction of a texel off the seam), and symmetric:
         // corner shading must not favour one side.
         let (wf, ww) = (max_w(0), max_w(1));
@@ -674,7 +674,7 @@ mod tests {
         assert!((wf - ww).abs() < 0.15, "corner shading must be symmetric: {wf} vs {ww}");
     }
 
-    /// THE overlay guarantee, forward-rendered to a PNG: the base render is PIXEL-EXACT
+    /// the overlay guarantee, forward-rendered to a PNG: the base render is pixel-exact
     /// wherever paint hasn't landed (the reported bug was the base texture's pixels changing
     /// angle/scale under the old baked canvas), a painted disc blends over it smoothly across
     /// faces, and an erased area returns to exactly the base. Asserted, not just eyeballed.
@@ -774,7 +774,7 @@ mod tests {
         let base_only = render(false);
         let painted = render(true);
 
-        // THE assertion: every pixel outside the dab is byte-identical to the base render,
+        // the assertion: every pixel outside the dab is byte-identical to the base render,
         // and the erased center returns to it too. Only the painted ring may differ.
         let px_at = |img: &[u8], wx: f32, wy: f32| {
             let ox = ((wx / size) * res as f32) as u32;

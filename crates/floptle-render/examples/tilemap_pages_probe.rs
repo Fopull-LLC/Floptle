@@ -22,7 +22,7 @@ const S: u32 = 320;
 const COLS: u32 = 8;
 const ROWS: u32 = 8;
 const TILE: f32 = 1.0;
-/// Page 0 is cut 2x2; page 1 is cut 1x1. Deliberately DIFFERENT, because a
+/// Page 0 is cut 2x2; page 1 is cut 1x1. Deliberately different, because a
 /// shared cut would hide a page using the wrong sheet's grid.
 const P0: (u32, u32) = (2, 2);
 const P1: (u32, u32) = (1, 1);

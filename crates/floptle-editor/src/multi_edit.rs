@@ -308,7 +308,7 @@ fn diff_named<V: Clone + PartialEq>(
 /// adding the variant's fields to [`matter_diff`] — `true` alone is a no-op.
 fn matter_propagates(m: &Matter) -> bool {
     match m {
-        // The id IS the data: two nodes sharing a terrain or map-mesh id both
+        // The id is the data: two nodes sharing a terrain or map-mesh id both
         // point at one field, and the second node's geometry is gone.
         // A navmesh id is the same kind of data: two nodes sharing one point
         // at a single baked file, and the second node's bake is gone.
@@ -762,7 +762,7 @@ mod tests {
     fn one_edit_travels_and_takes_nothing_with_it() {
         let (mut w, es) = scene(3);
         let snap = Snapshot::take(&w, &es).expect("three selected");
-        // The Inspector's edit: roughness on the primary (the LAST selected).
+        // The Inspector's edit: roughness on the primary (the last selected).
         w.get_mut::<Material>(*es.last().unwrap()).unwrap().roughness = 0.9;
         assert_eq!(snap.apply(&mut w, &es), 2, "both other nodes take it");
         for (i, &e) in es.iter().enumerate() {

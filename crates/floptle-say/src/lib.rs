@@ -40,7 +40,7 @@ macro_rules! say_err {
 mod tests {
     /// Point this process's stderr at a pipe nobody reads. A write then fails
     /// with `EPIPE` — the same failing write a dead pty gives as `EIO` — and
-    /// that is what `eprintln!` panics on. (A merely CLOSED descriptor is
+    /// that is what `eprintln!` panics on. (A merely closed descriptor is
     /// not enough: Rust's stdio swallows `EBADF` on purpose.)
     #[cfg(unix)]
     fn break_stderr() {
@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(status.code(), Some(42), "the child did not reach the end: {status:?}");
     }
 
-    /// The control: the macro this replaces DOES die on the same descriptor,
+    /// The control: the macro this replaces does die on the same descriptor,
     /// or the test above proves nothing about what it fixed.
     #[cfg(unix)]
     #[test]

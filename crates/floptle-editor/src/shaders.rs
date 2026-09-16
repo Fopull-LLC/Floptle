@@ -1,13 +1,13 @@
 //! Custom `.flsl` shader materials in the editor (ADR-0007, Phase 2).
 //!
 //! The pipeline: a Material's `shader` names a project `.flsl` file; this
-//! module compiles it (parse → check → transpile → naga against the REAL
+//! module compiles it (parse → check → transpile → naga against the real
 //! raster+field sources), registers the pipeline with the raster pass, and
 //! keeps one live group(3) binding (params UBO + texture slots) per entity.
 //!
 //! Hot reload is the house mtime pattern (texture registry, prefab cache):
 //! shaders in use are re-stat'ed every frame and recompile on change. A broken
-//! edit KEEPS the last good pipeline running and reports to the Console + the
+//! edit keeps the last good pipeline running and reports to the Console + the
 //! IDE squiggle — a failed save never black-screens the scene.
 
 use std::collections::{HashMap, HashSet};
@@ -22,7 +22,7 @@ use crate::Editor;
 /// One `.flsl` file's compile state, keyed by project-relative path.
 pub(crate) struct FlslEntry {
     mtime: Option<SystemTime>,
-    /// The last GOOD compile — kept while `error` reports a newer failure.
+    /// The last good compile — kept while `error` reports a newer failure.
     pub(crate) compiled: Option<(CompiledFragment, FlslShaderId)>,
     /// The newest failure (compile or naga), already line-mapped for humans.
     pub(crate) error: Option<String>,
@@ -94,7 +94,7 @@ impl Editor {
     /// a node's own whole-model `Material` (`flsl_binds`, keyed by entity) and
     /// each part of an `ObjectMaterials` override that names a shader of its
     /// own (`obj_flsl_binds`, keyed by entity + the part's override key). A
-    /// part's override is a WHOLE material superseding the node's — its
+    /// part's override is a whole material superseding the node's — its
     /// shader-or-not is part of that whole — so it gets its own binding
     /// rather than inheriting whatever the node happens to have.
     pub(crate) fn ensure_flsl_materials(&mut self) {
@@ -275,7 +275,7 @@ impl Editor {
         };
 
         let outcome = floptle_shader::compile_fragment(&src).and_then(|compiled| {
-            // naga against the REAL pass sources — passing here means the
+            // naga against the real pass sources — passing here means the
             // pipeline build below can't fail on the shader.
             floptle_shader::validate(floptle_render::pass_prelude(), &compiled.chunk).map_err(
                 |d| match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
@@ -408,7 +408,7 @@ pub(crate) struct SdfEntry {
 impl Editor {
     /// Per-frame driver for Field Shapes: hot-reload their sdf shaders, and
     /// when the (entity, shader, generation) set changes, transpile per slot
-    /// and splice `custom_d`/`custom_col` into BOTH passes. Runs right after
+    /// and splice `custom_d`/`custom_col` into both passes. Runs right after
     /// `ensure_flsl_materials` — same pattern, the field mirror's version.
     pub(crate) fn sync_field_shapes(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() || self.raymarch.is_none() {
@@ -527,7 +527,7 @@ impl Editor {
         }
         color_code.push_str("    return bi;\n}\n");
 
-        // naga-gate BOTH assembled modules before swapping any pipeline —
+        // naga-gate both assembled modules before swapping any pipeline —
         // a bad splice must never panic the pass builders.
         let support = floptle_shader::stdlib::SUPPORT_WGSL;
         let rm_src = floptle_render::Raymarch::preview_custom_source(Some((
@@ -614,7 +614,7 @@ impl Editor {
 
 /// Fill the raymarch globals' Field Shape arrays for this frame: camera-
 /// relative transforms, bounding radii, shader uniform values and the node
-/// Material's surface response. `only` parks every OTHER shape out of
+/// Material's surface response. `only` parks every other shape out of
 /// existence (the selection-outline mask marches just one). A free function
 /// over disjoint Editor fields so callers can hold the GPU stack borrowed.
 pub(crate) fn apply_field_shapes(
@@ -706,7 +706,7 @@ pub(crate) type ObjFlslBinds = HashMap<(Entity, String), FlslMatBind>;
 /// One `stage ui` `.flsl` file's compile state, keyed by element shader path.
 pub(crate) struct UiFlslEntry {
     mtime: Option<SystemTime>,
-    /// The last GOOD compile — kept while `error` reports a newer failure.
+    /// The last good compile — kept while `error` reports a newer failure.
     pub(crate) compiled: Option<(floptle_shader::CompiledUi, floptle_render::UiShaderId)>,
     pub(crate) error: Option<String>,
 }
@@ -821,7 +821,7 @@ impl Editor {
             }
         };
         let outcome = floptle_shader::compile_ui(&src).and_then(|compiled| {
-            // naga against the REAL ui pass source (+ the field shim the
+            // naga against the real ui pass source (+ the field shim the
             // shared stdlib support needs) — passing here means the pipeline
             // build below can't fail on the shader.
             let prelude = format!(
@@ -894,7 +894,7 @@ pub(crate) type SdfCache = HashMap<String, SdfEntry>;
 /// PostProcess node.
 pub(crate) struct PostFlslEntry {
     mtime: Option<SystemTime>,
-    /// The last GOOD compile — kept while `error` reports a newer failure, so a
+    /// The last good compile — kept while `error` reports a newer failure, so a
     /// broken save leaves the effect running instead of dropping the frame back
     /// to un-processed mid-edit.
     pub(crate) compiled: Option<(floptle_shader::CompiledPost, floptle_render::PostShaderId)>,
@@ -919,7 +919,7 @@ impl Editor {
         }
 
         // The same two rules `post_process_uniforms` follows, and they have to
-        // be the same two: a switched-off node runs NO chain, screen shaders
+        // be the same two: a switched-off node runs no chain, screen shaders
         // included, and a node on a disabled layer is not the scene's node at
         // all (so it is skipped rather than vetoing the layer that replaced it).
         let listed: Vec<floptle_core::ScreenShader> = self

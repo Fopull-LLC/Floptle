@@ -9,7 +9,7 @@
 //!
 //! Alongside the `.cfield`s this writes `<out_dir>/planetoid.palette` — the
 //! per-scene slot→image list the editor adopts with the terrain (glowing slots
-//! carry a `|glow` suffix). Texture paths are written ABSOLUTE: asset paths
+//! carry a `|glow` suffix). Texture paths are written absolute: asset paths
 //! resolve as-is from the editor's CWD, and the solar project lives outside it.
 //!
 //! Usage:  cargo run --release -p floptle-field --example gen_planetoid -- <out_dir> [seed]
@@ -65,7 +65,7 @@ fn main() {
     };
     let seed: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
 
-    // Planet-scale world (Ty: "these planets aren't a realistic scale"): radius
+    // Planet-scale world ("these planets aren't a realistic scale"): radius
     // 300 with µ tuned to g ≈ 9.8 at the surface. Orbital velocity in low orbit
     // ≈ 53 u/s, escape ≈ 76 — you REACH orbit with technique, you don't trip
     // into it. Voxel 2.0: crust chunks only ≈ tens of MB resident (sparse).
@@ -100,7 +100,7 @@ fn main() {
                 return planet;
             }
             // Caves as part of the SDF, not carved after: tunnels live where two
-            // independent noise fields are BOTH near zero (their implicit surfaces
+            // independent noise fields are both near zero (their implicit surfaces
             // intersect along winding curves). Gated below the local surface —
             // you DIG to find them, which is the gameplay. (Carving with brush
             // dabs after the fill exposed band-clamped rock: literal terraces.)
@@ -119,7 +119,7 @@ fn main() {
             // Keep ≥3 voxels of crust (pinhole guard), stop above the CORE
             // (a solid ball survives at the center — the core node lives in
             // it), and cap the network at depth 130. Deeper than the old 50
-            // on purpose (Ty: deeper, more complex caves) — costs resident
+            // on purpose (deeper, more complex caves) — costs resident
             // chunks, the price of the interior being real.
             let gated = cave.max(6.0 + planet).max(-(planet + 130.0)).max((CORE_R + 12.0) - r);
             planet.max(-gated)
@@ -133,15 +133,15 @@ fn main() {
             let vary = noise.fbm(p * 0.05 + Vec3::splat(83.0), 2);
 
             // Core zone: molten glow (slot 6) all the way through, so a dig
-            // that reaches the deep interior reads HOT long before the core.
+            // that reaches the deep interior reads hot long before the core.
             if r < CORE_R + 10.0 {
                 return rgba(tint([0.98, 0.82, 0.6], vary), 6);
             }
             // Crystal pockets: sparse fbm peaks anywhere below the topsoil. They
             // glow (palette slot 7), so a dig or a cave wall that cuts one open
-            // reads instantly even in the dark. Threshold tuned HIGH — pockets
+            // reads instantly even in the dark. Threshold tuned high — pockets
             // are treasures; caves must read as lit-by-them, not made of them
-            // (Ty: "inside the planet is fullbright").
+            // ("inside the planet is fullbright").
             let pocket = noise.fbm(p * 0.05 + Vec3::splat(17.3), 3);
             if depth > 8.0 && pocket > 0.46 {
                 return rgba(tint([0.72, 0.65, 0.85], vary), 7);
@@ -179,7 +179,7 @@ fn main() {
     let fill_ms = t0.elapsed().as_millis();
 
     // One starter dig site: a shallow crater at the "north pole" spawn so the first
-    // thing you see hints that the ground is diggable. Brush dabs are fine ON the
+    // thing you see hints that the ground is diggable. Brush dabs are fine on the
     // fresh surface (the band is intact there).
     let t0 = std::time::Instant::now();
     field.sculpt(
@@ -207,7 +207,7 @@ fn main() {
     );
 
     // ---- Pebble, the moon (terrain id 2): a cratered grey-ice ball. Every
-    // celestial body in the demo is REAL terrain — walkable, diggable, its own
+    // celestial body in the demo is real terrain — walkable, diggable, its own
     // collider — not a prop sphere. Craters are part of the fill SDF (spherical
     // dents subtracted at seeded surface points; carving after the fill would
     // hit band-clamped rock and terrace).

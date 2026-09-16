@@ -20,7 +20,7 @@ use crate::device::Gpu;
 /// The GI probe texture and the numbers a shader needs to find its way into it.
 pub struct GiVolume {
     pub(crate) tex: wgpu::Texture,
-    /// `gi_meta`, `gi_dims`, `gi_center` (WORLD, made camera-relative at draw
+    /// `gi_meta`, `gi_dims`, `gi_center` (world, made camera-relative at draw
     /// time) and `gi_half`, ready to copy into `RaymarchGlobals`.
     pub meta: [f32; 4],
     pub dims: [f32; 4],
@@ -63,7 +63,7 @@ impl GiVolume {
         }
     }
 
-    /// Upload a bake. `center` is the volume's WORLD position (the shader gets a
+    /// Upload a bake. `center` is the volume's world position (the shader gets a
     /// camera-relative copy at draw time), `leak` and `intensity` are the node's
     /// knobs — both applied here, on the CPU, so that turning either changes an
     /// upload rather than a bake, and costs a shading point nothing per pixel.
@@ -143,7 +143,7 @@ fn alloc(gpu: &Gpu, dims: [u32; 3]) -> wgpu::Texture {
     })
 }
 
-/// The bind-group-layout entry a GI probe texture occupies, built ONCE and used
+/// The bind-group-layout entry a GI probe texture occupies, built once and used
 /// by both the raymarch pass's own group and the shared field group.
 ///
 /// Float32 textures are not filterable, so this entry must say so — and it must

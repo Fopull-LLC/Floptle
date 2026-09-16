@@ -1,6 +1,6 @@
 //! The graph view of a shader (ADR-0007, proposal §10.2) — headless.
 //!
-//! Both authoring views project the SAME [`ShaderIr`]: the text view is
+//! Both authoring views project the same [`ShaderIr`]: the text view is
 //! `text::print`/`text::parse`; this module is the node-graph view. It answers
 //! two questions for the editor's canvas:
 //!
@@ -128,7 +128,7 @@ pub enum InlineVal {
     Num(f64),
     /// A `#RRGGBB[AA]` color literal.
     Color([f32; 4]),
-    /// A `vecN(…)` constructor whose components are ALL numbers: `ctor` is the
+    /// A `vecN(…)` constructor whose components are all numbers: `ctor` is the
     /// constructor expression, `vals` its per-lane values.
     Vec { ctor: ExprId, lanes: u8, vals: [f64; 4] },
     /// A string parameter (palette names) — the editor shows a combo.
@@ -154,7 +154,7 @@ pub struct GPort {
     pub site: Site,
 }
 
-/// What a view node IS — drives its title, ports and body widgets.
+/// What a view node is — drives its title, ports and body widgets.
 #[derive(Clone, Debug)]
 pub enum NodeKind {
     /// A stdlib op call.
@@ -261,7 +261,7 @@ fn inline_val(ir: &ShaderIr, id: ExprId) -> Option<InlineVal> {
     }
 }
 
-/// The node another expression wires FROM (references resolve to the shared
+/// The node another expression wires from (references resolve to the shared
 /// source / let nodes; everything else is an anonymous expression node).
 fn source_key(ir: &ShaderIr, id: ExprId) -> NodeKey {
     match &ir.expr(id).kind {
@@ -371,7 +371,7 @@ pub fn build_view_padded(
     nodes
 }
 
-/// Re-run the auto-layout over EVERY node (ignoring current positions) and
+/// Re-run the auto-layout over every node (ignoring current positions) and
 /// store the result as `//@layout` entries — the "Arrange" button. Anonymous
 /// nodes stay unpinned (they re-stack beside their consumers on each build).
 pub fn arrange(ir: &mut ShaderIr, ck: Option<&Checked>, extra_h: &dyn Fn(&GNode) -> f32) {
@@ -427,7 +427,7 @@ impl ViewBuilder<'_> {
         }
         let root = self.ir.lets[i].1;
         // A bare literal root renders as a named Constant node. A `vecN(...)`
-        // constructor does NOT, even when every lane is still a literal
+        // constructor does not, even when every lane is still a literal
         // default — collapsing it here would leave a freshly placed "combine"
         // node with a single unwireable port and no way to ever reach its
         // individual lanes (see `NodeKind::VecCtor`'s per-lane ports below).
@@ -611,7 +611,7 @@ impl ViewBuilder<'_> {
     }
 }
 
-/// Node width/height the canvas ALSO uses — positions are computed against
+/// Node width/height the canvas also uses — positions are computed against
 /// these, so they live beside the layout code.
 pub const NODE_W: f32 = 168.0;
 pub const NODE_ROW_H: f32 = 22.0;
@@ -908,7 +908,7 @@ fn remove_optional_arg(ir: &mut ShaderIr, site: Site) -> bool {
     let Some(idx) = idx else { return true }; // already omitted
     let mut new_args = args;
     let removed = new_args.remove(idx);
-    // Positionals AFTER the removed one would shift slots — re-name them all
+    // Positionals after the removed one would shift slots — re-name them all
     // so every remaining arg keeps its meaning.
     if removed.name.is_none() {
         let slots_now = spec.inputs;
@@ -1405,7 +1405,7 @@ pub fn set_texture_default(
     Ok(())
 }
 
-/// Where a value dropped ONTO a node should land: the first input port whose
+/// Where a value dropped onto a node should land: the first input port whose
 /// texture-ness matches what's being dropped, else simply the first input.
 ///
 /// This is what closes the loop on dragging a wire into empty canvas — the
@@ -1439,7 +1439,7 @@ pub fn set_position(ir: &mut ShaderIr, key: &NodeKey, pos: (f32, f32)) -> Result
 
 /// Duplicate a set of nodes: each named/anonymous value node becomes a fresh
 /// `let` copying its whole expression (anonymous ones are named first).
-/// References BETWEEN duplicated nodes point at the copies; references to
+/// References between duplicated nodes point at the copies; references to
 /// everything else (sources, unselected lets) are shared, like Blender.
 /// Sources and the sink don't duplicate. Returns the new nodes' keys.
 pub fn duplicate_nodes(ir: &mut ShaderIr, keys: &[NodeKey]) -> Result<Vec<NodeKey>, EditError> {
@@ -1608,7 +1608,7 @@ pub fn paste_nodes(
             return n.clone();
         }
         let Some((src_name, root)) = from.lets.get(l).cloned() else { return String::new() };
-        // Reserve the name BEFORE recursing: a malformed source with a cycle
+        // Reserve the name before recursing: a malformed source with a cycle
         // must not spin here (the parser forbids one, a hand-edited file may not).
         let name = fresh_name(ir, &src_name);
         names.insert(l, name.clone());
@@ -2082,7 +2082,7 @@ shader plasma {
     /// Copying nodes between two shaders carries everything the chunk needs to
     /// still mean something over there — the lets it reads, the knobs it reads,
     /// the texture slot and the image on it — while a name that already exists
-    /// in the destination binds to the LOCAL one.
+    /// in the destination binds to the local one.
     #[test]
     fn pasting_carries_a_chunk_into_another_shader() {
         let from = parse(PLASMA).unwrap();
@@ -2112,7 +2112,7 @@ shader plasma {
         crate::ir::check(&re).unwrap_or_else(|e| panic!("paste checks: {}\n{printed}", e[0].message));
     }
 
-    /// A texture slot pastes WITH the image on it — otherwise the copy arrives
+    /// A texture slot pastes with the image on it — otherwise the copy arrives
     /// showing the checkerboard, which is the exact thing slot defaults exist
     /// to prevent.
     #[test]

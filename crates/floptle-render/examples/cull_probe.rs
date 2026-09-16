@@ -141,7 +141,7 @@ fn main() {
         println!("\nwrote {stem}_all.png and {stem}_culled.png — LOOK at them");
     }
 
-    // THE HARNESS CHECK, before the comparison it guards. Two empty frames
+    // the HARNESS CHECK, before the comparison it guards. Two empty frames
     // compare equal, so "identical" is only evidence if there was something in
     // them — a probe that renders nothing passes a pixel-diff perfectly and
     // proves nothing at all. This repo has shipped exactly that mistake before.
@@ -222,7 +222,7 @@ fn scene() -> Vec<Prop> {
         unit(Vec3::new(2.0, 0.0, 8.0), false, "behind the camera"),
         // The case a `size/2` radius gets wrong: a long thin box turned 45°, so
         // its corner reaches much further than half its longest edge. Sitting
-        // ON the right plane, where an under-sized sphere would cull it and the
+        // on the right plane, where an under-sized sphere would cull it and the
         // corner would visibly vanish.
         Prop {
             pos: Vec3::new(19.5, 0.0, -20.0),

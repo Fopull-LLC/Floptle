@@ -2,8 +2,8 @@
 //!
 //! The depth prepass draws skinned parts through `skin_prepass_pipeline`, which
 //! reads the bone palette out of the globals bind group — but it used to set its
-//! globals WITHOUT publishing this frame's palette, so it primed depth from
-//! wherever the character was LAST frame. This frame's triangles then depth-fail
+//! globals without publishing this frame's palette, so it primed depth from
+//! wherever the character was last frame. This frame's triangles then depth-fail
 //! against their own stale silhouette, and a moving character flickers.
 //!
 //! The invariant this checks needs no golden image: **a pose must render the
@@ -45,7 +45,7 @@ fn main() {
     let mesh = raster.register(&gpu, &body, None);
 
     // One joint driving every vertex: the simplest rig that still goes down the
-    // whole GPU-skinning path. What is under test is WHEN the palette reaches
+    // whole GPU-skinning path. What is under test is when the palette reaches
     // the GPU, not how many bones blend.
     let joints = vec![[0u16; 4]; nverts];
     let weights = vec![[1.0f32, 0.0, 0.0, 0.0]; nverts];
@@ -71,7 +71,7 @@ fn main() {
     let mp = MaterialParams::flat([0.8, 0.35, 0.3]);
     let raw = instance_of_mat(model, &mp);
 
-    // The stale pose must sit IN FRONT of the live one at the same pixels, or a
+    // The stale pose must sit in front of the live one at the same pixels, or a
     // stale prepass writes depth where nothing is drawn and the bug is invisible.
     // +Z is toward the camera.
     let near_pose = Mat4::from_translation(Vec3::new(0.0, 0.0, 2.5));
@@ -83,7 +83,7 @@ fn main() {
         let skins = vec![SkinDraw { mesh, tex: None, instance: raw, pose: idx }];
         let plain: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         // The editor's order: prepass primes the main depth, the color pass
-        // LOADS it under LessEqual.
+        // loads it under LessEqual.
         raster.depth_prepass_with(&gpu, globals, &plain, &[], &skins, gpu.depth_texture());
         clear_color(&gpu, &color_view, [0.02, 0.02, 0.05, 1.0]);
         raster.draw_scene_with(

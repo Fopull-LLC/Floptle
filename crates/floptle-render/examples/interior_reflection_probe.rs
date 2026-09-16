@@ -34,7 +34,7 @@ use floptle_render::{
 use glam::{DVec3, Mat4, Quat, Vec3};
 
 const S: u32 = 256;
-/// Half the room, in metres. The probe's box is the same, because the box IS
+/// Half the room, in metres. The probe's box is the same, because the box is
 /// the room — that is what makes a reflected wall land on the wall.
 const ROOM: f32 = 5.0;
 /// The sky, in a colour the room does not contain.
@@ -48,15 +48,15 @@ fn main() {
     let with = shot(&gpu, true, &format!("{dir}/interior_reflection_on.png"));
     let without = shot(&gpu, false, &format!("{dir}/interior_reflection_off.png"));
 
-    // WHERE the side walls land on a mirror ball is not where intuition puts
-    // them. A ball seen head-on reflects what is BEHIND the camera at its centre
-    // and sweeps round to what is behind IT at the rim; the wall to its left
+    // where the side walls land on a mirror ball is not where intuition puts
+    // them. A ball seen head-on reflects what is behind the camera at its centre
+    // and sweeps round to what is behind it at the rim; the wall to its left
     // shows up half way between, at the point whose normal is 45° round — about
     // 0.7 of the way out to the silhouette. Sampling nearer the middle reads the
     // back wall, which is grey in this room and looks exactly like a probe that
     // is not working. `PROFILE=1` prints the row these came from.
     //
-    // Check 1 doubles as the guarantee that these windows are ON THE BALL: the
+    // Check 1 doubles as the guarantee that these windows are on the BALL: the
     // room contains no green, so a window reading green in the no-probe shot
     // cannot be looking at a wall. That matters — a probe measuring the blue
     // wall directly would report a perfect blue reflection while reflecting
@@ -173,9 +173,9 @@ fn main() {
     println!("interior reflection probe OK");
 }
 
-/// The room, in WORLD coordinates: (transform, colour). Rendered relative to
+/// The room, in world coordinates: (transform, colour). Rendered relative to
 /// whichever eye is looking, which is the whole of what ADR-0015 asks of a
-/// caller — subtract the eye and the model translation IS the camera-relative
+/// caller — subtract the eye and the model translation is the camera-relative
 /// position.
 fn room() -> Vec<(Mat4, [f32; 3])> {
     // `plane(half)` spans [-half, half], so `plane(1.0)` scaled by ROOM is a
@@ -206,7 +206,7 @@ fn room() -> Vec<(Mat4, [f32; 3])> {
     // finer than the blur is the only thing that can tell them apart, and these
     // bars are it: a mirror shows five bars, a frosted surface shows one grey
     // smear, and the difference is a contrast measurement.
-    // They go on the wall BEHIND the eye. A ball seen head-on reflects what is
+    // They go on the wall behind the eye. A ball seen head-on reflects what is
     // behind the camera at its centre — the one part of it every measurement here
     // already looks through — so anywhere else and the bars would sit at the rim
     // where the silhouette compresses them to nothing.
@@ -257,7 +257,7 @@ fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
         mp.unlit = true;
         mp
     };
-    // A bright silver mirror. For a metal the albedo IS f0, so a dark one
+    // A bright silver mirror. For a metal the albedo is f0, so a dark one
     // reflects almost nothing and would measure the analytic grazing sheen
     // instead of the environment.
     let mut ball_mp = MaterialParams::flat([0.95, 0.95, 0.95]);
@@ -272,7 +272,7 @@ fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
     // ---- the capture -------------------------------------------------------
     //
     // Six 90° renders from the middle of the room, folded into one
-    // equirectangular map. The ball is deliberately NOT in them: a mirror in its
+    // equirectangular map. The ball is deliberately not in them: a mirror in its
     // own reflection is a separate question, and this probe is about the walls.
     let probe_at = Vec3::ZERO;
     let face_instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = room()
@@ -285,7 +285,7 @@ fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
         let cam = RenderCamera::new(
             DVec3::ZERO,
             floptle_render::reflect::face_rotation(f),
-            // A cube face IS a 90° square frustum — anything else and the
+            // A cube face is a 90° square frustum — anything else and the
             // directions the conversion assumes stop matching the pixels.
             Projection::Perspective { fov_y: std::f32::consts::FRAC_PI_2, near: 0.05, far: 200.0 },
         );
@@ -355,7 +355,7 @@ fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
         light_color: [0.0; 4],
         ambient: [0.0; 4],
         bg: [SKY[0], SKY[1], SKY[2], 1.0],
-        // No screen-space reflections: the walls ARE on screen here, and the
+        // No screen-space reflections: the walls are on screen here, and the
         // point of this probe is what happens when the environment has to
         // answer. SSR is `ssr_probe`'s subject.
         ssr: [0.0, 30.0, 32.0, 0.5],
@@ -366,7 +366,7 @@ fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
     };
     rm.upload_globals(gpu, rmg);
     rm.capture_env(gpu);
-    // The ONLY difference between the two shots.
+    // The only difference between the two shots.
     if use_probe {
         rm.set_reflection_probes(gpu, Some((probes.view(), probes.sampler())));
     }

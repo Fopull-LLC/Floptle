@@ -1,99 +1,63 @@
-# --- Rust ---------------------------------------------------------------------
+# Rust
 /target
 **/*.rs.bk
-# NOTE: Cargo.lock IS committed on purpose — this workspace produces binaries
-# (floptle-editor, floptle-runtime), so a locked dependency set is reproducible.
+# Cargo.lock is committed: this workspace produces binaries.
 
-# --- Editor / OS scratch ------------------------------------------------------
+# Editor / OS scratch
 *.swp
 .DS_Store
 Thumbs.db
 .idea/
 
-# Machine-specific cargo config: this repo lives on an NTFS (ntfs3) disk whose
-# truncate path deadlocks under concurrent Rust-build I/O, so target-dir is
-# redirected to a native-fs path that differs per machine. Keep it out of git.
+# Machine-specific cargo config (target-dir differs per machine).
 .cargo/config.toml
 
-# Throwaway dev screenshots / capture shares (not engine content).
+# Dev screenshots and capture shares.
 /Screenshots/
 
-# CI-built engine binaries consumed by File ⏵ Export Game… (macOS — see
-# .github/workflows/macos-binary.yml + docs/export-builds.md). Machine-local.
+# CI-built engine binaries consumed by Export Game (see docs/export-builds.md).
 /prebuilt/
 
-# --- TEMPORARY / LEGALLY-SENSITIVE TEST ASSETS --------------------------------
-# Ocarina of Time textures are used ONLY as local placeholder test assets during
-# development. They MUST NOT enter git history (we plan to open-source later, and
-# scrubbing history is painful). Drop them under assets/textures/_oot_temp/.
-# They are git-ignored on purpose; replace with original Fopull textures before
-# any public release.
+# Local placeholder assets that never ship.
 assets/textures/_oot_temp/
 assets/**/_oot_temp/
-
-# Third-party / sample test models (e.g. Khronos glTF samples) used to exercise
-# the importer during development — kept out of history like the OoT textures.
-# Your own models live elsewhere under assets/models/ and ARE committed.
 assets/models/_test/
 
-# Large / generated binary assets (imported glTF caches, baked data, etc.)
+# Generated binary assets (import caches, bakes).
 assets/.cache/
 *.blend1
 out.png
 
-# Terrain fields are STREAMING DATA, not source:
-# bodies carry a genspec in the scene and (re)generate deterministically on
-# approach; player edits persist in game SAVE SLOTS (terrain.saveDir), and the
-# editor's local project files stay on disk — none of it belongs in git history
-# (a single field can exceed GitHub's 100 MB hard limit).
+# Terrain fields are streaming data, regenerated deterministically from the
+# scene; player edits persist in save slots. A single field can exceed 100 MB.
 *.cfield
 *.tfield
 **/terrain/*.meta
 
-# Player save slots (per-slot save stores + slot terrain caches) — runtime data.
+# Runtime data written by the engine while a game runs.
 **/saves/
-
-# Crash-recovery autosaves.
 **/.floptle/autosave/
-
-# A PROJECT's runtime dirs, for every project in the repo rather than a named
-# one. These are written by the engine while the game runs, not authored:
-#   save/     — the script save API's slots (floptle_script::save → <project>/save/<slot>.ron)
-#   replays/  — recorded rollback match logs (crate::shadow), which get large
-# Anchored one level down on purpose. A NESTED folder called `save` is content
-# and ships — the same distinction the exporter draws when it decides what a
-# build carries.
 /*/save/
 /*/replays/
 
-# Auto-seeded UI effect examples in the scratch/default project (regenerated on
-# project open).
+# Auto-seeded UI effect examples in the default project (regenerated on open).
 assets/shaders/examples/ui/
 
 # The Solar demo lives in its own repository (github.com/Fopull-LLC/Solar); a
 # local symlink here keeps older project paths working.
 /solar
 
-# A PROJECT's package registry. `Source::Linked` records an ABSOLUTE path on the
-# machine that linked it — "/home/someone/…" — so this file is developer state,
-# not project source: committing it hands everyone else a path that exists on
-# exactly one computer. Anchored one level down like the runtime dirs above, so
-# it covers every project in the repo without naming one.
+# A project's package registry records absolute paths on the machine that
+# linked them.
 /*/packages.ron
 
-# Offscreen render-probe outputs (ui_shader_probe, etc.)
+# Offscreen render-probe outputs, and ad-hoc screenshots at the repo root.
 *_probe.png
+/*.png
+!/docs/**/*.png
 
-# --- Agent / tooling scratch --------------------------------------------------
-# Claude Code's per-project state (session transcripts, local settings). Machine-
-# and person-specific, and it can carry conversation content — never in history.
+# Agent tooling state and internal working notes.
 .claude/
-
-# --- Internal working material (local only) -----------------------------------
-# Working notes: handoffs, proposals for unshipped systems, roadmaps, and the
-# decision records behind them. They are drafts and intentions rather than
-# documentation of the engine, and docs/ is the shipped surface. Kept on disk,
-# out of the repo.
 /.internal/
 /CLAUDE.md
 
@@ -102,26 +66,13 @@ __pycache__/
 *.pyc
 .venv/
 
-# Local packaging output (scripts/package.sh writes bundles + releases.json here;
-# real releases are built by CI and published to GitHub Releases).
+# Local packaging output (scripts/package.sh); real releases are built by CI.
 /dist/
 /builds/
 builds.zip
 
-# Source-art archives dropped at the repo root while working (texture/VFX packs
-# and the like). They are INPUTS to the assets under assets/ and each is tens of
-# megabytes — the same call as builds.zip above. Unpacked art that the engine
-# actually loads is committed; the archive it came out of is not.
+# Source-art archives dropped at the repo root while working.
 /*.zip
 
-# --- Dev capture scratch ------------------------------------------------------
-# Ad-hoc screenshots and render probes people drop at the repo root while
-# debugging. The named *_probe.png rule above only catches the ones that follow
-# the convention; these are the rest.
-/*.png
-!/docs/**/*.png
-
-# The two release binaries and per-run JSON that scripts/scene-bench.sh builds
-# to compare script VMs. Each binary is the whole editor; the numbers that
-# matter out of a run are recorded in the plan doc by hand, not committed here.
+# Script-VM comparison builds from scripts/scene-bench.sh.
 /.bench/

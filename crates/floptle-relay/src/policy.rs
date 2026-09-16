@@ -11,7 +11,7 @@
 //! Five rules make it safe, and the first is the one that bites if it is
 //! forgotten:
 //!
-//! 1. **Absent from the snapshot is NOT revoked.** A key minted ten seconds ago
+//! 1. **Absent from the snapshot is not revoked.** A key minted ten seconds ago
 //!    is not in it yet. Only an explicit removal or a non-active state refuses;
 //!    anything unknown goes to the cold path. Read absence as refusal and every
 //!    developer's first host of a new game fails intermittently for thirty
@@ -138,7 +138,7 @@ pub struct CloudPolicy {
     last_usage: Instant,
     /// **The forwarding loop's own period, sampled every tick**
     /// (`floptle/0215`). `tick()` runs at the top of every `step()` and the
-    /// binary steps in a tight loop, so the gap between consecutive ticks IS
+    /// binary steps in a tight loop, so the gap between consecutive ticks is
     /// the loop period — no plumbing through the relay required. It stretches
     /// under load before the kernel starts dropping datagrams, which makes it
     /// the earliest honest saturation signal this box has.
@@ -174,7 +174,7 @@ pub struct CloudPolicy {
     /// plane can alert on before anyone decides whether to refuse it.
     /// Updated when a host comes back from a different address.
     host_of: HashMap<String, std::net::IpAddr>,
-    /// The key a lobby was opened with, kept from when it CLOSES until the
+    /// The key a lobby was opened with, kept from when it closes until the
     /// next usage flush.
     ///
     /// A game that filled up and emptied again inside one ten-second interval
@@ -186,7 +186,7 @@ pub struct CloudPolicy {
     /// an operator on the box can sanity-check the reported figure against the
     /// interface counters, which is the only independent check there is.
     bytes_total: (u64, u64),
-    /// Keys currently at their ceiling, so the host is told ONCE per episode
+    /// Keys currently at their ceiling, so the host is told once per episode
     /// rather than once per refused join (`floptle/0194`). A busy game at cap
     /// refuses constantly, and a line per refusal is a flood that gets muted —
     /// taking the one message that matters with it.
@@ -343,7 +343,7 @@ impl CloudPolicy {
         b.limit_drops = Some(self.limit_drops);
 
         // Occupancy: lobbies the relay is holding, and the players in them
-        // counted the ONE way `host_seat` defines (`floptle/0211`) — a
+        // counted the one way `host_seat` defines (`floptle/0211`) — a
         // dedicated server is a box nobody is sitting at and is not a player.
         b.lobbies = self.of_lobby.len() as u32;
         b.peers = self
@@ -521,7 +521,7 @@ impl CloudPolicy {
                 };
             }
             if row.account_over_limit {
-                // A host refused at host time is the SAME event as a join
+                // A host refused at host time is the same event as a join
                 // refused at the ceiling, so it gets the same sentence rather
                 // than a generic "refused" (`floptle/0194`). This one goes to
                 // the developer, so it carries the number and the portal.
@@ -612,7 +612,7 @@ impl RelayPolicy for CloudPolicy {
                     .into(),
             };
         };
-        // **Rule 1.** A key the snapshot does not carry has NOT been revoked;
+        // **Rule 1.** A key the snapshot does not carry has not been revoked;
         // it may simply have been minted since the last pull. Ask.
         //
         // **Rule 2 falls out of this one rather than needing its own branch**,
@@ -715,7 +715,7 @@ impl RelayPolicy for CloudPolicy {
     }
 
     fn lobby_host_lost(&mut self, code: &str) {
-        // ⚠ **Named, with the code.** The relay printed a bare lobby COUNT
+        // ⚠ **Named, with the code.** The relay printed a bare lobby count
         // before this, and a count cannot say which lobby died or what killed
         // it — which is why a host dropping three times inside one real match
         // was found by differencing two byte counters rather than by reading
@@ -849,7 +849,7 @@ impl RelayPolicy for CloudPolicy {
                 e.0 += self.live.get(code).copied().unwrap_or(0) + self.host_seat(code);
                 e.1 += 1;
             }
-            // Traffic folds onto the SAME `of_lobby` mapping the occupancy
+            // Traffic folds onto the same `of_lobby` mapping the occupancy
             // used, so a sample's bytes and its lobby count can never disagree
             // about which key a lobby belonged to. A lobby that closed inside
             // this interval has carried real bytes and no longer appears in
@@ -959,7 +959,7 @@ impl RelayPolicy for CloudPolicy {
 /// actionable thing: someone will leave.
 pub const FULL_RIGHT_NOW: &str = "This game is full right now. Try again in a minute.";
 
-/// **What the HOST is told, once per at-cap episode** (`floptle/0194`).
+/// **What the host is told, once per at-cap episode** (`floptle/0194`).
 ///
 /// The developer's mental model of a refused friend is "my netcode is broken".
 /// Left alone that is a churn event; named, it is the best news they have had
@@ -1380,7 +1380,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **A control plane this relay cannot reach HOLDS the joiner** rather
+    /// ⚠ **A control plane this relay cannot reach holds the joiner** rather
     /// than refusing.
     ///
     /// The same failing-open rule the rest of this file follows: an outage and
@@ -1592,7 +1592,7 @@ mod tests {
         );
 
         // The host of UCCCCC blips and comes back from somewhere else; one
-        // lobby closes. The next sample says where things are NOW.
+        // lobby closes. The next sample says where things are now.
         p.lobby_host_lost("UCCCCC");
         p.lobby_host_returned("UCCCCC", Some(a));
         p.lobby_closed("UBBBBB");
@@ -1677,7 +1677,7 @@ mod tests {
             );
         }
 
-        // …and the developer, who CAN act on it, gets all of it — once.
+        // …and the developer, who can act on it, gets all of it — once.
         let said = fake_log(&p);
         assert!(said.contains("20 players are in your games"), "names the number: {said}");
         assert!(said.contains("free plan"), "names the plan: {said}");
@@ -1773,9 +1773,9 @@ mod tests {
         let HostAdmission::Refuse { reason } = p.admit_host(Some(KEY), None) else {
             panic!("an account over its pooled limit must not open another lobby");
         };
-        // A host refused at host time is the SAME event as a join refused at
+        // A host refused at host time is the same event as a join refused at
         // the ceiling, so it says the same thing rather than a generic
-        // "refused" (`floptle/0194`) — and this one IS the developer, so it
+        // "refused" (`floptle/0194`) — and this one is the developer, so it
         // carries the number, the reassurance and the portal.
         assert!(reason.contains("20 players are in your games"), "names the number: {reason}");
         assert!(reason.contains("nobody playing was disconnected"), "{reason}");
@@ -1928,7 +1928,7 @@ mod tests {
         );
     }
 
-    /// **An explicit removal IS a revocation** — the other half of rule 1, and
+    /// **An explicit removal is a revocation** — the other half of rule 1, and
     /// the reason rule 1 is safe. Absence is a question; `removed` is an
     /// answer.
     #[test]
@@ -1954,7 +1954,7 @@ mod tests {
         });
         due_now(&mut p);
         // It hangs on the cold path rather than refusing outright, which is
-        // rule 1 doing its job — but it does NOT host.
+        // rule 1 doing its job — but it does not host.
         assert!(
             settle(&mut p, |p| p.keys.get(KEY).is_none()),
             "the removal never applied"
@@ -1973,7 +1973,7 @@ mod tests {
     #[test]
     fn a_cold_lookup_that_never_answers_is_floored_rather_than_left_hanging() {
         let fake = Arc::new(Fake::default());
-        // `cold` has no entry for NEW, so `authorize` hangs.
+        // `cold` has no entry for new, so `authorize` hangs.
         let mut p = policy(fake);
         assert!(settle(&mut p, |p| p.snapshot_age_s().is_some()));
         assert_eq!(p.admit_host(Some(NEW), None), HostAdmission::Pending);
@@ -2103,7 +2103,7 @@ mod tests {
         );
     }
 
-    /// Ty's rule at this layer: no key, no managed relay — and the sentence
+    /// The rule at this layer: no key, no managed relay — and the sentence
     /// names both ways out.
     #[test]
     fn a_keyless_host_is_refused_with_somewhere_to_go() {

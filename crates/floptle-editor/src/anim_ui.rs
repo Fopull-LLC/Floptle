@@ -106,7 +106,7 @@ pub struct AnimUiState {
     /// The same, for the path-and-name fields — so ● Record off puts a swapped
     /// texture back rather than leaving the scene edited.
     pub record_restore_prop_strs: Vec<(Entity, String, String, String)>,
-    /// …and for a sprite frame, whose CELL lives on `Matter::Sprite` rather than
+    /// …and for a sprite frame, whose cell lives on `Matter::Sprite` rather than
     /// on any component the two lists above can reach. Without it, scrubbing a
     /// sprite lane with record on left the node wearing whichever frame you
     /// stopped on, and that is what got saved.
@@ -1291,7 +1291,7 @@ impl EditorTabViewer<'_> {
                         .collect()
                 })
                 .unwrap_or_default(),
-            // Rig without a controller: embedded clip names (the NAME as key lets the
+            // Rig without a controller: embedded clip names (the name as key lets the
             // registry's stem-fallback find an extracted `.anim.ron` of the same name
             // → full editable timeline), PLUS any standalone clip authored FOR this
             // model (its `source_model` = this mesh's path) — that's how a "✚ New…"
@@ -1314,7 +1314,7 @@ impl EditorTabViewer<'_> {
                 _ => Vec::new(),
             },
         };
-        // How many states play each clip FILE. Two states on one file are not two
+        // How many states play each clip file. Two states on one file are not two
         // animations — they are one animation with two names, and editing either
         // edits both. That used to be invisible; now the list says so.
         let mut clip_users: HashMap<String, usize> = HashMap::new();
@@ -1343,7 +1343,7 @@ impl EditorTabViewer<'_> {
                 .show_ui(ui, |ui| {
                     for (e, n) in &candidates {
                         if ui.selectable_label(*e == target, n).clicked() && *e != target {
-                            // A live recording is bound to the OLD target's subtree —
+                            // A live recording is bound to the old target's subtree —
                             // stop it (restoring the pre-record scene) before switching.
                             if self.anim_ui.record {
                                 stop_record_ui(self.world, self.anim_ui);
@@ -1377,7 +1377,7 @@ impl EditorTabViewer<'_> {
                             .selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), lbl)
                             .clicked()
                         {
-                            // Recording writes into the CURRENT clip — stop it before
+                            // Recording writes into the current clip — stop it before
                             // switching so keys can't land in the wrong animation.
                             if self.anim_ui.record {
                                 stop_record_ui(self.world, self.anim_ui);
@@ -1466,7 +1466,7 @@ impl EditorTabViewer<'_> {
                             })
                             .collect();
                         // Snapshot pre-record property values too (for restore
-                        // on stop) — numbers AND paths. Without the second half,
+                        // on stop) — numbers and paths. Without the second half,
                         // recording a texture swap leaves the swap in the scene.
                         self.anim_ui.record_restore_props = scene_channel_names(self.world, target)
                             .into_iter()
@@ -1723,7 +1723,7 @@ impl EditorTabViewer<'_> {
         }
 
         // ---- shared-clip guard --------------------------------------------
-        // Several states pointing at ONE clip file is legal (a "hit" reused by
+        // Several states pointing at one clip file is legal (a "hit" reused by
         // three attacks) but it is a single animation: keying it changes every
         // state that plays it. Left unsaid, that reads as the editor randomly
         // replacing your work — so say it, and offer the one-click fix.
@@ -1790,7 +1790,7 @@ impl EditorTabViewer<'_> {
             self.bare_ruler_ui(ui, target, &sel_anim);
         }
 
-        // (Record diffing runs in the render loop BEFORE the preview re-applies
+        // (Record diffing runs in the render loop before the preview re-applies
         // the clip — see anim_ui::record_scan.)
 
         // Save coalescing for clip edits.
@@ -1876,7 +1876,7 @@ fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32) {
 /// Scroll-wheel navigation for the dopesheet, mirroring the particle timeline: plain
 /// wheel zooms X about the cursor (keeping the time under the pointer fixed), Alt+wheel
 /// zooms Y (row height), Shift+wheel falls through to the ScrollArea to pan, and a
-/// pending Fit sizes the whole clip to the view. Runs BEFORE the `clip_doc` borrow
+/// pending Fit sizes the whole clip to the view. Runs before the `clip_doc` borrow
 /// (it mutates disjoint `st` fields), so `dur` is passed in.
 fn handle_anim_wheel(ui: &egui::Ui, st: &mut AnimUiState, dur: f32) {
     let region = ui.available_rect_before_wrap();
@@ -4900,7 +4900,7 @@ mod tests {
     /// says which picture; these say what the node does with it — squash and
     /// stretch, a flip on a turn, a pivot shifted for a crouch. Every one was
     /// reachable from a script and from no clip, which is the wrong way round in
-    /// a 2D game where the clip IS the character.
+    /// a 2D game where the clip is the character.
     ///
     /// The flip is asserted STEPPED on purpose: an eased mirror turns the sprite
     /// round exactly halfway between two keys, at a moment nobody authored.
@@ -4934,7 +4934,7 @@ mod tests {
     /// **A keyed cell has to move the sprite on playback.**
     ///
     /// The one the ▫ Sprite Inspector's frame grid produces: picking a frame
-    /// writes the node's own `cell` AND the Material's copy of it, so record
+    /// writes the node's own `cell` and the Material's copy of it, so record
     /// diffs the Material and writes a `Material ▸ cell` lane. Playing that lane
     /// back wrote the Material's cell and stopped — which a Sprite node's draw
     /// does not read, so every key was correct and nothing on screen ever
@@ -4968,7 +4968,7 @@ mod tests {
         assert_eq!(w.get::<floptle_core::Material>(e).map(|m| m.cell), Some(0));
     }
 
-    /// A surface that is NOT a sprite still keeps its cell on the material —
+    /// A surface that is not a sprite still keeps its cell on the material —
     /// the rule is "wherever it is read", not "always the node".
     #[test]
     fn a_mesh_keeps_its_cell_on_the_material() {
@@ -5087,7 +5087,7 @@ mod tests {
     #[test]
     fn every_animatable_field_can_be_both_read_and_written() {
         let (mut w, e) = sprite_world();
-        // Everything ANIMATABLE_PROPS names has to be present on SOME node for
+        // Everything ANIMATABLE_PROPS names has to be present on some node for
         // this to test anything, so build one wearing the lot.
         w.insert(e, floptle_ui::ElementSpec {
             image: Some(floptle_ui::ImageSpec::default()),
@@ -5144,7 +5144,7 @@ mod tests {
             for (field, kind, _) in fields.iter() {
                 // `Sprite ▸ frame` is a pseudo-field with its own applier, so it
                 // is checked below rather than through the two mirrors. The rest
-                // of the Sprite heading is the NODE's own numbers and goes
+                // of the Sprite heading is the node's own numbers and goes
                 // through them like everything else.
                 if *comp == floptle_scene::SPRITE_COMPONENT
                     && *field == floptle_scene::SPRITE_FIELD
@@ -5432,14 +5432,14 @@ mod tests {
         assert_eq!(doc.channels[0].properties[0].times, vec![0.25, 0.5]);
         assert_eq!(doc.channels[0].properties[0].values[0], AnimPropValueDoc::Float(5.0));
 
-        // Deleting both keys drops the emptied track AND the now-empty channel.
+        // Deleting both keys drops the emptied track and the now-empty channel.
         delete_property_key(&mut doc, 0, 0, 0.25);
         assert_eq!(doc.channels[0].properties[0].times, vec![0.5]);
         delete_property_key(&mut doc, 0, 0, 0.5);
         assert!(doc.channels.is_empty(), "an empty channel is removed");
     }
 
-    /// A channel that still carries a transform lane is NOT dropped when its last
+    /// A channel that still carries a transform lane is not dropped when its last
     /// property track goes away.
     #[test]
     fn drop_empty_channel_spares_transform_lanes() {

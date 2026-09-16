@@ -62,7 +62,7 @@ impl Editor {
 
     /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
     /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
-    /// gravity well at the node. No GravityVolume node → ZERO gravity (a space/zero-g
+    /// gravity well at the node. No GravityVolume node → zero gravity (a space/zero-g
     /// world). Takes `&World` (not `&self`) so it can be called from the play loop
     /// while `self.gpu`/egui are mutably borrowed — see call site.
     /// Build the scene's gravity field for the sim. `origin` is the sim's world origin
@@ -89,7 +89,7 @@ impl Editor {
             }
         }
         // Celestial bodies (solar demo S2): real µ/r² sources with patched-conic
-        // SOI dominance — the deepest body whose SOI contains you is the ONE
+        // SOI dominance — the deepest body whose SOI contains you is the one
         // that pulls (see `GravitySource::InvSq`). SOI 0 auto-derives Laplace
         // from the parent's µ and the orbit's semi-major axis.
         let cb: Vec<(Entity, floptle_core::CelestialBody, DVec3)> = world
@@ -270,7 +270,7 @@ impl Editor {
         for e in ents {
             let wt = floptle_core::world_transform(&self.world, e);
             // Anchor each collider on its own node (full f64) and bake geometry
-            // RELATIVE to it — the residuals stay small and exact no matter how far
+            // relative to it — the residuals stay small and exact no matter how far
             // out the node sits (ADR-0015); the sim re-anchors them per rebase.
             let anchor = wt.translation;
             let s = wt.scale;
@@ -304,13 +304,13 @@ impl Editor {
                     }
                     sim.add_static_mesh(anchor, &verts, &indices, layer);
                 }
-                // Map meshes: the kernel geometry IS the collider (all slots
+                // Map meshes: the kernel geometry is the collider (all slots
                 // concatenated) — a blockout wall collides exactly where it draws.
                 Some(Matter::MapMesh { id }) => {
                     let Some(mesh) = self.maps.meshes.get(id) else { continue };
                     let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
                     // Per-face material slots ride along, so a query can answer
-                    // WHAT it hit and not only which node — one big building
+                    // what it hit and not only which node — one big building
                     // with nine slots is one node, and the node's own material
                     // says "stone" for its grass too (`floptle/0174`).
                     let (verts, indices, tri_slot, slots) =
@@ -327,7 +327,7 @@ impl Editor {
                 // allows (`floptle_tiles::collision_boxes`). Two reasons it is
                 // merged rather than one box per square:
                 //
-                // 1. A 100x100 solid floor is 10,000 squares and ONE box. Ten
+                // 1. A 100x100 solid floor is 10,000 squares and one box. Ten
                 //    thousand static colliders is more than most whole 3D levels
                 //    have, and the sim rebuilds its index over all of them.
                 // 2. A character sliding along a row of separate boxes catches on
@@ -335,7 +335,7 @@ impl Editor {
                 //    at a shallow angle the depenetration pass ticks across each
                 //    boundary. One merged box has no interior seams.
                 //
-                // Depth is one tile: a 2D game's collider has to have SOME depth to
+                // Depth is one tile: a 2D game's collider has to have some depth to
                 // be a box, and a tile's own size is the only defensible choice —
                 // it keeps a character with any thickness at all inside the layer
                 // rather than passing through a paper-thin wall.
@@ -363,7 +363,7 @@ impl Editor {
         }
     }
 
-    /// Build the play sim under the PROJECT'S LAYER TABLE: terrain + static
+    /// Build the play sim under the project'S LAYER TABLE: terrain + static
     /// colliders carry their node's layer bit, dynamic bodies resolve theirs,
     /// the collision matrix lands in the world, and the script host is lent
     /// the same table (`node.layer` validation + `raycast` layer filters).
@@ -443,13 +443,13 @@ impl Editor {
         // host: the host does no file I/O, so who owns the parse is unambiguous.
         self.script_host.set_tilesets(self.scene_tilesets());
         // …and every imported model's material slots, so `node:materials()` can
-        // answer what a character's parts are CALLED. Same deal as the tilesets:
+        // answer what a character's parts are called. Same deal as the tilesets:
         // the parts are the importer's knowledge and the host does no file I/O.
         self.script_host.set_model_slots(self.model_slots());
         sim
     }
 
-    /// [`Self::build_play_sim`] for a world that is NOT `self.world` — the
+    /// [`Self::build_play_sim`] for a world that is not `self.world` — the
     /// referee's and a replay's ([`crate::shadow::ShadowSim`]).
     ///
     /// Same gravity field, same layers, same terrain volumes, same static
@@ -461,7 +461,7 @@ impl Editor {
     /// already said all of it, about the same scene, one line earlier.
     pub(crate) fn build_sim_for_world(&self, world: &floptle_core::World) -> floptle_physics::Sim {
         let layers = self.project.build_layers();
-        // The origin comes from OUR world on purpose: it is a precision anchor,
+        // The origin comes from our world on purpose: it is a precision anchor,
         // and the two sims must round to the same one or every f64→f32 residual
         // differs. The shadow is the same scene, so this is the same answer.
         let origin = self.sim_origin_hint();
@@ -471,7 +471,7 @@ impl Editor {
             floptle_physics::Sim::build_layered(world, &terrain_vols, gravity, origin, layers);
         drop(terrain_vols);
         self.add_static_colliders_for_world(world, &mut sim);
-        // The shadow's authority is that it runs the SAME physics — which now
+        // The shadow's authority is that it runs the same physics — which now
         // includes the same water. A referee whose seas were dry would call
         // every splashdown a desync.
         sim.world.water = Self::build_water_field(world, origin);
@@ -495,7 +495,7 @@ impl Editor {
             .map(|s| s.body_states().map(|r| (r.entity.index(), r.vel)).collect())
             .unwrap_or_default();
         // COMPOUNDS carry more runtime state that the rebuild must not drop:
-        // the `anchored` flag AND angular velocity. Losing `anchored` silently
+        // the `anchored` flag and angular velocity. Losing `anchored` silently
         // freed a launch-clamped vessel whenever terrain streamed in mid-clamp
         // (loaded saves stream terrain during Play), which left the ship's
         // damage model permanently disarmed — it flew fine but bounced off the
@@ -553,11 +553,11 @@ impl Editor {
     }
 
     /// The UNREADY terrains the game cannot start without: any celestial
-    /// terrain body with NO resident field that a dynamic node (the player,
-    /// the ship) is practically ON — within `RESIDENT_SYNC_RADII` body radii.
-    /// Deliberately not just the COLD set: a spawn planet whose first
+    /// terrain body with no resident field that a dynamic node (the player,
+    /// the ship) is practically on — within `RESIDENT_SYNC_RADII` body radii.
+    /// Deliberately not just the cold set: a spawn planet whose first
     /// generation is still running (▶ Generate then Play before it lands) is
-    /// in NEITHER set — it was the hole that let the player fall through when
+    /// in neither set — it was the hole that let the player fall through when
     /// Play started mid-generation. Falling through one of these is the bug
     /// class this exists to kill. Returns (entity, id, is_cold) — only cold
     /// entries are kickable (mid-generation ones land via the generation
@@ -589,7 +589,7 @@ impl Editor {
     }
 
     /// G1/G2 residency, Play start: if the terrain under the player is still
-    /// cold, HOLD the run (auto-pause) and stream it in the BACKGROUND — the
+    /// cold, hold the run (auto-pause) and stream it in the BACKGROUND — the
     /// game must not start until the ground exists, and it must not freeze the
     /// UI loading it either (the no-stutter rule). The residency driver
     /// releases the hold the moment nothing required is left cold.
@@ -623,7 +623,7 @@ impl Editor {
     /// that's player state, exactly what a slot is for (G2).
     pub(crate) fn drop_play_loaded_terrains(&mut self) {
         // Exit-path guarantee: settle the background checkpoint and put every
-        // dirty field on disk in the slot BEFORE anything drops — the per-entity
+        // dirty field on disk in the slot before anything drops — the per-entity
         // writes below then skip whatever this already saved.
         self.flush_slot_terrains_sync();
         let dropped: Vec<Entity> = self.play_loaded_terrains.drain().collect();
@@ -702,7 +702,7 @@ impl Editor {
     /// Turn ● Record off and put the posed subtree back exactly as it was
     /// when recording started — recording authors the CLIP, never the scene.
     /// One implementation for every path (transport, play start, undo, save):
-    /// restores transforms AND recorded property values, and forgets the
+    /// restores transforms and recorded property values, and forgets the
     /// preview snapshot (stale mid-record state — never to be applied).
     pub(crate) fn stop_recording(&mut self) {
         // Recording is an authoring gesture; nothing in a build can start one.
@@ -787,14 +787,14 @@ impl Editor {
             self.cursor_freed = false;
             // A mid-play `scene.load(...)` renamed the scene for the session —
             // the restored world is the PRE-PLAY scene, so its name must come
-            // back BEFORE `restore()` runs: restore's `adopt_terrain()` loads
+            // back before `restore()` runs: restore's `adopt_terrain()` loads
             // terrain fields by scene name, and doing this after it once made
             // Stop fill the editor scene's terrain nodes with the PLAYED
             // scene's fields (the next save then overwrote the real terrain
             // on disk — real lost work).
             self.pending_scene.clear();
             // Did a `scene.load` actually happen? The live name is the played scene's and
-            // the snapshot holds the pre-Play one, so a difference IS the switch. Worth
+            // the snapshot holds the pre-Play one, so a difference is the switch. Worth
             // knowing because the switch now reloads the paint stores (it has to — see
             // `switch_scene_during_play`), and those have no snapshot to come back from.
             let switched =
@@ -814,7 +814,7 @@ impl Editor {
             // played scene's, and unlike terrain and map geometry they are far too big to
             // snapshot per Play — texture paint is images — so they come back off disk.
             //
-            // The cost is narrow and worth naming: paint edited but NOT saved before
+            // The cost is narrow and worth naming: paint edited but not saved before
             // pressing Play, in a session where a script then switched scenes, reverts to
             // what is on disk. Leaving another scene's paint loaded instead would be worse
             // and much harder to notice. Nothing is written here, so nothing is destroyed.
@@ -824,7 +824,7 @@ impl Editor {
                 self.paint_meshes.clear();
                 self.mesh_wire_cache.clear();
             }
-            // Terrain fields live OUTSIDE the scene doc, so the snapshot above
+            // Terrain fields live outside the scene doc, so the snapshot above
             // doesn't carry them — bring back the exact pre-Play fields (+
             // texture palette). Disk can't stand in: it may be behind unsaved
             // sculpts, and a mid-play scene switch swapped the live fields for
@@ -860,11 +860,11 @@ impl Editor {
                 self.terrain_textures_dirty = true;
                 self.terrain_gpu_dirty = !self.terrains.is_empty();
             }
-            // G1 residency: terrains that streamed IN during Play were cold at
+            // G1 residency: terrains that streamed in during Play were cold at
             // Play start (not in the snapshot above) — drop them back to cold so
             // Play can't leak residency or persist in-Play digs on them. Their
-            // on-disk field is untouched (nothing saves to the PROJECT during
-            // Play), so cold + disk file IS the pre-Play state. (Fields dug
+            // on-disk field is untouched (nothing saves to the project during
+            // Play), so cold + disk file is the pre-Play state. (Fields dug
             // during Play with a save SLOT set flushed to the slot inside
             // drop_play_loaded_terrains — player state, not authoring.)
             self.drop_play_loaded_terrains();
@@ -928,13 +928,13 @@ impl Editor {
             self.script_lines.clear(); // no stale map lines across runs
             self.script_rects.clear();
             self.script_texts.clear();
-            // Every Play is a FRESH RUN: drop all script instances so top-level
-            // script state can't leak across sessions (Ty's ship still thought
+            // Every Play is a FRESH run: drop all script instances so top-level
+            // script state can't leak across sessions (a ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.
             self.script_host.reset_instances();
             // …and every diagnostic they already said once. Play clears the
             // Console two dozen lines below, and a warning suppressed by the
-            // PREVIOUS run would never refill it — a project replayed without
+            // previous run would never refill it — a project replayed without
             // an edit ran silently. See `ScriptHost::reset_diagnostics`.
             self.script_host.reset_diagnostics();
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
@@ -947,7 +947,7 @@ impl Editor {
             self.tick_mouse_delta = (0.0, 0.0);
             self.tick_scroll = 0.0;
             // G1/G2 residency: if the terrain under the player is still cold,
-            // the run HOLDS (auto-paused) while it streams in the background —
+            // the run holds (auto-paused) while it streams in the background —
             // the game never starts on an intangible planet, and the UI never
             // freezes loading one. Released by the residency driver.
             self.begin_play_terrain_hold();
@@ -977,7 +977,7 @@ impl Editor {
             self.vfx.start_play(&self.world);
             // Fire play-on-start sounds through the project mixer.
             self.audio_start_play();
-            // The project's `vec3` choice, applied HERE as well as on open: the
+            // The project's `vec3` choice, applied here as well as on open: the
             // ⚙ Settings row says "takes effect on the next Play", and this is
             // what makes that sentence true rather than "on the next open".
             self.apply_script_vec3_mode();
@@ -1111,7 +1111,7 @@ impl Editor {
                 return None;
             }
         };
-        // WHAT SURVIVES. `node.persistent` marks a subtree as outliving the
+        // what SURVIVES. `node.persistent` marks a subtree as outliving the
         // swap — a HUD, a party, a save-game manager, the music. Collected
         // before anything is torn down, because the answer is about the world
         // that is still standing.
@@ -1138,7 +1138,7 @@ impl Editor {
         self.audio_stop_play();
         // …swap the world…
         //
-        // DESPAWN IN PLACE rather than `World::new()`, so a persistent node
+        // DESPAWN in PLACE rather than `World::new()`, so a persistent node
         // keeps its ENTITY. That is not a micro-optimisation — script
         // instances, UI bindings and net handlers are all keyed by entity
         // index, and a survivor that came back under a different index would
@@ -1156,7 +1156,7 @@ impl Editor {
         for e in doomed {
             self.world.despawn(e);
         }
-        // A survivor parented to a node that did NOT survive is now a child of
+        // A survivor parented to a node that did not survive is now a child of
         // nothing, and `world_transform` would fold in a transform that no
         // longer exists. Re-root it: it keeps the world pose it had, which is
         // where the player last saw it.
@@ -1186,23 +1186,23 @@ impl Editor {
         self.env_layer = None;
         self.set_scene_file(&path);
         self.adopt_terrain();
-        // THE OUT-OF-DOCUMENT STORES, which a scene switch has to reload exactly as
+        // the out-of-document STORES, which a scene switch has to reload exactly as
         // opening a scene does.
         //
-        // Map geometry, vertex paint and texture paint live in sidecars keyed by SCENE
-        // NAME, not in the scene .ron. `set_scene_file` above just repointed every one of
+        // Map geometry, vertex paint and texture paint live in sidecars keyed by scene
+        // name, not in the scene .ron. `set_scene_file` above just repointed every one of
         // those paths at the new scene — but until these run, the in-memory stores still
         // hold the previous scene's contents, and map node ids start at 0 in every scene,
         // so they collide rather than come up empty. A node whose id survives draws the
         // *other* scene's geometry under the *other* scene's slot names; a node whose id
         // doesn't gets seeded with a default box. Either way the per-face materials in the
-        // scene .ron are keyed by slot NAME and match nothing, so the map renders grey.
+        // scene .ron are keyed by slot name and match nothing, so the map renders grey.
         // Colliders are baked from the same store, so the collision follows the picture.
         //
         // This was missing here and present in all five editor entry points, which is why
         // a map looks right when you open its scene and wrong when a game loads it.
         //
-        // Maps FIRST: paint is keyed to a triangulation that comes out of the map store.
+        // Maps first: paint is keyed to a triangulation that comes out of the map store.
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
@@ -1304,7 +1304,7 @@ impl Editor {
         // copies carry the tag — `unload` then removes both, which is the only
         // answer that isn't arbitrary.
         let tag = req.trim().to_string();
-        // The handover happens BEFORE the layer's own nodes exist, so the
+        // The handover happens before the layer's own nodes exist, so the
         // environment being put to sleep is exactly the base scene's.
         if environment {
             self.take_environment(&doc, &tag);
@@ -1319,7 +1319,7 @@ impl Editor {
             return;
         }
         // Meshes need GPU parts before they can draw; map/paint sidecars are
-        // keyed by SCENE NAME and belong to the base scene, so an additive
+        // keyed by scene name and belong to the base scene, so an additive
         // layer deliberately does not touch them.
         self.register_scene_meshes();
         // Physics: the same incremental wiring a spawned prefab gets. Bodies
@@ -1364,7 +1364,7 @@ impl Editor {
     /// Hand the world's environment to an additive layer
     /// (`{ additive = true, environment = true }`).
     ///
-    /// A world has ONE environment. Without this, a layer carrying a Skybox is
+    /// A world has one environment. Without this, a layer carrying a Skybox is
     /// a second Skybox, and the renderer resolves both with a first-match query
     /// (`shading::skybox_uniforms`) — so the look would be decided by spawn
     /// order, which is the "the additive scene broke my lighting" failure the
@@ -1378,7 +1378,7 @@ impl Editor {
     /// everything else Play has done to it.
     fn take_environment(&mut self, doc: &floptle_scene::SceneDoc, tag: &str) {
         // A second environment layer over a first: the base's nodes are already
-        // asleep and its Light is already saved, so the loan must NOT be
+        // asleep and its Light is already saved, so the loan must not be
         // re-taken from the world (that would record the outgoing layer's
         // environment as the base's, and unloading would restore the wrong
         // one). Only the owning tag moves.
@@ -1401,7 +1401,7 @@ impl Editor {
             }
             sleepers
         } else {
-            // Keep the ORIGINAL loan; only its owner changes.
+            // Keep the original loan; only its owner changes.
             self.env_layer.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default()
         };
         let base_light = if first {
@@ -1534,7 +1534,7 @@ impl Editor {
         }
         let Some(scr) = self.world.get_mut::<Scripts>(e) else { return };
         for (inst, (defs, ref_decls, str_decls)) in scr.0.iter_mut().zip(defaults) {
-            // An empty result means "no defaults declared" OR a transient parse error
+            // An empty result means "no defaults declared" or a transient parse error
             // (e.g. mid-edit) — never wipe the user's overrides in that case.
             if defs.is_empty() && ref_decls.is_empty() && str_decls.is_empty() {
                 continue;
@@ -1768,7 +1768,7 @@ mod water_streaming_tests {
             },
         );
 
-        // ONE tick is the actual claim: the pool must be in the solver's
+        // one tick is the actual claim: the pool must be in the solver's
         // field the same frame it exists in the world, not next Play. Water
         // this dense (1000, real-water-like, against a 1 kg 0.5 m sphere)
         // flips the ball's velocity from falling to sharply buoyant
@@ -1807,7 +1807,7 @@ mod script_vec3_tests {
     use crate::Editor;
 
     /// **A `vec3` choice made in the ⚙ tab lands on the next Play.** The row
-    /// says so; without the apply at Play start it landed on the next OPEN,
+    /// says so; without the apply at Play start it landed on the next open,
     /// and a setting that appears to do nothing is one somebody clicks twice.
     #[test]
     fn a_changed_script_vec3_setting_lands_on_the_next_play() {

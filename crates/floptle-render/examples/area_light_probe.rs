@@ -1,4 +1,4 @@
-//! Area lights: does a light with a SHAPE light differently from a point at the
+//! Area lights: does a light with a shape light differently from a point at the
 //! same place, and does the half that claims to be exact actually agree with a
 //! numerically integrated one.
 //!
@@ -101,7 +101,7 @@ fn a_rect_lights_from_where_it_is(gpu: &Gpu) {
 // ---------------------------------------------------------------------------
 // 3. The exact half, against quadrature.
 //
-// Three surfaces at the SAME world point with three different normals, lit by
+// Three surfaces at the same world point with three different normals, lit by
 // one large rect. The prediction for each comes from integrating the emitter's
 // vector irradiance numerically here in Rust — a fine grid over its real
 // surface, no shared code with the shader — and then applying the documented
@@ -177,7 +177,7 @@ fn the_direction_matches_quadrature_over_the_emitter(gpu: &Gpu) {
 // same emitter with `two_sided` on, which must light both.
 // ---------------------------------------------------------------------------
 fn a_one_sided_light_has_a_back(gpu: &Gpu, dir: &str) {
-    // The wall faces +Z (toward the camera); the light sits in FRONT of it,
+    // The wall faces +Z (toward the camera); the light sits in front of it,
     // turned around so its emitting face points away.
     let away = Quat::from_rotation_y(std::f32::consts::PI);
     let pos = [0.0, 0.0, 4.0];
@@ -416,7 +416,7 @@ fn target(gpu: &Gpu, label: &str) -> (wgpu::Texture, wgpu::TextureView) {
     (tex, view)
 }
 
-/// The pixel at `(fx, fy)`, in LINEAR light — the target is 8-bit sRGB, and
+/// The pixel at `(fx, fy)`, in linear light — the target is 8-bit sRGB, and
 /// comparing those bytes to a linear expectation is a 2.2-power error.
 fn at(px: &[[u8; 4]], fx: f32, fy: f32) -> [f32; 3] {
     let i = ((fy * S as f32) as u32 * S + (fx * S as f32) as u32) as usize;

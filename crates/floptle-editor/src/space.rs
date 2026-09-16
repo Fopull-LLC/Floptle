@@ -1,13 +1,13 @@
 //! On-rails celestial driver (solar demo S2, the Solar demo build order).
 //!
 //! Each gameplay tick: advance space time by `warp × dt`, assemble the scene's
-//! `CelestialBody` nodes into a [`floptle_core::frames::System`], WRITE every
+//! `CelestialBody` nodes into a [`floptle_core::frames::System`], write every
 //! non-root body node's translation from its Kepler elements (exact analytic
 //! orbits — stable at any warp), re-anchor their terrain colliders in the sim,
 //! rebuild gravity (the µ/r² centers moved), and feed the `space.*` snapshot to
-//! scripts. The ROOT body (empty `parent`) stays where the scene put it. Bodies
+//! scripts. The root body (empty `parent`) stays where the scene put it. Bodies
 //! may live under a scene group (a generator's "<Star> System" folder): rails
-//! positions are computed in WORLD space and converted into the scene parent's
+//! positions are computed in world space and converted into the scene parent's
 //! frame before the local-translation write.
 
 use floptle_core::frames::{Body, Kepler, System};
@@ -56,7 +56,7 @@ impl Editor {
         self.space_time += tick_dt * self.space_warp;
         let t = self.space_time;
 
-        // Assemble the system: parent linkage by node NAME; SOI auto-derives
+        // Assemble the system: parent linkage by node name; SOI auto-derives
         // Laplace when left 0. A dangling parent name degrades to root (loud
         // would be better; the Inspector shows the field, keep Play running).
         let names: Vec<String> = cb
@@ -140,13 +140,13 @@ impl Editor {
         // dynamic body inside a moving celestial's sphere of influence shifts
         // by that body's rails delta this tick — stand on an orbiting moon and
         // you ride it instead of it sliding out from under you; orbit inside
-        // its SOI and you orbit IT, not a point it left behind. Velocity is
-        // untouched (positions ARE the frame); crossing an SOI boundary swaps
+        // its SOI and you orbit it, not a point it left behind. Velocity is
+        // untouched (positions are the frame); crossing an SOI boundary swaps
         // frames with a small world-velocity step — the v1 patched-conic seam.
         //
         // WARP COASTING (S4): while warp > 1 every IN-FLIGHT body (off the
         // ground, clear of the surface, actually moving relative to its
-        // dominant celestial) snaps to its OWN Kepler rails — its conic is
+        // dominant celestial) snaps to its own Kepler rails — its conic is
         // captured once on warp engage and evaluated analytically each tick,
         // so a 1000× warp is exactly as drift-free as the planets' rails. The
         // realtime sim still steps underneath, but its one-tick integration is
@@ -167,10 +167,10 @@ impl Editor {
             for (eid, pos) in sim.body_positions() {
                 let mut dom: Option<(usize, f64)> = None; // (index, soi)
                 for (i, sb) in sys.bodies.iter().enumerate() {
-                    // Containment against the OLD center: `pos` is the body's
+                    // Containment against the old center: `pos` is the body's
                     // PRE-tick position while `bodies[i].pos` already moved by
                     // this tick's rails delta. Testing the new center strands
-                    // a body when its planet jumps (worst on the FIRST tick,
+                    // a body when its planet jumps (worst on the first tick,
                     // where authored scene positions can differ from the rails
                     // by the whole inclination offset — the planet teleports
                     // out from under the spawn and leaves the crew in space).
@@ -183,7 +183,7 @@ impl Editor {
                 }
                 let Some((i, _)) = dom else { continue };
                 let (mut vel, grounded) = states.get(&eid).copied().unwrap_or_default();
-                // FRAME CONVENTION: a dynamic body's sim velocity is measured
+                // frame CONVENTION: a dynamic body's sim velocity is measured
                 // in its DOMINANT celestial's carried frame — the carry moves
                 // positions only, so a landed ship reads v ≈ 0 while its
                 // planet orbits the star at full speed. Everything below (and
@@ -192,13 +192,13 @@ impl Editor {
                 // bug that bent trajectories the moment warp engaged.
                 //
                 // SOI SEAM: crossing into a different dominant frame must keep
-                // the WORLD velocity continuous, so the sim velocity jumps by
+                // the world velocity continuous, so the sim velocity jumps by
                 // (old frame vel − new frame vel) — leave a planet's SOI and
                 // you carry its orbital velocity into the star's frame.
                 let dom_key = cb[i].0.index();
-                // The tick-sampled SOI seam ONLY runs for bodies NOT coasting
+                // The tick-sampled SOI seam only runs for bodies not coasting
                 // on rails: a coast handles its own frame handoffs at the
-                // EXACT crossing time (bisected on the conic below). Applying
+                // exact crossing time (bisected on the conic below). Applying
                 // this sampled seam to a coasting ship at high warp put the
                 // velocity step at the wrong time/place — every moon-SOI
                 // transit bent the orbit a little until clean ellipses
@@ -221,7 +221,7 @@ impl Editor {
                     }
                 }
                 let center = DVec3::from(bodies[i].pos);
-                // Relative to the OLD center: `center` already moved by delta
+                // Relative to the old center: `center` already moved by delta
                 // this tick, the body's sim position has not.
                 let rel = (pos - center) + deltas[i];
                 let flying = warping
@@ -236,7 +236,7 @@ impl Editor {
                     self.space_coast.entry(eid).or_insert_with(|| {
                         // Capture the conic from the PRE-TICK state (old center,
                         // old time) — from here on the cached elements are truth.
-                        // The sim velocity IS the frame-relative velocity.
+                        // The sim velocity is the frame-relative velocity.
                         (dom_key, Kepler::from_state(rel, vel.as_dvec3(), cb[i].1.mu, t_old))
                     });
                     // World state of body index `j` at absolute time τ.
@@ -262,7 +262,7 @@ impl Editor {
                     let mut fd =
                         cb.iter().position(|(e, _)| e.index() == fdk).unwrap_or(i);
                     // Evaluate t_old → t, bisecting each SOI crossing to its
-                    // exact time and re-capturing the conic THERE (world
+                    // exact time and re-capturing the conic there (world
                     // velocity continuous by construction). A warped tick can
                     // hop hundreds of seconds; the handoff must not.
                     let mut t_lo = t_old;
@@ -314,7 +314,7 @@ impl Editor {
                     self.space_frame.insert(eid, fdk);
                     // G1 residency: warp crosses the 80-radii terrain-load
                     // lead in milliseconds — closing on a body whose field is
-                    // still COLD drops to realtime so the background stream
+                    // still cold drops to realtime so the background stream
                     // gets its seconds (the residency driver kicks the load
                     // as the camera arrives). Re-warp once it's resident.
                     if self.terrain_cold.contains_key(&cb[fd].0)
@@ -398,7 +398,7 @@ impl Editor {
                     sim.shift_compound(eid, deltas[i]);
                 }
             }
-            // SURFACE STRUCTURES ride their planet: a Static-bodied node
+            // surface STRUCTURES ride their planet: a Static-bodied node
             // parented (at any depth) under a celestial follows it visually
             // through the transform hierarchy for free — but its baked
             // collider blob would stay behind in space. Shift the colliders
@@ -437,7 +437,7 @@ impl Editor {
                 }
                 best.map(|(i, _)| i)
             };
-            // COMPOUND WARP COASTING: while warp > 1, every LIVE in-flight
+            // COMPOUND WARP COASTING: while warp > 1, every live in-flight
             // compound (the piloted vessel above all) snaps to its own Kepler
             // conic, exactly like single bodies — captured on engage,
             // evaluated analytically at rails time, velocity kept current so
@@ -492,7 +492,7 @@ impl Editor {
                     sim.shift_compound(eid, target - com);
                     sim.set_compound_velocity(eid, v.as_vec3());
                     // Tick-sampled SOI seam: recapture in the new dominant
-                    // frame with the WORLD velocity kept continuous.
+                    // frame with the world velocity kept continuous.
                     if let Some(nj) = dom_of(target)
                         && nj != j
                         && cb[nj].1.mu > 0.0
@@ -533,7 +533,7 @@ impl Editor {
                     // Kept live (assembly.keepLive — the piloted vessel in the map
                     // view): stay in full physics however far the camera roams. If
                     // it was already LOD'd when the exemption came in, wake it now —
-                    // an in-flight craft ON its conic (its real vel was zeroed by the
+                    // an in-flight craft on its conic (its real vel was zeroed by the
                     // anchor, so resuming from rest would drop it out of orbit), a
                     // landed one at rest (respecting a prior clamp).
                     if self.lod_keep_live.contains(&eid) {
@@ -601,7 +601,7 @@ impl Editor {
                             // by the map/HUD to draw the vessel's orbit — must stay
                             // the true orbital velocity, or the trajectory vanishes
                             // the instant the map camera pulls back past LOD_FAR
-                            // (Ty's "trajectory only shows while I'm moving"). This
+                            // ("trajectory only shows while I'm moving"). This
                             // runs at tick start, before `feed_assembly_info`
                             // publishes it and before the physics step re-zeroes
                             // the anchored body — so the value survives to scripts.
@@ -638,7 +638,7 @@ impl Editor {
     }
 }
 
-/// Convert a WORLD position into `e`'s scene-parent-local frame — what a
+/// Convert a world position into `e`'s scene-parent-local frame — what a
 /// `Transform.translation` write on `e` must contain to land the node at `wp`.
 /// Top-level nodes pass through unchanged. This is what lets celestial bodies
 /// live under a scene group (a generator's "<Star> System" folder): rails
@@ -665,13 +665,13 @@ mod tests {
     use floptle_core::{Parent, World};
 
     /// The rails write must round-trip: writing the converted local translation
-    /// puts the node's WORLD transform exactly at the rails position, whatever
+    /// puts the node's world transform exactly at the rails position, whatever
     /// frame the scene parent (a generator's system group) sits in.
     #[test]
     fn rails_world_position_survives_a_scene_parent() {
         let mut w = World::default();
         let group = w.spawn();
-        // A group deliberately NOT at identity — offset, rotated, scaled.
+        // A group deliberately not at identity — offset, rotated, scaled.
         w.insert(
             group,
             Transform {

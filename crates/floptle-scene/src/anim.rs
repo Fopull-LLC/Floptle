@@ -134,7 +134,7 @@ pub struct AnimTrackDoc3 {
     pub values: Vec<[f32; 3]>,
     #[serde(default)]
     pub step: bool,
-    /// **Which keys HOLD**, by their time: a key listed here keeps its value
+    /// **Which keys hold**, by their time: a key listed here keeps its value
     /// until the next key instead of interpolating toward it. Keys not listed
     /// use the lane's `step`.
     ///
@@ -161,7 +161,7 @@ pub struct AnimTrackDoc4 {
     pub values: Vec<[f32; 4]>,
     #[serde(default)]
     pub step: bool,
-    /// **Which keys HOLD**, by their time: a key listed here keeps its value
+    /// **Which keys hold**, by their time: a key listed here keeps its value
     /// until the next key instead of interpolating toward it. Keys not listed
     /// use the lane's `step`.
     ///
@@ -243,7 +243,7 @@ pub struct AnimStateDoc {
     pub speed: f32,
     #[serde(default = "true_bool")]
     pub looped: bool,
-    /// Overrides the fade of EVERY transition into this state (seconds).
+    /// Overrides the fade of every transition into this state (seconds).
     /// `Some(0.0)` = always snap (instant); `None` = per-transition/default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<f32>,
@@ -636,7 +636,7 @@ mod tests {
         // Times: 10 fps is a tenth of a second a frame, and the `hold` on the
         // last one makes it three.
         assert_eq!(lane.times, vec![0.0, 0.1, 0.2, 0.3, 0.4]);
-        // The duration runs to the END of the last frame. Stopping at its START
+        // The duration runs to the end of the last frame. Stopping at its start
         // would drop it from every loop and read as the clip being one short.
         assert!((clip.duration - 0.7).abs() < 1e-5, "duration was {}", clip.duration);
     }

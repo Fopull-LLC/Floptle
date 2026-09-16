@@ -51,7 +51,7 @@ pub(crate) fn resolve_app_id(
 /// A developer running from a terminal is not that situation, and treating
 /// it as one is a game that "starts, then quits immediately" with Steam
 /// trying to launch an install of app 480 that doesn't exist. That was the
-/// first thing the live overlay test hit, 2026-08-29.
+/// first thing the live overlay test hit.
 #[cfg(feature = "steam")]
 pub(crate) fn boot(app_id: u32, shipped: bool) -> Option<Rc<dyn floptle_services::Platform>> {
     if shipped && floptle_steam::restart_app_if_necessary(app_id) {

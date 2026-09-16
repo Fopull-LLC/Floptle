@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 // Per-corner / per-side scalars
 // ---------------------------------------------------------------------------
 
-/// Serde shim: a single number OR four of them. Lets `radius: 14.0` and
+/// Serde shim: a single number or four of them. Lets `radius: 14.0` and
 /// `radius: (12.0, 12.0, 0.0, 0.0)` both parse into the same field, so no
 /// existing scene has to be rewritten.
 #[derive(Serialize, Deserialize)]
@@ -213,7 +213,7 @@ pub struct ShadowSpec {
     pub blur: f32,
     /// Grow the shadow beyond the element on every side (design units).
     pub spread: f32,
-    /// Draw it INSIDE the shape instead of behind it.
+    /// Draw it inside the shape instead of behind it.
     #[serde(default)]
     pub inset: bool,
 }
@@ -232,7 +232,7 @@ impl Default for ShadowSpec {
 
 /// An outer bloom. Mechanically a shadow with no offset and a colour you can
 /// see — kept separate because "glow" is what you are actually reaching for,
-/// and because an element wants both at once (lifted off the page AND lit).
+/// and because an element wants both at once (lifted off the page and lit).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GlowSpec {
     pub color: [f32; 4],

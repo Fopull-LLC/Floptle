@@ -44,7 +44,7 @@ pub struct Deployment {
     pub sha256: String,
     /// Which `floptle-server` runs it.
     pub engine_version: String,
-    /// The project directory INSIDE the bundle (`"assets"`).
+    /// The project directory inside the bundle (`"assets"`).
     #[serde(default = "default_project")]
     pub project: String,
     pub port: u16,
@@ -185,7 +185,7 @@ impl State {
     /// W holds a deployment's UDP port for five minutes after a terminal
     /// report, because handing a live port on while the old server's players
     /// are still sending packets delivers their traffic into a different game.
-    /// The hold starts when THIS agent says the process is gone — not when the
+    /// The hold starts when this agent says the process is gone — not when the
     /// developer pressed stop — so failing to report a terminal state leaks the
     /// port until somebody notices by hand.
     pub fn is_terminal(self) -> bool {
@@ -223,7 +223,7 @@ impl Report {
 /// how many slots its declaration still shows — so a `/proc/meminfo` this agent
 /// could not read, sent as `0`, is a healthy box declaring itself out of memory.
 /// That does not merely stop a placement: a region whose only box looks full is
-/// a region the control plane prices a NEW MACHINE for. "Did not measure" and
+/// a region the control plane prices a new MACHINE for. "Did not measure" and
 /// "measured none left" are opposite facts and only one of them should cost
 /// money.
 ///
@@ -397,7 +397,7 @@ pub struct ServerStatus {
     pub tick_p95_ms: Option<f32>,
     #[serde(default)]
     pub lobby_code: Option<String>,
-    /// The player ceiling the ENGINE is enforcing, as the server reports it.
+    /// The player ceiling the engine is enforcing, as the server reports it.
     #[serde(default)]
     pub max_players: Option<u32>,
     /// **Where this server is actually reachable** (`floptle/0209`, forwarded
@@ -455,7 +455,7 @@ mod tests {
 
     /// **Zero limits are "not entitled yet", and must not become a cap.**
     ///
-    /// This is what production answers TODAY, so it is the payload the agent
+    /// This is what production answers today, so it is the payload the agent
     /// will first meet on the box. `MemoryMax=0` is not a large cap or a
     /// missing one — it is a unit systemd kills on its first allocation, so a
     /// good build would crash-loop and the portal would blame the build.
@@ -579,7 +579,7 @@ mod tests {
     /// ⚠ **Every field the server writes reaches the wire, or is named here as
     /// deliberately left behind** (`floptle/0229`, the fourth time). The file
     /// below is what `dedicated.rs::status_document` writes on `us-east-1`;
-    /// the test runs it through the SAME function the agent's report does, so
+    /// the test runs it through the same function the agent's report does, so
     /// a field the agent parses and then forgets to copy fails here — which
     /// the hand-built `DeploymentStatus` literals above cannot catch, because
     /// they copy by hand too.
@@ -641,7 +641,7 @@ mod tests {
         assert!((d["tick_p95_ms"].as_f64().unwrap() - 4.1).abs() < 1e-3, "{v}"); // f32 on the wire
     }
 
-    /// ⚠ **A server that reports no ceiling sends NO field, not `0`.**
+    /// ⚠ **A server that reports no ceiling sends no field, not `0`.**
     ///
     /// `max_players: 0` is a server that admits nobody. "No cap set" and "a cap
     /// of none" would then be the same JSON, and the control plane would read a

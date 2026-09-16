@@ -67,7 +67,7 @@ fn time(dir: &Path, nodes: usize, calls: usize) -> f64 {
 }
 
 /// One driver, one singleton manager, and `nodes` worth of ordinary scenery —
-/// the manager LAST, which is the honest case: a scan finds it only after
+/// the manager last, which is the honest case: a scan finds it only after
 /// walking everything else, and where it happens to sit is not something a
 /// scene author thinks about.
 fn build_world(nodes: usize) -> World {
@@ -83,9 +83,9 @@ fn build_world(nodes: usize) -> World {
         world.insert(e, Name(format!("prop{i}")));
         // Scenery carries tags, and every tenth one a script, so the scan has
         // real strings to compare rather than empty slots to skip. Not one
-        // script EACH: a live Lua environment per instance is held by the host,
-        // and a few thousand of those hit a limit of their own (see the note in
-        // the ledger) which is not what this probe is measuring.
+        // script each: a live Lua environment per instance is held by the host,
+        // and a few thousand of those hit a limit of their own, which is not
+        // what this probe is measuring.
         world.insert(e, Tags(vec!["scenery".into()]));
         if i % 10 == 0 {
             world.insert(e, Scripts(vec![inst("prop")]));

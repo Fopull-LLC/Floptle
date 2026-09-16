@@ -13,7 +13,7 @@
 //! 1. **A mirror reflects the sky's colour.** Under a strongly coloured sky, a
 //!    metallic roughness-0 sphere reads that colour. A sun highlight is white
 //!    and would not.
-//! 2. **It reflects THIS sky, not a remembered one.** Change the sky, capture
+//! 2. **It reflects this sky, not a remembered one.** Change the sky, capture
 //!    again, and the sphere changes with it. This is what catches a capture
 //!    that ran once, or a stale pipeline after a Sky shader is spliced in.
 //! 3. **Roughness blurs it.** A rough sphere and a mirror sphere under the same
@@ -71,7 +71,7 @@ fn main() {
          highlight, not a reflection"
     );
 
-    // 2. …and it is THIS sky. Under the orange sky the balance must invert.
+    // 2. …and it is this sky. Under the orange sky the balance must invert.
     let o = other_sky.rgb;
     assert!(
         o[0] > o[2] + 0.05,
@@ -139,7 +139,7 @@ fn shot(
     };
     rmg.params[0] = 0.0; // time
     rm.upload_globals(gpu, rmg);
-    // THE capture. Without it the environment map holds whatever was there
+    // the capture. Without it the environment map holds whatever was there
     // before, which is check 2's whole point.
     rm.capture_env(gpu);
 
@@ -152,7 +152,7 @@ fn shot(
         ..Default::default()
     };
 
-    // A SILVER metal. It has to be a bright one: for a metal, albedo IS `f0` —
+    // A SILVER metal. It has to be a bright one: for a metal, albedo is `f0` —
     // its reflectance — so a black metal reflects nothing by definition. An
     // earlier version of this probe used one and measured only the grazing
     // sheen the analytic BRDF adds, which looked like a passing test and proved
@@ -171,8 +171,8 @@ fn shot(
         ..SurfaceExtras::default()
     });
     // CAMERA-RELATIVE (ADR-0015): the view matrix carries no translation, so an
-    // instance's model translation IS its position relative to the eye. A model
-    // at the origin sits AT the camera — which put the eye inside the sphere and
+    // instance's model translation is its position relative to the eye. A model
+    // at the origin sits at the camera — which put the eye inside the sphere and
     // quietly rendered its interior.
     let m = Mat4::from_translation(Vec3::new(0.0, 0.0, -4.0));
     let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =

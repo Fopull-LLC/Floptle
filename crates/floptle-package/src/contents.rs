@@ -391,7 +391,7 @@ mod tests {
         assert!(!c.has(Facet::Audio));
         assert_eq!(c.count(Facet::Audio), 0);
 
-        // Reported in ALL order regardless of what the filesystem handed back.
+        // Reported in all order regardless of what the filesystem handed back.
         assert_eq!(c.keys(), vec!["models", "textures", "scripts", "editor"]);
         assert!(c.summary().starts_with("2 3D models · 1 textures"), "{}", c.summary());
 

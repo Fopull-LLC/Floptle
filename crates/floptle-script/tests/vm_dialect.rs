@@ -175,7 +175,7 @@ fn the_width_of_a_lua_integer_is_a_property_of_the_vm() {
 }
 
 /// `setfenv` / `getfenv` survive into Luau, and the engine's sandbox leans on
-/// them. Asserted rather than believed: the plan for this work said "it KEEPS
+/// them. Asserted rather than believed: the plan for this work said "it keeps
 /// `setfenv`/`getfenv` (5.1 heritage — verify in the harness, don't trust this
 /// sentence)", and this is that verification.
 #[test]
@@ -271,7 +271,7 @@ fn the_standard_library_is_the_one_this_vm_actually_has() {
         ("math.fmod", "function", "function"),
         ("math.pow", "function", "function"),
         ("collectgarbage", "function", "function"),
-        // What Luau ADDS, and Phase 3 spends: a native vector type.
+        // What Luau adds, and Phase 3 spends: a native vector type.
         ("vector", "nil", "table"),
         ("buffer", "nil", "table"),
         ("utf8", "nil", "table"),
@@ -427,7 +427,7 @@ fn what_a_runtime_error_names_is_a_property_of_the_vm() {
              If this VM's messages have changed, update the recorded text — and check whether \
              a host-side rewrite is now needed, or no longer is."
         );
-        // Whatever else it does, it must always say WHERE.
+        // Whatever else it does, it must always say where.
         assert!(got.contains(":2:") || got.contains(":1:"), "[{VM_NAME}] no line number: {got}");
     }
 
@@ -447,7 +447,7 @@ fn what_a_runtime_error_names_is_a_property_of_the_vm() {
     }
 }
 
-/// **End to end: a real script, a real host, and the SAME message either way.**
+/// **End to end: a real script, a real host, and the same message either way.**
 ///
 /// The unit tests in `runtime_error` prove the rewrite; this proves it is
 /// actually reached, from a script on disk through `ScriptHost::run` to the

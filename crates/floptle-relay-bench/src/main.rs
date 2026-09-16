@@ -5,7 +5,7 @@
 //! (1 OCPU, 954 MB, **0.48 Gbps**). `floptle/0215` gave the relay instruments;
 //! this points something at them.
 //!
-//! ⚠ **This drives the REAL client and host legs against a REAL relay.** The
+//! ⚠ **This drives the real client and host legs against a real relay.** The
 //! thing being measured is the forwarding loop and the link, and a mock
 //! transport measures neither.
 //!
@@ -16,7 +16,7 @@
 //! - **The CCU at which drops first appear**, which is the honest ceiling
 //!   whatever the arithmetic says, because that is players losing packets.
 //!
-//! ⚠ **Traffic SHAPE matters more than volume**, so rate and payload are flags
+//! ⚠ **Traffic shape matters more than volume**, so rate and payload are flags
 //! rather than constants. A relay multiplies: one datagram into an eight-player
 //! lobby leaves seven times. A bench sending big infrequent packets and one
 //! sending small frequent ones find completely different ceilings — and games
@@ -172,7 +172,7 @@ struct Counts {
     sent: u64,
     /// Client pings that came back to their sender.
     echoed: u64,
-    /// Messages the host sent — one echo plus one per OTHER member for every
+    /// Messages the host sent — one echo plus one per other member for every
     /// ping it received, unless `--echo-only`.
     host_sent: u64,
     /// Pings the host received.
@@ -247,7 +247,7 @@ fn run(args: &Args) -> Result<(), String> {
 
     // --- drive it -----------------------------------------------------------
     //
-    // ⚠ **Round trips are measured on the CLIENT leg**, client → relay → host →
+    // ⚠ **Round trips are measured on the client leg**, client → relay → host →
     // relay → client. That is the path a player's input actually takes, and it
     // is the number the relay's own `step_p95_ms` has to be checked against —
     // an independent measurement, from outside the box.
@@ -344,7 +344,7 @@ fn roster(peers: &mut Vec<u64>, ev: &Incoming) {
 /// `None` is a clean step; `Some(why)` is one that is past the limit, whose
 /// `per CCU` is not a cost and whose ceiling must not be printed.
 ///
-/// ⚠ **The arithmetic went UP as the relay failed.** At 400 CCU the drive
+/// ⚠ **The arithmetic went up as the relay failed.** At 400 CCU the drive
 /// loop sent 45,798 of the 240,000 pings the flags asked for — every sender
 /// was waiting on an echo the relay had dropped — so the payload rate fell,
 /// `per CCU` fell with it, and `0.8 × link / per CCU` printed `implied
@@ -395,7 +395,7 @@ fn report(args: &Args, elapsed: Duration, n: &Counts, rtts: &mut [f32]) -> Strin
     let loss_pct = if n.sent > 0 { lost as f64 * 100.0 / n.sent as f64 } else { 0.0 };
     let _ = writeln!(out, "  unreturned      {lost}  ({loss_pct:.2}%)");
     if !args.echo_only {
-        // Each ping the host received went to every OTHER member.
+        // Each ping the host received went to every other member.
         let others = args.lobby_size.saturating_sub(2) as u64;
         let fan_expected = n.host_received * others;
         let fan_lost = fan_expected.saturating_sub(n.fanned_in);

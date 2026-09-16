@@ -26,7 +26,7 @@
 //!    lit. So the darkness is the occluder rather than the flag costing light.
 //!
 //! 3 and 4 together are what make this a measurement instead of a coincidence:
-//! the shadow needs BOTH halves, and either one on its own leaves the floor
+//! the shadow needs both halves, and either one on its own leaves the floor
 //! exactly as it was.
 //!
 //! Run: cargo run -p floptle-render --example offscreen_shadow_probe -- <out-dir>
@@ -39,7 +39,7 @@ use glam::{DVec3, Mat4, Quat, Vec3};
 
 const S: u32 = 256;
 
-/// The lamp, above and BEHIND the camera. Behind, so that the straight line from
+/// The lamp, above and behind the camera. Behind, so that the straight line from
 /// it to the floor passes through space the camera is not looking at — which is
 /// where the occluder goes.
 const LAMP: Vec3 = Vec3::new(0.0, 4.0, 2.0);
@@ -60,7 +60,7 @@ fn main() {
     let proxy_only = shot(&gpu, &mut raster, &mut rm, floor_mesh, false, true, &format!("{dir}/offscreen_shadow_noflag.png"));
     let flag_only = shot(&gpu, &mut raster, &mut rm, floor_mesh, true, false, &format!("{dir}/offscreen_shadow_noproxy.png"));
 
-    // Bands in frame coordinates. Distance runs UPWARD under a camera looking
+    // Bands in frame coordinates. Distance runs upward under a camera looking
     // down, so the shadow the bar throws lands as a horizontal stripe and the
     // floor above and below it stays lit. `PROFILE=1` prints the profile these
     // were read off.
@@ -142,7 +142,7 @@ fn shot(
 ) -> Vec<u8> {
     // Looking steeply down at a floor. The camera is at the ORIGIN and
     // everything is camera-relative (ADR-0015) — the view matrix has no
-    // translation, so these positions ARE the shader's coordinates.
+    // translation, so these positions are the shader's coordinates.
     let cam = RenderCamera::new(
         DVec3::ZERO,
         Quat::from_rotation_x(-1.15),
@@ -154,7 +154,7 @@ fn shot(
         * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
         * Mat4::from_scale(Vec3::splat(40.0));
     let floor_mp = MaterialParams::flat([0.85, 0.85, 0.85]);
-    // ONE surface, and it is the one being measured. Nothing else is drawn —
+    // one surface, and it is the one being measured. Nothing else is drawn —
     // not the lamp, and above all not the occluder.
     let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
         vec![(floor_mesh, None, instance_of_mat(floor, &floor_mp))];
@@ -168,7 +168,7 @@ fn shot(
     // `[kind, a, b, flags]` — a bare point, bit 1 of the flags is "casts".
     point_shape[0] = [0.0, 0.0, 0.0, if casts { 2.0 } else { 0.0 }];
 
-    // The occluder, as a proxy and ONLY as a proxy: `prox_b.w = 2` is an
+    // The occluder, as a proxy and only as a proxy: `prox_b.w = 2` is an
     // oriented box, `prox_a.xyz` its centre, `prox_b.xyz` its half-extents.
     let mut prox_a = [[0.0f32; 4]; 32];
     let mut prox_b = [[0.0f32; 4]; 32];

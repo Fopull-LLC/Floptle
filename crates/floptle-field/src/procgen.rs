@@ -1,7 +1,7 @@
 //! Generic procedural PLANET fill — the native backend of the Lua
 //! `terrain.generatePlanet(id, opts)` API.
 //!
-//! Deliberately game-agnostic: WHAT to build (solar systems, archetypes,
+//! Deliberately game-agnostic: what to build (solar systems, archetypes,
 //! orbits, names) is game-side scripting; this module is only the heavy
 //! per-voxel primitive a script can't afford to run itself — a layered,
 //! cavernous, cratered sphere written into a sparse [`ChunkField`], with
@@ -51,7 +51,7 @@ pub struct SeamSpec {
 
 /// Everything `generate_planet` needs — every field has a workable default,
 /// so callers (the Lua table) override only what they care about.
-/// Serializable: the RON form IS the on-node "genspec" that lets a body
+/// Serializable: the RON form is the on-node "genspec" that lets a body
 /// generate on-demand when first approached (G2 galaxy streaming) — new
 /// fields must keep serde defaults so old genspec strings stay loadable.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -204,7 +204,7 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
             let vary = noise.fbm(p * 0.05 + Vec3::splat(83.0), 2);
             let patch = noise.fbm(dir * 9.0 + Vec3::splat(37.0), 3);
 
-            // Molten core zone (usually a GLOW slot): a deep dig reads HOT
+            // Molten core zone (usually a GLOW slot): a deep dig reads hot
             // before the core itself appears.
             if spec.core_paint.slot != 0 && cave_depth > 0.0 && r < core_r + core_r.min(10.0) {
                 return rgba(tint(spec.core_paint.color, vary), spec.core_paint.slot);

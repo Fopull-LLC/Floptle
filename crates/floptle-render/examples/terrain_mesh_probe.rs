@@ -1,4 +1,4 @@
-//! Terrain 2.0 P2 parity probe — the SAME sculpted field rendered BOTH ways, from the
+//! Terrain 2.0 P2 parity probe — the same sculpted field rendered both ways, from the
 //! same camera under the same light, so the render swap is evidence rather than a claim.
 //!
 //!   old: the raymarch sphere-traces the dense voxel field as primary visibility (w = 1)
@@ -6,7 +6,7 @@
 //!        pass, while the volume flips to w = 3 — still casting sun shadows, still in
 //!        the AO field, no longer drawn
 //!
-//! Two views, because they are the two Ty photographed:
+//! Two views, because they are the two that were photographed:
 //!   `closeup` — camera on a hill flank at default detail, where trilinear-gradient
 //!               normals kink on the voxel lattice ("looks very strange up close")
 //!   `grazing` — low camera, low sun across open ground, where the shadow ray hugs the
@@ -17,7 +17,7 @@
 //!     two paths must draw the same shape; this is the parity half.
 //!   * SHADING GRAIN — mean |luminance - blur3x3(luminance)| over ground pixels. This is
 //!     the lattice speckle itself, as a number. Lower is smoother; the mesh path should
-//!     win outright, and that win IS the bug fix.
+//!     win outright, and that win is the bug fix.
 //!
 //! Run: cargo run --release -p floptle-render --example terrain_mesh_probe -- <prefix>
 
@@ -43,7 +43,7 @@ fn white() -> TextureData {
 /// the grainy case. Deterministic — no rng — so the numbers below are comparable run to
 /// run and a regression shows up as a moved number.
 ///
-/// One dab does NOT make a hill: `Brush::Raise` is a CSG union with a ball of the
+/// One dab does not make a hill: `Brush::Raise` is a CSG union with a ball of the
 /// brush's radius, so it is idempotent — repeating a dab at the same spot is what
 /// accumulates height (the same loop `terrain_closeup_probe` uses). The first version of
 /// this probe dabbed once and rendered a near-flat plain that the camera flew over.
@@ -179,19 +179,19 @@ fn main() {
             },
             terrain_tint: [TINT[0], TINT[1], TINT[2], 0.0],
             terrain_params: [16.0, 0.0, 0.0, 1.0],
-            // Shadows ON (k = 12), quantize + dither OFF: any banding is the FIELD.
+            // Shadows on (k = 12), quantize + dither off: any banding is the field.
             shadow_params: [1.0, 12.0, 1.0, 150.0],
             shadow_tint: [0.0, 0.0, 0.0, 0.0],
             ao_params: [1.0, 0.85, 1.5, 0.0], // SDF AO on — the "AO acts weird" half
             ..Default::default()
         };
 
-        // --- OLD: raymarch draws the terrain (kind 1) ---
+        // --- old: raymarch draws the terrain (kind 1) ---
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rg(1.0));
         let old = readback(&gpu, &color_tex);
         save_png(&old, &format!("{prefix}_{}_old.png", v.name));
 
-        // --- NEW: kind 3 — the raymarch paints sky only, the raster draws the chunks ---
+        // --- new: kind 3 — the raymarch paints sky only, the raster draws the chunks ---
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rg(3.0));
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
@@ -238,7 +238,7 @@ fn main() {
         }
         // Normal visualisation: unlit, with each chunk's colour block overwritten by its
         // own encoded vertex normal. Shows the interpolated normal field itself, with no
-        // lighting in the way — if THIS is smooth, a rim in the lit render is the
+        // lighting in the way — if this is smooth, a rim in the lit render is the
         // shader's doing, not the mesher's.
         if std::env::var("NORMALS").is_ok() {
             for (i, (_, cm)) in chunks.iter().enumerate() {
@@ -363,7 +363,7 @@ fn main() {
             );
         }
 
-        // The old path with AO off: if this lands on the NEW path's value, then the whole
+        // The old path with AO off: if this lands on the new path's value, then the whole
         // old-vs-new gap at this pixel is SDF AO, and the mesh path is receiving none.
         let mut oao = rg(1.0);
         oao.ao_params[0] = 0.0;

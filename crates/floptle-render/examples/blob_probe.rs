@@ -1,5 +1,5 @@
 //! Headless render probe — renders reference meshes plus a centered SDF blob to a
-//! PNG, so the raymarched look can be inspected and iterated WITHOUT a window. This
+//! PNG, so the raymarched look can be inspected and iterated without a window. This
 //! drives the real `Raster` + `Raymarch` passes (the same code the editor runs), so
 //! what the PNG shows is what the editor shows.
 //!

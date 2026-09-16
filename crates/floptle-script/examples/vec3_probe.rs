@@ -12,7 +12,7 @@
 //!
 //! * `mlua::Lua::set_type_metatable` looks like the answer and **is not** — it
 //!   is bounded by a private `LuaType` trait implemented for `bool`, `Number`,
-//!   `String`, `Table`, `Function` and `Thread`, and NOT for `Vector`.
+//!   `String`, `Table`, `Function` and `Thread`, and not for `Vector`.
 //! * Luau does give vectors a metatable already, with `__index` as a C
 //!   function — but it is **readonly**, so the obvious Lua-side
 //!   `getmetatable(v).__index = …` raises. That is what step 2 below shows, and

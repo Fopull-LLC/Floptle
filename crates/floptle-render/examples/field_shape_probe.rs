@@ -1,6 +1,6 @@
 //! Headless Field Shape probe (ADR-0007 Sdf stage) — compiles two sdf-stage
 //! `.flsl` shaders through the production path (check_sdf → transpile_sdf per
-//! slot → naga on BOTH assembled pass modules → set_custom_field), then draws
+//! slot → naga on both assembled pass modules → set_custom_field), then draws
 //! them raymarched beside/above a raster ground slab that must RECEIVE their
 //! sun shadows through the shared field module.
 //!
@@ -92,7 +92,7 @@ fn main() {
     raymarch.set_custom_field(&gpu, Some((&field_code, &color_code, support)));
     raster.set_custom_field(&gpu, Some((&field_code, support)));
 
-    // ---- scene: two shapes over a ground slab, sun shadows ON ----
+    // ---- scene: two shapes over a ground slab, sun shadows on ----
     let cam = RenderCamera::new(
         DVec3::new(0.0, 1.6, 6.5),
         Quat::from_rotation_x(-0.18),

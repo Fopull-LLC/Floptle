@@ -208,7 +208,7 @@ pub(crate) struct Shared {
     pub(crate) pick_reqs: RefCell<Vec<PickReq>>,
     /// Files the user has handed a package through `ed.pickFile` this session.
     ///
-    /// **The picker IS the permission.** `ed.read` scopes to the package and the
+    /// **The picker is the permission.** `ed.read` scopes to the package and the
     /// project, which is right for a path a package makes up — but a path the
     /// package did not make up, that the user chose in an OS dialog for this
     /// exact purpose, is a different thing. Without this a package can open a
@@ -403,7 +403,7 @@ pub(crate) fn tab_key(pkg_id: &str, title: &str) -> u64 {
 /// around it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct OverlayLook {
-    /// Left edge rather than right. The left stack starts BELOW the viewport
+    /// Left edge rather than right. The left stack starts below the viewport
     /// toolbar, wherever the user has dragged it to.
     pub(crate) left: bool,
     /// **The editor draws no frame and no title.** For an overlay that paints
@@ -640,7 +640,7 @@ impl ExtHost {
     ///
     /// It goes through `api::build_env` and the same `ExtCmd` queue a package
     /// uses, so a script run from a terminal can do exactly what a package can
-    /// do and nothing else. What it is NOT is a package: it has no manifest, no
+    /// do and nothing else. What it is not is a package: it has no manifest, no
     /// folder, no prefs and no hooks, and it runs once instead of registering
     /// callbacks for later.
     ///
@@ -975,7 +975,7 @@ impl ExtHost {
             if self.packages.get(pkg).is_some_and(|p| p.failed.is_some()) {
                 continue;
             }
-            // Re-arm BEFORE the call, so a callback that cancels itself wins.
+            // Re-arm before the call, so a callback that cancels itself wins.
             if repeat {
                 let t = &mut self.timers[i];
                 t.due = (t.due + every).max(now - every);
@@ -1106,7 +1106,7 @@ impl ExtHost {
 
     /// Hand one mesh read back to the Lua that asked for it.
     ///
-    /// The table is built HERE rather than in the editor because it is Lua's
+    /// The table is built here rather than in the editor because it is Lua's
     /// shape, not the editor's — and it is built once per read, not per frame.
     pub(crate) fn deliver_mesh(
         &mut self,
@@ -1379,7 +1379,7 @@ impl ExtHost {
                     "there is no Play mode without the editor; `floptle run` is how a project \
                      is played from a terminal",
                 ),
-                // `Copy` is deliberately NOT here: the applier already refuses
+                // `Copy` is deliberately not here: the applier already refuses
                 // it with a better line than this one could ("there is no
                 // clipboard to write to here"). Replacing a specific message
                 // with a generic one is not coverage.

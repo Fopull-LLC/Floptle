@@ -1,4 +1,4 @@
-//! Does a mirror show the SCENE, or only the sky?
+//! Does a mirror show the scene, or only the sky?
 //!
 //! `reflection_probe` proves a surface reflects the captured sky. This is the
 //! other half: an object standing in the world has to appear in the mirror below
@@ -16,7 +16,7 @@
 //! 1. **Green appears on the floor** when reflections are on, and over a real
 //!    area rather than a stray pixel or two.
 //! 2. **It is not there with reflections off.** The same frame, the same
-//!    everything, one flag — so the difference IS the feature and not the
+//!    everything, one flag — so the difference is the feature and not the
 //!    lighting, the sky or the material.
 //! 3. **It lands under the block, not somewhere else.** A reflection that
 //!    appears in the wrong place is a bug that a "some green arrived" test would
@@ -26,7 +26,7 @@
 //!    would put a dark band across every reflective floor in the engine.
 //!
 //! Two frames are rendered on purpose. Shading is forward, so a reflection reads
-//! the PREVIOUS frame's picture (see `ssr.rs`); a probe that rendered once would
+//! the previous frame's picture (see `ssr.rs`); a probe that rendered once would
 //! be reading an empty history and measuring the fallback.
 //!
 //! Run: cargo run -p floptle-render --example ssr_probe -- <out-dir>
@@ -105,7 +105,7 @@ fn main() {
     println!("ssr probe OK  (far floor rgb [{:.3}, {:.3}, {:.3}])", far[0], far[1], far[2]);
 }
 
-/// One two-frame render. `reflections` switches ONLY the SSR flag; everything
+/// One two-frame render. `reflections` switches only the SSR flag; everything
 /// else — the geometry, the sky, the material, the two frames — is identical.
 fn shot(
     gpu: &Gpu,
@@ -119,7 +119,7 @@ fn shot(
     // Pitched down so the floor fills the lower frame and the block sits in the
     // upper. The camera is at the ORIGIN and everything is placed relative to it
     // (ADR-0015): the view matrix carries no translation, so an instance's model
-    // translation IS its position relative to the eye.
+    // translation is its position relative to the eye.
     let cam = RenderCamera::new(
         DVec3::ZERO,
         Quat::from_rotation_x(-0.28),

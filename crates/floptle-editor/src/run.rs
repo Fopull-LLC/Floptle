@@ -48,7 +48,7 @@
 //! physics budget in CI gets a real answer from `run`; one asserting on draw
 //! calls or light counts wants `floptle shot` or `--play` instead.
 //!
-//! ## `--timing`: the one thing here that IS a wall clock
+//! ## `--timing`: the one thing here that is a wall clock
 //!
 //! The paragraph above says the span never comes off the clock, and it still
 //! does not — `--timing` changes nothing about how far the run goes or what it
@@ -65,7 +65,7 @@
 //! What is inside the measurement is the engine's frame: world streaming and
 //! `play_step`. The runner's own bookkeeping — draining the log, folding the
 //! profiler — is outside it, so the number is the game's cost and not this
-//! file's. What is NOT inside it is anything a window would have done: no
+//! file's. What is not inside it is anything a window would have done: no
 //! render, no present, no vsync. A step here is the CPU half of a frame.
 
 use std::path::Path;
@@ -216,19 +216,19 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 
 /// A headless client of the session the project is hosting — `--ghosts N`.
 ///
-/// **`floptle run` could already HOST a real session** — `net.host{}` with
+/// **`floptle run` could already host a real session** — `net.host{}` with
 /// neither `port` nor `relay` stands up the in-editor loopback harness with no
 /// GPU and no window, and `net.role`, `synced`, `onRpc`, `net.rpc{to = peer}`,
 /// `net.spawn` and `scene.load` all work under it. Nothing could JOIN it. The
 /// ghost client existed too (`Editor::net_join_local`), but it hung off the
 /// Editor and was reachable only from the 🌐 panel's button, so everything that
-/// is only true ACROSS THE WIRE was untestable except by a person clicking in a
+/// is only true across the WIRE was untestable except by a person clicking in a
 /// GUI or by two machines: a client's mirror, targeted RPCs reaching the peer
 /// they named and only that peer, late joiners receiving current `synced`
 /// values, and — the one that matters most — interest management, whose whole
-/// promise is about what a client is NOT sent (`floptle/0193`).
+/// promise is about what a client is not sent (`floptle/0193`).
 ///
-/// These are owned by the RUN LOOP rather than by the Editor, deliberately: the
+/// These are owned by the run LOOP rather than by the Editor, deliberately: the
 /// Editor holds exactly one ghost and one Lua VM, and N of either is a design
 /// question this verb does not need to answer to make the wire observable.
 struct Ghost {
@@ -316,7 +316,7 @@ fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
                 // false)` is verified by this number going DOWN for that peer
                 // and not for the others — which is `floptle/0182`'s whole
                 // promise, and was taken on trust in every project until now.
-                // Nodes actually being SENT state, not ids bound locally.
+                // Nodes actually being sent state, not ids bound locally.
                 "receiving": g.receiving(),
                 "rtt_ms": stats.rtt_ms,
                 "loss": stats.loss,
@@ -347,13 +347,13 @@ pub(crate) struct Options {
     /// `--ghosts N`: how many headless clients to join the session the project
     /// hosts. Zero — the default — stands none up and costs nothing.
     pub(crate) ghosts: u32,
-    /// `--join <addr>`: be a CLIENT of a server in another process, rather than
+    /// `--join <addr>`: be a client of a server in another process, rather than
     /// hosting one.
     ///
     /// The other half of `--ghosts`, and the shape a dedicated-server project
     /// actually ships in: this is the real QUIC transport rather than the
     /// loopback hub, so it is the only way to test the wire itself. It also
-    /// gets the ghosts' missing half for free — the run's own Lua IS the
+    /// gets the ghosts' missing half for free — the run's own Lua is the
     /// client's, so `net.isServer()` answers false and the project's own
     /// scripts do the asserting (`floptle/0193`).
     pub(crate) join: Option<String>,
@@ -384,7 +384,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     if let Some(seed) = seed {
         ed.script_host.set_seed(seed);
     }
-    // Resolved from the project's OWN project.ron, not whatever `ed` cached
+    // Resolved from the project's own project.ron, not whatever `ed` cached
     // while opening — `open_project` doesn't hand the config back, and this
     // is a small file, cheap to read again.
     let cfg = floptle_scene::load_project(&root.join("project.ron"));
@@ -416,12 +416,12 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         return 1;
     }
     // Joining happens after Play starts, because that is the rule the session
-    // itself enforces — and it is the project's OWN scripts that then run as a
+    // itself enforces — and it is the project's own scripts that then run as a
     // client, which is what makes the client half assertable at all.
     if let Some(addr) = join.as_deref() {
         ed.net_join_quic(addr);
         if ed.net_play_client.is_none() {
-            // **THE REASON IS ON THE CONSOLE, NOT IN THE SCRIPT LOG.** This used
+            // **the REASON is on the CONSOLE, not in the script LOG.** This used
             // to drain the script host and then say "the reason is in the log
             // above" — but nothing a script wrote is what failed. `net_join_quic`
             // reports its refusals (a transport that would not connect, a peer
@@ -446,7 +446,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // **The clock, not the step count.** A step is not a promise that anything
     // moved: a paused session — which is what the Play-start terrain hold makes
     // one until the ground exists — steps happily with `dt = 0`. Reporting
-    // `steps × DT` therefore published a span the run had NOT simulated, and it
+    // `steps × DT` therefore published a span the run had not simulated, and it
     // was the confident kind of wrong: 3600 steps, "60.00s of simulated time",
     // and a world where `time` never left zero (`floptle/0157`). `play_t` is the
     // clock the scripts themselves read, so it cannot disagree with them.
@@ -456,7 +456,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     let mut clock = timing.then(|| Timing::new(asked));
     // `--alloc`: how much Lua heap a frame makes. Measured across a window in
     // the middle of the run — after the opening frames, which allocate the
-    // world rather than a steady frame — with the collector STOPPED, because
+    // world rather than a steady frame — with the collector stopped, because
     // it cannot be measured with the collector running (see
     // `ScriptHost::gc_stop`).
     let window = alloc.then(|| AllocWindow::plan(asked)).flatten();
@@ -495,12 +495,12 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
                 ed.script_host.gc_restart();
                 ed.script_host.gc_collect();
             }
-            // Sampled AFTER the collect+stop above, on the same step.
+            // Sampled after the collect+stop above, on the same step.
             if step == w.start {
                 w.at.set(ed.script_host.lua_used_memory());
             }
         }
-        // The clock BEFORE the step, so the step can be asked afterwards whether
+        // The clock before the step, so the step can be asked afterwards whether
         // it was a frame of the game or a frame of the loading hold.
         let was = ed.play_t;
         let began = floptle_core::time::Instant::now();
@@ -529,7 +529,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // The same drain the editor's frame does, for the same reason it does it
         // per frame rather than at the end: the host holds every line until
         // somebody asks, and a long run of a script that logs each step would
-        // otherwise grow that buffer without limit. The Console it drains INTO
+        // otherwise grow that buffer without limit. The Console it drains into
         // merges consecutive repeats into a count and caps its history, so
         // draining early is what keeps a ten-thousand-step run cheap.
         //
@@ -798,7 +798,7 @@ fn report(
         if let Some(c) = clock {
             let sorted = c.sorted();
             doc["timing"] = serde_json::json!({
-                // How many steps this distribution is OF — the simulating ones.
+                // How many steps this distribution is of — the simulating ones.
                 // `steps` above is every step the loop took, and the two differ
                 // by exactly `paused`, so a caller can see the split without
                 // parsing a sentence.
@@ -1107,12 +1107,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// `floptle/0193`: `run` could HOST a real session and nothing could JOIN
+    /// `floptle/0193`: `run` could host a real session and nothing could JOIN
     /// it, so everything that is only true across the wire was untestable
     /// except by a person clicking in a GUI or by two machines.
     ///
     /// The assertion that matters is the second one. A ghost that connects and
-    /// sees NOTHING is the failure this whole thing exists to catch — it is what
+    /// sees nothing is the failure this whole thing exists to catch — it is what
     /// an interest-management bug looks like, and it reads exactly like success
     /// if all you check is that a client joined.
     #[test]
@@ -1189,12 +1189,12 @@ mod tests {
     ///
     /// `net.setRelevant(node, peer, false)` is `floptle/0182`'s whole promise —
     /// the cheat-resistance of a hidden-role game is *defined* by what a client
-    /// is NOT sent — and until there was a way to be a client, every project
+    /// is not sent — and until there was a way to be a client, every project
     /// relying on it took it on trust.
     ///
     /// It is also what proves the report is honest. Counting the ids a client
     /// bound locally would answer the same for both peers here, because both
-    /// loaded the same scene file; only counting what each was actually SENT
+    /// loaded the same scene file; only counting what each was actually sent
     /// can tell them apart.
     #[test]
     fn a_node_hidden_from_one_client_is_missing_from_that_clients_wire_and_no_ones_else() {
@@ -1211,7 +1211,7 @@ mod tests {
             "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
         )
         .unwrap();
-        // Host, then hide the Secret from the FIRST peer to arrive and nobody
+        // Host, then hide the Secret from the first peer to arrive and nobody
         // else. Done once, on the frame the second peer shows up, so the two
         // clients differ by exactly one decision.
         std::fs::write(
@@ -1364,14 +1364,14 @@ mod tests {
     /// one layer down).
     ///
     /// The Play-start terrain hold steps with `dt = 0`. Those steps are cheap,
-    /// and worse, how MANY of them there are depends on the terrain worker — so
+    /// and worse, how many of them there are depends on the terrain worker — so
     /// letting them into the distribution both understates the frame cost and
     /// makes two runs of the same project incomparable, which is precisely what
     /// a timing probe is for.
     #[test]
     fn the_loading_hold_is_excluded_and_said_out_loud() {
         let mut c = Timing::new(20);
-        // Ten paused steps: cheap, and NOT the game.
+        // Ten paused steps: cheap, and not the game.
         for _ in 0..10 {
             c.push(0.01, false);
         }
@@ -1390,7 +1390,7 @@ mod tests {
         assert!(line.contains("10 paused step(s) not counted"), "{line}");
     }
 
-    /// …and a run that simulated NOTHING says that, rather than reporting a
+    /// …and a run that simulated nothing says that, rather than reporting a
     /// frame cost of zero. A zero here would read as "free", and this file's
     /// whole argument is that a number nobody measured must not look like one
     /// somebody did.

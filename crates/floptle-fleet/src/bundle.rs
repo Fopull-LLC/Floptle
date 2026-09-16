@@ -267,7 +267,7 @@ mod tests {
 
     /// One raw 512-byte tar header plus its data, written by hand.
     ///
-    /// `tar::Builder` refuses to WRITE a `..` path — which is a good default and
+    /// `tar::Builder` refuses to write a `..` path — which is a good default and
     /// exactly why it cannot be used to build the fixture: a hostile archive is
     /// not produced by a well-behaved writer, it is produced by whatever the
     /// attacker likes, so the bytes are laid out here directly.
@@ -302,7 +302,7 @@ mod tests {
     /// that climbs out is refused.**
     ///
     /// The prefix is the half that must be ACCEPTED — it is what both artifacts
-    /// Ty produced actually look like, and a guard that rejected it would
+    /// a developer produced actually look like, and a guard that rejected it would
     /// refuse every real bundle. The escapes are the half that must be
     /// REFUSED, and they are refused by name so the journal says which entry.
     #[test]

@@ -380,7 +380,7 @@ impl BakedGi {
         let sp = g.spacing();
         let min_sp = sp[0].min(sp[1]).min(sp[2]).max(1e-4);
         // Step off the surface before looking up. A shading point sits exactly
-        // ON the geometry, which is the one place where "which side of the wall
+        // on the geometry, which is the one place where "which side of the wall
         // am I on" is genuinely ambiguous; half a cell along the normal is not.
         let p = pos + normal * (normal_bias * min_sp);
 

@@ -66,7 +66,7 @@ fn hole_at(body: &str) -> Option<String> {
             let run = i - start;
             let before = start.checked_sub(1).and_then(|j| b.get(j)).copied();
             let after = b.get(i).copied();
-            // Deliberately NOT `)` or `"`: those are how an aligned code
+            // Deliberately not `)` or `"`: those are how an aligned code
             // sample ends (`find("Player")   first node in the scene`), which
             // is the one place a wide gap is the point.
             let ok_before = before.is_some_and(|c| c.is_alphabetic() || ",.;:—".contains(c));
@@ -211,7 +211,7 @@ fn the_hole_detector_knows_prose_from_a_column() {
         hole_at("being ignored.                      Rename one: a file and a file in the                      same folder").is_some(),
         "a sentence with two holes must not read as a table"
     );
-    // …and the exemption must not swallow the defect it is next to: ONE long
+    // …and the exemption must not swallow the defect it is next to: one long
     // run is a hole however long it is.
     assert_eq!(runs_of_four("or                  scene.info(id)"), 1);
     assert_eq!(runs_of_four("a    b    c"), 2);

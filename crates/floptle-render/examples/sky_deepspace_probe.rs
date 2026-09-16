@@ -1,9 +1,9 @@
 //! Visual verification of the DYNAMIC deep-space background (the built-in
 //! `sky_color` flat-bg fallback: `deep_space()` → `atmo_composite`). Renders the
-//! SAME atmospheric body from four framings to prove the context-aware behavior:
+//! same atmospheric body from four framings to prove the context-aware behavior:
 //!
 //! - surface: deep inside the daytime shell — stars washed out, sky tinted.
-//! - orbit: above the shell — the limb halo AND a visible starfield.
+//! - orbit: above the shell — the limb halo and a visible starfield.
 //! - deep: far out, the planet a tiny dot — a star vault + a faint milky-way band.
 //! - sunward: aimed at the star across empty sky (no shell) — the DIM sun glint.
 //!
@@ -103,7 +103,7 @@ fn main() {
             target: DVec3::ZERO,
         },
         View {
-            // Above the planet on the sun side, looking OUT at the star across
+            // Above the planet on the sun side, looking out at the star across
             // empty sky (the shell is behind us → atmo off along the ray).
             name: "sunward",
             cam: s * (2.6 * r),

@@ -7,8 +7,8 @@
 //! all of that means running `fixedUpdate` and stepping physics bodies.
 //!
 //! It is a generalization of the predictor's replay loop (`net.rs`): where that
-//! rewinds ONE entity to the server's word and replays its unacknowledged
-//! inputs, this rewinds EVERY rollback node together and replays every peer's
+//! rewinds one entity to the server's word and replays its unacknowledged
+//! inputs, this rewinds every rollback node together and replays every peer's
 //! inputs, in a fixed order, with all three kinds of per-tick state restored
 //! around it.
 //!
@@ -28,7 +28,7 @@
 //!   that matched once fails to match on the replay. Neither shows up as an
 //!   error; both show up as a desync.
 //!
-//! ## Live and replayed ticks run the SAME code
+//! ## Live and replayed ticks run the same code
 //!
 //! [`RollbackDriver::advance`] and the replay loop both end in
 //! [`RollbackDriver::simulate_tick`]. That is not tidiness — it is the whole
@@ -218,7 +218,7 @@ impl RollbackDriver {
         // checksums stay green) and therefore completely silent: a fighter that
         // simply never moves, in a match that never complains. Say it here.
         //
-        // Scene data, so it is answerable NOW — unlike the script audit, which
+        // Scene data, so it is answerable now — unlike the script audit, which
         // has to wait for environments that may not exist yet ([`Self::audit`]).
         let players = host.input_system().borrow().players();
         if self.nodes.len() > players {
@@ -251,7 +251,7 @@ impl RollbackDriver {
     /// fighting them. Deferred out of [`Self::rebind`] on purpose.
     ///
     /// A driver engages on the same frame the scene switches, which is a frame
-    /// or more BEFORE the new scene's script environments have been built. Ask
+    /// or more before the new scene's script environments have been built. Ask
     /// then and every answer is "no": no `snapshot()`, no `restore()`, no
     /// `synced` — because there is nothing to ask. The old code asked then, and
     /// told people their fighter would not be rolled back while pointing at a
@@ -265,7 +265,7 @@ impl RollbackDriver {
         if self.audited {
             return true;
         }
-        // A node with no scripts AT ALL never becomes knowable, and waiting for
+        // A node with no scripts at all never becomes knowable, and waiting for
         // it forever would suppress every other node's audit. It is also worth
         // reporting in its own right, so it counts as built and falls into the
         // no-hooks arm below.
@@ -362,7 +362,7 @@ impl RollbackDriver {
     /// table's keys in a different order — an alarm that cries wolf is worse
     /// than no alarm, because everyone learns to ignore it.
     ///
-    /// Transforms are deliberately NOT hashed. Rotation on a fighter is derived
+    /// Transforms are deliberately not hashed. Rotation on a fighter is derived
     /// presentation (which way the model faces), and a checksum that fires on
     /// divergence the simulation cannot feel is the same cried wolf.
     /// The same fold `state_hash` performs, but **labelled** and one hash per
@@ -390,7 +390,7 @@ impl RollbackDriver {
 
 /// One labelled hash per value in a saved tick — the shared body of
 /// [`RollbackDriver::state_breakdown`] and the replay audit, which needs the
-/// same labels for a state that is NOT in the ring.
+/// same labels for a state that is not in the ring.
 fn breakdown_of(
     nodes: &[RollbackNode],
     s: &SavedTick,
@@ -522,7 +522,7 @@ impl RollbackDriver {
     /// May this frame sample the local pad, and for which tick?
     ///
     /// `None` while stalled, and that is the whole point: a stall leaves the
-    /// frontier where it is, so the next frame would otherwise sample the SAME
+    /// frontier where it is, so the next frame would otherwise sample the same
     /// tick a second time. A tick may only ever be sampled once. The second
     /// sample overwrites the first locally, while on the wire the fan-out's
     /// per-`(peer, tick)` dedup drops it — so this machine simulates the tick
@@ -615,7 +615,7 @@ impl RollbackDriver {
     /// other one, about a value that has already been overwritten.
     ///
     /// Fofighter shipped one: a node handle cached in a Lua local at the top of
-    /// one script's hook and read by a DIFFERENT script during the correction.
+    /// one script's hook and read by a different script during the correction.
     /// `restore()` cannot put a Lua local back and the driver never knew it
     /// existed, so a re-simulated tick computed a hit the original pass did
     /// not, from byte-identical rollback state. It showed up as 8-to-15
@@ -651,13 +651,13 @@ impl RollbackDriver {
             return Vec::new();
         }
         let from = to - depth;
-        // The anchor is the state BEFORE `from` ran, and every tick in
+        // The anchor is the state before `from` ran, and every tick in
         // `from..=to` must already be in the ring for the comparison to have
         // anything to compare against.
         if !self.ring.iter().any(|s| s.tick == from) {
             return Vec::new();
         }
-        // Only audit ticks whose inputs are all REAL. A tick still running on a
+        // Only audit ticks whose inputs are all real. A tick still running on a
         // guess would be re-guessed here from the same `used` record, so it
         // would in fact match — but a pending correction could land between the
         // two passes and turn a clean audit into a false alarm. Waiting costs
@@ -672,7 +672,7 @@ impl RollbackDriver {
         let Some(anchor) = self.ring.iter().find(|s| s.tick == from).cloned() else {
             return Vec::new();
         };
-        // The live present, to put back afterwards — captured from the WORLD,
+        // The live present, to put back afterwards — captured from the world,
         // not read out of the ring. The ring's entry for tick `to` is the state
         // before `to` ran, so restoring that would leave the game a tick in the
         // past: a diagnostic that caused the problem it went looking for.
@@ -682,7 +682,7 @@ impl RollbackDriver {
         ctx.host.begin_replay();
         self.apply(ctx, &anchor);
         for t in from..=to {
-            // The ring's entry for tick `t` is the state BEFORE `t` ran
+            // The ring's entry for tick `t` is the state before `t` ran
             // (`advance` captures, then simulates), so capture at the same
             // moment or the two are a tick apart and everything "diverges".
             // Tick `from` is therefore the control: it is the anchor we just
@@ -705,7 +705,7 @@ impl RollbackDriver {
                     Some(a) if a == b => {}
                     Some(a) => out.push((*t, label.clone(), *b, *a)),
                     // A key the replay did not produce at all is a divergence
-                    // in SHAPE, which is worth naming just as loudly.
+                    // in shape, which is worth naming just as loudly.
                     None => out.push((*t, label.clone(), *b, 0)),
                 }
             }
@@ -759,7 +759,7 @@ impl RollbackDriver {
             return;
         };
         // Everything newer than the anchor is provisional and about to be
-        // rewritten; the anchor itself is the state BEFORE `from`, which the
+        // rewritten; the anchor itself is the state before `from`, which the
         // correction does not change (only `from`'s inputs did).
         let anchor = self.ring[i].clone();
         self.ring.truncate(i);
@@ -822,12 +822,12 @@ impl RollbackDriver {
                 *a = floptle_script::net_aim(&r.input);
             }
         }
-        // Fresh body state for THIS tick (post the previous tick's physics), so
+        // Fresh body state for this tick (post the previous tick's physics), so
         // `node.vx/grounded` read what the live tick would have read.
         Self::feed_bodies(ctx);
         Self::lend_world(ctx);
         let t = tick as f32 * ctx.step;
-        // BOTH hooks run on the tick clock. `update` is a render-rate pass
+        // both hooks run on the tick clock. `update` is a render-rate pass
         // everywhere else, and a render-rate read is one no replay can
         // reproduce — so for a rollback node it rides the tick exactly as it
         // already does for a `Predicted` one (§2.4).
@@ -1021,7 +1021,7 @@ function restore(s)\n\
   for k, v in pairs(s) do state[k] = v end\n\
 end\n";
 
-    /// The SAME fighter with one line changed: a counter that lives OUTSIDE
+    /// The same fighter with one line changed: a counter that lives outside
     /// `state`, so `snapshot()` does not carry it and `restore()` cannot put it
     /// back.
     ///
@@ -1233,12 +1233,12 @@ end\n";
     /// machine (§7 P3).
     ///
     /// Two runs of the same twenty-tick match. The first never guesses: every
-    /// input is known before its tick. The second is fed P2's inputs LATE for a
+    /// input is known before its tick. The second is fed P2's inputs late for a
     /// stretch in the middle, so the driver predicts them (repeat-last),
     /// simulates several ticks on the guess, then gets contradicted and has to
     /// restore and re-simulate the whole span.
     ///
-    /// The two must end BIT-IDENTICAL — same body positions, same velocities,
+    /// The two must end bit-identical — same body positions, same velocities,
     /// same script state down to the float bits. Anything less than bit
     /// equality is a rollback implementation that plays a subtly different match
     /// on each screen until someone notices the health bars disagree.
@@ -1291,8 +1291,8 @@ end\n";
         assert!(b.faults.is_empty(), "faults: {:?}", b.faults);
     }
 
-    /// FIELD REGRESSION (floptle/0050): a script that reads a value its
-    /// `snapshot()` does not carry must be caught HERE, by the machine that has
+    /// field regression (floptle/0050): a script that reads a value its
+    /// `snapshot()` does not carry must be caught here, by the machine that has
     /// it, while it has it.
     ///
     /// Before this, the only way to find out was to lose a live match: the
@@ -1347,7 +1347,7 @@ end\n";
         assert!(bad.host.errors().is_empty(), "errors: {:?}", bad.host.errors());
     }
 
-    /// The same scenario driven twice through the same span: a SECOND
+    /// The same scenario driven twice through the same span: a second
     /// correction inside an already-replayed range must land on the replay's
     /// state, not on the original pass's.
     ///
@@ -1382,7 +1382,7 @@ end\n";
             // degradation, not a failure. The end state must still be right.
             ever_stalled |= b.advance(&mut rolled.ctx()).is_none();
             // Two late deliveries over overlapping ranges: the second reaches
-            // back INTO the span the first already replayed.
+            // back into the span the first already replayed.
             if *t == 10 {
                 for (lt, _, p2) in script.iter().filter(|(t, ..)| (9..=10).contains(t)) {
                     b.add_remote(P2, *lt, p2.clone());
@@ -1405,7 +1405,7 @@ end\n";
 
     /// Past the depth cap the driver waits instead of guessing further (§2.3):
     /// A link slow enough to stall the session repeatedly, with a pad whose
-    /// value depends on WHEN it was polled rather than on which tick it feeds.
+    /// value depends on when it was polled rather than on which tick it feeds.
     ///
     /// This is the shape of a real player's hands, and it is the case a
     /// scripted match cannot test: a scripted input is the same value however
@@ -1441,7 +1441,7 @@ end\n";
         pump(4, &mut wall, &mut host_net, &mut peer_net);
         let (roster, delay, seed) =
             peer_net.take_rollback_start().expect("the host announces the match");
-        // Only NOW does the link go bad: far past what delay 2 and a depth cap
+        // Only now does the link go bad: far past what delay 2 and a depth cap
         // of 8 can absorb, so the session spends most of its life waiting —
         // which is the point.
         hub.set_conditions(14, 0.15);
@@ -1493,7 +1493,7 @@ end\n";
                 }
             }
             for (side, driver) in [(0u64, &mut host_d), (1u64, &mut peer_d)] {
-                // THE contract under test: ask the driver whether this frame
+                // the contract under test: ask the driver whether this frame
                 // may sample at all, and poll the pad only if it says yes.
                 let Some(sampled) = driver.sample_tick() else { continue };
                 let ni = pad(wall, side);
@@ -1528,7 +1528,7 @@ end\n";
         // simulated from guesses whose real inputs are literally still in the
         // air — so two peers disagreeing there means nothing. Tick `target` has
         // every peer's real input in it and will never be re-simulated again;
-        // if the machines disagree about THAT, they disagree about the match.
+        // if the machines disagree about that, they disagree about the match.
         let (h, p) = (host_d.state_hash(target), peer_d.state_hash(target));
         assert!(h.is_some(), "tick {target} fell off the host's ring before it could be compared");
         assert_eq!(
@@ -1636,7 +1636,7 @@ end\n";
     ///
     /// Packet loss is the point of running it here rather than on a clean link:
     /// it is what makes the driver re-simulate ticks it has already re-simulated
-    /// once, which is where reusing the ORIGINAL guess for still-missing inputs
+    /// once, which is where reusing the original guess for still-missing inputs
     /// stops being a nicety.
     #[test]
     fn two_peers_over_a_lossy_link_simulate_the_same_match() {
@@ -1738,7 +1738,7 @@ end\n";
         );
         // Compared at a CONFIRMED tick. The newest few ticks on either machine
         // are still speculation — simulated from guesses whose real inputs are
-        // literally still in the air — so two peers differing THERE is the
+        // literally still in the air — so two peers differing there is the
         // system working, not failing. Tick `target` holds every peer's real
         // input and will never be re-simulated again.
         let (h, p) = (host_d.state_hash(target), peer_d.state_hash(target));
@@ -1915,7 +1915,7 @@ end\n";
         d.rebind(&world, &mut sim, &host);
         assert_eq!(d.nodes().len(), 1);
 
-        // FIRST: nothing has loaded the scripts yet, which is the state a driver
+        // first: nothing has loaded the scripts yet, which is the state a driver
         // engaging on a scene switch finds the world in. The audit must DECLINE
         // to answer rather than answer "no hooks" — the old code answered, and
         // told people a fighter defining both hooks would not be rolled back
@@ -1930,7 +1930,7 @@ end\n";
             d.faults
         );
 
-        // THEN, once the environments are built, the real answer.
+        // then, once the environments are built, the real answer.
         host.run(&mut world, &dir, STEP, 0.0);
         assert!(d.audit(&world, &host), "with envs built the audit must resolve");
         assert!(
@@ -1945,7 +1945,7 @@ end\n";
         assert!(d.faults.is_empty(), "the audit must not re-report: {:?}", d.faults);
     }
 
-    /// FIELD REGRESSION (floptle/0039 Symptom B): a restart that binds NOTHING
+    /// field regression (floptle/0039 Symptom B): a restart that binds nothing
     /// must not leave the previous driver's nodes in the script filters.
     ///
     /// `net_rollback_start` takes the running driver, rebinds it, and abandons
@@ -1966,7 +1966,7 @@ end\n";
         assert!(eids.iter().all(|e| f.host.is_filtered(*e)), "the driver owns them while running");
 
         // The scene switches to one with no fighters. `net_rollback_start`'s
-        // order: give the filters back FIRST, then rebind, then re-take only on
+        // order: give the filters back first, then rebind, then re-take only on
         // success.
         f.host.shrink_filters(eids.clone());
         for e in f.world.query::<Replicated>().map(|(e, _)| e).collect::<Vec<_>>() {
@@ -1984,7 +1984,7 @@ end\n";
         }
     }
 
-    /// A `Rollback` node with NO scripts at all can never become "built", so an
+    /// A `Rollback` node with no scripts at all can never become "built", so an
     /// audit that waited for its environment would wait forever — and suppress
     /// every other node's report along with it.
     #[test]
@@ -2008,10 +2008,10 @@ end\n";
 
     /// The desync an adversarial review found before this batch shipped
     /// (`floptle/0143`): a driven body's ground vanishing must wake it
-    /// through the SAME sequence a resimulated tick actually runs —
+    /// through the same sequence a resimulated tick actually runs —
     /// `reclaim_world`'s per-tick collider swap, then that tick's
     /// `step_body_tick` — not only through `render_frame.rs`'s
-    /// once-per-REAL-frame `set_colliders` call, which `simulate_tick` never
+    /// once-per-real-frame `set_colliders` call, which `simulate_tick` never
     /// reaches during a pure resimulation. If the wake only happened through
     /// the frame-pass call, a live tick would wake the body and a later
     /// resimulation of that exact tick would not, computing a stationary body

@@ -1,6 +1,6 @@
 //! Persistence for vertex paint: `<project>/paint/<scene>.vpaint`.
 //!
-//! ONE container per scene, not one file per node — an all-painted scene would
+//! one container per scene, not one file per node — an all-painted scene would
 //! otherwise mean hundreds of tiny files and hundreds of syscalls per load. The
 //! format is deliberately "the GPU buffer, serialized": an index of
 //! `paint_id → (offset, count, geom_hash)` followed by the bulk RGBA8, so loading is
@@ -9,7 +9,7 @@
 //! Binary, not RON, because per-vertex arrays in a `.ron` would be unreadable and
 //! enormous — the same call terrain fields make.
 //!
-//! NOTE the scene-name keying inherits the bug class fixed on 2026-07-14 for terrain:
+//! NOTE the scene-name keying inherits the bug class fixed earlier for terrain:
 //! files keyed by `scene_name` get overwritten if the name changes underfoot. Paint
 //! rides the existing mitigations — `save_scene` refuses during Play, and paint reloads
 //! through `adopt_paint` after any scene load/undo-restore.
@@ -141,13 +141,12 @@ impl Editor {
 
     /// Write every painted node's colors beside the scene. Called from `save_scene`.
     ///
-    /// Entries the last adopt could NOT apply (`paint_orphans` — mesh unloadable or
+    /// Entries the last adopt could not apply (`paint_orphans` — mesh unloadable or
     /// the re-import guard refused) are carried through UNCHANGED, as long as a node
     /// still references their id and the user hasn't repainted it. Before this, one
     /// save from a session with broken asset resolution silently destroyed every
-    /// unloaded node's paint (Ty's `assets` project lost ~90% of both paint files,
-    /// 2026-07-20).
-    /// Whether everything that should be on disk IS — the scene save's dirty
+    /// unloaded node's paint (one project lost ~90% of both paint files).
+    /// Whether everything that should be on disk is — the scene save's dirty
     /// flag aggregates this, so a failed write keeps the scene "unsaved".
     pub(crate) fn save_paint(&mut self) -> bool {
         let referenced: std::collections::HashSet<u32> =
@@ -262,7 +261,7 @@ impl Editor {
                     .and_then(|ps| ps.get(i))
                     .map_or(0, |pp| geom_hash(&pp.verts));
                 // The re-import guard. Applying a stale block would put paint on the
-                // WRONG vertices — visibly scrambled, silently. Refuse and say so.
+                // wrong vertices — visibly scrambled, silently. Refuse and say so.
                 if live != colors.len() as u32 || (*hash != 0 && live_hash != 0 && *hash != live_hash) {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
@@ -343,9 +342,9 @@ mod tests {
         assert_eq!(geom_hash(&mk(1.0)), geom_hash(&mk(1.0)));
         // A real move changes the hash → the guard fires.
         assert_ne!(geom_hash(&mk(1.0)), geom_hash(&mk(1.5)));
-        // Sub-quantum float noise does NOT → the guard doesn't cry wolf on a re-export.
+        // Sub-quantum float noise does not → the guard doesn't cry wolf on a re-export.
         assert_eq!(geom_hash(&mk(1.0)), geom_hash(&mk(1.0 + 1e-7)));
-        // Vertex COUNT is part of the hash.
+        // Vertex count is part of the hash.
         let mut two = mk(1.0);
         two.push(two[0]);
         assert_ne!(geom_hash(&mk(1.0)), geom_hash(&two));

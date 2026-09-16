@@ -27,7 +27,7 @@
 //!
 //! **Callers, not this crate, own `restart_app_if_necessary` and any
 //! logging.** [`restart_app_if_necessary`] is re-exported so a caller can run
-//! it BEFORE engine startup and exit immediately if it returns `true` — never
+//! it before engine startup and exit immediately if it returns `true` — never
 //! call [`SteamPlatform::init`] first. `init` returns a plain `Result`; a
 //! caller unable to init (no Steam client running, most commonly) decides for
 //! itself whether that's a warning worth surfacing and falls back to
@@ -99,7 +99,7 @@ fn flush_is_due(last_attempt: Option<Instant>, now: Instant, interval: Duration)
 
 /// Returns `true` if the app wasn't launched through Steam and Steam has
 /// begun relaunching it — the caller should exit as soon as possible and
-/// must NOT go on to call [`SteamPlatform::init`]. Re-exports
+/// must not go on to call [`SteamPlatform::init`]. Re-exports
 /// `steamworks::restart_app_if_necessary`.
 #[cfg(feature = "steam")]
 pub fn restart_app_if_necessary(app_id: u32) -> bool {
@@ -146,7 +146,7 @@ pub struct SteamPlatform {
     /// Every board handle resolved this session, keyed by its raw value.
     ///
     /// This registry is not a cache — it is load-bearing. `steamworks`'
-    /// `Leaderboard` exposes `raw()` but has NO constructor from a raw value,
+    /// `Leaderboard` exposes `raw()` but has no constructor from a raw value,
     /// so a handle that leaves Rust can never be turned back into one. Keeping
     /// the real values here is what lets a caller name a board with a plain
     /// number.
@@ -175,7 +175,7 @@ pub struct SteamPlatform {
     /// recorded for that same lobby. Read and cleared in `poll`.
     lobby_join_targets: Arc<Mutex<HashMap<u64, u64>>>,
     lobby_next_request: Cell<u64>,
-    /// Whether the overlay is up RIGHT NOW — the level behind
+    /// Whether the overlay is up right now — the level behind
     /// [`Overlay::is_active`], maintained by the `GameOverlayActivated`
     /// callback. Distinct from [`overlay_flips`](Self::overlay_flips), which
     /// records each transition as an event.
@@ -321,10 +321,10 @@ impl Platform for SteamPlatform {
     fn pump(&self) {
         self.client.run_callbacks();
         self.report_overlay_hook();
-        // Reconcile FIRST: a store's async server round-trip can fail on a
+        // Reconcile first: a store's async server round-trip can fail on a
         // frame long after `dirty` was already cleared for it, and the due/
         // dirty check right below is the only thing deciding whether `flush`
-        // gets called at all — checking `store_failed` only INSIDE `flush`
+        // gets called at all — checking `store_failed` only inside `flush`
         // would mean it's never read until something else re-dirties first.
         if self.store_failed.swap(false, Ordering::Relaxed) {
             self.dirty.store(true, Ordering::Relaxed);
@@ -367,7 +367,7 @@ impl Overlay for SteamPlatform {
         self.overlay_active.load(Ordering::Relaxed)
     }
 
-    // Every `open_*` below checks `is_enabled` FIRST: the SDK's own calls
+    // Every `open_*` below checks `is_enabled` first: the SDK's own calls
     // return nothing and silently do nothing when the overlay isn't hooked
     // (disabled in Steam's settings, not yet attached, an injection-hostile
     // Linux/Proton setup), and "the button did nothing" is exactly the
@@ -435,10 +435,10 @@ impl SteamPlatform {
     /// Says, once, whether the overlay attached to this process — because a
     /// session where it silently never does is indistinguishable from one
     /// where Shift+Tab is simply not being pressed, and the first live test
-    /// of this integration (2026-08-29) spent a round on exactly that.
+    /// of this integration spent a round on exactly that.
     ///
     /// The overlay is not something the SDK does: it is an injection the
-    /// Steam CLIENT sets up for games IT launches — on Linux an `LD_PRELOAD`
+    /// Steam client sets up for games it launches — on Linux an `LD_PRELOAD`
     /// of `gameoverlayrenderer.so`, a Vulkan implicit layer switched on by
     /// `ENABLE_VK_LAYER_VALVE_steam_overlay_1=1`, and an X11 (or XWayland)
     /// window to hook; a native Wayland surface can't be. A game started from
@@ -732,7 +732,7 @@ impl Achievements for SteamPlatform {
         // The synchronous call only means "the local request was accepted" —
         // clear optimistically. If the actual async server round-trip later
         // comes back failed, the `UserStatsStored` callback sets
-        // `store_failed`, and the reconcile above (on the NEXT `pump`/`flush`)
+        // `store_failed`, and the reconcile above (on the next `pump`/`flush`)
         // re-marks `dirty` so the write isn't lost. A synchronous `Err` here
         // (stats not ready yet, most likely) leaves `dirty` set so the next
         // attempt retries.
@@ -764,7 +764,7 @@ impl SteamPlatform {
 
     /// A mistyped achievement id is the single most common Steamworks
     /// partner-site foot-gun (the Steam integration plan) — name it
-    /// explicitly once stats ARE known ready, since "not ready" is then ruled
+    /// explicitly once stats are known ready, since "not ready" is then ruled
     /// out and an unknown id is what's left.
     fn achievement_write_failed(&self, id: &str) -> String {
         if self.stats_ready() {
@@ -1251,7 +1251,7 @@ impl Lobbies for SteamPlatform {
             mm.add_request_lobby_list_string_filter(steamworks::StringFilter(
                 steamworks::LobbyKey::new(k),
                 v,
-                // Explicitly `Equal`: this enum's DEFAULT is
+                // Explicitly `Equal`: this enum's default is
                 // `EqualToOrLessThan`, i.e. a lexicographic `<=`, which is
                 // not what anyone filtering on a game mode means.
                 steamworks::StringFilterKind::Equal,
@@ -1402,7 +1402,7 @@ impl Lobbies for SteamPlatform {
                         *info = self.lobby_info(info.id);
                     }
                 }
-                // A join failure arrives with an EMPTY message on purpose:
+                // A join failure arrives with an empty message on purpose:
                 // Steam's own join error is the unit type and carries no
                 // reason at all. The reason lives in the `LobbyEnter`
                 // callback's record, and by now `pump` has run every callback
@@ -1434,7 +1434,7 @@ mod tests {
     /// is what lets a caller fall back to [`floptle_services::NullPlatform`]
     /// rather than crash.
     ///
-    /// **This deliberately does not assert WHICH way.** It used to assert
+    /// **This deliberately does not assert which way.** It used to assert
     /// `is_err()`, on the reasoning that no Steam client runs in CI — true
     /// there, and false on the machine of anybody actually developing this
     /// crate, who has Steam open. App 480 (Spacewar) is free to every Steam
@@ -1476,7 +1476,7 @@ mod tests {
     /// and the scores are simply ranked the wrong way round — or a lap time
     /// is displayed as a point score. Nothing errors, and the only symptom is
     /// a leaderboard that looks wrong to players. The round trip is what
-    /// makes a swap fail HERE instead.
+    /// makes a swap fail here instead.
     #[test]
     fn every_leaderboard_enum_survives_a_round_trip_through_steams_own() {
         for s in [LeaderboardSort::Ascending, LeaderboardSort::Descending] {

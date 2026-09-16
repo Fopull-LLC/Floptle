@@ -180,7 +180,7 @@ impl Editor {
         // The Hub launches the editor with the project as an argument, so this
         // was every Hub-started session, not just a binary run by hand.
         //
-        // Must sit ABOVE the `is_empty` early-out below: with nothing loaded
+        // Must sit above the `is_empty` early-out below: with nothing loaded
         // yet, that return is exactly the branch this has to get past.
         if !self.ext_booted && !self.project_root.as_os_str().is_empty() {
             self.ext_booted = true;
@@ -269,7 +269,7 @@ impl Editor {
     ///
     /// **Reuses last frame's buffer when the grid has not changed.** This
     /// runs whenever `ext_mirror` does, which is gated on `World::revision`
-    /// — but that revision moves on ANY mutable access anywhere in the
+    /// — but that revision moves on any mutable access anywhere in the
     /// scene, so "the mirror is rebuilding" does not mean "this particular
     /// map changed". Comparing against `ext_tilemap_cache` (survives the
     /// mirror being replaced) is what tells the two apart: the comparison
@@ -678,7 +678,7 @@ impl Editor {
             return Err(format!("node {id} has no document"));
         };
         let merged = merge_doc(&current, patch)?;
-        // Clear first, then write: `insert_doc` only ever ADDS, which is right
+        // Clear first, then write: `insert_doc` only ever adds, which is right
         // for a fresh node and would leave a removed rigidbody in place here.
         self.clear_doc_components(e, &merged);
         self.insert_doc(e, &merged);
@@ -699,7 +699,7 @@ impl Editor {
             }
             None => None,
         };
-        // Read the WHOLE tree before spawning any of it: a document with a typo
+        // Read the whole tree before spawning any of it: a document with a typo
         // three nodes down should cost a Console line, not half a room.
         let tree = read_spec(spec)?;
         self.spawn_spec_tree(&tree, parent_entity);
@@ -850,7 +850,7 @@ pub(crate) fn menu_tree(host: &ext::ExtHost) -> Vec<ExtMenuGroup> {
     groups
 }
 
-/// A node's LOCAL half-extents, for `scene.raycast`.
+/// A node's local half-extents, for `scene.raycast`.
 ///
 /// The built-in shapes use the same figures the editor's own click-picking does,
 /// so a ray and a click agree about where a node is. A model uses the longest
@@ -894,7 +894,7 @@ pub(crate) struct ExtMenuGroup {
 // The node document, as a package writes it.
 //
 // A package sends a Lua table; these two functions turn it into a `NodeDoc` —
-// the SAME type a `.ron` scene, a prefab and the clipboard all serialise. That
+// the same type a `.ron` scene, a prefab and the clipboard all serialise. That
 // is the whole design: there is no second description of what a node is for a
 // package to write against, so a node type that gains a field is writable the
 // day it lands and nothing here has to be updated to allow it.
@@ -988,11 +988,11 @@ fn known_doc_fields() -> &'static [&'static str] {
         "material",
         "object_materials",
         "tint",
-        // A Tint's three fields are three keys and ONE component: `tint` is the
+        // A Tint's three fields are three keys and one component: `tint` is the
         // multiply, `tint_rim` the additive edge `(r, g, b, strength)`, and
         // `tint_ambient` the ambient multiplier. They were bound `: _` above
         // when they were added, which silenced the exhaustive destructure
-        // WITHOUT doing what that check exists to make you do — so a package
+        // without doing what that check exists to make you do — so a package
         // writing `tint_rim` was told it "is not a node property", which was
         // both wrong and the exact error the check is here to prevent.
         "tint_rim",
@@ -1027,7 +1027,7 @@ fn known_doc_fields() -> &'static [&'static str] {
         "light_falloff",
         "light_shadows",
         "camera_2d",
-        // `id`, `parent_id`, `parent` and `attachment` are the scene FILE's
+        // `id`, `parent_id`, `parent` and `attachment` are the scene file's
         // linkage between nodes. A package addresses a node by the id `scene.*`
         // gave it and re-parents with `scene.setParent`; letting one write these
         // would let it point a node at a position in a list it cannot see
@@ -1223,7 +1223,7 @@ mod tests {
         );
     }
 
-    /// And a field CAN be cleared, which only works because the write clears
+    /// And a field can be cleared, which only works because the write clears
     /// before it inserts. `insert_doc` alone would have left the component on.
     #[test]
     fn writing_a_field_away_actually_removes_it() {
@@ -1442,7 +1442,7 @@ mod tests {
 
     /// **The property `floptle/0117` exists to protect, on the editor's own
     /// mirror this time.** A grid that has not changed must come back as the
-    /// SAME allocation across a rebuild, not a fresh copy — an `Rc::clone`,
+    /// same allocation across a rebuild, not a fresh copy — an `Rc::clone`,
     /// not a `Vec` realloc, however big the map.
     #[test]
     fn an_unchanged_tilemap_reuses_last_frames_grid() {
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(g1, g2);
     }
 
-    /// …and a real edit DOES get a fresh grid, with the new data in it.
+    /// …and a real edit does get a fresh grid, with the new data in it.
     #[test]
     fn an_edited_tilemap_gets_a_fresh_grid() {
         let (mut ed, id) = with_a_tilemap(2, 1);
@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     /// …and an edit to `tile` (the tile's world-unit size) with `data`
-    /// untouched must ALSO get a fresh grid — the reuse check compared only
+    /// untouched must also get a fresh grid — the reuse check compared only
     /// `data`, so a size or tileset edit that left the cell contents alone
     /// handed packages back the old `tile`/`cols`/`rows`/`tileset` forever.
     #[test]

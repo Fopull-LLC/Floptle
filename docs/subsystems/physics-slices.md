@@ -73,5 +73,4 @@ Shipped so physics games are buildable in-editor:
 - Raycast-vehicle model (drive across a fractal).
 - Density-field/Poisson gravity tier (ADR-0014 `DensityField`) + gravity-field arrow viz.
 
-Memory rule: commit under Ty Johnston, no co-author; build with the sandbox disabled;
-verify each headless slice with `cargo test -p floptle-physics`.
+Verify each headless slice with `cargo test -p floptle-physics`.

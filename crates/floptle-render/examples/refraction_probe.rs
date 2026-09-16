@@ -1,7 +1,7 @@
 //! Does glass bend what is behind it?
 //!
 //! Reflections gave a crystal ball its surroundings. This is the other half:
-//! seeing THROUGH it, distorted. The difference between the two on screen is
+//! seeing through it, distorted. The difference between the two on screen is
 //! stark — a sphere that only reflects reads as a chrome bearing however clear
 //! you make it — but it is easy to fake in a way a naive test would accept, so
 //! the scene is built to make one answer possible.
@@ -53,7 +53,7 @@ fn main() {
     let straight = shot(&gpu, &mut raster, ball, card, 1.0, 1.0, &format!("{dir}/refract_ior1.png"));
     let solid = shot(&gpu, &mut raster, ball, card, 0.0, 1.8, &format!("{dir}/refract_off.png"));
 
-    // Two small windows INSIDE the ball, either side of its centre. With the
+    // Two small windows inside the ball, either side of its centre. With the
     // backdrop's seam projecting to the middle of the frame, "what colour is the
     // left half of the ball" is the whole measurement — and it is immune to
     // which way a lens happens to flip the image, which an edge-finder is not.
@@ -142,12 +142,12 @@ fn shot(
     // Two big cards edge to edge, filling the frame behind the ball. Unlit, so
     // their colours are exact and the only thing that can change them is the
     // glass in front. Camera-relative (ADR-0015): the view matrix carries no
-    // translation, so these ARE positions relative to the eye.
+    // translation, so these are positions relative to the eye.
     let mut left_mp = MaterialParams::flat([0.9, 0.1, 0.05]);
     left_mp.unlit = true;
     let mut right_mp = MaterialParams::flat([0.05, 0.35, 0.9]);
     right_mp.unlit = true;
-    // `plane(half)` spans [-half, half], so `plane(1.0)` is TWO units across and
+    // `plane(half)` spans [-half, half], so `plane(1.0)` is two units across and
     // scale 8 makes each card 16 wide. Offsetting by 8 butts them edge to edge
     // with the seam at x = 0, which projects to the middle of the frame.
     let back = |x: f32| {
@@ -212,7 +212,7 @@ fn shot(
     let mut rmr = Raymarch::new(gpu);
     rmr.upload_globals(gpu, rm);
 
-    // The scene WITHOUT the glass: prepass (which excludes it), then the colour
+    // The scene without the glass: prepass (which excludes it), then the colour
     // pass (which excludes it too).
     raster.depth_prepass_with(gpu, globals, &instances, &[], &[], gpu.depth_texture());
     rmr.set_depth_prime(gpu, raster.prepass_view());

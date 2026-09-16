@@ -6,7 +6,7 @@
 //! label just looks broken to whoever opens the editor.
 //!
 //! So every icon lives here as a named constant, and [`ALL`] names the ones
-//! shared across tabs. But the test that guards them ([`tests`]) does NOT read
+//! shared across tabs. But the test that guards them ([`tests`]) does not read
 //! that list: it scans **every string literal in every source file**, because
 //! the icon that ships broken is always the one nobody remembered to register.
 //!
@@ -81,7 +81,7 @@ pub(crate) const NET: &str = "🌐";
 pub(crate) const SHADERS: &str = "◈";
 pub(crate) const PAINT: &str = "◨";
 /// The 2D image editor (distinct from ◨ Paint, which is the 3D brush).
-/// NOT 🎨 — the proposal suggested it and `every_icon_has_a_glyph` refused it:
+/// not 🎨 — the proposal suggested it and `every_icon_has_a_glyph` refused it:
 /// the bundled NotoEmoji subset has no palette glyph, so it would have shipped
 /// as a tofu box in the tab bar. 🖼 renders, and matches the Assets browser's
 /// texture icon.
@@ -140,7 +140,7 @@ pub(crate) fn test_context() -> egui::Context {
     ctx
 }
 
-/// A headless frame with a REAL screen rect.
+/// A headless frame with a real screen rect.
 ///
 /// `RawInput::default()` has no `screen_rect`, so egui lays out into nothing and
 /// every widget is clipped away — which makes a "does it render" test pass

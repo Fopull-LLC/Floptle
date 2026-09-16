@@ -118,7 +118,7 @@ pub(crate) fn asset_picker(
                 }
             });
         });
-    // The closed button is also a DROP TARGET: drag a matching asset from the
+    // The closed button is also a DROP target: drag a matching asset from the
     // Assets tab straight onto it to fill the value (no need to open + search).
     let dropping = btn
         .dnd_hover_payload::<crate::assets::AssetPayload>()
@@ -386,7 +386,7 @@ pub(crate) fn asset_size(ui: &egui::Ui, path: &str) -> Option<(u32, u32)> {
 /// returns `false` when the grid is 1×1 — a texture is a sheet only if its asset
 /// settings say so.
 ///
-/// One widget, used by BOTH the UI element inspector and the Material editor, so
+/// One widget, used by both the UI element inspector and the Material editor, so
 /// picking a frame reads identically wherever a sheet is used — same row-major
 /// order, same ring, same hint. `id` salts the per-caller egui state (scroll
 /// position), `cell` is edited in place.
@@ -403,7 +403,7 @@ pub(crate) fn sheet_cell_picker(
     }
     // **A grid nobody can use, and a frame nobody gets back.** This draws one
     // button per cell with no virtualisation, so a 256×256 sheet is 65,536
-    // allocations, strokes and format! calls EVERY frame — an effective freeze
+    // allocations, strokes and format! calls every frame — an effective freeze
     // reached by dragging a number. Past this the numbers still work; only the
     // picture is withheld, with a line saying so.
     const MAX_PICKER_CELLS: u32 = 64 * 64;
@@ -513,7 +513,7 @@ fn downscale_rgba(px: &[u8], w: usize, h: usize, max: usize) -> egui::ColorImage
 
 /// A ComboBox over a long asset list with a search box. The search field
 /// AUTO-FOCUSES when the popup opens (type immediately, no click needed),
-/// clicking inside the popup does NOT close it (CloseOnClickOutside), and
+/// clicking inside the popup does not close it (CloseOnClickOutside), and
 /// picking an entry closes explicitly. Returns `Some(pick)` when something was
 /// chosen this frame — `Some(None)` is the `none_label` entry.
 ///

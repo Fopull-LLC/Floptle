@@ -10,7 +10,7 @@
 //! the editor flushes on Stop + periodically during Play, so a crash loses at
 //! most a few seconds. `save.flush()` forces a write (checkpoints).
 //!
-//! Multiplayer: this is LOCAL storage. For server-authoritative progress, call
+//! Multiplayer: this is local storage. For server-authoritative progress, call
 //! `save.*` in server-side script paths (`net.isServer()`) and hand results to
 //! clients via `synced`/RPC.
 
@@ -23,7 +23,7 @@ use floptle_net::NetValue;
 use mlua::{Lua, Value};
 
 /// How many keys one slot may hold, and how many bytes between them. A value
-/// is already capped at 1 KB; without these the COUNT was unbounded, and the
+/// is already capped at 1 KB; without these the count was unbounded, and the
 /// flush serialises the whole store every few seconds — a slot that only grew
 /// was a stall that only grew with it.
 pub const MAX_SAVE_KEYS: usize = 10_000;
@@ -178,7 +178,7 @@ pub(crate) fn install_save_api(
         }
     }
 
-    // save.deleteSlot(name) — delete a slot's store FILE from disk (save-slot
+    // save.deleteSlot(name) — delete a slot's store file from disk (save-slot
     // management UIs: "delete this save"). Deleting the ACTIVE slot also wipes
     // the in-memory store, so the slot is immediately reusable as a fresh save.
     // Returns true if a file was actually removed. Terrain a game persisted per

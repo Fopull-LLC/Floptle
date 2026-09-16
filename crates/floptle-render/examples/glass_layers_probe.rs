@@ -1,4 +1,4 @@
-//! Does the glass BEHIND a piece of glass still show?
+//! Does the glass behind a piece of glass still show?
 //!
 //! Refraction works by sampling a picture of everything behind the surface, and
 //! that picture has to be taken before the surface is drawn. Take it once and
@@ -21,10 +21,10 @@
 //! Four checks:
 //!
 //! 1. **The overlap is green at two layers.** The pane behind survived.
-//! 2. **The overlap is NOT green at one.** So the difference is the layering
+//! 2. **The overlap is not green at one.** So the difference is the layering
 //!    rather than anything else about the scene, and this probe would have
 //!    failed before the change.
-//! 3. **Green pane alone reads green in BOTH.** The control: the far pane is
+//! 3. **Green pane alone reads green in both.** The control: the far pane is
 //!    drawing and tinting correctly either way, so check 2's white overlap is
 //!    the near pane hiding it and not the far pane being missing.
 //! 4. **The bare card reads white in both.** The other control: nothing in this
@@ -48,7 +48,7 @@ fn main() {
     let two = shot(&gpu, 2, &format!("{dir}/glass_layers_two.png"));
     let one = shot(&gpu, 1, &format!("{dir}/glass_layers_one.png"));
 
-    // The three regions, in frame coordinates. The clear pane covers the LEFT
+    // The three regions, in frame coordinates. The clear pane covers the left
     // half of the green one, so left = both panes, middle = green only, right =
     // bare card. All three are read from the same row.
     let both = |px: &[u8]| mean_rgb(px, 0.16, 0.30, 0.42, 0.58);
@@ -121,7 +121,7 @@ fn shot(gpu: &Gpu, layers: u32, out: &str) -> Vec<u8> {
     let pane = raster.register(gpu, &plane(1.0), None);
 
     // Straight on, camera at the ORIGIN (ADR-0015: the view matrix has no
-    // translation, so these positions ARE the shader's coordinates).
+    // translation, so these positions are the shader's coordinates).
     let cam = RenderCamera::new(
         DVec3::ZERO,
         Quat::IDENTITY,
@@ -132,7 +132,7 @@ fn shot(gpu: &Gpu, layers: u32, out: &str) -> Vec<u8> {
     // A plain white card filling the frame, lit by ambient alone so its
     // brightness is a constant and not a lighting result.
     let card_mp = MaterialParams::flat([1.0, 1.0, 1.0]);
-    // `plane(half)` spans [-half, half] — `plane(1.0)` is TWO units across, so
+    // `plane(half)` spans [-half, half] — `plane(1.0)` is two units across, so
     // every scale below is half the width it looks like.
     let card_at = Mat4::from_translation(Vec3::new(0.0, 0.0, -14.0)) * Mat4::from_scale(Vec3::splat(9.0));
 
@@ -151,7 +151,7 @@ fn shot(gpu: &Gpu, layers: u32, out: &str) -> Vec<u8> {
     let green_at =
         Mat4::from_translation(Vec3::new(-1.4, 0.0, -8.0)) * Mat4::from_scale(Vec3::splat(2.6));
 
-    // The near pane: clear glass, over the LEFT half of the green one.
+    // The near pane: clear glass, over the left half of the green one.
     let mut clear_mp = MaterialParams::flat([1.0, 1.0, 1.0]);
     clear_mp.ext_index = raster.push_surface_extras(SurfaceExtras {
         roughness: 0.0,

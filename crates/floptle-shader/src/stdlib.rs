@@ -64,7 +64,7 @@ const fn opt(name: &'static str, ty: SigTy, default: f64) -> SigInput {
 
 const BOTH: &[Stage] = &[Stage::Fragment, Stage::Sdf];
 const FRAG: &[Stage] = &[Stage::Fragment];
-// Pure math/noise/color: valid in ANY stage, including Sky, Ui and Post shaders.
+// Pure math/noise/color: valid in any stage, including Sky, Ui and Post shaders.
 const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky, Stage::Ui, Stage::Post];
 // Fragment + Sky + Ui + Post (color helpers; no field position needed). Post
 // belongs here for the obvious reason: grading a finished frame is most of what
@@ -296,7 +296,7 @@ fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
 // compiler (Tint) enforces that while naga does not — so an unparenthesised
 // version validates on the desktop, ships, and is refused WHOLE in a tab,
 // taking every pipeline in the module with it. That is exactly what happened
-// to any game shader using noise until 2026-09-05. The probe's shader census
+// to any game shader using noise for a long time. The probe's shader census
 // (`tools/web/shot.py`) compiles the shipped examples through a real browser
 // and is what catches this class. The old float hashes
 // (`fract(p * 456.21)`…) silently quantized once the product outgrew f32

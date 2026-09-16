@@ -7,7 +7,7 @@
 //!    guard: adding spots must not move it.
 //! 2. **hard edge** — a 40° cone at softness 0: a crisp circle.
 //! 3. **soft edge** — the same 40° cone at softness 0.6, faded from the middle
-//!    out. Softness is a fraction OF the cone, not an addition to it.
+//!    out. Softness is a fraction of the cone, not an addition to it.
 //! 4. **aimed away** — the same spot rotated 90°. Must be black. A cone whose
 //!    cosine test ran the wrong way round would light this panel and darken
 //!    every other one, and the first three would still look plausible alone.
@@ -61,7 +61,7 @@ fn grid_wall(half: f32, n: usize) -> MeshData {
 }
 
 fn main() {
-    // **A directory OR a file**, because the probes genuinely disagree about
+    // **A directory or a file**, because the probes genuinely disagree about
     // which their argument is — `skin_probe` is handed a file, `area_light_probe`
     // right beside this one in CI is handed a directory, and CI passes the same
     // `$P` to both. Taking either means this cannot fail on the difference.

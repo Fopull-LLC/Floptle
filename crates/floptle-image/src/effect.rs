@@ -200,7 +200,7 @@ fn shift(a: &mut [f32], w: u32, h: u32, dx: f32, dy: f32) {
     }
 }
 
-/// Composite a coloured alpha field UNDER the buffer.
+/// Composite a coloured alpha field under the buffer.
 fn under(buf: &mut [u8], a: &[f32], color: [u8; 4], opacity: f32) {
     for (i, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let cov = (a[i] / 255.0).clamp(0.0, 1.0) * opacity * (color[3] as f32 / 255.0);
@@ -214,7 +214,7 @@ fn under(buf: &mut [u8], a: &[f32], color: [u8; 4], opacity: f32) {
     }
 }
 
-/// Composite a coloured alpha field OVER the buffer.
+/// Composite a coloured alpha field over the buffer.
 fn over(buf: &mut [u8], a: &[f32], color: [u8; 4], opacity: f32) {
     for (i, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let cov = (a[i] / 255.0).clamp(0.0, 1.0) * opacity * (color[3] as f32 / 255.0);

@@ -14,7 +14,7 @@ use floptle_render::TextureData;
 use serde_json::{json, Value};
 
 /// One triangle mesh attached to a [`WriteNode`]. Streams are parallel and in the
-/// node's LOCAL space.
+/// node's local space.
 #[derive(Clone, Default)]
 pub struct WriteMesh {
     pub positions: Vec<[f32; 3]>,

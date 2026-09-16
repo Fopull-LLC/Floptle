@@ -225,16 +225,16 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
 
 /// Put a texture's sheet grid onto **every material that wears it**.
 ///
-/// The grid lives on the TEXTURE — "slice the .png once, every material using it
+/// The grid lives on the texture — "slice the .png once, every material using it
 /// inherits the same cells" — but the only thing that ever copied it onto a
 /// `Material` was the Inspector's material editor, which runs for the one node
 /// somebody happens to have selected. So slicing a sheet from the Assets panel
 /// left every existing sprite believing its texture was one whole cell: the
-/// sprite drew the ENTIRE SHEET stretched across its quad, and came out sized
+/// sprite drew the entire SHEET stretched across its quad, and came out sized
 /// from the whole image rather than from one frame. That reads as spritesheets
 /// being broken, which is a long way from one number being stale.
 ///
-/// A cell that no longer exists falls back INTO range rather than drawing off
+/// A cell that no longer exists falls back into range rather than drawing off
 /// the end of the image — and a `Matter::Sprite` carries its own cell, which is
 /// the one its draw actually reads, so it gets the same clamp.
 /// **What a material wearing this texture should say.** Its sheet grid comes
@@ -286,7 +286,7 @@ pub(crate) fn reslice_materials(
     changed
 }
 
-/// Put EVERY texture's sheet grid onto every material that wears it.
+/// Put every texture's sheet grid onto every material that wears it.
 ///
 /// [`reslice_materials`] answers "this texture was re-sliced"; this answers "a
 /// world just arrived". A scene saved before its textures were sliced — or one
@@ -318,7 +318,7 @@ pub(crate) fn sync_sheet_grids(
     changed
 }
 
-/// A texture's sampling settings, looked up by a path in EITHER form.
+/// A texture's sampling settings, looked up by a path in either form.
 ///
 /// `texture_settings` is keyed the way scenes and materials reference a texture:
 /// **project-relative**. The Assets browser works in absolute paths, though, so the
@@ -436,7 +436,7 @@ mod tests {
             assert_eq!((m.sheet_cols, m.sheet_rows), (16, 2), "a material kept a stale grid");
             assert!(m.cell < 32, "a cell was left past the end of the new grid");
         }
-        // The node's OWN cell is what a sprite draws, so it is clamped too.
+        // The node's own cell is what a sprite draws, so it is clamped too.
         assert!(matches!(
             world.get::<floptle_core::Matter>(sprite),
             Some(floptle_core::Matter::Sprite { cell: 31, .. })
@@ -525,7 +525,7 @@ mod tests {
         );
     }
 
-    /// The Inspector selects a texture by its ABSOLUTE path; a scene references it by a
+    /// The Inspector selects a texture by its absolute path; a scene references it by a
     /// PROJECT-RELATIVE one. Both must reach the same settings entry, or a `Pixelated`
     /// pick shows in the Inspector and never reaches the sampler (floptle/0026).
     #[test]

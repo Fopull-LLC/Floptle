@@ -7,7 +7,7 @@
 //! regions worked out from the control image itself:
 //!
 //!   * **the silhouette** — every pixel next to a colour boundary in the
-//!     control. The outline MUST darken these; that is the whole feature.
+//!     control. The outline must darken these; that is the whole feature.
 //!   * **the sphere's interior** — curved, and the classic false positive: a
 //!     naive depth-DIFFERENCE detector inks a sphere solid near its rim, because
 //!     depth changes fastest exactly where the surface turns away.
@@ -246,7 +246,7 @@ fn main() {
 
     // ---- two passes, in order ----------------------------------------------
     //
-    // Stacking is the point of a LIST, and the cheapest way to be sure the
+    // Stacking is the point of a list, and the cheapest way to be sure the
     // second pass really reads the first one's output (rather than the scene
     // again) is a pass whose signature is unmistakable: scan lines put a hard
     // row-to-row ripple into a flat wall that no single-pass frame has.

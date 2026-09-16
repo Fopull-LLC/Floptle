@@ -232,7 +232,7 @@ pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
     }
 
     // `input.player(n)` — the same API bound to another local player. A fighter
-    // gives both characters the SAME script and passes the slot in as a param:
+    // gives both characters the same script and passes the slot in as a param:
     //   local me = input.player(params.player)
     let (s, d) = (sys.clone(), domain.clone());
     let _ = t.set(

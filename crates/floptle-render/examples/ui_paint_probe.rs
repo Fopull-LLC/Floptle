@@ -374,7 +374,7 @@ fn main() {
     }
 
     // ---- opacity cascade -------------------------------------------------
-    // Not a shader feature — but it IS the change most likely to silently
+    // Not a shader feature — but it is the change most likely to silently
     // regress, so it gets pixels too.
     {
         use floptle_ui::{ElementSpec, Node, ShapeSpec, Size};
@@ -418,7 +418,7 @@ fn main() {
     }
 
     // ---- 9-slice --------------------------------------------------------
-    // The feature that makes a project's OWN panel art usable: one small frame
+    // The feature that makes a project's own panel art usable: one small frame
     // texture dressing a big element without smearing its corners.
     {
         // A 32×32 frame: an 8px border of gold with rounded-ish corner notches,
@@ -497,7 +497,7 @@ fn main() {
         // Nine patches per sliced quad, not one.
         println!("9-slice: {} instances for 3 sliced quads + bg", instances.len());
         assert_eq!(instances.len(), 1 + 9 * 3, "each sliced quad should expand to nine patches");
-        // The corner pip must stay the SAME size on the wide box and the
+        // The corner pip must stay the same size on the wide box and the
         // narrow one — that is the whole promise of 9-slice, and the thing a
         // plain stretched quad gets wrong.
         let count_red = |x0: u32, y0: u32, x1: u32, y1: u32| -> i32 {

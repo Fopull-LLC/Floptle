@@ -222,7 +222,7 @@ pub struct Agent {
     /// so it runs a few times a second, phase-scattered across the crowd.
     since_cut: f32,
     /// Last step's avoidance chose to hang back for the crowd. Queueing at a
-    /// doorway is progress that hasn't happened YET, not a unit that is stuck —
+    /// doorway is progress that hasn't happened yet, not a unit that is stuck —
     /// the watchdog counts it at a fraction of the rate.
     yielding: bool,
     /// The last search could not find one end of the order on the navmesh.
@@ -276,7 +276,7 @@ impl Agent {
         self.stalled = 0.0;
     }
 
-    /// Keep the target in step WITHOUT treating it as a fresh order: an
+    /// Keep the target in step without treating it as a fresh order: an
     /// unchanged target is left entirely alone — a Blocked agent stays resting
     /// instead of being woken (and re-queued) every frame by a host that
     /// mirrors world-space targets each step. A changed one — a real order, or
@@ -721,7 +721,7 @@ impl Crowd {
         if agent.state == AgentState::Blocked {
             agent.vel = damp(agent.vel, agent.params.accel, dt);
             self.settle(agent, slot, mesh, dt);
-            // A watchdog block WITH a viable route is usually a crowd pin — a
+            // A watchdog block with a viable route is usually a crowd pin — a
             // unit shoved against a door jamb by sixty friends — not a dead
             // end. It rests, then tries again; standing forever in a doorway
             // that cleared ten seconds ago is the worse behaviour. A route
@@ -1357,7 +1357,7 @@ mod tests {
         // nothing like standing on the same spot.
         assert!(worst > 0.35, "two units ended up {worst:.2} apart, which is inside each other");
 
-        // ALL of them: the point itself only holds one, and arrival being
+        // all of them: the point itself only holds one, and arrival being
         // contagious (touching an arrived friend with the same order counts)
         // is what lets the rest settle instead of grinding forever.
         let arrived = ids.iter().filter(|id| crowd.agent(**id).unwrap().arrived()).count();

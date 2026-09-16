@@ -91,7 +91,7 @@ fn main() {
     for (name, fogc, volumetric) in frames {
         let (into_sun, amount, shafts, density) = (true, 1.0f32, false, 0.07f32);
         let fog_on = name != "fogc_none.png";
-        // Aimed just off the sun, so the frame is about the light BETWEEN the stones
+        // Aimed just off the sun, so the frame is about the light between the stones
         // rather than about a white disc.
         let look = if into_sun { Vec3::new(-0.55, 0.02, -1.0) } else { Vec3::new(0.55, 0.02, 1.0) };
         let rot = Quat::from_rotation_arc(Vec3::NEG_Z, look.normalize());

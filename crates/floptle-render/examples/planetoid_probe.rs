@@ -1,5 +1,5 @@
-//! Planetoid probe: render the ACTUAL solar-demo cfields (planet + moon) with the
-//! ACTUAL palette sidecar, from four vantage points — orbit, surface, inside a cave,
+//! Planetoid probe: render the actual solar-demo cfields (planet + moon) with the
+//! actual palette sidecar, from four vantage points — orbit, surface, inside a cave,
 //! and the moon — and save PNGs for eyeball verification. This is the visual test
 //! for the textured-planets pass: biome splats on the surface, strata in dig walls,
 //! and GLOWING magma/crystal slots that must stay readable in an unlit cave.
@@ -141,7 +141,7 @@ fn main() {
             let th = ix as f32 * 0.157;
             let ph = iy as f32 * 0.07;
             let dirv = Vec3::new(th.cos() * ph.cos(), ph.sin(), th.sin() * ph.cos());
-            // The REAL surface radius along this direction (raycast in from
+            // The real surface radius along this direction (raycast in from
             // outside), so the sub-surface scan tracks any planet size.
             let Some(hit) = planet.raycast(dirv * (bound_r + 4.0), -dirv, bound_r * 1.5)
             else {
@@ -163,7 +163,7 @@ fn main() {
                         let slot = planet.color(hit)[3];
                         if slot == 6 || slot == 7 {
                             score += 10;
-                            // Aim AT a glowing wall with some standoff — the
+                            // Aim at a glowing wall with some standoff — the
                             // whole point of the shot is glow in frame.
                             if glow_look.is_none() && (hit - p).length() > 4.0 {
                                 glow_look = Some(*d);
@@ -210,7 +210,7 @@ fn main() {
         );
         let view_proj = cam.view_proj(W as f32 / H as f32);
         let cr = (DVec3::ZERO - cam_pos).as_vec3();
-        // Directional sun by default; `star` switches to full STARS MODE — the
+        // Directional sun by default; `star` switches to full STARS mode — the
         // multi-star uniforms drive `key_light` (the light_dir mirror keeps
         // single-light consumers like the atmosphere daylight in agreement).
         let (light, star_meta, star_pos, star_color) = match star {
@@ -287,7 +287,7 @@ fn main() {
     // Surface: standing height near the north-pole spawn, looking at the horizon.
     let eye = Vec3::new(6.0, 312.0, 10.0);
     shot("surface", eye.as_dvec3(), Vec3::new(60.0, 296.0, 90.0), &planet_ids, [0.25, 0.25, 0.28], space, 1.0, None, &mut raster, &mut raymarch);
-    // Cave: sun fully OFF (the probe binds no field, so sun_shadow can't occlude —
+    // Cave: sun fully off (the probe binds no field, so sun_shadow can't occlude —
     // with sun on, direct light would fake its way through 30 m of rock) plus a
     // whisper of ambient: the glow slots have to carry the image on their own.
     let cave_px = shot("cave", cave.as_dvec3(), cave + cave_look * 20.0, &planet_ids, [0.04, 0.04, 0.05], [0.0, 0.0, 0.0, 1.0], 0.0, None, &mut raster, &mut raymarch);
@@ -324,8 +324,8 @@ fn main() {
     println!("terminator: day side {day:.1}, night side {night:.1}");
     assert!(day > 60.0, "day side too dark ({day:.1}) — is the star being honored?");
     assert!(night < day * 0.45, "no terminator: night {night:.1} vs day {day:.1}");
-    // The atmosphere ring just OUTSIDE the disc: bright on the day limb, and a
-    // faint-but-visible airglow on the NIGHT limb (Ty: the halo must read all
+    // The atmosphere ring just outside the disc: bright on the day limb, and a
+    // faint-but-visible airglow on the NIGHT limb (the halo must read all
     // the way around, not cut off at the terminator).
     let limb_day = avg(&term_px, 716, 288);
     let limb_night = avg(&term_px, 220, 288);
@@ -334,7 +334,7 @@ fn main() {
     assert!(limb_night > 9.0, "night limb airglow missing ({limb_night:.1}) — halo cut at terminator");
     assert!(limb_night < limb_day, "night limb should be dimmer than day");
 
-    // The cave must not be pitch black: glowing slots bypass lighting, so SOME pixels
+    // The cave must not be pitch black: glowing slots bypass lighting, so some pixels
     // should be clearly bright even with ambient 0.04.
     let bright = cave_px.iter().filter(|p| p[0].max(p[1]).max(p[2]) > 90).count();
     println!("cave bright pixels: {bright}");

@@ -43,7 +43,7 @@ pub(crate) fn build_env(lua: &Lua, src: &str, name: &str) -> mlua::Result<Table>
 /// The first of `names` that's a function in `env` (lets a hook have aliases).
 ///
 /// Raw first. A script's own `update` is a direct field of its env — running the
-/// chunk put it there — and on Luau an mlua `get` against a table that HAS a
+/// chunk put it there — and on Luau an mlua `get` against a table that has a
 /// metatable takes the protected path and allocates whether or not `__index` is
 /// ever consulted. The second loop keeps the old answer for a hook that is not
 /// the script's own: `__index` falls through to the real globals.
@@ -62,10 +62,10 @@ pub(crate) fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<F
 }
 
 /// The sentinel `noderef()` returns — a `defaults` value of this string marks the
-/// param as a NODE REFERENCE the Inspector wires to a scene node by name.
+/// param as a node REFERENCE the Inspector wires to a scene node by name.
 pub(crate) const NODEREF_SENTINEL: &str = "__floptle_noderef";
 /// `scriptref("health")` → `__floptle_scriptref:health` — the param binds to
-/// that SCRIPT on the wired node (the script sees a script handle directly).
+/// that script on the wired node (the script sees a script handle directly).
 pub(crate) const SCRIPTREF_PREFIX: &str = "__floptle_scriptref:";
 /// `componentref("RigidBody")` → `__floptle_compref:RigidBody` — the param
 /// binds to that COMPONENT on the wired node (a component handle directly).
@@ -135,7 +135,7 @@ pub(crate) fn params_table(
             t.set(k.as_str(), *v as f64)?;
         }
     }
-    // Stored STRING overrides land over the defaults, like the numbers above.
+    // Stored string overrides land over the defaults, like the numbers above.
     for (k, v) in strs {
         t.set(k.as_str(), v.as_str())?;
     }
@@ -166,7 +166,7 @@ pub(crate) fn params_table(
 /// ```
 ///
 /// — keep working: `me` is the same table the engine goes on updating, so `me.x` on a
-/// later hook is the CURRENT position. Building a fresh table per hook froze such a
+/// later hook is the current position. Building a fresh table per hook froze such a
 /// handle at the spawn pose, silently, while everything using the passed `node` stayed
 /// correct (floptle/0027).
 pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
@@ -216,7 +216,7 @@ pub(crate) fn stamp_node_table(
             t.raw_set("up_z", b.up[2] as f64)?;
             t.raw_set("grounded", b.grounded)?;
             t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
-            // The TICK pose channel (`docs/multiplayer.md` §3):
+            // The tick pose channel (`docs/multiplayer.md` §3):
             // the body's own position, not the interpolated render pose that
             // `x`/`y`/`z` carry between ticks. Read it to build a hurtbox;
             // write it to move the body without going through the transform.
@@ -240,7 +240,7 @@ pub(crate) fn stamp_node_table(
 }
 
 /// The own-node table's values as the engine last left them. A difference against this
-/// at the start of the next hook means something wrote to the table from OUTSIDE that
+/// at the start of the next hook means something wrote to the table from outside that
 /// script's hook — a cross-script method call, a timer or an `on…` callback — which the
 /// post-hook read-back never saw. [`drain_node_writes`] applies those before re-stamping.
 #[derive(Clone, Copy)]
@@ -367,7 +367,7 @@ pub(crate) fn node_pre(tr: &Transform) -> NodePre {
 /// **Raw reads, and this is a hot path.** [`stamp_node_table`] writes these ten
 /// as direct fields before every hook, so the node metatable's `__index` can
 /// never be reached for them — but on Luau an mlua `get` against a table that
-/// merely HAS a metatable takes the protected path and allocates about 96 bytes
+/// merely has a metatable takes the protected path and allocates about 96 bytes
 /// per key regardless. Ten keys, twice a pass, three passes a frame, on every
 /// scripted node: that alone was ~4.5 KB of Lua heap per scripted node per
 /// frame before a script did anything at all, and most of what a 0.84 profile

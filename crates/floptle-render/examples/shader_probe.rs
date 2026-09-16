@@ -1,5 +1,5 @@
 //! Headless `.flsl` shader probe — compiles four custom shaders through the
-//! FULL production path (parse → check → transpile → naga against the real
+//! full production path (parse → check → transpile → naga against the real
 //! pass sources → `register_flsl_shader` → group(3) bindings →
 //! `draw_scene_with`) and renders them beside a built-in material to a PNG.
 //! Proves ADR-0007 Phase 2 end-to-end without a window.

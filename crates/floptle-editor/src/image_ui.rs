@@ -792,7 +792,7 @@ impl ImageCtx<'_> {
             f(doc);
         }
         self.st.invalidate_all();
-        // Re-fit ONLY when the canvas actually changed shape (a rotate). A flip
+        // Re-fit only when the canvas actually changed shape (a rotate). A flip
         // must not move the view: nothing re-frames itself in this editor.
         if before != self.st.doc.as_ref().map(|d| (d.w, d.h)) {
             self.st.fit_pending = true;
@@ -1129,7 +1129,7 @@ impl ImageCtx<'_> {
                 .desired_width(f32::INFINITY)
                 .hint_text("type…"),
         );
-        // Focus ONCE, on the frame the block was placed. Requesting it every
+        // Focus once, on the frame the block was placed. Requesting it every
         // frame meant the field could never be left: the size slider couldn't
         // take a click and Escape was swallowed the moment it arrived.
         if self.st.take_text_focus() {

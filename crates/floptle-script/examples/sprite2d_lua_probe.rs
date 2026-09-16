@@ -119,7 +119,7 @@ fn build_world(shape: Shape2d, n: usize) -> (World, Entity) {
                 let e = world.spawn();
                 world.insert(e, Transform::IDENTITY);
                 world.insert(e, Name(format!("b{i}")));
-                // A 2D game's sprite IS a plane with a spritesheet on it.
+                // A 2D game's sprite is a plane with a spritesheet on it.
                 world.insert(e, Matter::Primitive { shape: Shape::Plane, color: [1.0; 3] });
                 world.insert(e, sheet_material());
             }

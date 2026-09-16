@@ -2,7 +2,7 @@
 //!
 //! Follows the same queue-drain shape as `net.*`: calls push [`VoiceCmd`]s the
 //! editor drains each tick, and live state (devices, mic level, who is
-//! speaking) is mirrored IN through [`VoiceState`].
+//! speaking) is mirrored in through [`VoiceState`].
 //!
 //! ## The shape a game actually writes
 //!
@@ -59,10 +59,10 @@ pub enum VoiceCmd {
     Detach { peer: u64 },
     /// Retune a live source (`voice.source(peer):setTrack(...)` and friends).
     Params { peer: u64, opts: VoiceOpts },
-    /// `voice.mute(peer, bool)` — a LOCAL mute. Never leaves this machine: it
+    /// `voice.mute(peer, bool)` — a local mute. Never leaves this machine: it
     /// is one player's choice not to listen, not a rule about who may speak.
     Mute { peer: u64, muted: bool },
-    /// `voice.setForward(peer, { peers })` — SERVER: who may hear `peer`.
+    /// `voice.setForward(peer, { peers })` — server: who may hear `peer`.
     /// `None` = everyone.
     SetForward { peer: u64, to: Option<Vec<u64>> },
     /// `voice.sidetone(bool)` — hear your own microphone. Off by default.
@@ -266,7 +266,7 @@ pub(crate) fn install_voice_api(lua: &Lua, voice: &SharedVoice) -> mlua::Result<
             "source",
             lua.create_function(move |lua, peer: u64| {
                 // A handle shaped like the one `audio.play` returns, because a
-                // remote speaker IS an ordinary voice — the same `:setTrack`,
+                // remote speaker is an ordinary voice — the same `:setTrack`,
                 // `:setVolume`, `:setPosition` a game already knows.
                 make_source(lua, peer, &cmds, &state)
             })?,
@@ -357,7 +357,7 @@ fn make_source(
         h.set(
             "setPosition",
             lua.create_function(move |_, (_this, node): (Table, Table)| {
-                // Position comes from a NODE, not three numbers: a voice that
+                // Position comes from a node, not three numbers: a voice that
                 // has to be moved by hand every frame is one that will be
                 // forgotten in some code path and left across the map.
                 if let Ok(eid) = node.raw_get::<u32>("__id") {

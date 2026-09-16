@@ -178,7 +178,7 @@ impl Capture {
 
     /// The input callback: downmix to mono, resample to 48 kHz, cut into frames.
     fn on_input(shared: &Arc<Shared>, data: &[f32], channels: usize, step: f64) {
-        // Level is measured BEFORE the transmit gate, so a settings screen can
+        // Level is measured before the transmit gate, so a settings screen can
         // show the meter moving while push-to-talk is up. That is the whole
         // point of a level meter: proving the microphone works without
         // broadcasting to a lobby to find out.

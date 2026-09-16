@@ -458,7 +458,7 @@ mod tests {
             );
             baked.distance[((k * dy + j) * dx + i) as usize]
         };
-        // ON the cube's +X face: inside the fattened sheet → negative (a shadow ray
+        // on the cube's +X face: inside the fattened sheet → negative (a shadow ray
         // crossing here must register a hard hit)
         let on_face = sample(Vec3::new(1.0, 0.0, 0.0));
         assert!(on_face <= 0.0, "surface sheet should be negative, got {on_face}");

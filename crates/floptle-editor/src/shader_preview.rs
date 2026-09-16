@@ -1,6 +1,6 @@
-//! The ◈ Shaders tab's LIVE per-node previews (Unity-style thumbnails).
+//! The ◈ Shaders tab's live per-node previews (Unity-style thumbnails).
 //!
-//! `floptle_shader::preview` turns the open graph into ONE standalone WGSL
+//! `floptle_shader::preview` turns the open graph into one standalone WGSL
 //! module that renders every node's value into its own tile of a grid atlas;
 //! this module owns the GPU side — the pipeline (rebuilt only when the
 //! generated WGSL actually changes), the atlas texture (registered with egui
@@ -33,7 +33,7 @@ pub(crate) const TILE_PX: u32 = 128;
 /// file, so a bare revision number cannot tell two shaders apart: open any
 /// unedited shader (revision 1), then open any other one (also revision 1), and
 /// a preview keyed on the number alone concludes nothing changed and renders
-/// the NEW graph's IR through the OLD graph's compile. Every `dyn_slots` entry
+/// the new graph's IR through the old graph's compile. Every `dyn_slots` entry
 /// is then an index into the wrong arena — which is a panic the moment the new
 /// shader is the smaller of the two.
 pub(crate) type PreviewKey = (String, u64);
@@ -50,7 +50,7 @@ pub(crate) struct ShaderGraphPreview {
     pub(crate) atlas_px: (u32, u32),
     /// Preview-only failure (the graph stays fully editable).
     pub(crate) err: Option<String>,
-    /// The open shader reads `time`, so its tiles move on their own — the ONE
+    /// The open shader reads `time`, so its tiles move on their own — the one
     /// reason the graph tab is allowed to ask for a continuous repaint.
     pub(crate) animates: bool,
     /// The last compile, and the graph revision it came from. Anything the
@@ -96,7 +96,7 @@ impl Default for ShaderGraphPreview {
     }
 }
 
-/// The preview's uniform buffers, sized for the WORST case so they never
+/// The preview's uniform buffers, sized for the worst case so they never
 /// reallocate: `g` mirrors RasterGlobals (640 B), `globals` the bigger of the
 /// two `G` stand-ins (sdf: 1056 B), `pv` grid+nums (1040 B), `p` the max
 /// param block (16 uniforms + 8 tiling pairs = 512 B).
@@ -111,7 +111,7 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-/// Read every live literal's CURRENT value out of the graph and pack it into
+/// Read every live literal's current value out of the graph and pack it into
 /// the `PV.nums` lane array — this is what lets dragging a number on a node
 /// repaint its thumbnail without recompiling anything.
 ///
@@ -157,7 +157,7 @@ impl Editor {
         // ---- compile, but only when the graph actually moved ----
         //
         // This used to clone the IR, type-check it and re-transpile the whole
-        // shader EVERY frame the tab was open. On a hundred-node sky graph
+        // shader every frame the tab was open. On a hundred-node sky graph
         // that is a real per-frame bill, paid to produce a byte-identical
         // module: the live literal values it exists to stream ride the uniform
         // lane array uploaded further down, which costs nothing.
@@ -352,7 +352,7 @@ impl ShaderGraphPreview {
                 p[i * 4..i * 4 + 4].copy_from_slice(&u.default);
             }
             // Each slot's two tiling lanes follow the knobs (the generated
-            // `t{i}a`/`t{i}b` fields). All-zero is NOT neutral: it reads as a
+            // `t{i}a`/`t{i}b` fields). All-zero is not neutral: it reads as a
             // triplanar scale of 0, which `flsl_triplanar` clamps to 1e-4 and
             // turns any sampleTriplanar preview into noise. Spell out the
             // identity transform instead: no rotation (mode 0), one tile,

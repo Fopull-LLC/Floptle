@@ -9,7 +9,7 @@
 //! floptle-server <project|--build DIR> [--scene scenes/x.ron]
 //!                [--port 7777 | --relay host:port] [--tick 60]
 //!                [--interest 150] [--budget 16384]
-//!                [--max-players N] [--status-file PATH] [--game-key KEY]
+//!                [--max-players N] [--status-file path] [--game-key KEY]
 //! ```
 //!
 //! **What makes this a different binary from `floptle-player` rather than a

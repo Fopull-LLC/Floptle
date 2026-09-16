@@ -1,4 +1,4 @@
-//! Every built-in example shader must compile against the REAL pass sources —
+//! Every built-in example shader must compile against the real pass sources —
 //! the exact modules the editor assembles (not the transpiler's TEST_PRELUDE
 //! mirror). Catches raster.wgsl/field.wgsl drift before a user's first
 //! double-click on an example.

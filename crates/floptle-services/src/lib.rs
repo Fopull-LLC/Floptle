@@ -76,7 +76,7 @@ pub trait Achievements {
     /// Sends every pending achievement/stat write to the backend now, rather
     /// than waiting for the next automatic batch. Safe to call with nothing
     /// pending (a no-op). A failed send (offline, a transient backend error)
-    /// is NOT lost — it stays queued and the next automatic batch (or the
+    /// is not lost — it stays queued and the next automatic batch (or the
     /// next explicit `flush`) retries it.
     fn flush(&self);
     /// Wipes every stat, and every achievement if `achievements_too` — for
@@ -113,7 +113,7 @@ pub trait Cloud {
     fn file_exists(&self, name: &str) -> bool;
     /// `name`'s last-write timestamp (Unix seconds), if it exists.
     fn file_timestamp(&self, name: &str) -> Option<i64>;
-    /// Deletes `name` locally AND remotely. `false` if there was nothing to
+    /// Deletes `name` locally and remotely. `false` if there was nothing to
     /// delete.
     fn delete_file(&self, name: &str) -> Result<(), String>;
     /// Deletes `name` from the Cloud while keeping the local copy — for a
@@ -175,7 +175,7 @@ pub trait Ugc {}
 
 /// Every page name [`Overlay::open_page`] accepts, verbatim as the Steam SDK
 /// spells them — so the list is searchable against Valve's own docs. The
-/// script layer validates against this BEFORE any backend is consulted, so a
+/// script layer validates against this before any backend is consulted, so a
 /// typo'd page name is caught in every session, including one with no Steam
 /// at all (where the call would otherwise fail with only "not available").
 pub const OVERLAY_PAGES: [&str; 7] =
@@ -262,7 +262,7 @@ pub struct FriendInfo {
     /// own state list is unlikely to gain new values a caller must switch
     /// on exhaustively.
     pub state: String,
-    /// `true` if they're currently playing THIS app (not just online).
+    /// `true` if they're currently playing this app (not just online).
     pub playing_this_game: bool,
 }
 
@@ -286,7 +286,7 @@ pub trait Social {
     fn clear_rich_presence(&self);
     /// The local user's friend list.
     fn friends(&self) -> Vec<FriendInfo>;
-    /// Reads one of `friend_id`'s OWN rich-presence keys (set via their
+    /// Reads one of `friend_id`'s own rich-presence keys (set via their
     /// own `set_rich_presence`) — `None` if they haven't set it, aren't a
     /// friend, or aren't currently in a session the backend can read it
     /// from.
@@ -321,7 +321,7 @@ pub enum LeaderboardDisplay {
 pub enum LeaderboardScope {
     /// Ranks counted from the top of the board.
     Global,
-    /// Ranks counted RELATIVE to the local user's own — a negative start and
+    /// Ranks counted relative to the local user's own — a negative start and
     /// a positive end give the rows either side of them.
     GlobalAroundUser,
     /// Only the local user's friends, ranks counted from the best of them.
@@ -345,7 +345,7 @@ pub enum UploadMethod {
 pub struct LeaderboardInfo {
     /// The backend's own handle for this board. Opaque — meaningful only to
     /// the backend that issued it, and only for as long as this session
-    /// lives; do NOT save it and expect it to resolve next time.
+    /// lives; do not save it and expect it to resolve next time.
     pub id: u64,
     /// The board's name, as it was created on the backend.
     pub name: String,
@@ -376,7 +376,7 @@ pub struct LeaderboardEntry {
 /// What came back from an [`Leaderboards::upload`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoreUploaded {
-    /// The score now stored — NOT necessarily the one uploaded, under
+    /// The score now stored — not necessarily the one uploaded, under
     /// [`UploadMethod::KeepBest`].
     pub score: i32,
     /// Whether this upload actually changed the stored score.
@@ -639,7 +639,7 @@ pub trait Lobbies {
     fn delete_data(&self, lobby: u64, key: &str) -> Result<(), String>;
     /// Reads one of `member`'s own data values in this lobby.
     fn member_data(&self, lobby: u64, member: u64, key: &str) -> Option<String>;
-    /// Sets one of the LOCAL user's data values in this lobby — their chosen
+    /// Sets one of the local user's data values in this lobby — their chosen
     /// character, their ready flag. Any member may set their own.
     fn set_member_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String>;
 

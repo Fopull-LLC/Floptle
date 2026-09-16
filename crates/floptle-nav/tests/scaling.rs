@@ -99,12 +99,12 @@ impl Yardstick {
     }
 }
 
-/// Everything this file measures, in ONE test.
+/// Everything this file measures, in one test.
 ///
 /// Not three, which is what it was. `cargo test` runs a file's tests on
 /// separate threads, so three timing tests in one binary spend their whole
 /// lives competing with each other for cores — and taking the best of several
-/// runs, which is what makes a ratio robust, does not help when NO run is
+/// runs, which is what makes a ratio robust, does not help when no run is
 /// uncontended. Measured back to back it reads 4.0x every time; measured
 /// alongside its siblings it read 8.1x often enough to fail two runs in five.
 ///
@@ -126,11 +126,11 @@ fn the_bake_and_its_queries_stay_linear() {
 /// a dozen agents redrawing a destination in one frame is ordinary. A game
 /// measured it at 0.014 ms with an 8 m radius and 0.71 ms with 80 m, and worked
 /// around it by caching. Some of that is real: a bigger window genuinely covers
-/// more polygons. What was NOT real was the rest of the level: the call
+/// more polygons. What was not real was the rest of the level: the call
 /// allocated three vectors and walked its neighbourhood three times over, and
 /// that per-call cost is what makes a dozen draws four milliseconds.
 ///
-/// This pins the property the game needs — the SAME window on four times the
+/// This pins the property the game needs — the same window on four times the
 /// level costs the same — because that is the one a cache cannot paper over and
 /// the one that breaks silently as a level grows.
 fn a_wander_point_costs_what_its_window_costs(yard: &Yardstick) {
@@ -200,7 +200,7 @@ fn a_held_samplers_draw_is_priced_by_nothing(yard: &Yardstick) {
 /// and measuring that is also how the guards get their yardstick.
 fn harness_can_tell_linear_from_quadratic() -> Yardstick {
     // Two things this workspace's optimised dev profile forces. The size, so
-    // the work clears the noise floor at all — and the `black_box` INSIDE the
+    // the work clears the noise floor at all — and the `black_box` inside the
     // loop, because summing 0..n has a closed form and LLVM will happily
     // replace the whole loop with it, leaving a "linear" measurement that takes
     // the same time at every size.
@@ -320,7 +320,7 @@ fn pathing_grows_with_the_level_it_crosses(yard: &Yardstick) {
         let mesh = &meshes.iter().find(|(a, _)| *a == area).unwrap().1;
         let size = (area as f32).sqrt();
         // The same number of queries at both sizes, so the ratio is the cost of
-        // ONE query growing — and enough of them to be worth timing at all.
+        // one query growing — and enough of them to be worth timing at all.
         for _ in 0..200 {
             // Corner to corner: the longest question the level can be asked.
             let p = mesh.path([1.0, 0.0, 1.0], [size - 1.0, 0.0, size - 1.0]);

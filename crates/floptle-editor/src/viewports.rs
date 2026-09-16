@@ -37,7 +37,7 @@ use crate::{Egui, PreviewTarget, PreviewView, scene_hit};
 /// render-target view stays sRGB. But egui is handed a NON-sRGB *view* of the same
 /// texture: egui-wgpu treats a sampled native texture as already gamma-encoded and
 /// decodes it once in its shader, so sampling through an sRGB-format view would decode a
-/// SECOND time (hardware sRGB→linear) and display the offscreen view ~40% too dark
+/// second time (hardware sRGB→linear) and display the offscreen view ~40% too dark
 /// (`srgb_to_linear` applied twice). A linear view makes egui sample the stored bytes
 /// verbatim, so the docked Game view / camera POV / asset preview match the surface. On a
 /// non-sRGB surface `remove_srgb_suffix()` is a no-op, so this stays correct there too.
@@ -100,7 +100,7 @@ fn make_offscreen_target(
     h: u32,
     label: &str,
     filter: wgpu::FilterMode,
-    // Does the SCENE draw into this target? Then it needs its own terminal pass
+    // Does the scene draw into this target? Then it needs its own terminal pass
     // to get from the floating-point scene format down to the sRGB texture egui
     // shows. A target that only receives an already-finished picture (the docked
     // Game view, the UI designer) does not.
@@ -145,7 +145,7 @@ impl Editor {
         }
         let Some(egui) = self.egui.as_ref() else { return };
         if let Some(img) = floptle_assets::load_texture(Path::new(path)) {
-            // TRUE dimensions — shown as the "N×N px" label and used for aspect.
+            // true dimensions — shown as the "N×N px" label and used for aspect.
             let dims = [img.width as usize, img.height as usize];
             // A texture larger than the GPU's max 2D dimension (e.g. an 8400px-wide
             // sprite sheet) would PANIC egui's wgpu upload the instant it's selected.
@@ -294,14 +294,14 @@ impl Editor {
             (self.gpu.as_ref(), self.raster.as_mut(), self.preview.as_ref())
         {
             // …and none of the project's era artefacts, for the same reason the
-            // vignette is left out: this is a picture OF a material, not a
+            // vignette is left out: this is a picture of a material, not a
             // picture of the game. A screen-grid snap sized for the game view
             // would mangle a thumbnail this small, and the frame would then be
             // showing an artefact of the preview rather than the surface.
             //
             // Said explicitly rather than left to run order. The turntable is
             // drawn before the frame sets the project's defaults, so it would
-            // happen to inherit LAST frame's — right today by accident, and
+            // happen to inherit last frame's — right today by accident, and
             // wrong the moment anything moves.
             raster.set_retro_defaults(floptle_core::Retro::default());
             raster.draw_scene(
@@ -369,7 +369,7 @@ impl Editor {
     }
 
     /// A1 render targets: every camera with a non-empty `target` name renders
-    /// the world into its live `rt:<name>` texture — BEFORE any pass that
+    /// the world into its live `rt:<name>` texture — before any pass that
     /// might sample it (the main surface, the game viewport, previews).
     /// Runs in edit mode too, so a cockpit screen shows its feed while you
     /// place it.
@@ -530,7 +530,7 @@ impl Editor {
     /// see. Everything host-specific is a parameter:
     ///
     /// * `cv` / `dv` / `dtex` — the final colour target, its depth view, and
-    ///   the depth TEXTURE behind that view. The texture is what lets the
+    ///   the depth texture behind that view. The texture is what lets the
     ///   opaque prepass run, and therefore what makes contact shadows,
     ///   reflections and lamp shadows appear at all; a view cannot be asked for
     ///   it. Ignored in retro mode, which has its own depth.
@@ -629,13 +629,13 @@ impl Editor {
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
         // Film grain needs a clock or it is a dirty lens, not film. Reduced
-        // motion is deliberately NOT applied here: grain is texture, not
-        // movement, and freezing it makes it MORE of a fixed pattern to look at.
+        // motion is deliberately not applied here: grain is texture, not
+        // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
         let retro_on = self.project.retro;
 
         // Composited resolution: the retro internal res in retro mode (so post/AO/dither
-        // land on the same chunky pixel grid as the fullscreen view, THEN upscale), else
+        // land on the same chunky pixel grid as the fullscreen view, then upscale), else
         // the panel res. This mirrors the surface path so a docked/split Game tab looks
         // identical to fullscreen instead of rendering crisp + unprocessed.
         let (cw, ch) = if retro_on { self.project.retro_size(panel_aspect) } else { (w, h) };
@@ -676,7 +676,7 @@ impl Editor {
         // terminal pass knows how to land that on a display.
         let scene_target = self.game_post.as_ref().map(|p| p.input_view().clone());
         let Some(scene_target) = scene_target else { return };
-        // The depth TEXTURE behind `depth` — the retro target's in retro mode,
+        // The depth texture behind `depth` — the retro target's in retro mode,
         // the panel's own otherwise. This is what lets the prepass run here, and
         // therefore what makes a docked Game panel show the same picture as the
         // same game fullscreen: contact shadows, shoreline foam, screen-space
@@ -702,7 +702,7 @@ impl Editor {
         );
         // World canvases: real geometry, so they draw into the scene target with
         // its depth, before post. `include_screen: false` — this tab shows a
-        // BUILD, so screen-space layers belong in the flat overlay below, not
+        // build, so screen-space layers belong in the flat overlay below, not
         // hanging in the world as authoring holograms. Without this the docked
         // tab drew no diegetic UI at all while still happily hit-testing it.
         self.draw_world_canvases(&scene_target, &depth, &cam, aspect);
@@ -724,7 +724,7 @@ impl Editor {
             if let Some(d) = crate::shading::dof_focus_distance(&self.world, cam.world_position) {
                 ps.dof_focus = d;
             }
-            // This IS the game view, so it gets the shutter.
+            // This is the game view, so it gets the shutter.
             self.motion_prev = Some(crate::shading::motion_frame(
                 &mut ps,
                 self.motion_prev,
@@ -787,7 +787,7 @@ impl Editor {
         false
     }
 
-    /// True when the game owns the WHOLE window: the fullscreen Game tab, or
+    /// True when the game owns the whole window: the fullscreen Game tab, or
     /// the player. The complement of [`Self::game_offscreen`] for the two cases
     /// where the game is on screen at all.
     pub(crate) fn game_fullscreen(&self) -> bool {
@@ -965,7 +965,7 @@ impl Editor {
         if let Some(old) = self.ui_design_vp.take() {
             egui.renderer.free_texture(&old.tex_id);
         }
-        // Nearest: the canvas is rendered AT its on-screen size (zoom multiplies
+        // Nearest: the canvas is rendered at its on-screen size (zoom multiplies
         // the render, it doesn't stretch a smaller image), so a linear blit
         // would only soften pixel-art UI for nothing.
         self.ui_design_vp =
@@ -987,7 +987,7 @@ impl Editor {
 
     /// Load / save the UI tab's guides as the open scene changes.
     ///
-    /// Guides follow the SCENE, and are keyed inside it by layer name — an
+    /// Guides follow the scene, and are keyed inside it by layer name — an
     /// entity index is a runtime accident, and a guide that silently reattached
     /// to a different layer after a reload would be worse than no guide.
     #[cfg(feature = "editor-ui")]
@@ -1019,7 +1019,7 @@ impl Editor {
     }
 
     /// Render the ◫ UI tab's canvas: the selected layer, solved at the preview
-    /// resolution and drawn by the REAL UI pipeline into an offscreen target.
+    /// resolution and drawn by the real UI pipeline into an offscreen target.
     ///
     /// Everything the tab draws on top (outlines, handles, guides) is chrome
     /// over this image — the image itself is the shipping renderer, so what the
@@ -1116,7 +1116,7 @@ impl Editor {
 
         let Some(target) = self.ui_design_vp.as_ref() else { return };
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) else { return };
-        // Clear to the chosen backdrop. wgpu clear colours are LINEAR and the
+        // Clear to the chosen backdrop. wgpu clear colours are linear and the
         // target is sRGB, so the picked colour is encoded on the way in —
         // without this the canvas background reads several stops too light.
         let lin = |c: f32| {
@@ -1213,7 +1213,7 @@ mod tests {
         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
     }
 
-    /// The bug Ty hit: a docked Game tab is FOCUSED, so the old code asked
+    /// The bug: a docked Game tab is FOCUSED, so the old code asked
     /// `game_view()`, got true, and measured the pointer against the whole
     /// window. It has to measure against the tab — offset and all.
     #[test]
@@ -1243,7 +1243,7 @@ mod tests {
         assert!(ed.game_surface_px().is_none());
     }
 
-    /// Fullscreening some OTHER tab also takes the game off screen, even
+    /// Fullscreening some other tab also takes the game off screen, even
     /// though the Game tab is still the front tab of its leaf.
     #[test]
     fn fullscreening_another_tab_takes_the_game_off_screen() {

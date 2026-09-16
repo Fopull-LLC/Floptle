@@ -484,7 +484,7 @@ impl Runner {
                     (&frame.view, gpu.depth_view())
                 };
 
-                // SDF matter first (clears + writes depth); the meshes then LOAD
+                // SDF matter first (clears + writes depth); the meshes then load
                 // those targets and share the one depth buffer, so matter and
                 // Blender geometry occlude/intersect correctly.
                 let raster_clear = if self.raymarch_on {

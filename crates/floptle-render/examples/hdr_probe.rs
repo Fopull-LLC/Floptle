@@ -5,7 +5,7 @@
 //! scene pass — raster, raymarch, particles, lines, grid, triangles, world-space
 //! UI, the 2D light composite — declares its colour target when its pipeline is
 //! built, and a target that disagrees with the texture it is given is a
-//! validation error at DRAW time, in a running editor, on whichever scene
+//! validation error at draw time, in a running editor, on whichever scene
 //! happens to contain that one pass. Building all of them here against an HDR
 //! GPU turns that into a compile-and-run check.
 //!
@@ -63,7 +63,7 @@ fn main() {
         assert!(c[0] > 100, "{name} must still leave it bright, got {c:?}");
     }
     // ACES has a shoulder and Reinhard does not, so ACES holds a highlight up.
-    // AgX is deliberately NOT compared here: its distinguishing move is a
+    // AgX is deliberately not compared here: its distinguishing move is a
     // desaturation, and a neutral white has no saturation to give away — on grey
     // it reduces to Reinhard exactly, which is correct and not worth asserting.
     assert!(
@@ -80,7 +80,7 @@ fn main() {
     // blue is already at 255 and the other channels are at 0, so four times the
     // light looks exactly like one time it: a flat block of pure blue. AgX
     // answers by desaturating toward white as it climbs, the way film and a
-    // sensor do, so the extra light shows up in the OTHER channels.
+    // sensor do, so the extra light shows up in the other channels.
     let blue = chain_reads(&gpu, [0.0, 0.02, 1.0]);
     println!(
         "4× blue   clip {:?} reinhard {:?} aces {:?} agx {:?}",

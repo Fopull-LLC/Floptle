@@ -88,7 +88,7 @@ pub struct Band {
 /// on the second visit, which breaks that outright — and it would put a script
 /// call inside chunk generation besides.
 ///
-/// So a game's rule is evaluated ONCE, when the source is declared, and what
+/// So a game's rule is evaluated once, when the source is declared, and what
 /// the engine keeps is the answer. Cheap to sample, deterministic by
 /// construction, and it replicates as a small array if it ever needs to.
 #[derive(Clone, Debug, PartialEq)]
@@ -202,7 +202,7 @@ pub struct ScatterSource {
     pub region: Region,
     /// Instances per chunk. The chunk is the unit of determinism and of
     /// streaming, so density is expressed against it rather than per m² —
-    /// a per-m² figure would silently change the instance COUNT (and therefore
+    /// a per-m² figure would silently change the instance count (and therefore
     /// every id) whenever the chunk size changed.
     pub per_chunk: u32,
     /// Chunk edge in world units.
@@ -215,7 +215,7 @@ pub struct ScatterSource {
     /// Metres of cross-fade at each band boundary, so nothing pops.
     pub fade: f32,
     /// Where this source grows and how thickly, `0..1` (`None` = everywhere,
-    /// evenly). A density of 0 produces NO instance — not a hidden one, or the
+    /// evenly). A density of 0 produces no instance — not a hidden one, or the
     /// whole point of scattering is lost.
     pub density: Option<Density>,
     /// Instances the game has removed (harvested, dug out from under).
@@ -283,7 +283,7 @@ pub fn cost(src: &ScatterSource) -> Cost {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Instance {
     pub id: InstanceId,
-    /// World position, BEFORE the caller drops it onto the real surface.
+    /// World position, before the caller drops it onto the real surface.
     pub pos: DVec3,
     /// Surface normal used for `Align::Surface` (world +Y for `Align::World`).
     pub up: Vec3,
@@ -301,7 +301,7 @@ impl Instance {
         let spin = Quat::from_rotation_y(self.yaw);
         match align {
             Align::World => spin,
-            // Tilt +Y onto the surface normal, THEN spin about it — the other
+            // Tilt +Y onto the surface normal, then spin about it — the other
             // order spins about world +Y and leaves a hillside's trees all
             // facing the same way as they lean.
             Align::Surface => Quat::from_rotation_arc(Vec3::Y, self.up) * spin,
@@ -325,7 +325,7 @@ fn hash3(a: u64, b: u64, c: u64) -> u64 {
     mix(mix(mix(a) ^ b) ^ c)
 }
 
-/// A 0..1 float from a hash word. Uses the HIGH bits: the low bits of a
+/// A 0..1 float from a hash word. Uses the high bits: the low bits of a
 /// multiply-xorshift mix are the weakest, and a lattice in the low bits shows up
 /// as trees in rows.
 fn unit(h: u64) -> f64 {
@@ -349,7 +349,7 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
             continue;
         }
         // Four independent streams off the same id — deriving them by shifting
-        // ONE value correlates position with scale, and a forest whose big
+        // one value correlates position with scale, and a forest whose big
         // trees are all in the north-east reads as a bug you cannot name.
         let (hx, hz, hy, hp) =
             (mix(id), mix(id ^ 0xA1), mix(id ^ 0xB2), mix(id ^ 0xC3));
@@ -432,7 +432,7 @@ fn cube_face_dir(f: usize, u: f64, v: f64) -> DVec3 {
     }
 }
 
-/// Which LOD band a distance falls in, and how far it is faded into the NEXT
+/// Which LOD band a distance falls in, and how far it is faded into the next
 /// one (`0` = fully this band, `1` = fully the next).
 ///
 /// Returned as a blend rather than a hard index because the pop at a band
@@ -442,7 +442,7 @@ pub fn band_at(src: &ScatterSource, dist: f32) -> Option<(usize, f32)> {
     let fade = src.fade.max(0.0);
     for (i, b) in src.bands.iter().enumerate() {
         if dist < b.distance {
-            // Inside a fade window BEFORE this band's far edge, and there is
+            // Inside a fade window before this band's far edge, and there is
             // something to fade into.
             let into = b.distance - dist;
             if into < fade && i + 1 < src.bands.len() {
@@ -451,7 +451,7 @@ pub fn band_at(src: &ScatterSource, dist: f32) -> Option<(usize, f32)> {
             return Some((i, 0.0));
         }
     }
-    // Past the last band — but fade OUT across the final window rather than
+    // Past the last band — but fade out across the final window rather than
     // vanishing, so the horizon dissolves instead of snapping.
     None
 }
@@ -687,7 +687,7 @@ mod tests {
 
     /// The load-bearing property survives a mask: same chunk, same answer, and
     /// the ids of the survivors do not shift when their neighbours vanish —
-    /// `scatter.remove` / `restore` address instances BY id.
+    /// `scatter.remove` / `restore` address instances by id.
     #[test]
     fn a_masked_chunk_is_still_recomputed_identically_and_keeps_its_ids() {
         let mut s = ground(64);
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(cost(&empty), Cost::default());
     }
 
-    /// The sweep comes back NEAREST FIRST, and that order is load-bearing: a
+    /// The sweep comes back nearest first, and that order is load-bearing: a
     /// draw budget cuts the tail of this list, and the tail has to be the
     /// horizon rather than whichever chunks a nested loop reached last. A
     /// budget that drops the props at your feet is worse than no budget.
@@ -962,7 +962,7 @@ mod tests {
         let a = eye_chunk(&s, DVec3::new(1.0, 0.0, 1.0));
         assert_eq!(a, eye_chunk(&s, DVec3::new(15.9, 40.0, 2.0)), "still the same chunk");
         assert_ne!(a, eye_chunk(&s, DVec3::new(16.1, 0.0, 1.0)), "crossed into the next one");
-        // …and the sweep from anywhere in one chunk is the SAME LIST, order
+        // …and the sweep from anywhere in one chunk is the same list, order
         // included. That is not tidiness: the draw caches this list until the
         // eye crosses a boundary, so a sweep that drifted with sub-chunk
         // movement would make the cache quietly wrong instead of merely stale.
@@ -978,7 +978,7 @@ mod tests {
         );
     }
 
-    /// A planet's props sit ON the sphere — every one of them, at the radius
+    /// A planet's props sit on the sphere — every one of them, at the radius
     /// asked for. Cube-face projection rather than lat/long is what keeps the
     /// density even instead of piling everything at the poles.
     #[test]
@@ -1001,7 +1001,7 @@ mod tests {
         }
     }
 
-    /// Surface alignment tilts THEN spins. The other order spins about world
+    /// Surface alignment tilts then spins. The other order spins about world
     /// +Y and leaves a hillside's trees all facing the same way as they lean.
     #[test]
     fn surface_alignment_stands_a_prop_off_its_ground() {

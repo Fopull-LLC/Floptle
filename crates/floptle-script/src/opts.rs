@@ -35,7 +35,7 @@ pub struct OptTable {
 /// it pushes a bogus key through each call **for real, through Lua**, and fails
 /// if the call accepts it. So an entry here is a promise the code has to keep,
 /// and the companion source-scan test
-/// (`no_option_table_escapes_the_registry`) fails when a NEW option table
+/// (`no_option_table_escapes_the_registry`) fails when a new option table
 /// appears that is neither registered nor deliberately excused.
 pub const TABLES: &[OptTable] = &[
     OptTable { call: "scatter.create", keys: crate::scatter_api::CREATE_KEYS },
@@ -74,9 +74,9 @@ pub fn check_keys(opts: &Table, known: &[&str], call: &str) -> mlua::Result<()> 
     let mut unknown: Option<String> = None;
     for pair in opts.clone().pairs::<Value, Value>() {
         let (k, _) = pair?;
-        // A LIST where a keyed table belongs — `node:setSprite{ 8, 1, true }`,
+        // A list where a keyed table belongs — `node:setSprite{ 8, 1, true }`,
         // which is what anybody who reads the call as taking arguments in order
-        // writes. Every option is looked up BY NAME, so such a table sets
+        // writes. Every option is looked up by name, so such a table sets
         // nothing whatsoever: the call returns, the value is unchanged, and the
         // script's own `print` still says the thing it meant to write. That cost
         // a real project a debugging session on a sprite that would not flip.
@@ -131,7 +131,7 @@ pub fn near_miss_hint(key: &str, known: &[&str]) -> String {
 
 /// Resolve an enumerated string value, or refuse it naming what is accepted.
 ///
-/// `parse` is the SAME parser the engine uses to act on the value — that is the
+/// `parse` is the same parser the engine uses to act on the value — that is the
 /// whole point of the shape (`floptle/0072`): a check that reimplements the list
 /// drifts from it, and the drift is invisible until a player types a name the
 /// check allows and the parser doesn't.
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// Every registered option table refuses a key the engine does not read —
-    /// checked by CALLING IT, from Lua, through the real host (`floptle/0082`).
+    /// checked by CALLING it, from Lua, through the real host (`floptle/0082`).
     ///
     /// 32 of the 74 bugs filed against this engine were one shape: the engine
     /// answered something it did not understand. Every one was fixed on its own,
@@ -395,7 +395,7 @@ mod tests {
     /// remembers a convention, and 32 bugs say that does not happen.
     #[test]
     fn no_option_table_escapes_the_registry() {
-        // Closures that take a table which is NOT a bag of options, with why.
+        // Closures that take a table which is not a bag of options, with why.
         const NOT_OPTIONS: &[(&str, &str)] = &[
             ("math_api.rs", "list helpers (map/filter/sort) take DATA, not options"),
             ("http_api.rs", "the reply table is built by the engine and read by the game"),

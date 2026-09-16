@@ -207,7 +207,7 @@ fn main() {
     let measure = |t: &TextSpec| ui.measure_spec(t);
     let placed = floptle_ui::solve(&roots, design_vp, &measure);
 
-    // One render per case, because only ONE element can be edited at a time —
+    // One render per case, because only one element can be edited at a time —
     // which is itself the rule worth proving. The shots are composited into a
     // single image so the whole set can be looked at in one go.
     let cases: [(&str, Option<EditState>); 6] = [
@@ -314,7 +314,7 @@ fn main() {
         "the placeholder should read as a hint, not as content ({hint:.1} vs {real:.1})"
     );
 
-    // 2. The caret at the end of "HELLO" sits AFTER the last glyph, not at the
+    // 2. The caret at the end of "HELLO" sits after the last glyph, not at the
     //    box edge and not inside the word.
     let r = row_rect(1);
     let (caret_x, _) = shot.column_light(r[0] + 4.0, r[0] + FW - 4.0, r[1] + 14.0, r[1] + 42.0);
@@ -326,7 +326,7 @@ fn main() {
         r[0] + text_w
     );
 
-    // 3. The selection band lights up the middle of the word and NOT its ends,
+    // 3. The selection band lights up the middle of the word and not its ends,
     //    which is the assertion that catches an off-by-a-character band.
     let r = row_rect(2);
     let pre = ui.measure("sel", 26.0)[0];

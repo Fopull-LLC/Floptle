@@ -105,7 +105,7 @@ fn main() {
         // reads left to right in the same order as the printout.
         let x = (i as f32 - (steps.len() as f32 - 1.0) * 0.5) * 1.6;
 
-        // Drawn back-first and then front-first. If BOTH orders put the same
+        // Drawn back-first and then front-first. If both orders put the same
         // colour on top, the depth test decided; if the top colour follows the
         // draw order, it did not and we are looking at submission order.
         let a = resolves(&gpu, &mut raster, &view, &color, globals, quad, x, *dz, back, front, true);

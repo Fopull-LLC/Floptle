@@ -259,7 +259,7 @@ impl ReflectionProbes {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // COPY_SRC so a probe can read a capture back and LOOK at it. A
+            // COPY_SRC so a probe can read a capture back and look at it. A
             // reflection that is subtly rotated reads as "the reflections are a
             // bit odd" for a long time; the map itself says so at a glance.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -411,7 +411,7 @@ impl ReflectionProbes {
         let convert_pipeline =
             full_screen(device, &array_layout, CONVERT_WGSL, "reflection-probe-convert", format);
 
-        // The chain is the SAME box filter the sky's is — see `env::DOWN_WGSL`.
+        // The chain is the same box filter the sky's is — see `env::DOWN_WGSL`.
         let down_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reflection-probe-down"),
             entries: &[
@@ -585,7 +585,7 @@ impl ReflectionProbes {
     /// The 1×1 stand-in a renderer with no probes binds instead.
     ///
     /// Same shape as the sky's and the depth prepass's empty: shading reads the
-    /// probe COUNT from the uniforms and the dimensions from the texture, so
+    /// probe count from the uniforms and the dimensions from the texture, so
     /// "there are no probes" needs no flag anybody could forget to clear, and a
     /// scene that never places one costs a 1×1 texture.
     pub fn empty(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {
@@ -660,7 +660,7 @@ fn full_screen(
 
 /// Where a probe's camera looks for cube face `f`, and how big a square it sees.
 ///
-/// A cube face IS a 90° square frustum. This re-exports the GI bake's face table
+/// A cube face is a 90° square frustum. This re-exports the GI bake's face table
 /// rather than declaring a second one, because the conversion shader's
 /// `face_of` is written as the inverse of *that* table — two independent sets of
 /// six orientations is exactly the kind of thing that drifts by one flip and

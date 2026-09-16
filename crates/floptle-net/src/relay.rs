@@ -90,7 +90,7 @@ enum RelayMsg {
     /// Postcard numbers enum variants by declaration order, so a new relay
     /// decodes every message an old build sends exactly as before, and this one
     /// is simply a variant old relays have never heard of. The other direction
-    /// — a new build meeting an OLD relay — is what
+    /// — a new build meeting an old relay — is what
     /// [`RelayHost::host_keyed`]'s fallback is for.
     HostKeyed { key: String, build: Option<String> },
     /// Relay → host: something the developer should hear, once per episode.
@@ -220,7 +220,7 @@ pub const HOST_GRACE: Duration = Duration::from_secs(20);
 
 /// Why a lobby ended, for the operator's journal (`floptle/0222`).
 ///
-/// ⚠ **The relay logged a bare COUNT before this.** "lobbies: 1" cannot say
+/// ⚠ **The relay logged a bare count before this.** "lobbies: 1" cannot say
 /// which lobby died or what killed it, which is why a real teardown mid-match
 /// took a byte-level diff of two counters to find at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,14 +318,14 @@ impl Default for RelayLimits {
     }
 }
 
-/// The largest reliable payload a HOST may push through the relay to one peer.
+/// The largest reliable payload a host may push through the relay to one peer.
 ///
 /// Measured before it was set: the largest reliable message a host sends is a
 /// `Spawn` carrying a prefab's RON, and the largest prefab in any shipped game
 /// is Solar's `FacHangar` at 28 248 bytes (Forgery's `Survivor` is 18 400).
 /// Four times that, rounded to a power of two.
 pub const MAX_HOST_RELIABLE: usize = 128 * 1024;
-/// The largest reliable payload a CLIENT may push through the relay to a host.
+/// The largest reliable payload a client may push through the relay to a host.
 ///
 /// A client's reliable messages are `Hello`, `Input` and `Rpc`, and an RPC's
 /// value is capped at 1 KB by the wire's own rule; a voice packet is 400
@@ -430,7 +430,7 @@ pub trait RelayPolicy: Send {
 
     /// **A lobby ended, and why.**
     ///
-    /// ⚠ The relay logged a bare lobby COUNT before this. A count cannot say
+    /// ⚠ The relay logged a bare lobby count before this. A count cannot say
     /// which lobby died or what killed it, and a real mid-match teardown
     /// therefore took a byte-level diff of two counters that are supposed to be
     /// equal before anybody noticed it had happened at all.
@@ -977,7 +977,7 @@ impl RelayServer {
                 }
                 // Undecided: park it and ask again next step, rather than
                 // block this one. A parked host keeps its place in the queue
-                // from the moment it FIRST asked, so a slow lookup cannot be
+                // from the moment it first asked, so a slow lookup cannot be
                 // restarted forever by the retry that is waiting on it.
                 HostAdmission::Pending => {
                     let since =
@@ -1140,7 +1140,7 @@ impl RelayServer {
         self.dedicated.remove(&c);
         match self.conns.remove(&c) {
             Some(Role::Host { code }) => {
-                // ⚠ **The lobby is HELD, not destroyed** (`floptle/0222`). A
+                // ⚠ **The lobby is held, not destroyed** (`floptle/0222`). A
                 // host whose connection blipped for a few seconds used to take
                 // everybody's match with it, and the players were left sending
                 // into a lobby that no longer existed — their sockets were
@@ -1304,7 +1304,7 @@ impl SeqState {
     }
 }
 
-/// The HOST's end of a relayed session: one QUIC leg to the relay, a lobby
+/// The host's end of a relayed session: one QUIC leg to the relay, a lobby
 /// code for friends, and the same [`Transport`] the sessions already speak —
 /// peers appear exactly as if they had connected directly.
 pub struct RelayHost {
@@ -1431,7 +1431,7 @@ impl RelayHost {
         wanted: Option<String>,
     ) -> Result<(Self, String), String> {
         let mut inner = QuicClient::connect(relay_addr)?;
-        // ⚠ **The claim goes FIRST, ahead of the host request.** Both ride the
+        // ⚠ **The claim goes first, ahead of the host request.** Both ride the
         // same ordered stream, and the relay opens the lobby — choosing a code
         // — the instant it reads the host request. Sent afterwards this arrives
         // one message too late, every time: the code is already minted and the
@@ -1588,7 +1588,7 @@ impl Transport for RelayHost {
             match inc {
                 Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
                     Some(RelayMsg::Hosted { code }) => {
-                    // ⚠ **A reclaim that failed says so HERE, on the side that
+                    // ⚠ **A reclaim that failed says so here, on the side that
                     // asked** (`floptle/0217`).
                     //
                     // The control plane detects a mismatch one report later and
@@ -1614,7 +1614,7 @@ impl Transport for RelayHost {
                         ));
                     }
                     // A re-host after an outage: the relay lost every lobby, so
-                    // this is a NEW code and the old one is gone for good. Said
+                    // this is a new code and the old one is gone for good. Said
                     // out loud because a developer who read the old one to a
                     // friend needs to know it changed under them.
                     if self.retry_at.is_some() {
@@ -1679,7 +1679,7 @@ impl Transport for RelayHost {
     }
 }
 
-/// A CLIENT's end of a relayed session: joins by lobby code; the host appears
+/// A client's end of a relayed session: joins by lobby code; the host appears
 /// as [`SERVER`], exactly like a direct connection.
 pub struct RelayClient {
     inner: QuicClient,
@@ -1764,7 +1764,7 @@ impl Transport for RelayClient {
                         self.retry_at = None;
                         out.push(Incoming::refused(SERVER, reason));
                     }
-                    // ⚠ Deliberately NOT an `Incoming` — the link is fine and
+                    // ⚠ Deliberately not an `Incoming` — the link is fine and
                     // nobody is disconnected. A refusal ends the attempt; this
                     // says to keep waiting, so it rides the same side channel
                     // `Notice` uses rather than widening a transport enum whose
@@ -1804,7 +1804,7 @@ mod tests {
 
     /// **Every wire variant keeps the number it was born with.**
     ///
-    /// Postcard indexes enum variants by DECLARATION ORDER, so inserting one
+    /// Postcard indexes enum variants by DECLARATION order, so inserting one
     /// anywhere but the end renumbers everything after it — and a build in the
     /// wild then sends `HostKeyed` at an index the relay now reads as something
     /// else. The failure is silent on both sides: a decode returns `None` and
@@ -1817,7 +1817,7 @@ mod tests {
     /// rather than a refactor.
     #[test]
     fn every_wire_variant_keeps_the_number_it_shipped_with() {
-        // The first byte postcard writes for a variant IS its index.
+        // The first byte postcard writes for a variant is its index.
         let index = |m: &RelayMsg| RelayMsg::encode(m)[0];
 
         assert_eq!(index(&RelayMsg::Host), 0);
@@ -1840,7 +1840,7 @@ mod tests {
     }
 
     /// A relay that has never heard of a message skips it rather than dying,
-    /// which is the other half of why appending is safe: an OLD host meeting a
+    /// which is the other half of why appending is safe: an old host meeting a
     /// `Notice` must carry on hosting.
     #[test]
     fn an_unknown_variant_decodes_to_nothing_rather_than_breaking_the_link() {
@@ -2130,7 +2130,7 @@ mod tests {
         );
 
         // The relay comes back at the same address, and the host must return
-        // WITHOUT anybody restarting it.
+        // without anybody restarting it.
         let _relay = TestRelay::restart_on(port);
         let mut back = None;
         for _ in 0..2000 {
@@ -2212,7 +2212,7 @@ mod tests {
         assert!(got[0].tick.is_some());
     }
 
-    /// Rollback inputs must cross a REAL relay in BOTH directions, through the
+    /// Rollback inputs must cross a real relay in both directions, through the
     /// field's actual sequence: a long menu/lobby phase on the ordinary
     /// predicted path, then the scene switch, then the match.
     ///
@@ -2270,7 +2270,7 @@ mod tests {
         let me = peer.my_peer().expect("the Welcome must assign the joiner a peer id");
         assert_ne!(me, SERVER, "a joiner must not believe it is the host");
 
-        // FIELD SHAPE: the lobby is hosted in the MENU scene, so a long stretch
+        // field shape: the lobby is hosted in the MENU scene, so a long stretch
         // of ordinary predicted traffic — snapshots, acks, pings — runs before
         // the scene switch flips the session into rollback. Anything that
         // survives that transition wrongly only shows up if it happened.
@@ -2342,7 +2342,7 @@ mod tests {
 
         // Join with a garbage code → refused (a Disconnected on the client).
         let mut nope = RelayClient::join(&addr, "XXXXX").expect("connects to the relay fine");
-        // The refusal must arrive WITH the relay's reason. A disconnect that
+        // The refusal must arrive with the relay's reason. A disconnect that
         // carries nothing is indistinguishable from the host closing their
         // laptop — and mistyping the code is the most common thing that will
         // ever go wrong in an online session, so it is the one failure a game
@@ -2518,7 +2518,7 @@ mod managed_tests {
         );
     }
 
-    /// Ty's rule, path 1: **a game with no key cannot use a managed relay** —
+    /// The rule, path 1: **a game with no key cannot use a managed relay** —
     /// and is told where to go rather than left guessing.
     #[test]
     fn a_managed_relay_refuses_a_keyless_host_and_says_where_to_go() {
@@ -2531,7 +2531,7 @@ mod managed_tests {
         );
     }
 
-    /// Ty's rule, path 2. An unknown key gets a **different** sentence to a
+    /// The rule, path 2. An unknown key gets a **different** sentence to a
     /// missing one: a developer who has not connected their project yet and a
     /// developer whose key was revoked need different next actions, and one
     /// message for both sends the first one hunting for a problem they do not
@@ -2621,12 +2621,12 @@ mod managed_tests {
         let (mut again, back) =
             RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("re-hosts");
         assert_eq!(back, "U5FEFJ", "not a reclaim");
-        // Past the OLD deadline, inside the new one: still open. (No `drain`
+        // Past the old deadline, inside the new one: still open. (No `drain`
         // here — it polls for 200 ms, which is the whole window.)
         std::thread::sleep(idle * 3 / 4);
         let _ = again.poll();
         assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the old clock was carried over the reclaim");
-        // And a player's lobby still ends once ITS window has run.
+        // And a player's lobby still ends once its window has run.
         std::thread::sleep(idle);
         let _ = drain(&mut again);
         assert_eq!(relay.lobbies.load(Ordering::Relaxed), 0, "a reclaimed player lobby became immortal");
@@ -2634,7 +2634,7 @@ mod managed_tests {
 
     /// ⚠ **A host whose connection blips keeps its match** (`floptle/0222`).
     ///
-    /// Ty and a friend played Fofighter over the managed relay and the host's
+    /// Two people played Fofighter over the managed relay and the host's
     /// lobby was created and destroyed **three times in ten minutes** — twice
     /// while about a megabit a second was flowing, so not an idle timeout, on a
     /// box using one tenth of one percent of its link. For the joiner every
@@ -2664,7 +2664,7 @@ mod managed_tests {
         drop(host);
         std::thread::sleep(Duration::from_millis(300));
 
-        // ⚠ The client must NOT have been told the match is over.
+        // ⚠ The client must not have been told the match is over.
         assert!(
             !evicted(&mut client),
             "a blip threw the player out of a match that was still there"
@@ -2674,7 +2674,7 @@ mod managed_tests {
         let (_again, back) =
             RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("re-hosts");
         assert_eq!(back, "U5FEFJ", "the returning host was given a different lobby");
-        // ⚠ And the player is STILL in it. A reclaim that opened a fresh lobby
+        // ⚠ And the player is still in it. A reclaim that opened a fresh lobby
         // under the same code would leave this client attached to the old one —
         // which is the failure mode the grace window exists to prevent, wearing
         // the right code.
@@ -2741,7 +2741,7 @@ mod managed_tests {
     /// (`floptle/0217`).
     ///
     /// W's control plane detects the mismatch one report later and deliberately
-    /// KEEPS its reservation rather than adopting the new code — adopting it
+    /// keeps its reservation rather than adopting the new code — adopting it
     /// looks helpful and produced a restart loop that stopped a live server for
     /// two minutes. So on this side a failed reclaim would otherwise be a
     /// silence, and the process that actually knows is this one.
@@ -2898,7 +2898,7 @@ mod managed_tests {
 /// **The relay's own limits** — what one connection, one address and one
 /// lobby may do on any relay, the open one included. Each cap is tripped by
 /// exactly one and the refusal or drop asserted; the byte budget asserts the
-/// COUNT moved, not merely that nothing arrived.
+/// count moved, not merely that nothing arrived.
 #[cfg(test)]
 mod limit_tests {
     use super::tests::TestRelay;
@@ -2946,14 +2946,14 @@ mod limit_tests {
     fn one_connection_hosts_one_lobby() {
         let relay = TestRelay::start();
         let (mut host, code) = RelayHost::host(&relay.addr()).expect("hosts");
-        // A second host request on the SAME connection.
+        // A second host request on the same connection.
         host.inner.send(SERVER, Channel::Reliable, &RelayMsg::Host.encode());
         let refused = drain(&mut host).into_iter().find_map(|i| match i {
             Incoming::Disconnected(_, Some(r)) => Some(r),
             _ => None,
         });
         // The refusal lands as a `Refused` the host reports; either way the
-        // relay still holds exactly ONE lobby, under the first code.
+        // relay still holds exactly one lobby, under the first code.
         assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "a second lobby was opened: {refused:?}");
         assert_eq!(host.lobby_code().as_deref(), Some(code.as_str()));
         assert!(relay.drops.load(Ordering::Relaxed) >= 1, "the second host was not counted as refused");

@@ -148,7 +148,7 @@ pub struct Bound {
     /// where it is without the answer depending on a mesh being loaded.
     pub pos: [f64; 3],
     /// A pending `agent:teleport(...)`, in world space. The host writes it to
-    /// the NODE and skips this frame's scene read-back — without that, the
+    /// the node and skips this frame's scene read-back — without that, the
     /// read-back immediately puts the agent right back where it was and a
     /// teleport is just a `stop()` wearing a hat.
     pub teleport: Option<[f64; 3]>,
@@ -273,7 +273,7 @@ impl UserData for LuaObstacle {
         fields.add_field_method_get("active", |_, o| {
             Ok(o.mesh.borrow().as_ref().is_some_and(|m| m.obstacles().iter().any(|x| x.id == o.id)))
         });
-        // What was ACTUALLY cut, which is the asked-for box grown outward to the
+        // What was actually cut, which is the asked-for box grown outward to the
         // bake's grid. Read rather than assumed: a crate blocks up to one cell
         // more per side than its own footprint, and a script drawing a debug box
         // round it should draw the hole, not the wish.
@@ -476,7 +476,7 @@ impl UserData for LuaAgent {
                 }
             }
             // Names only mean something against the mesh's area list — resolve
-            // NOW, or the new filter waits for the next bake that never comes
+            // now, or the new filter waits for the next bake that never comes
             // in a shipped game.
             if filter_changed {
                 let guard = a.mesh.borrow();
@@ -614,7 +614,7 @@ pub(crate) fn install_nav_api(
                     .into(),
             ));
         };
-        // Size is a span, not a place, so it is NOT put through `to_local` —
+        // Size is a span, not a place, so it is not put through `to_local` —
         // the same trap `nav.obstacle` has a test for.
         q.borrow_mut().push(crate::NavRebakeRequest {
             centre: [c.x, c.y, c.z],
@@ -754,7 +754,7 @@ pub(crate) fn install_nav_api(
     // rebake is the honest answer and this is not.
     //
     // A handle, not an id, so taking it away is `ob:remove()` and there is
-    // nothing to write down. A moving obstacle is deliberately NOT offered:
+    // nothing to write down. A moving obstacle is deliberately not offered:
     // carving per frame is a rebuild per frame, which is the trade this exists
     // to avoid.
     let m = mesh.clone();
@@ -770,7 +770,7 @@ pub(crate) fn install_nav_api(
         let mut guard = m.borrow_mut();
         let Some(mesh) = guard.as_mut() else { return Ok(None) };
         let local = mesh.to_local([c.x, c.y, c.z]);
-        // Size is a span, not a place, so it is NOT put through `to_local` —
+        // Size is a span, not a place, so it is not put through `to_local` —
         // that would subtract the anchor from it and make every box on an
         // anchored level enormous.
         let id = mesh.carve(local, [s.x as f32, s.y as f32, s.z as f32]);
@@ -971,7 +971,7 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
 
     // nav.sampler([near, radius]) -> handle | nil
     //
-    // The neighbourhood gathered ONCE, for many draws — `s:point(u, v)`.
+    // The neighbourhood gathered once, for many draws — `s:point(u, v)`.
     //
     // `nav.random` re-gathers, re-sorts and re-measures every polygon its window
     // covers on every single call, so its cost grows with the window: a game
@@ -1449,7 +1449,7 @@ mod tests {
             "there is a crate standing there"
         );
 
-        // The handle answers where the hole IS, in world space, and how big it
+        // The handle answers where the hole is, in world space, and how big it
         // actually came out — grown to whole cells, never shrunk.
         let (x, z): (f64, f64) = eval(&lua, "return ob.position.x, ob.position.z");
         assert!((x - (a[0] + 6.0)).abs() < 0.5, "{x}");

@@ -714,7 +714,7 @@ mod tests {
         let s = open(0.25);
         let tris = slab(0.0, 0.0, 12.0, 6.0, 0.0);
         let hole = volume([6.0, 0.0, 3.0], [1.0, 2.0, 3.5], 0, true);
-        // Wider than the hole and LATER in the list — the order that used to
+        // Wider than the hole and later in the list — the order that used to
         // resurrect every cell they share.
         let mud = volume([6.0, 0.0, 3.0], [2.0, 2.0, 3.5], 1, false);
         let mesh = crate::bake_with(&tris, &s, &[hole, mud], Vec::new())

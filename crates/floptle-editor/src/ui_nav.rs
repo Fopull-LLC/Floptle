@@ -129,7 +129,7 @@ impl Editor {
         // a form is still navigable and nobody is ever trapped in a box.
         //
         // This is the ordering half of "every key is two things" — without it
-        // one arrow press is spent twice, moving the caret AND the selection.
+        // one arrow press is spent twice, moving the caret and the selection.
         if self.ui_field_focused() {
             input.dir = input.dir.filter(|d| matches!(d, Dir4::Up | Dir4::Down));
         }
@@ -180,7 +180,7 @@ impl Editor {
         }
         self.ui_focus_set(focus);
 
-        // Submit fires the SAME `clicked` hook a mouse fires. A button that
+        // Submit fires the same `clicked` hook a mouse fires. A button that
         // works with a pointer works with a pad, with no second code path in
         // anyone's script.
         let submit_edge = input.submit && !self.ui_submit_was;
@@ -213,7 +213,7 @@ impl Editor {
         }
     }
 
-    /// The `nav` override for a direction, resolved from an element NAME to an
+    /// The `nav` override for a direction, resolved from an element name to an
     /// id within this layer. An override naming something that isn't focusable
     /// is ignored rather than swallowing the press.
     fn ui_nav_override(

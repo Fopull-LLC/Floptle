@@ -26,7 +26,7 @@ use floptle_render::{instance_of_mat, InstanceRaw, MaterialParams, MeshId, TexId
 pub(crate) struct ResolvedChunk {
     pub instances: Vec<Instance>,
     /// The removal-set size the chunk was resolved at. A cut prop has to
-    /// disappear THIS frame, not when the chunk next streams — so a change
+    /// disappear this frame, not when the chunk next streams — so a change
     /// here invalidates the cache.
     pub removed_len: usize,
 }
@@ -34,7 +34,7 @@ pub(crate) struct ResolvedChunk {
 /// How many props may be dropped onto the ground in one frame, across every
 /// source (`floptle/0071`).
 ///
-/// Settling is a raycast per prop, cached per chunk — so the FIRST frame a
+/// Settling is a raycast per prop, cached per chunk — so the first frame a
 /// chunk comes into range pays for all of its props at once. A third-person
 /// camera swings the eye several metres just from looking around, which crosses
 /// chunk boundaries, which used to drag thousands of fresh raycasts into a
@@ -48,7 +48,7 @@ const SETTLE_BUDGET: usize = 512;
 /// Which chunks one source is resident in, and where the eye was standing when
 /// that was worked out.
 struct Sweep {
-    /// The chunk the eye was in. The key set changes when THIS changes, not
+    /// The chunk the eye was in. The key set changes when this changes, not
     /// when the frame advances. `None` = never swept.
     at: Option<ChunkKey>,
     /// Nearest first, as `chunks_near` returns them.
@@ -117,7 +117,7 @@ fn settle(
         ground(f.to_world(from), f.dir_to_world(-up), LIFT * 2.5)?;
     inst.pos = from - up.as_dvec3() * dist as f64;
     if src.align == Align::Surface {
-        // The REAL normal, not the region's idealised one: a tree on a hillside
+        // The real normal, not the region's idealised one: a tree on a hillside
         // should lean with the hill.
         inst.up = f.dir_to_local(normal);
     }
@@ -125,7 +125,7 @@ fn settle(
 }
 
 /// One drawable piece of a scatter prototype: a mesh, its texture, and where it
-/// sits WITHIN the prop.
+/// sits within the prop.
 ///
 /// A `.glb` is one part at identity. A prefab is however many Mesh nodes it
 /// holds, each at its authored place — which is what lets a plant be a trunk
@@ -156,7 +156,7 @@ pub(crate) fn build_instances(
     // written in the same loop.
     let ScatterCache { chunks: resolved, sweeps } = cache;
     sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
-    // Shared across sources, because it is a FRAME budget. A source that eats
+    // Shared across sources, because it is a frame budget. A source that eats
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
     let mut settled = 0usize;
@@ -183,7 +183,7 @@ pub(crate) fn build_instances(
         // the frame advances (`floptle/0071`). Standing still, or walking
         // within one chunk, this is a hash lookup — it used to be a square
         // sweep, allocated and thrown away sixty times a second.
-        // Everything below happens in the SOURCE'S OWN FRAME (`floptle/0073`).
+        // Everything below happens in the source'S own frame (`floptle/0073`).
         // The eye comes to the region rather than the region going to the world,
         // so a body that orbits at 99 units/s changes exactly one number here —
         // and no id, no local position, no settled height and no cached chunk.
@@ -200,7 +200,7 @@ pub(crate) fn build_instances(
         for &key in &sweep.keys {
             let ck = (src.id, key);
             let known = resolved.get(&ck);
-            // Something has been cut since this chunk was resolved: redo it NOW,
+            // Something has been cut since this chunk was resolved: redo it now,
             // budget or no budget. That is one chunk, it is the player's own
             // doing, and a prop that survives the swing that felled it is a bug.
             let cut = known.is_some_and(|c| c.removed_len != src.removed.len());
@@ -226,13 +226,13 @@ pub(crate) fn build_instances(
                 // the body happens to be.
                 let d = (inst.pos - eye_local).length() as f32;
                 let Some((band, blend)) = scatter::band_at(src, d) else { continue };
-                // …and only HERE does the world get involved: the instance's
+                // …and only here does the world get involved: the instance's
                 // place in its region, carried out to wherever that region is.
                 let rot = src.frame.rot * inst.rotation(src.align);
                 let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
                 // …and only then, is it on screen? Distance was the only test a
                 // field ever applied, so a full disc submitted everything behind
-                // you (`floptle/0075`). AFTER the band test, which is the cheaper
+                // you (`floptle/0075`). after the band test, which is the cheaper
                 // one and also the one that rejects most.
                 if let Some(pr) = prop_radius
                     && !frustum
@@ -242,7 +242,7 @@ pub(crate) fn build_instances(
                 }
                 let model =
                     Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
-                // Mid-fade draws BOTH bands, cross-dissolved. Drawing one and
+                // Mid-fade draws both bands, cross-dissolved. Drawing one and
                 // switching is what a pop is; two half-opaque props for a few
                 // metres of walking is what nobody notices.
                 let mut push = |b: usize, alpha: f32| {
@@ -257,14 +257,14 @@ pub(crate) fn build_instances(
                     mp.color = [mp.color[0] * tintf, mp.color[1] * tintf, mp.color[2] * tintf];
                     // A prototype may be several parts (a prefab's nodes), each
                     // with its own mesh, texture and place within the prop. They
-                    // are still ONE instanced draw each — the prefab is resolved
+                    // are still one instanced draw each — the prefab is resolved
                     // to this list once, not instantiated per prop.
                     for &(mesh, tex, local) in &parts {
                         out.push((mesh, tex, instance_of_mat(model * local, &mp)));
                     }
                 };
                 // At the very ends of a fade window one half rounds to nothing.
-                // Draw the OTHER half fully opaque rather than at 0.995: a
+                // Draw the other half fully opaque rather than at 0.995: a
                 // barely-transparent prop still pays for the blended pass —
                 // depth-sorted, no depth write — for a difference no eye can
                 // see, and every prop in a forest paying that is the cost.
@@ -283,7 +283,7 @@ pub(crate) fn build_instances(
 }
 
 impl crate::Editor {
-    /// A scatter prototype resolved to its drawable parts, baked ONCE and kept.
+    /// A scatter prototype resolved to its drawable parts, baked once and kept.
     ///
     /// A mesh file is one part at identity — what scatter has always drawn. A
     /// **prefab** is each of its `Mesh` nodes at its authored place inside the
@@ -426,7 +426,7 @@ impl crate::Editor {
     }
 }
 
-/// A prefab node's transform relative to the prefab's ROOT — its own, composed
+/// A prefab node's transform relative to the prefab's root — its own, composed
 /// with every ancestor's, so a frond attached to a trunk lands on the trunk.
 fn prefab_local(docs: &[floptle_scene::NodeDoc], i: usize) -> Mat4 {
     let mut m = Mat4::IDENTITY;
@@ -481,7 +481,7 @@ mod tests {
         // …and it is not cached as an answer, so the same editor with a GPU
         // would still bake it.
         // Cached so a thousand-step headless run does not re-parse it a
-        // thousand times — but remembered as a non-answer, so an editor WITH a
+        // thousand times — but remembered as a non-answer, so an editor with a
         // GPU bakes it properly.
         assert!(ed.scatter_protos.contains_key("models/rock.glb"), "cached, so it is asked once");
         assert!(ed.scatter_protos_gpuless.contains("models/rock.glb"), "…and known to be provisional");
@@ -515,7 +515,7 @@ mod tests {
         }
     }
 
-    /// A prototype of several parts draws one instance PER PART, each at its
+    /// A prototype of several parts draws one instance per part, each at its
     /// place within the prop and all sharing the prop's transform
     /// (`floptle/0065`). That is what lets a generated plant — a trunk and
     /// A field is culled by DIRECTION, not only by distance (`floptle/0075`).
@@ -635,7 +635,7 @@ mod tests {
         assert!(settle(&s, inst, &mut nothing).is_none());
     }
 
-    /// …and one that DOES have ground lands on it, taking the ground's real
+    /// …and one that does have ground lands on it, taking the ground's real
     /// normal so a hillside's trees lean with the hill.
     #[test]
     fn a_settled_prop_takes_the_grounds_height_and_normal() {
@@ -649,7 +649,7 @@ mod tests {
         assert!(out.up.dot(slope) > 0.999, "did not take the ground's normal");
     }
 
-    /// Cutting a prop must show THIS frame, not when the chunk next streams —
+    /// Cutting a prop must show this frame, not when the chunk next streams —
     /// so the cache is keyed on the removal set having changed, not on time.
     #[test]
     fn cutting_a_prop_invalidates_the_cache_immediately() {
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(out.len(), before - 1, "the cut prop was still drawn");
     }
 
-    /// The draw budget is a HARD stop. A source with a silly density must cost
+    /// The draw budget is a hard stop. A source with a silly density must cost
     /// a frame-rate dip, never a frame that never ends.
     #[test]
     fn the_instance_budget_is_never_exceeded() {
@@ -752,7 +752,7 @@ mod tests {
             worst <= SETTLE_BUDGET + s.per_chunk as usize,
             "one frame settled {worst} props — the cap is {SETTLE_BUDGET}"
         );
-        // …and standing still, a warmed field costs NO ground work at all.
+        // …and standing still, a warmed field costs no ground work at all.
         let mut casts = 0usize;
         let mut ground = |_: DVec3, _: Vec3, _: f32| {
             casts += 1;
@@ -817,7 +817,7 @@ mod tests {
     /// world at declare time, and the spawn planet moves at 99 units/s — so a
     /// 240-unit field was entirely behind its own planet in 2.4 seconds.
     ///
-    /// What must NOT happen while it follows is anything being recomputed: same
+    /// What must not happen while it follows is anything being recomputed: same
     /// ids, same local positions, same settled heights, same removals. A rock
     /// stays the same rock.
     #[test]
@@ -873,7 +873,7 @@ mod tests {
             "{casts:?} props were re-settled onto the ground because their planet moved; \
              a settled height is expressed in the body's own frame and cannot go stale"
         );
-        // Every prop is in the same place ON THE PLANET as before. Draw
+        // Every prop is in the same place on the PLANET as before. Draw
         // positions are camera-relative, so read them back into the body's own
         // frame — the planet turned as well as moved, and a prop that rode it
         // correctly turned with it.
@@ -918,7 +918,7 @@ mod tests {
         assert!(!out.is_empty(), "an unanchored field stopped drawing");
     }
 
-    /// Mid-fade draws BOTH bands. Drawing one and switching IS the pop.
+    /// Mid-fade draws both bands. Drawing one and switching is the pop.
     #[test]
     fn a_band_boundary_draws_both_bands_cross_dissolved() {
         let mut cache = ScatterCache::default();
@@ -948,7 +948,7 @@ mod tests {
         let both = asked.iter().any(|a| a == "near") && asked.iter().any(|a| a == "far");
         assert!(both, "no boundary was cross-dissolved; asked for {asked:?}");
         // The two halves of a dissolve sum to one, so the pair is never brighter
-        // or dimmer than the single prop it replaces. Everything NOT mid-fade is
+        // or dimmer than the single prop it replaces. Everything not mid-fade is
         // a plain opaque draw, so the fractional alphas are exactly the halves.
         let mut fades: Vec<f32> =
             out.iter().map(|(_, _, r)| r.color[3]).filter(|a| *a < 0.999).collect();

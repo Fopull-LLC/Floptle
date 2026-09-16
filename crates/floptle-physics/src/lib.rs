@@ -5,7 +5,7 @@
 //! rigid-body engines are *worst* at (they assume explicit, mostly-static
 //! collision geometry). So the collision core is custom and **SDF-first**: we
 //! collide against the same signed-distance function the renderer draws, which
-//! is cheaper AND more robust than re-meshing a morphing surface every frame.
+//! is cheaper and more robust than re-meshing a morphing surface every frame.
 //! See `docs/subsystems/physics.md` + ADR-0012.
 //!
 //! Layered design (own the novel parts, borrow only the boring parts):
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn radial_gravity_grounds_a_planet_from_any_side() {
         // A sphere "planet" of radius 3 at the origin, with radial gravity toward its
-        // center. Bodies dropped from different sides all land ON the surface — the
+        // center. Bodies dropped from different sides all land on the surface — the
         // out-of-the-box Mario-Galaxy case.
         let mut g = GravityField::default();
         g.sources.push(GravitySource::Point { center: Vec3::ZERO, strength: 12.0, radius: 0.0 });
@@ -626,7 +626,7 @@ mod tests {
             }
         }
         let y = ecs.get::<Transform>(e).unwrap().translation.y;
-        // Capsule center rests half its height above the floor, and STAYS there.
+        // Capsule center rests half its height above the floor, and stays there.
         assert!((y - 1.5).abs() < 0.2, "capsule settled at y={y}, expected ~1.5");
         assert!((y - settled).abs() < 0.02, "body drifted {settled} → {y} while standing still");
     }
@@ -676,7 +676,7 @@ mod tests {
     /// disagreed with `step_tick` by even an ULP, every correction would nudge
     /// the fighter and the two machines would drift apart with nothing to
     /// blame. It holds because the solver has no body-vs-body pass — stepping
-    /// one body IS what the world step does to it.
+    /// one body is what the world step does to it.
     #[test]
     fn a_driven_body_steps_identically_to_the_whole_world_step() {
         let build = || {
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn body_snapshot_round_trips_absolute_world_state() {
         // Capture → mutate → restore must return the body to the captured state, in
-        // ABSOLUTE world coordinates even with a far-out floating origin (rollback's
+        // absolute world coordinates even with a far-out floating origin (rollback's
         // core contract, docs/multiplayer.md §6).
         let far = DVec3::new(1.0e6, 0.0, 1.0e6); // origin-relative sim, far from 0
         let mut ecs = World::default();
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn rigidbody_wins_over_collidable_so_it_still_falls() {
-        // A node flagged BOTH RigidBody and Collidable is a DYNAMIC body — the RigidBody
+        // A node flagged both RigidBody and Collidable is a DYNAMIC body — the RigidBody
         // wins, so build() makes it a body and it falls under gravity. (The editor skips
         // adding a static collider for it so its dynamic body doesn't fight a static shape.)
         // This is the canonical character setup: a player capsule with a Rigidbody + a
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn writeback_interpolates_between_fixed_steps() {
-        // THE moving-jitter fix: rendered motion must advance by exactly real_dt · v
+        // the moving-jitter fix: rendered motion must advance by exactly real_dt · v
         // every frame, even when a frame consumes a fractional number of fixed steps.
         // Without interpolation a 1.5-step frame renders 1 step (or 2), so on-screen
         // displacement alternates — the "player jerks back and forth" bug.
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn lock_from_start_freezes_at_spawn_not_zero() {
-        // Lock Y on a body spawned at (5, 7, 3): it must STAY at y=7 while gravity
+        // Lock Y on a body spawned at (5, 7, 3): it must stay at y=7 while gravity
         // pulls — not snap to y=0 (locks restore `home`, which must be the spawn).
         let mut ecs = World::default();
         let e = ecs.spawn();
@@ -989,7 +989,7 @@ mod tests {
         assert!(t.x > 0.1, "2D body did not move in its own plane: x = {}", t.x);
     }
 
-    /// 2D ADDS freezes; it never releases one the author set. Unticking it must
+    /// 2D adds freezes; it never releases one the author set. Unticking it must
     /// not quietly hand back an axis somebody locked on purpose.
     #[test]
     fn the_2d_switch_composes_with_hand_set_locks() {
@@ -1009,9 +1009,9 @@ mod tests {
 
     #[test]
     fn lock_toggled_mid_play_freezes_in_place() {
-        // A lock toggled DURING play (Inspector toggle or a script's `rig.lock_x =
+        // A lock toggled during play (Inspector toggle or a script's `rig.lock_x =
         // true`, both land via sync_dynamic_params) freezes the body where it IS —
-        // it must NOT teleport back to its spawn position.
+        // it must not teleport back to its spawn position.
         let mut ecs = World::default();
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(DVec3::new(5.0, 7.0, 3.0)));
@@ -1067,8 +1067,8 @@ mod tests {
 
     #[test]
     fn assembly_builds_one_compound_and_lands_on_ground() {
-        // Parts become ONE compound (no separate bodies), the stack falls and
-        // settles engine-down, and the ROOT transform gets pose + rotation.
+        // Parts become one compound (no separate bodies), the stack falls and
+        // settles engine-down, and the root transform gets pose + rotation.
         let mut ecs = World::default();
         let (root, ..) = spawn_rocket(&mut ecs, DVec3::new(0.0, 0.8, 0.0));
         let mut sim =
@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(sim.world.compounds.len(), 2);
         assert_eq!(sim.compound_of(root.index()).unwrap().shapes.len(), 2);
         assert_eq!(sim.compound_of(new_root.index()).unwrap().shapes.len(), 1);
-        // The new root spawned AT the nose's world position.
+        // The new root spawned at the nose's world position.
         let t = ecs.get::<Transform>(new_root).unwrap().translation;
         assert!((t.y - 12.8).abs() < 0.1, "detached root at the nose, y={}", t.y);
         // Push the detached half sideways; only it should drift.
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn compound_impacts_attribute_a_landing_to_the_bottom_part() {
         // Drop the rocket onto a pad: the tick it lands, `compound_impacts`
-        // must report the ENGINE (the bottom shape) absorbing the slam — with
+        // must report the engine (the bottom shape) absorbing the slam — with
         // a real impulse and the root attributed — and never the nose. This is
         // the per-part attribution the damage/stress systems are built on.
         let mut ecs = World::default();
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn a_fast_ram_into_solid_terrain_reports_its_true_impact_speed() {
-        // A fast lithobrake into a PLANET used to read as ~0 m/s (Ty: "rammed a
+        // A fast lithobrake into a PLANET used to read as ~0 m/s ("rammed a
         // planet really fast, nothing broke"). At high speed the stack tunnels
         // past the SDF's narrow band in one substep into the SATURATED interior,
         // where the gradient — and so the contact normal — is zero; `normal()`
@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn rot_lock_toggled_mid_play_keeps_current_rotation() {
         // Same for rotation: a script yaws the node during play, then locks rot Y —
-        // the writeback must hold the CURRENT yaw, not snap back to the authored 0.
+        // the writeback must hold the current yaw, not snap back to the authored 0.
         let mut ecs = World::default();
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));

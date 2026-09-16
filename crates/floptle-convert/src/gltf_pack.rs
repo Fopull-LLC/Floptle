@@ -224,7 +224,7 @@ fn walk(
             }
             if let Some(uv) = reader.read_tex_coords(0) {
                 // Already in glTF's convention — this is a repack, so it must
-                // NOT get the flip the FBX path applies.
+                // not get the flip the FBX path applies.
                 sm.uvs = Some(uv.into_f32().collect());
             }
             if let Some(c) = reader.read_colors(0) {

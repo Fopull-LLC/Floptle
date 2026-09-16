@@ -314,7 +314,7 @@ fn stamp_one(
                 return;
             }
         }
-        // Paint accumulates to a TARGET alpha (coverage × flow) rather than
+        // Paint accumulates to a target alpha (coverage × flow) rather than
         // adding per dab: overlapping dabs within one stroke must not build up,
         // or a soft 20 %-flow brush goes opaque the moment you slow down.
         // Solving 1-(1-a_prev)(1-k) = a_target gives the increment to apply.
@@ -940,7 +940,7 @@ mod tests {
         }
     }
 
-    /// The reported case: a one-pixel pencil paints ONE square texel, so its
+    /// The reported case: a one-pixel pencil paints one square texel, so its
     /// telegraph is one square texel — not a circle floating between them.
     #[test]
     fn a_one_pixel_pencil_outlines_exactly_one_texel() {

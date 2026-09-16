@@ -124,7 +124,7 @@ impl AudioCore {
         self.start(id, Source::Clip(clip), emitter, params);
     }
 
-    /// Start a voice fed by a LIVE stream instead of a decoded clip — a remote
+    /// Start a voice fed by a live stream instead of a decoded clip — a remote
     /// player's microphone (`floptle/0180`).
     ///
     /// It never finishes on its own. A clip ends when it runs out of samples;
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(core.active_voices(), 1, "a stream does not finish on its own");
     }
 
-    /// The failure that would be worst in the field: a late packet must not END
+    /// The failure that would be worst in the field: a late packet must not end
     /// the voice. A finished voice cannot be resumed, so the player would go
     /// silent mid-sentence and stay silent for the rest of the match.
     #[test]

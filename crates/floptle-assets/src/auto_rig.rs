@@ -75,14 +75,14 @@ pub fn add_flow_rig(
 
     // ---- build the output node list ----
     let mut nodes: Vec<WriteNode> = Vec::new();
-    // Every OTHER object rides along unchanged (rigid root node).
+    // Every other object rides along unchanged (rigid root node).
     for o in &objs {
         if o.name != object {
             nodes.push(WriteNode::mesh_node(o.name.clone(), o.mesh.clone()));
         }
     }
     // The bone chain (parent → child, straight down). Node index bookkeeping.
-    // The chain ROOT is parented under the target object's own node (pushed at
+    // The chain root is parented under the target object's own node (pushed at
     // `bone_base + n` below — forward references are fine, glTF children arrays
     // are index-based): skinned vertices follow JOINTS, so hanging the chain off
     // the object means "parent the hair under the head" carries the chain — and

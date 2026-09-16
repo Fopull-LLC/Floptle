@@ -1,7 +1,7 @@
 //! Headless material probe — renders a row of spheres, each with a different
 //! [`MaterialParams`], to a PNG. Validates the extended raster shader (emissive,
 //! Blinn-Phong specular, rim/fresnel, unlit) and lets the retro material look be
-//! inspected WITHOUT a window.
+//! inspected without a window.
 //!
 //! Run: cargo run -p floptle-render --example material_probe -- <out.png>
 

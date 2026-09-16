@@ -268,7 +268,7 @@ mod tests {
         assert!((no_road.cheapest(&areas) - 1.0).abs() < 1e-6);
 
         // Nothing cheap about a level of expensive ground — but the estimate
-        // must never be scaled UP, or it overshoots in the other direction.
+        // must never be scaled up, or it overshoots in the other direction.
         let dear = [Area::walkable(), Area::new("mud", 9.0)];
         assert!((QueryFilter::default().cheapest(&dear) - 1.0).abs() < 1e-6);
     }

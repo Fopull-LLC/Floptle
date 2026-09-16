@@ -17,7 +17,7 @@ use std::time::Duration;
 pub const DEFAULT_BASE: &str = "https://fopull.com";
 
 /// Where the game-data API lives under the base. Identity endpoints (`/oauth/*`,
-/// `/userinfo`) sit at the domain ROOT instead, pinned there by the contract, so
+/// `/userinfo`) sit at the domain root instead, pinned there by the contract, so
 /// the two are not interchangeable and this prefix is applied only here.
 pub const API_PREFIX: &str = "/api/floptle/v1";
 

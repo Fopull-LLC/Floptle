@@ -9,7 +9,7 @@ use std::path::Path;
 /// built-in behaviors, now plain hot-reloadable Lua the user can read and edit.
 pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     // The default new-scene camera's flycam (hold RMB to look, WASD to move) —
-    // default_camera_node() attaches `freelook`, so this MUST ship or a fresh
+    // default_camera_node() attaches `freelook`, so this must ship or a fresh
     // project's camera references a script that doesn't exist.
     ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
     ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
@@ -1965,7 +1965,7 @@ function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
 /// declaring the engine globals (so they aren't flagged undefined).
 pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"camera\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\", \"snapshot\", \"restore\"]\n}\n";
 
-/// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
+/// Byte-exact previous engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
@@ -1981,7 +1981,7 @@ const LUARC_JSON_OLD: &[&str] = &[
 ];
 
 /// Write the Lua language-server support files into a project (annotations always
-/// refreshed; `.luarc.json` only if absent OR still an unmodified engine-generated
+/// refreshed; `.luarc.json` only if absent or still an unmodified engine-generated
 /// version — a user's own config is preserved).
 pub(crate) fn write_lua_support(project_root: &Path) {
     let lib = project_root.join(".floptle").join("library");

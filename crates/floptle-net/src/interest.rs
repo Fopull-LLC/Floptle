@@ -46,7 +46,7 @@ pub struct InterestConfig {
     /// cannot see is not relevant to it (`net.host{ interestOcclusion = "Level" }`).
     ///
     /// **This is a security setting wearing a bandwidth setting's clothes.** A
-    /// radius bounds a leak; it does not remove one — a client that is TOLD
+    /// radius bounds a leak; it does not remove one — a client that is told
     /// where everyone within 25 m is standing knows where everyone within 25 m
     /// is standing, whatever it chooses to draw. For an open-world game that is
     /// fine and the radius is the whole feature. For a hidden-role or
@@ -85,7 +85,7 @@ impl Default for InterestConfig {
 }
 
 impl InterestConfig {
-    /// The budget for ONE snapshot, given how many go out per second.
+    /// The budget for one snapshot, given how many go out per second.
     pub fn budget_per_snapshot(&self, snapshots_per_sec: f32) -> usize {
         if snapshots_per_sec <= 0.0 {
             return usize::MAX;
@@ -115,7 +115,7 @@ pub struct InterestStat {
     pub deferred: usize,
     /// Bytes of entity entries in the last snapshot.
     pub bytes: usize,
-    /// Replicable nodes this client was NOT told about, and why. "Is my filter
+    /// Replicable nodes this client was not told about, and why. "Is my filter
     /// working" has to be a number, or a project turns one on and has no way to
     /// tell it from a typo. floptle/0182.
     pub withheld_radius: usize,
@@ -168,7 +168,7 @@ pub struct Candidate {
     pub changed: bool,
     /// It belongs to some player (an avatar rather than scenery).
     pub is_player: bool,
-    /// It belongs to THIS client.
+    /// It belongs to this client.
     pub is_owned: bool,
     /// Flagged never-cull.
     pub always: bool,
@@ -183,7 +183,7 @@ pub struct PeerInterest {
     /// Accrued priority per net id — reset to zero when the entity is sent.
     priority: HashMap<u64, f32>,
     /// Ids this client is considered to hold current state for. A node
-    /// entering this set is sent in FULL, whatever the delta says.
+    /// entering this set is sent in full, whatever the delta says.
     live: HashSet<u64>,
     /// Consecutive snapshots each held id has tested out of sight — the
     /// occlusion hysteresis. Cleared the moment it is visible again.

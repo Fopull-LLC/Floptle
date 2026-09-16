@@ -1,4 +1,4 @@
-//! Deterministic noise + RNG — the ONE implementation Rust generators and the Lua
+//! Deterministic noise + RNG — the one implementation Rust generators and the Lua
 //! `math.noise`/`rng()` API share, so a planet generated in Rust and decoration
 //! scattered from a script agree on every number, on every machine (no libm/crate
 //! variance, no platform drift — a requirement for replicated procgen).
@@ -6,7 +6,7 @@
 use crate::math::Vec3;
 
 /// Deterministic xorshift32 — small, fast, plenty for gameplay (loot rolls, spawn
-/// jitter, decoration scatter). NOT cryptographic. State is `pub` so hosts can
+/// jitter, decoration scatter). not cryptographic. State is `pub` so hosts can
 /// snapshot/replicate it.
 #[derive(Clone, Copy, Debug)]
 pub struct Rng {

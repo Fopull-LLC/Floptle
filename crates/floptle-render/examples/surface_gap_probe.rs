@@ -3,8 +3,8 @@
 //! This is the question behind shoreline foam, soft particles and contact glow,
 //! and it is one you cannot answer by looking at a screenshot of water: foam
 //! looks like foam whether it is measuring the scene or painting a fixed band
-//! near the camera. So the probe renders the measurement ITSELF — a translucent
-//! sheet whose colour IS `surfaceGap`, white where it touches something and
+//! near the camera. So the probe renders the measurement itself — a translucent
+//! sheet whose colour is `surfaceGap`, white where it touches something and
 //! black where the scene is wide open — over a mesh box sunk through it.
 //!
 //! Three things get checked, and each of them is a way the feature has
@@ -14,7 +14,7 @@
 //!    texture was never populated, which is exactly what happens when the
 //!    prepass does not run — the silent failure this probe exists for.
 //! 2. **It is bright where the box is and dark where it is not.** A gradient
-//!    alone proves nothing; it has to be the RIGHT gradient, keyed to geometry
+//!    alone proves nothing; it has to be the right gradient, keyed to geometry
 //!    that only exists as a mesh (no terrain, no SDF field, nothing
 //!    `fieldDistance` could have found).
 //! 3. **With nothing behind the sheet at all, it reads wide open.** The "no
@@ -66,7 +66,7 @@ fn main() {
     let chunk = format!("{}\n{}", floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk);
     // BLENDED, not opaque — and that is a fact about the feature, not a detail
     // of the probe. The prepass records the opaque surfaces, so an opaque sheet
-    // is IN it and every sample finds itself: the gap reads zero everywhere and
+    // is in it and every sample finds itself: the gap reads zero everywhere and
     // a shader would foam over its whole surface. Water, soft particles and
     // contact glow are all translucent for exactly this reason; a surface has to
     // be absent from the prepass to be able to measure it.
@@ -109,7 +109,7 @@ fn main() {
     // A box under the middle of the sheet, its top ENTIRELY below it. Nothing
     // here is terrain or an SDF blob: `fieldDistance` cannot see any of it.
     //
-    // Entirely below matters. An earlier version had the box poking THROUGH the
+    // Entirely below matters. An earlier version had the box poking through the
     // sheet, so the bright patch in the middle of the frame was the box's own
     // grey albedo drawn over the top — and every assertion here passed on that
     // while the sheet itself rendered flat black, which is what `surfaceGap`
@@ -139,7 +139,7 @@ fn main() {
          almost certainly did not run, so surfaceGap saw nothing"
     );
 
-    // 2. It is bright ON the box and dark off it. The box is at the centre; the
+    // 2. It is bright on the box and dark off it. The box is at the centre; the
     //    corners of the frame are open sheet.
     let centre = sample(&near, W / 2, H / 2);
     let corner = sample(&near, W / 8, H / 8);
@@ -282,7 +282,7 @@ fn save_png(pixels: &[u8], path: &str) {
 
 /// The field globals `flsl_surface_gap` reads. It reprojects the shaded point to
 /// find its texel in the prepass and then un-projects the depth it finds there,
-/// so it needs BOTH matrices — and an identity `inv_view_proj` turns every gap
+/// so it needs both matrices — and an identity `inv_view_proj` turns every gap
 /// into a number with no relation to the scene.
 fn rm_globals(g: Globals) -> floptle_render::RaymarchGlobals {
     let vp = glam::Mat4::from_cols_array_2d(&g.view_proj);

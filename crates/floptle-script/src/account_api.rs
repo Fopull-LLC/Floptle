@@ -47,7 +47,7 @@ const TIMEOUT: f64 = 20.0;
 
 /// The `account.*` bridge.
 pub(crate) struct AccountState {
-    /// Built on FIRST USE, not at startup: constructing one reads the OS keyring
+    /// Built on first USE, not at startup: constructing one reads the OS keyring
     /// (D-Bus on Linux), and a project that never signs anybody in should never
     /// pay for that or trip a "an app wants your keyring" prompt.
     account: Option<Account>,
@@ -246,7 +246,7 @@ fn parse_args(
             ));
         }
     };
-    // Checked HERE, not on the worker, so a typo raises at the call site with a
+    // Checked here, not on the worker, so a typo raises at the call site with a
     // line number instead of arriving three frames later as `res.error` — which
     // reads like the server rejected it rather than like the script is wrong.
     // `floptle-account` checks again on its own side; this is the friendly half.
@@ -259,7 +259,7 @@ fn parse_args(
     let body = if has_body {
         match it.next() {
             Some(Value::String(s)) => Some(s.to_string_lossy().to_string()),
-            // Every Cloud body is a JSON OBJECT, and `{}` is what an empty Lua
+            // Every Cloud body is a JSON object, and `{}` is what an empty Lua
             // table encodes to, so the common case needs no thought.
             Some(Value::Table(t)) => Some(
                 serde_json::to_string(&crate::http_api::lua_to_json(&Value::Table(t))?)
@@ -320,7 +320,7 @@ pub(crate) fn install_account_api(
 
     let st = state.clone();
     if let Ok(f) = lua.create_function(move |_, ()| {
-        // Signing OUT builds an account if there isn't one, so that a game with
+        // Signing out builds an account if there isn't one, so that a game with
         // a Sign Out button still clears a session the Hub left behind.
         st.borrow_mut().account().sign_out();
         Ok(())
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn a_project_that_never_signs_in_never_touches_the_keyring() {
         let (lua, state) = harness();
-        // The read-only queries answer for a signed-out player WITHOUT
+        // The read-only queries answer for a signed-out player without
         // constructing an Account — which is what would read the OS keyring and
         // pop a permission prompt on someone who only wanted to play the game.
         let s: String = lua.load("return account.state()").eval().unwrap();
@@ -449,7 +449,7 @@ mod tests {
         let (lua, state) = harness();
         state.borrow_mut().set_playing(true);
         // The mistake everybody makes coming from http.*, and the error has to
-        // explain WHY rather than just refusing.
+        // explain why rather than just refusing.
         let e = lua
             .load("account.get('https://fopull.com/api/floptle/v1/wallet', function() end)")
             .exec()
@@ -477,7 +477,7 @@ mod tests {
         }
         assert_eq!(state.borrow().in_flight(), 0, "a refused call left something pending");
         // `/wallet` gets past the path check (and stops at the sign-in gate,
-        // which is the NEXT thing a request meets — not the path rule).
+        // which is the next thing a request meets — not the path rule).
         let e = lua.load("account.get('/wallet', function() end)").exec().err().map(|e| e.to_string());
         assert!(
             e.as_deref().is_none_or(|e| !e.contains("not a path a game may call")),

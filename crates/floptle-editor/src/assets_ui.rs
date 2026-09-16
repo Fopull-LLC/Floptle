@@ -240,7 +240,7 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// A folder tile: double-click to descend, and a DROP TARGET — release a
+    /// A folder tile: double-click to descend, and a DROP target — release a
     /// dragged asset (or the whole selection) on it to move the files inside,
     /// or a Hierarchy node to save it as a prefab here.
     pub(crate) fn folder_tile(&mut self, ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
@@ -265,7 +265,7 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Accept files dragged in from the OS file explorer, importing (copying) them
     /// into `dir`. egui-winit populates `raw.hovered_files`/`raw.dropped_files`, but
-    /// winit carries NO drop position and doesn't move the cursor during an OS drag
+    /// winit carries no drop position and doesn't move the cursor during an OS drag
     /// (and on Wayland delivers no drops at all — use the ⬇ Import button there).
     ///
     /// `strong` = a folder target: precise, pointer-gated (bright outline + tip), so
@@ -364,7 +364,7 @@ impl<'a> EditorTabViewer<'a> {
     /// tile: scenes open, editors (anim graph / particles) focus, audio
     /// previews, scripts/markdown open in the IDE. Other kinds just select.
     fn asset_open(&mut self, path: &str) {
-        // Prefabs FIRST: a prefab lives under `scenes/` in some projects, and
+        // Prefabs first: a prefab lives under `scenes/` in some projects, and
         // `is_scene` is "a .ron under scenes/" — so the more specific test has
         // to win or a prefab there would be handed to the scene loader.
         if is_prefab(path) {
@@ -691,7 +691,7 @@ impl<'a> EditorTabViewer<'a> {
                     let (icon, _) = asset_kind_icon(path);
                     let grip = "¦";
                     let label = format!("{grip} {icon} {name}");
-                    // A single widget that senses BOTH click and drag. (The old
+                    // A single widget that senses both click and drag. (The old
                     // dnd_drag_source layered a drag-sense interaction over the label,
                     // and the drag sense swallowed double-clicks — so a script could
                     // only be dragged, never opened.) One click_and_drag widget lets
@@ -786,7 +786,7 @@ impl<'a> EditorTabViewer<'a> {
             return;
         }
         ui.label("map geometry — the blockout shapes a scene's Map tool built");
-        // Nothing to place. Say THAT, rather than falling through to "no scene
+        // Nothing to place. Say that, rather than falling through to "no scene
         // was found" — which is true of an empty file and is not the reason.
         if p.shapes.is_empty() {
             ui.small(

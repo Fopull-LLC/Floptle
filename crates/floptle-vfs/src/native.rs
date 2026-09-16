@@ -66,7 +66,7 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
     std::fs::copy(from, to)
 }
 
-/// Remove an EMPTY directory, as `std::fs::remove_dir` does.
+/// Remove an empty directory, as `std::fs::remove_dir` does.
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     std::fs::remove_dir(path)
 }

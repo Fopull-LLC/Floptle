@@ -38,7 +38,7 @@ pub struct Agent {
     /// developer actually wants ("it has crashed four times").
     restarts: BTreeMap<String, u32>,
     /// Deployments that were running last cycle, so one that has left
-    /// `/desired` can be reported terminal ONCE before it is forgotten.
+    /// `/desired` can be reported terminal once before it is forgotten.
     seen: BTreeMap<String, State>,
 }
 
@@ -266,13 +266,13 @@ impl Agent {
             host.run("systemctl", &["enable", &name])?;
             // **`restart`, not `enable --now`.** `--now` means "start it if it
             // is not running", and on a unit that is already active it does
-            // NOTHING — so the agent would write a corrected unit, log that it
+            // nothing — so the agent would write a corrected unit, log that it
             // had started it, and leave the old process running the old command
             // line forever. That is not a hypothetical: it is what happened on
             // `us-east-1` when `floptle/0200`'s fix first reached the box, and
             // the fix read as a failure because the file on disk was right and
             // the running process was a day old. Reaching this branch at all
-            // means the text CHANGED, which means the running process is
+            // means the text changed, which means the running process is
             // serving something other than what the control plane asked for.
             host.run("systemctl", &["restart", &name])?;
             bundle::log_line(&format!("{name}: written and (re)started"));
@@ -297,7 +297,7 @@ impl Agent {
         state: State,
     ) -> DeploymentStatus {
         let id = d.deployment_id.clone();
-        // A transition INTO a run from a non-running state is a restart, which
+        // A transition into a run from a non-running state is a restart, which
         // is the number a developer actually wants: "it has crashed four times"
         // rather than "it is up".
         if state == State::Running && self.seen.get(&id).is_some_and(|p| *p == State::Failed) {
@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(body["deployments"][0]["port"], 30000);
     }
 
-    /// **A deployment that leaves `/desired` is stopped AND reported gone.**
+    /// **A deployment that leaves `/desired` is stopped and reported gone.**
     ///
     /// The report is the half that is easy to leave out and expensive to:
     /// W holds the UDP port for five minutes after a terminal state, and the

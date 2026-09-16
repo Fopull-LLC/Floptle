@@ -120,12 +120,12 @@ mod tests {
         std::fs::write(v.join("not-a-dir"), b"x").unwrap();
         let installs = scan_installs(&v);
         let versions: Vec<&str> = installs.iter().map(|i| i.version.as_str()).collect();
-        // Semver-ish: 0.2 < 0.9 < 0.10 (NOT lexical, which would put 0.10 first).
+        // Semver-ish: 0.2 < 0.9 < 0.10 (not lexical, which would put 0.10 first).
         assert_eq!(versions, ["0.2.0", "0.9.0", "0.10.0"]);
     }
 
     /// A hand-unpacked archive (folder named after the archive, not the
-    /// version) registers under its version.json's version — Ty unpacked
+    /// version) registers under its version.json's version — a developer unpacked
     /// `floptle-0.1.3-linux-x86_64/` manually and the Hub called it not
     /// installed. Stray dirs stay ignored; duplicates keep the first.
     #[test]

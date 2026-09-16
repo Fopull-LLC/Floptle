@@ -29,7 +29,7 @@ use floptle_core::time::Instant;
 
 use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform, World};
 
-/// Nodes per chunk. Floprooms builds ~800; a round thousand is the ledger's ask.
+/// Nodes per chunk. Floprooms builds ~800; a round thousand is the target.
 const CHUNK: usize = 1_000;
 
 /// Write the project the measurement runs in: one prefab, and one script that

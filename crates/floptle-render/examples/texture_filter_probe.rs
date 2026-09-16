@@ -15,7 +15,7 @@ use glam::{DVec3, Quat, Vec3};
 const W: u32 = 1200;
 const H: u32 = 420;
 
-/// A FINE checker (small cells) so the far side of the sphere minifies heavily —
+/// A fine checker (small cells) so the far side of the sphere minifies heavily —
 /// where Pixelated aliases into noise and mipmaps smooth it out.
 fn checker() -> TextureData {
     let n = 512u32;

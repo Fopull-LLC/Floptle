@@ -196,7 +196,7 @@ fn texture_coordinates_survive() {
     }
 }
 
-/// **Packing a `.gltf` must NOT flip V.**
+/// **Packing a `.gltf` must not flip V.**
 ///
 /// The FBX path flips it because FBX and glTF disagree; the repack path must
 /// not, because the source is already glTF. It is the same line of code in two
@@ -433,7 +433,7 @@ fn write_binary_ply(path: &Path, be: bool) {
     let tris = cube_triangles();
     let n = tris.len() * 3;
     // **An element we do not want, sitting between the two we do.** PLY's body
-    // is elements back to back with no markers, so position IS the addressing:
+    // is elements back to back with no markers, so position is the addressing:
     // skipping an unwanted element rather than consuming it leaves the reader
     // pointing into the middle of it and every face after is nonsense. Real
     // scanner output carries these (`camera`, `range_grid`), so the fixture

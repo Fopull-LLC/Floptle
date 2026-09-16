@@ -4,7 +4,7 @@
 //! "360Slash") is a container of **tracks** arranged on a video-editor timeline:
 //! each track is one visual layer with its own look, carrying draggable **clips**
 //! (ranged emission spans), **bursts** (instant emits), and **automation lanes**
-//! (curves over effect time). Every per-particle property is a constant OR a curve
+//! (curves over effect time). Every per-particle property is a constant or a curve
 //! over the particle's own life. Design: `docs/subsystems/particles-vfx.md`.
 //!
 //! Layering: authoring types ([`ParticleEffect`]) are what the editor edits and RON

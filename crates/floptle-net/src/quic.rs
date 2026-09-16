@@ -13,7 +13,7 @@
 //!   interest/byte-budget work keeps snapshots under the MTU).
 //!
 //! **Dev-trust security model (v1):** the server presents a fresh self-signed
-//! certificate and clients accept ANY certificate. That makes LAN/self-hosted
+//! certificate and clients accept any certificate. That makes LAN/self-hosted
 //! play zero-config, and it is exactly as trustworthy as a Minecraft server —
 //! the connection is encrypted, but the server's identity is not verified.
 //!
@@ -339,7 +339,7 @@ impl ServerCertificate {
         let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
             .map_err(|e| format!("key PEM: {e}"))?;
         let out = Self { chain, key };
-        // A key that does not match its certificate is refused NOW, by the
+        // A key that does not match its certificate is refused now, by the
         // same check `with_single_cert` runs, so the mismatch is a load error
         // and never a swap that left the endpoint presenting nothing.
         out.server_config()?;
@@ -440,7 +440,7 @@ impl QuicServer {
     }
 
     /// [`Self::bind_with_certificate`] asking the kernel for `buffer` bytes of
-    /// receive AND send buffer on the socket before quinn takes it. What was
+    /// receive and send buffer on the socket before quinn takes it. What was
     /// granted is on [`Self::socket_buffers`]; a relay is expected to print
     /// it. `None` keeps the kernel default, which is right for a player's own
     /// listen socket and wrong for a relay (see [`SocketBuffers`]).
@@ -742,7 +742,7 @@ impl QuicClient {
     }
 
     /// Verify the server's chain for `server_name` against the public roots
-    /// and take NO fallback: a chain that does not verify is a
+    /// and take no fallback: a chain that does not verify is a
     /// [`Incoming::Disconnected`] carrying the reason, never a connection.
     /// What `floptle-relay-bench --verify` runs, and what every managed
     /// connection becomes once the fallback in [`Self::connect_with_trust`]
@@ -752,7 +752,7 @@ impl QuicClient {
     }
 
     /// The leaf certificate the server presented, DER — `None` until the
-    /// handshake completes. For telling WHICH certificate answered: the
+    /// handshake completes. For telling which certificate answered: the
     /// self-signed dev one, the one on disk, or the one before a renewal.
     pub fn peer_certificate(&self) -> Option<Vec<u8>> {
         let conn = self.conn.lock().unwrap().clone()?;
@@ -822,7 +822,7 @@ impl QuicClient {
                             // No fallback to take: the reason travels with the
                             // disconnect, the way a relay's refusal does, so
                             // whoever asked for a verified connection is told
-                            // WHY there is not one.
+                            // why there is not one.
                             let ev = match &trust {
                                 ClientTrust::Verify { server_name } => Incoming::refused(
                                     SERVER,
@@ -938,7 +938,7 @@ impl Transport for QuicClient {
 
 impl Drop for QuicClient {
     fn drop(&mut self) {
-        // Graceful goodbye so the server learns NOW, not at the idle timeout.
+        // Graceful goodbye so the server learns now, not at the idle timeout.
         if let Some(c) = self.conn.lock().unwrap().take() {
             c.close(0u32.into(), b"left");
         }
@@ -1069,7 +1069,7 @@ mod tests {
         let port = server.local_port();
         let mut client = QuicClient::connect(&format!("127.0.0.1:{port}")).expect("connect");
 
-        // Reliable queued BEFORE the handshake completes must still arrive first.
+        // Reliable queued before the handshake completes must still arrive first.
         client.send(SERVER, Channel::Reliable, b"hello");
 
         let mut on_server = Polled::new(&mut server);

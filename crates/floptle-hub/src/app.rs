@@ -22,7 +22,7 @@ const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 
 /// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
 /// emoji-icon-font), so none render as a missing-glyph box. Anything added here must be
-/// checked against that font union first: some obvious choices are NOT in the set and show
+/// checked against that font union first: some obvious choices are not in the set and show
 /// as tofu — fullwidth plus (U+FF0B), the light check (U+2713), the multiplication-x
 /// (U+2715), and any emoji carrying a U+FE0F variation selector. Prefer U+2795 / U+2714 /
 /// U+2716 instead.
@@ -116,7 +116,7 @@ enum AuthKind {
 
 /// An account sign-in / token-refresh running off the UI thread — the device flow polls the
 /// provider for up to several minutes, so it must never block repaint. (Sign-out is fire-and-
-/// forget and is NOT tracked here, so it can't wedge the Account panel.)
+/// forget and is not tracked here, so it can't wedge the Account panel.)
 enum AuthEvent {
     /// The provider issued a device code — show it and open the approval page.
     Prompt { user_code: String, approve_url: String },
@@ -246,7 +246,7 @@ struct VersionRow {
     date: String,
     title: String,
     notes_url: String,
-    /// The bundle for THIS platform, if the release ships one.
+    /// The bundle for this platform, if the release ships one.
     artifact: Option<crate::releases::Artifact>,
     installed: Option<Install>,
     is_default: bool,
@@ -270,7 +270,7 @@ impl HubApp {
         // Restore a previously signed-in account from the OS keyring (one-time, before the
         // window is interactive).
         //
-        // A session from a DIFFERENT provider is dropped here rather than carried in. The
+        // A session from a different provider is dropped here rather than carried in. The
         // retired dev instance had its own database and its own signing key, so a session
         // it minted names an account that does not exist on production: every refresh
         // answers `invalid_grant` and every call answers `401`. Presenting it as signed in
@@ -697,7 +697,7 @@ impl HubApp {
     ///
     /// The `changes_hub` check is the mirror of the one `update_available` has always had,
     /// and it was missing here for ~90 releases. One tag builds both binaries, so CI
-    /// publishes a `hub_artifacts` entry on EVERY release — which made "is there a hub
+    /// publishes a `hub_artifacts` entry on every release — which made "is there a hub
     /// bundle above my version" true every single time, and this banner offered a self-update
     /// on engine releases that had not touched a line of Hub code. Worse, the chip that draws
     /// it outranks the engine one, so an engine release announced itself as a Hub update and
@@ -1138,7 +1138,7 @@ impl eframe::App for HubApp {
         }
     }
 
-    // egui 0.35 hands the root `Ui`; panels are shown INTO it (top/bottom first, then the
+    // egui 0.35 hands the root `Ui`; panels are shown into it (top/bottom first, then the
     // central content).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("tabs").show(ui, |ui| {
@@ -1147,7 +1147,7 @@ impl eframe::App for HubApp {
                 let mark = self.mark_texture(ui.ctx());
                 ui.add(egui::Image::new((mark.id(), egui::vec2(22.0, 22.0))));
                 ui.heading("Floptle Hub");
-                // THE HUB'S OWN VERSION, ALWAYS IN VIEW. Three different things share one
+                // the HUB'S own VERSION, always in view. Three different things share one
                 // version number here — the Hub, the engine, and the engine a project is
                 // pinned to — and until this line the only one with its name attached was
                 // on the About tab. Somebody reading "0.22.1" in the Installs list had
@@ -1165,7 +1165,7 @@ impl eframe::App for HubApp {
                 ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
                 ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
 
-                // THE CHIP THAT NEVER GOES AWAY. Both banners below can be put away — one
+                // the CHIP that never goes AWAY. Both banners below can be put away — one
                 // for the session, one for a version — and this cannot be put away at
                 // all. It stays until the update is actually installed. That is the
                 // difference between "we told you once" and "you cannot be running
@@ -1221,7 +1221,7 @@ impl eframe::App for HubApp {
             });
         });
 
-        // THE HUB ITSELF IS OUT OF DATE. Above the engine banner, because an old Hub is
+        // the HUB itself is out of DATE. Above the engine banner, because an old Hub is
         // the thing that would stop the rest of this working — and it is the one update a
         // user cannot perform any other way without leaving the app.
         if let Some(r) = self.hub_update_available()
@@ -1278,7 +1278,7 @@ impl eframe::App for HubApp {
 
         // UPDATE BANNER: a new engine version on the user's channel, newer than
         // anything installed, with a bundle for this platform. One click
-        // installs; ✖ mutes the banner for THAT version (anything newer brings
+        // installs; ✖ mutes the banner for that version (anything newer brings
         // it back). This is how users get notified of releases.
         if let Some(r) = self.update_available()
             && self.config.settings.dismissed_update.as_deref() != Some(r.version.as_str())
@@ -1644,7 +1644,7 @@ impl HubApp {
                 ui.small(format!("{} channel", self.config.settings.channel));
             });
         });
-        // SAY WHICH VERSIONS THESE ARE. "Engine versions" alone left the reader to work out
+        // say which versions these are. "Engine versions" alone left the reader to work out
         // that the Hub is not in this list and does not update from it — and the Hub's own
         // updates arrive as a banner, from the same release, wearing the same number.
         ui.small(egui::RichText::new(
@@ -1670,7 +1670,7 @@ impl HubApp {
             return;
         }
 
-        // Actions are collected and applied AFTER the panes: every one of them mutates
+        // Actions are collected and applied after the panes: every one of them mutates
         // `self`, and the panes are holding a borrow of the row list built from it.
         let mut to_install: Option<(String, crate::releases::Artifact)> = None;
         let mut set_default: Option<String> = None;
@@ -1701,14 +1701,14 @@ impl HubApp {
                 |ui| {
                 egui::ScrollArea::vertical().id_salt("version-list").show(ui, |ui| {
                     for r in &rows {
-                        // "new" means a new ENGINE. A Hub-only release is newer than
+                        // "new" means a new engine. A Hub-only release is newer than
                         // everything installed and still has nothing in it for this list.
                         let is_new = !r.hub_only
                             && newest_installed
                                 .as_ref()
                                 .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
 
-                        // ONE ROW, ONE HIT TARGET. This used to be a `selectable_label`
+                        // one ROW, one HIT target. This used to be a `selectable_label`
                         // for the version and an unclickable line of state under it — so
                         // the actual target was the width of the text "0.21.0" and one
                         // line tall, with dead space around it that looked clickable and
@@ -1740,7 +1740,7 @@ impl HubApp {
                                 label = label.strong();
                             }
                             ui.label(label);
-                            // WORDS, NOT GLYPHS. The Hub ships egui's default fonts, which
+                            // words, not GLYPHS. The Hub ships egui's default fonts, which
                             // have no ● and no ✔ — both draw as an empty box, and a list of
                             // empty boxes is worse than no marker at all. "installed" also
                             // needs no legend.
@@ -1761,7 +1761,7 @@ impl HubApp {
                                 ui.small(egui::RichText::new("Hub only").weak());
                             }
                         });
-                        // The release NAME, which the column had no room for before — it is
+                        // The release name, which the column had no room for before — it is
                         // what somebody actually remembers a version by.
                         inner.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -1805,7 +1805,7 @@ impl HubApp {
                 });
             });
 
-            // SAY IT BEFORE THE INSTALL BUTTON, NOT IN THE NOTES BELOW IT. v0.22.1's notes
+            // say it before the INSTALL BUTTON, not in the NOTES below it. v0.22.1's notes
             // did say the engine was unchanged — in an "Upgrading" section under several
             // screens of Hub changes, directly contradicted by the Install button at the
             // top of the same pane. One line, where the decision is actually made.
@@ -1819,7 +1819,7 @@ impl HubApp {
                 }).weak());
             }
 
-            // BUTTONS YOU CAN HIT. These were egui's defaults — text plus a few pixels of
+            // BUTTONS you can HIT. These were egui's defaults — text plus a few pixels of
             // padding, so "Install" was a ~60×20 target for the primary action of the
             // whole tab. A minimum size makes every one of them a deliberate object
             // rather than a word with a box round it, and the row gets breathing space
@@ -1900,7 +1900,7 @@ impl HubApp {
             egui::ScrollArea::vertical().id_salt(("notes", &r.version)).show(ui, |ui| {
                 if notes.trim().is_empty() {
                     ui.add_space(10.0);
-                    // Honest about WHY rather than silent: the six earliest releases
+                    // Honest about why rather than silent: the six earliest releases
                     // predate release notes entirely, and a blank pane reads as a Hub
                     // that failed to load something.
                     ui.weak("No release notes for this version.");
@@ -2172,7 +2172,7 @@ impl HubApp {
         });
         ui.add_space(8.0);
 
-        // WHETHER THIS HUB IS CURRENT, answered plainly. "version 0.21.1" alone is a fact
+        // whether this HUB is current, answered plainly. "version 0.21.1" alone is a fact
         // nobody can act on — it only means something next to the version that exists.
         let update = self.hub_update_available();
         let mut go: Option<crate::releases::Artifact> = None;
@@ -2283,7 +2283,7 @@ impl HubApp {
 mod tests {
     use super::pin_engine_version;
 
-    /// Render the Installs tab to a PNG so a layout change can be LOOKED AT.
+    /// Render the Installs tab to a PNG so a layout change can be LOOKED at.
     ///
     /// Ignored: it needs a GPU, and CI has none. Run it deliberately —
     /// `cargo test -p floptle-hub -- --ignored --nocapture` — and open the path it
@@ -2306,7 +2306,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let mut app = HubApp::new(Paths::at(tmp.path()));
             let mut m = Manifest { schema: 1, ..Default::default() };
-            // 0.21.1 is HUB-ONLY on purpose: the "Hub only" chip and the line that tells you
+            // 0.21.1 is HUB-only on purpose: the "Hub only" chip and the line that tells you
             // which engine is really in it are the whole point of this snapshot.
             for (v, date, title) in [
                 ("0.21.1", "2026-08-03", "Front Page"),
@@ -2367,7 +2367,7 @@ mod tests {
         }
 
         // The News tab, with the real docs/news.md — so the snapshot shows the page
-        // somebody will actually read, and the 📰 in the tab strip gets LOOKED AT. The
+        // somebody will actually read, and the 📰 in the tab strip gets LOOKED at. The
         // Hub's fonts have holes in them and a tofu box passes every non-visual test
         // there is: right layout, right string, rectangular pixels.
         {
@@ -2422,9 +2422,9 @@ mod tests {
         println!("wrote {}", out.display());
     }
 
-    /// Ty's report, exactly: 0.22.1 changed only the Hub, and the Projects tab offered to
+    /// The report, exactly: 0.22.1 changed only the Hub, and the Projects tab offered to
     /// migrate every project onto it as if it were a new engine. The offer has to survive
-    /// where it's real (0.21.2 skipped 0.22.0, which WAS an engine release) and disappear
+    /// where it's real (0.21.2 skipped 0.22.0, which was an engine release) and disappear
     /// where it isn't (already on the engine 0.22.1 carries).
     #[test]
     fn a_hub_only_release_is_not_offered_as_a_project_upgrade() {
@@ -2495,14 +2495,14 @@ mod tests {
     }
 
     /// The other half of the same bug, and the one that survived it. 0.22.1 taught the
-    /// PROJECT side not to treat a Hub-only release as a new engine; nothing taught the HUB
+    /// project side not to treat a Hub-only release as a new engine; nothing taught the HUB
     /// side not to treat an engine-only release as a new Hub. One tag builds both binaries,
     /// so `hub_artifacts` is populated on every release, and "is there a bundle above my
     /// version" was the whole test — true on all ~90 releases that scope.json marks
     /// `["engine"]`. Nine of the ten releases before this fix changed zero files under
     /// `crates/floptle-hub`, and every one of them offered a self-update.
     ///
-    /// Versions are 99.x deliberately: the check compares against the Hub's OWN compiled-in
+    /// Versions are 99.x deliberately: the check compares against the Hub's own compiled-in
     /// version, so anything near the real one stops testing anything the day it is bumped.
     #[test]
     fn an_engine_only_release_is_not_offered_as_a_hub_update() {
@@ -2530,7 +2530,7 @@ mod tests {
                     title: String::new(),
                     notes: String::new(),
                     artifacts: bundle(),
-                    // The point of the whole test: CI ships one of these on EVERY release.
+                    // The point of the whole test: CI ships one of these on every release.
                     hub_artifacts: bundle(),
                 });
             }
@@ -2567,7 +2567,7 @@ mod tests {
     fn pin_corrects_a_stale_engine_version() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("project.ron");
-        // Simulate what an OLD editor binary wrote: pinned to the workspace 0.0.0.
+        // Simulate what an old editor binary wrote: pinned to the workspace 0.0.0.
         let stale = floptle_scene::ProjectConfigDoc {
             engine_version: Some("0.0.0".into()),
             ..floptle_scene::ProjectConfigDoc::default()

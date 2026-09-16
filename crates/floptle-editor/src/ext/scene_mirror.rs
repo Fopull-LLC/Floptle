@@ -109,7 +109,7 @@ pub(crate) struct SceneMirror {
     /// and every one of those questions is a gravity times a jump impulse. The
     /// package API had no way to ask, so the editor's own 2D extractor sent the
     /// engine's `-9.81` default and flagged it as a guess. That default is not
-    /// even the right guess here: a scene with **no** `GravityVolume` has ZERO
+    /// even the right guess here: a scene with **no** `GravityVolume` has zero
     /// gravity (a space level), and one with a `Down` volume has whatever
     /// strength that volume was given.
     ///
@@ -401,13 +401,13 @@ fn ray_box(ro: DVec3, rd: DVec3, half: [f32; 3]) -> Option<(f64, usize, f32)> {
             return None;
         }
     }
-    // The box is entirely BEHIND the ray. Without this the clamp below turns
+    // The box is entirely behind the ray. Without this the clamp below turns
     // every box behind the camera into a hit at zero distance — which reads as
     // "there is something right here" everywhere you point.
     if tmax < 0.0 {
         return None;
     }
-    // A ray starting INSIDE the box hits it at zero, not behind itself.
+    // A ray starting inside the box hits it at zero, not behind itself.
     Some((if tmin < 0.0 { 0.0 } else { tmin }, axis, sign))
 }
 
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(c.parent, Some(parent.index()));
         assert_eq!(p.children, vec![child.index()]);
         assert_eq!(m.roots, vec![parent.index()]);
-        // LOCAL is what was authored; WORLD has the parent applied.
+        // local is what was authored; world has the parent applied.
         assert_eq!(c.pos, [0.0, 2.0, 0.0]);
         assert_eq!(c.world_pos, [10.0, 2.0, 0.0]);
         assert_eq!(c.kind, "pointLight");

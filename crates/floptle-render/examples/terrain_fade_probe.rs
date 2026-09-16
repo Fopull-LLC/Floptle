@@ -1,7 +1,7 @@
 //! What a chunk arriving looks like (`floptle/0067`) — the dissolve-in, rendered.
 //!
 //! The complaint was *"it's obvious when it pops in"*. Sizing the LOD rings to
-//! the body cut how MANY chunks arrive; it cannot change the fact that each one
+//! the body cut how many chunks arrive; it cannot change the fact that each one
 //! still switches from absent to fully lit between two frames. This is the other
 //! half: the streamer ramps a chunk's instance alpha over its first third of a
 //! second and the raster pass discards a matching fraction of its pixels, so the
@@ -163,7 +163,7 @@ fn main() {
             .collect();
         // The editor's order: prime depth, let the raymarch paint the sky capped
         // by it, then shade. A prepass that did not dither would cap the raymarch
-        // over the WHOLE hill and the dissolved-out pixels would come back empty.
+        // over the whole hill and the dissolved-out pixels would come back empty.
         raster.depth_prepass(&gpu, globals, &instances, gpu.depth_texture());
         // Bind it every time. Guarding this on "was the target reallocated?" is
         // what let the editor draw one view with another view's depth buffer.

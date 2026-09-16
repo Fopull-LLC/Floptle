@@ -52,7 +52,7 @@ pub struct Region {
     /// cached list instead of asking anybody, which is the whole reason the
     /// join path never depends on fopull.com being up.
     pub letter: char,
-    /// Human-readable, for a lobby screen: "US East (Ashburn)".
+    /// Human-readable, for a lobby screen: "us East (Ashburn)".
     #[serde(default)]
     pub name: String,
     /// `host:port` of the managed relay.
@@ -395,7 +395,7 @@ mod tests {
             !is_usable(&Cached { fetched_unix: now, regions: planned_only }, now),
             "a brand-new list that would refuse every host is not worth keeping"
         );
-        // …and the hot path is untouched: a list WITH a live region still
+        // …and the hot path is untouched: a list with a live region still
         // answers from disk, which is the whole reason this cache exists.
         assert!(
             is_usable(&Cached { fetched_unix: now, regions: list() }, now),

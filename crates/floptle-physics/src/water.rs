@@ -8,7 +8,7 @@
 //! the water pushes back, whether the camera is wet — is derived from that one
 //! number, so there is only ever one definition of "in the water".
 //!
-//! ## Why buoyancy is per SHAPE and not per body
+//! ## Why buoyancy is per shape and not per body
 //!
 //! A hull that lands flat floats; the same hull nose-down sinks its nose and
 //! rights itself. That difference is entirely about *where* the displaced
@@ -162,10 +162,10 @@ impl WaterField {
     pub fn submersion(&self, p: Vec3, radius: f32) -> f32 {
         let r = radius.max(1e-4);
         let d = self.depth_at(p);
-        // Fully dry: the centre is above water AND the sphere's top half can't
+        // Fully dry: the centre is above water and the sphere's top half can't
         // reach down to it.
         if d <= 0.0 {
-            // `depth_at` clamps at zero, so the only way to know how far ABOVE
+            // `depth_at` clamps at zero, so the only way to know how far above
             // the surface the centre is, is to ask each volume for its own
             // signed answer. Cheap, and only on the dry path.
             let above = self.height_above(p);
@@ -182,7 +182,7 @@ impl WaterField {
         1.0 - cap_fraction(r, r - d)
     }
 
-    /// How far ABOVE the nearest surface `p` is (0 when submerged). The signed
+    /// How far above the nearest surface `p` is (0 when submerged). The signed
     /// other half of `depth_at`, split out because a positive-only depth is the
     /// right default everywhere else.
     pub fn height_above(&self, p: Vec3) -> f32 {
@@ -267,7 +267,7 @@ pub fn buoyancy_accel(
     let r = radius.max(1e-4);
     let volume = 4.0 / 3.0 * core::f32::consts::PI * r * r * r * f;
     // Archimedes: the weight of the fluid displaced, pushed along the water's
-    // own up (NOT −gravity — on a sea they agree, in a tilted tank they do not).
+    // own up (not −gravity — on a sea they agree, in a tilted tank they do not).
     let buoyant = up * (density * volume * g.length()) / mass;
     // Quadratic drag over the wet cross-section. Capped at the acceleration
     // that would bring the body exactly to rest this step: an explicit
@@ -408,7 +408,7 @@ mod tests {
         let depth = 100.0 - p.y;
         assert!(v.length() < 0.2, "it should have settled, still moving at {}", v.length());
         // Floating at ρ_body/ρ_water = 0.4 submerged: the centre sits slightly
-        // BELOW the surface, but the body is nowhere near the seabed.
+        // below the surface, but the body is nowhere near the seabed.
         assert!(depth > -r && depth < r, "should straddle the waterline, sits at depth {depth}");
         assert!(p.y > 95.0, "it sank: {}", p.y);
     }

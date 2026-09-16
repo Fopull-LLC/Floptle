@@ -122,7 +122,7 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
         }
     }
 
-    // camera.screenRect() -> x, y, w, h — the game viewport IN THE SAME SPACE as
+    // camera.screenRect() -> x, y, w, h — the game viewport in the same SPACE as
     // input.mouse() and worldToScreen (which both carry the viewport's offset).
     // `screenSize` alone can't answer "is the cursor over the game view?": in the
     // editor the view is a dock panel, so the cursor's x is offset by whatever is
@@ -140,7 +140,7 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
     }
 
     // camera.worldToScreen(x,y,z) -> sx, sy, depth, onscreen.
-    // Pixels are in the SAME space as input.mouse() (game-view physical px).
+    // Pixels are in the same space as input.mouse() (game-view physical px).
     // `onscreen` is false for points behind the camera or outside the frustum —
     // Lua should skip those when finding the nearest orbit point to the cursor.
     {
@@ -302,7 +302,7 @@ mod tests {
         );
 
         // Distance is not in the answer — neither the camera's, nor one asked
-        // for explicitly. That is what an orthographic projection MEANS.
+        // for explicitly. That is what an orthographic projection means.
         let far: f32 = lua_with(info(400.0)).load("return camera.pixelsPerUnit()").eval().unwrap();
         assert!((far - px).abs() < 0.01, "moving the camera back changed {px} to {far}");
         let asked: f32 = near.load("return camera.pixelsPerUnit(37)").eval().unwrap();
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn behind_camera_is_offscreen() {
         let lua = lua_with(view_info([0.0, 0.0, 0.0], Quat::IDENTITY, 800.0, 600.0));
-        // +Z is BEHIND a -Z-looking camera.
+        // +Z is behind a -Z-looking camera.
         let (_sx, _sy, _d, on): (f32, f32, f32, bool) =
             lua.load("return camera.worldToScreen(0, 0, 10)").eval().unwrap();
         assert!(!on, "a point behind the camera must be off-screen");

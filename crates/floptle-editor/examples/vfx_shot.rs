@@ -1,4 +1,4 @@
-//! Render an authored `.vfx.ron` headlessly, so an effect can be LOOKED AT
+//! Render an authored `.vfx.ron` headlessly, so an effect can be LOOKED at
 //! without opening the editor.
 //!
 //! `validate` proves an effect parses. Nothing proved what it looked like — and
@@ -9,7 +9,7 @@
 //! the frame. (Same lesson as `flsl_prepass_probe`: a shader that compiles is
 //! not a shader that looks right.)
 //!
-//! It renders through the REAL path — `load_vfx_effect` -> `effect_from_doc` ->
+//! It renders through the real path — `load_vfx_effect` -> `effect_from_doc` ->
 //! `compile` -> `EffectInstance::simulate_to` -> `collect_billboards` -> the
 //! particle pipeline — so what comes out is what the game draws, not an
 //! approximation of it. Textures resolve by path against a project root, the
@@ -18,7 +18,7 @@
 //!
 //! A one-metre grid post and a 1.8 m figure stand at the origin for scale, which
 //! is the whole point when the note you are working from says "it needs to be
-//! HUGE".
+//! huge".
 //!
 //! Run:
 //!   cargo run -p floptle-editor --example vfx_shot -- \
@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 // `floptle-editor` is a binary crate with no `[lib]`, so its modules are not
 // importable — and `effect_from_doc`, the one and only doc -> runtime conversion
-// in the engine, lives in one of them. Including the REAL source file is how
+// in the engine, lives in one of them. Including the real source file is how
 // this probe stays honest: re-implementing the conversion here would give a
 // picture of what a second implementation draws, which is worth nothing. The
 // module it pulls in wants exactly one four-line path helper from `anim`, and
@@ -200,12 +200,12 @@ fn main() {
         fog_params: [0.0; 4],
     };
 
-    // THE SCALE REFERENCE, and the reason this probe is worth having. A floor, a
+    // the SCALE REFERENCE, and the reason this probe is worth having. A floor, a
     // 1.8-unit figure at the origin, and a post marked off every metre: "huge"
     // and "tiny" are not properties of an effect, they are properties of an
     // effect next to a fighter.
     let mut scene: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
-    // `size` is the box's FULL extent in world units. `cube(1.0)` spans -1..+1,
+    // `size` is the box's full extent in world units. `cube(1.0)` spans -1..+1,
     // so the scale that produces it is half of it — and getting that wrong is not
     // a cosmetic error in a tool whose entire job is answering "how big is this":
     // the first version drew a "1.8-unit fighter" 3.6 units tall and made every

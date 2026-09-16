@@ -119,7 +119,7 @@ impl GpuTimer {
 
     /// Mark the boundary between the previous region and one called `label`.
     ///
-    /// The label names what comes AFTER the mark, so a frame reads as a sequence
+    /// The label names what comes after the mark, so a frame reads as a sequence
     /// of marks and one [`end`](Self::end): region *i* runs from mark *i* to mark
     /// *i+1*.
     pub fn mark(&mut self, gpu: &Gpu, label: &str) {

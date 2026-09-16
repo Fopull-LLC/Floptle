@@ -153,7 +153,7 @@ impl Editor {
         }
     }
 
-    /// The devices as the GAME may read them this frame.
+    /// The devices as the game may read them this frame.
     ///
     /// Identical to `raw_input` except while the editor is holding the pointer
     /// (Escape during play): then the mouse — buttons, motion, wheel — is the
@@ -174,7 +174,7 @@ impl Editor {
         raw
     }
 
-    /// Resolve the FRAME domain (what `update` reads).
+    /// Resolve the frame domain (what `update` reads).
     ///
     /// Unfocused game view resolves neutral for the same reason raw keys do:
     /// you're editing, not playing, so the character must stop moving even
@@ -189,7 +189,7 @@ impl Editor {
         }
     }
 
-    /// Resolve the TICK domain (what `fixedUpdate` reads) and advance input
+    /// Resolve the tick domain (what `fixedUpdate` reads) and advance input
     /// history. Consumes the banked edges, so call exactly once per tick.
     pub(crate) fn resolve_tick_actions(&mut self, dt: f32, game_focused: bool) {
         let sys = self.script_host.input_system().clone();
@@ -203,7 +203,7 @@ impl Editor {
             raw.pressed.clear();
             raw.released.clear();
         } else if self.cursor_freed {
-            // Same rule as the frame domain, applied AFTER the drain so the
+            // Same rule as the frame domain, applied after the drain so the
             // edges are still consumed rather than piling up for later.
             raw.pressed.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
             raw.released.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
@@ -222,7 +222,7 @@ impl Editor {
     /// Load `input.ron` into the script host.
     ///
     /// A **missing** file falls back to [`InputMap::starter`] in memory rather
-    /// than to an empty map, and deliberately does NOT write anything to disk.
+    /// than to an empty map, and deliberately does not write anything to disk.
     /// The shipped default scripts (`freelook`, `first_person`, `third_person`,
     /// …) are written against the starter names, so an empty map would leave a
     /// fresh project's camera unable to move — while a file appearing on disk
@@ -285,7 +285,7 @@ impl Editor {
     }
 
     /// This project's action-map fingerprint, for the multiplayer handshake.
-    /// Peers whose maps differ in SHAPE are refused, because input commands
+    /// Peers whose maps differ in shape are refused, because input commands
     /// index actions by their position in the map.
     pub(crate) fn input_map_hash(&self) -> u64 {
         self.script_host.input_system().borrow().map().hash()
@@ -331,7 +331,7 @@ impl Editor {
                 }
                 InputCmd::AddEntry { name, kind } => add_entry(sys.map_mut(), kind, name),
                 InputCmd::AddBinding { action, source } => {
-                    // A picked pad source binds to THIS player's pad when the
+                    // A picked pad source binds to this player's pad when the
                     // project has several, matching what press-to-bind does —
                     // otherwise P2's binding would read P1's controller.
                     let multiplayer = sys.players() > 1;
@@ -458,7 +458,7 @@ fn add_entry(map: &mut InputMap, kind: crate::input_scan::UsageKind, name: Strin
         K::Motion => {
             if map.motion(&name).is_none() {
                 // A placeholder quarter-circle: the developer edits the
-                // directions in input.ron. Seeding an EMPTY dirs list would
+                // directions in input.ron. Seeding an empty dirs list would
                 // create a motion that can never match, which reads as a bug.
                 map.motions.push(floptle_input::Motion {
                     name,
@@ -538,7 +538,7 @@ mod tests {
         }
     }
 
-    /// The version of the test above used to enumerate only keys BOTH tables already had,
+    /// The version of the test above used to enumerate only keys both tables already had,
     /// so it passed for a year while `input.pressed("f9")` was permanently false: the raw
     /// table simply had no name for a function key, a numpad key or a bracket, and a script
     /// asking for one got the same answer as a script asking for a key nobody pressed.

@@ -218,7 +218,7 @@ fn q8(v: u8) -> u8 {
     quantize_u8(v as i32) as u8
 }
 
-/// EXACT distinct values, not "values more than a threshold apart": a fuzzy
+/// exact distinct values, not "values more than a threshold apart": a fuzzy
 /// dedup collapses a *smooth* ramp too, by chaining through its own tolerance,
 /// and would report a broken quantizer as a working one.
 fn distinct_levels(v: &[[u8; 4]]) -> usize {

@@ -1,8 +1,8 @@
-//! Per-node LIVE previews for the ◈ Shaders graph — every node renders a
+//! Per-node live previews for the ◈ Shaders graph — every node renders a
 //! little thumbnail of its value, Unity-style, so a beginner can watch the
 //! look build up stage by stage.
 //!
-//! One shader edit = ONE generated WGSL module: every preview tile lives in a
+//! One shader edit = one generated WGSL module: every preview tile lives in a
 //! grid atlas and a single fullscreen pass computes the shader's `let`s once
 //! per pixel, then selects the hovered tile's value. Every tile value is
 //! hoisted UNCONDITIONALLY before the `switch` so texture sampling stays in
@@ -17,7 +17,7 @@
 //! white zero line) through the z = 0 plane.
 //!
 //! Literal numbers ride a uniform lane array (`DynNums`) instead of being
-//! baked in, so dragging any inline value repaints the preview WITHOUT a
+//! baked in, so dragging any inline value repaints the preview without a
 //! pipeline rebuild — the host re-uploads lanes each frame.
 
 use crate::graph::{GNode, NodeKey, NodeKind};
@@ -26,7 +26,7 @@ use crate::stdlib;
 use crate::transpile::{EmitCtx, TranspileError, Writer, MAX_TEXTURE_SLOTS, MAX_UNIFORMS};
 
 /// The atlas holds at most this many tiles (a 12×11 grid). Graphs beyond it
-/// drop thumbnails for their LAST anonymous subexpressions only — the output
+/// drop thumbnails for their last anonymous subexpressions only — the output
 /// and every named node always get a tile (see [`preview_targets`]). Sized
 /// after the sky examples: a fully-exploded sky graph runs ~100 nodes.
 pub const PREVIEW_MAX_TILES: usize = 128;
@@ -80,7 +80,7 @@ pub struct CompiledPreview {
 /// thumbnail. Uniform/Constant nodes skip (their value is already an editor
 /// widget on the node); everything else previews.
 pub fn preview_targets(ir: &ShaderIr, view: &[GNode]) -> Vec<(NodeKey, PreviewTarget)> {
-    // The output and named nodes claim tiles FIRST: when a graph outgrows the
+    // The output and named nodes claim tiles first: when a graph outgrows the
     // tile budget, the dropped thumbnails must be trailing anonymous
     // subexpressions — never the output or a `let` someone is watching.
     let mut named = Vec::new();
@@ -141,7 +141,7 @@ pub fn transpile_preview(
         Stage::Fragment | Stage::Ui => EmitCtx::Fragment,
         Stage::Sky => EmitCtx::SkyPreview,
         Stage::Sdf => EmitCtx::Sdf { slot: 0 },
-        // Post previews use the REAL post emitter — `uv`, `time` and the scene
+        // Post previews use the real post emitter — `uv`, `time` and the scene
         // ops all spell themselves the same way — over a synthetic frame
         // (POST_PREVIEW_SHIM) instead of the real one.
         Stage::Post => EmitCtx::Post,
@@ -208,7 +208,7 @@ pub fn transpile_preview(
         w.line(format!("    let l{i}_{name}: {ty} = {expr};"), None);
     }
 
-    // Hoist every tile's visualized value BEFORE the switch (uniform control
+    // Hoist every tile's visualized value before the switch (uniform control
     // flow for texture samples); the switch just selects.
     let mut vis: Vec<String> = Vec::new();
     for t in targets {
@@ -301,7 +301,7 @@ fn target_vis(
         // Mirrors the emitter's Input arm (which needs a real expr id).
         PreviewTarget::Input(i) => {
             let e = match (stage, i) {
-                // `time` FIRST, and for every stage: it is the one input that
+                // `time` first, and for every stage: it is the one input that
                 // means the same thing everywhere, and each stage's catch-all
                 // below is an error arm — a Ui or Post shader that read the
                 // clock used to be told the clock did not exist.
@@ -370,7 +370,7 @@ fn target_vis(
 }
 
 /// Stand-ins for every raster-pass symbol a fragment chunk references — the
-/// preview's own bind groups. MUST declare the same names/shapes as
+/// preview's own bind groups. must declare the same names/shapes as
 /// [`crate::transpile::TEST_PRELUDE`] (the seam contract).
 const FRAG_PRELUDE: &str = r#"
 struct RasterGlobals {
@@ -436,7 +436,7 @@ fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); 
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 "#;
 
-/// A synthetic FRAME for post-shader previews: a lit ball on a flat wall, with
+/// A synthetic frame for post-shader previews: a lit ball on a flat wall, with
 /// depth and normals to match.
 ///
 /// A post pass has nothing of its own to look at — it is a transform of whatever
@@ -646,7 +646,7 @@ mod tests {
 
     /// A graph can outgrow the tile budget, but the tiles it drops must be
     /// anonymous subexpressions — the OUTPUT and every named `let` always
-    /// preview (the sky examples run ~100 nodes; Ty's first sight of them was
+    /// preview (the sky examples run ~100 nodes; the first sight of them was
     /// a graph whose output tile was silently over budget).
     #[test]
     fn the_output_and_named_lets_always_get_tiles() {

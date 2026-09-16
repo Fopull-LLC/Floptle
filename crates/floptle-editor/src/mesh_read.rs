@@ -156,7 +156,7 @@ pub(crate) fn read_node(
             }
             Ok(g)
         }
-        // Terrain is a FIELD, not a mesh: it is meshed on demand, per chunk, at
+        // Terrain is a field, not a mesh: it is meshed on demand, per chunk, at
         // whatever detail the camera wants, and "the terrain's triangles" is
         // not a question with one answer. Said plainly rather than returning
         // some arbitrary level of detail a tool would treat as the truth.
@@ -228,7 +228,7 @@ mod tests {
         }
     }
 
-    /// The refusal is the point: a node with no triangles must SAY so, not
+    /// The refusal is the point: a node with no triangles must say so, not
     /// hand back an empty mesh a tool would treat as the truth.
     ///
     /// What it can say depends on the build. Naming the kind reads it off the

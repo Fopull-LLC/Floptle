@@ -1,6 +1,6 @@
 //! # floptle-ui — the game-facing UI system (docs/ui-make.md)
 //!
-//! NOT the editor UI (that's egui). This crate is the renderer-agnostic core:
+//! not the editor UI (that's egui). This crate is the renderer-agnostic core:
 //! the element vocabulary (shapes, images, text — no premade widgets, no
 //! imposed look), the layout solver (Free placement by default, Pin presets,
 //! opt-in Stack flow), and the draw-list builder the GPU pass consumes.
@@ -96,7 +96,7 @@ impl Anchor {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Place {
     /// Where you put it: offset from the parent's top-left, in design units.
-    /// THE DEFAULT — the designer stays in charge.
+    /// the default — the designer stays in charge.
     Free { pos: [f32; 2] },
     /// Stick to a parent edge/corner: the same 9-point of the element sits at
     /// the parent's point, plus an offset. HUD corners that follow the window.
@@ -186,7 +186,7 @@ impl Default for StackCfg {
 
 /// The visual primitive: a rounded rectangle. Radius 0 = sharp panel, radius
 /// ≥ half the short side = pill/circle. Transparency via the fill alpha.
-/// The engine ships no UI art — shapes + your textures + text ARE the kit.
+/// The engine ships no UI art — shapes + your textures + text are the kit.
 ///
 /// Everything past `fill`/`radius`/`border` is optional and defaults to off, so
 /// a shape authored against the first cut of the UI system looks identical.
@@ -195,7 +195,7 @@ impl Default for StackCfg {
 /// side (rules and accent bars stop costing an extra node), `grain` (the
 /// cheapest cure for plastic-looking UI), and `glow`/inset `shadow` (light and
 /// recession).
-// NOT `Copy` since `frame` arrived: a 9-slice carries a texture path, and a path is a
+// not `Copy` since `frame` arrived: a 9-slice carries a texture path, and a path is a
 // String. Everything here was scalar until then, and the copies were incidental rather
 // than load-bearing — the emit path borrows the shape and clones only the path itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,7 +247,7 @@ pub struct ShapeSpec {
 pub struct FrameSpec {
     /// Texture asset path — normally a sheet holding many frames.
     pub texture: String,
-    /// UV sub-rect `[min_u, min_v, max_u, max_v]` of the sheet: WHICH frame.
+    /// UV sub-rect `[min_u, min_v, max_u, max_v]` of the sheet: which frame.
     #[serde(default = "full_uv")]
     pub uv: [f32; 4],
     /// 9-slice insets `[L, T, R, B]` as a fraction of `uv`. All zero would stretch
@@ -343,7 +343,7 @@ pub struct TextSpec {
     /// **The half that spans alone cannot do.** Glyph positions are computed
     /// inside the renderer and never surface, so a game could not move one
     /// letter at any price — no wobble, no jitter, no per-glyph reveal. This is
-    /// applied AFTER layout, so displacing a glyph never re-wraps the line it
+    /// applied after layout, so displacing a glyph never re-wraps the line it
     /// is in and never moves its neighbours.
     ///
     /// Indexed by character of the authored string, shorter is fine (the rest
@@ -371,7 +371,7 @@ pub struct TextSpec {
 /// span boundary is not a line-break opportunity a plain string would not have
 /// had — a two-colour run wraps identically to the same string in one colour,
 /// and a test says so. That is also why a span cannot change `size` or `font`:
-/// those WOULD change the layout, and a field that quietly did nothing would be
+/// those would change the layout, and a field that quietly did nothing would be
 /// worse than its absence.
 ///
 /// **`len` is CHARACTERS, not bytes.** This is text a human authored, and "the
@@ -460,7 +460,7 @@ pub struct ImageSpec {
     ///
     /// This is what makes authored panel art usable at all. Without it a
     /// project's own border/frame textures smear when the panel resizes, which
-    /// is why both of Ty's projects draw panels with engine rects instead of
+    /// is why real projects draw panels with engine rects instead of
     /// their own art.
     #[serde(default, skip_serializing_if = "is_zero4")]
     pub slice: [f32; 4],
@@ -527,7 +527,7 @@ impl ImageSpec {
     /// the renderer actually samples. Repeats above 1 rely on a repeating
     /// sampler; `offset` is in tiles, so animating it scrolls the fill.
     ///
-    /// Tiling a spritesheet CELL would sample its neighbours, so tiling is
+    /// Tiling a spritesheet cell would sample its neighbours, so tiling is
     /// ignored on a sheet — the cell rect wins.
     pub fn tiled_uv(&self) -> [f32; 4] {
         let base = self.cell_uv();
@@ -605,16 +605,16 @@ pub enum SliderPart {
 }
 
 /// Clip other elements to this element's rounded rect. Targets are node names
-/// (any elements in the same layer); each target's WHOLE subtree clips. If two
+/// (any elements in the same layer); each target's whole subtree clips. If two
 /// masks claim the same element, the mask earliest in scene order wins.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MaskSpec {
     pub targets: Vec<String>,
 }
 
-/// A vertical SCROLL VIEW: children keep their authored layout but shift up by
+/// A vertical SCROLL view: children keep their authored layout but shift up by
 /// `offset` and clip to this element's rounded rect (an implicit mask over its
-/// own subtree — draw AND hit-testing). The wheel drives `offset` while the
+/// own subtree — draw and hit-testing). The wheel drives `offset` while the
 /// pointer is anywhere inside the view, clamped so the content can never
 /// scroll fully out; scripts read/write it as `UiElement.scrollY`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -651,7 +651,7 @@ impl Default for ScrollSpec {
     }
 }
 
-/// A UI element — the ONE node kind. What it looks like is whichever visual
+/// A UI element — the one node kind. What it looks like is whichever visual
 /// specs are present (shape, then image, then text — that's the draw order);
 /// how it sits is `place` + `size`; whether it arranges children is `stack`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -704,7 +704,7 @@ pub struct ElementSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub button: bool,
     /// Name of a style in the project's style sheet (empty = none). At most
-    /// ONE — no lists, no classes, no selectors (see `style.rs`). Whatever the
+    /// one — no lists, no classes, no selectors (see `style.rs`). Whatever the
     /// style doesn't mention stays exactly as authored here.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub style: String,
@@ -769,7 +769,7 @@ pub struct ElementSpec {
     ///
     /// Opt-in, because "everything with a button flag is focusable" is wrong
     /// often enough to matter — a clickable background, a drag handle, a row
-    /// that only responds to a long press. What a focused element LOOKS like is
+    /// that only responds to a long press. What a focused element looks like is
     /// the style's `focus` block; the engine draws no ring of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub focusable: bool,
@@ -824,7 +824,7 @@ pub struct ElementSpec {
     /// engine only counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeater: Option<RepeatSpec>,
-    /// This element IS the layer's tooltip: one of yours, an ordinary panel
+    /// This element is the layer's tooltip: one of yours, an ordinary panel
     /// with a label inside, styled however you like.
     ///
     /// The engine never draws a tooltip of its own. It hides this element when
@@ -1008,14 +1008,14 @@ impl Default for ElementSpec {
 /// A scrollbar's link to the view it drives.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScrollBar {
-    /// The scroll view's element NAME, within this layer.
+    /// The scroll view's element name, within this layer.
     pub target: String,
     /// Which axis this bar drives. `Column` = the vertical bar.
     #[serde(default)]
     pub axis: Dir,
 }
 
-/// Per-element navigation overrides: the element NAME to focus when this
+/// Per-element navigation overrides: the element name to focus when this
 /// direction is pressed from here. An empty string means "work it out from the
 /// geometry", so you override only the edges that need it.
 ///
@@ -1061,7 +1061,7 @@ pub enum UiSpace {
 }
 
 /// How a layer's design units map to physical pixels as the window resizes —
-/// the canvas scaler (cf. Unity's CanvasScaler). Every mode resolves to ONE
+/// the canvas scaler (cf. Unity's CanvasScaler). Every mode resolves to one
 /// uniform `scale` (physical px per design unit); the design viewport handed to
 /// the solver is then `window_px / scale`, so the whole layout pipeline stays
 /// unchanged.
@@ -1079,7 +1079,7 @@ pub enum UiScaleMode {
     /// 1 = height) using the log-2 average — the fully responsive choice that
     /// splits the difference across aspect ratios.
     Blend,
-    /// Fit the whole reference resolution INSIDE the window (letterbox): the UI
+    /// Fit the whole reference resolution inside the window (letterbox): the UI
     /// never crops, but leaves empty margins on off-aspect monitors.
     Expand,
     /// Fill the window with the reference resolution (may crop): no empty
@@ -1115,7 +1115,7 @@ pub struct UiLayer {
     /// Master switch: an off layer draws nothing (in-game and in-editor).
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Snap the canvas scale to a WHOLE number of pixels per design unit.
+    /// Snap the canvas scale to a whole number of pixels per design unit.
     ///
     /// What a pixel-art HUD wants and nothing else does, which is why it is off
     /// by default: a fractional scale resamples a pixel font off its own grid,
@@ -1140,7 +1140,7 @@ pub struct UiLayer {
     /// Reported as *"each character looks like it's just not positioned exactly
     /// correctly"* — and **nothing is mispositioned**. The layout can be exact
     /// integers and the text still reads as badly spaced, because the
-    /// distortion is INSIDE each glyph rather than between them. Everyone who
+    /// distortion is inside each glyph rather than between them. Everyone who
     /// meets that symptom goes and audits the positioning code, which is
     /// correct. It is worth knowing that is where the hour goes.
     ///
@@ -1275,7 +1275,7 @@ impl UiLayer {
         // the glyph is resampled off its own grid and the whole HUD reads as
         // mush at one window size and crisp at another.
         //
-        // Rounding DOWN rather than to the nearest keeps every element inside
+        // Rounding down rather than to the nearest keeps every element inside
         // the viewport, and the leftover becomes margin: the design canvas is
         // solved slightly LARGER (243 units, not 240), so anchored elements
         // stay against their edges and centred ones stay centred. That is the
@@ -1618,7 +1618,7 @@ pub struct Clip {
     pub radius: f32,
 }
 
-/// A visual (NOT layout) transform applied to a quad about a pivot inside its
+/// A visual (not layout) transform applied to a quad about a pivot inside its
 /// own rect. Layout already happened; this only turns and scales the drawing,
 /// so juice can never reflow a screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1650,9 +1650,9 @@ pub enum QuadKind {
     /// Rounded rect: gradient/flat fill, per-side border, optional texture.
     #[default]
     Shape,
-    /// A feathered rounded rect drawn BEHIND the shape (drop shadow, glow).
+    /// A feathered rounded rect drawn behind the shape (drop shadow, glow).
     Shadow,
-    /// A feathered rounded rect drawn INSIDE the shape (recessed well).
+    /// A feathered rounded rect drawn inside the shape (recessed well).
     InsetShadow,
 }
 
@@ -1767,7 +1767,7 @@ pub struct TextRun {
     /// this rides the run rather than arriving as pre-computed quads.
     pub caret: Option<Caret>,
     /// Per-stretch colours, in characters of [`Self::text`] — the string as
-    /// DRAWN, so the case transform has already been folded through them.
+    /// drawn, so the case transform has already been folded through them.
     pub spans: Vec<TextSpan>,
     /// Per-character draw-time displacement, design units, same indexing.
     pub glyph_offsets: Vec<[f32; 2]>,
@@ -1818,7 +1818,7 @@ impl Default for TextRun {
 /// Which element is being typed into, and where its caret is.
 ///
 /// Runtime state, held by the editor/player and handed to [`draw_list_with`]
-/// once per frame. It is deliberately NOT part of [`ElementSpec`]: a caret
+/// once per frame. It is deliberately not part of [`ElementSpec`]: a caret
 /// position in a saved scene would be nonsense, and keeping it out means it is
 /// structurally impossible for one to get there.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2006,7 +2006,7 @@ pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> [f32; 2]
 ///
 /// `masks` is `(mask element id, target element id)` pairs: the target and its
 /// whole subtree clip to the mask's solved rect (+ the mask's shape radius).
-/// When several masks claim the same element, the FIRST pair wins — build the
+/// When several masks claim the same element, the first pair wins — build the
 /// list in scene order and the rule is "earliest mask in the scene wins". A
 /// mask that wasn't placed this frame (hidden) clips nothing.
 pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> DrawList {
@@ -2140,7 +2140,7 @@ pub fn draw_list_with(
                 xform,
                 ..Default::default()
             });
-            // Inset shadow rides ON TOP of the fill (it is a hole in the
+            // Inset shadow rides on top of the fill (it is a hole in the
             // surface, not something behind it) but under the image and text.
             if let Some(sh) = s.shadow
                 && sh.inset
@@ -2230,7 +2230,7 @@ pub fn draw_list_with(
             });
         }
         if let Some(t) = &spec.text {
-            // A field's text is what the PLAYER typed, so three things differ
+            // A field's text is what the player typed, so three things differ
             // from an ordinary label: an empty one shows the placeholder, a
             // masked one shows dots, and the one being edited carries a caret.
             let editing = edit.filter(|e| e.id == p.id);
@@ -2284,7 +2284,7 @@ pub fn draw_list_with(
                 }),
                 _ => None,
             };
-            // An empty label still draws nothing; an empty FIELD being edited
+            // An empty label still draws nothing; an empty field being edited
             // has to, or the caret has nowhere to appear.
             if !shown.is_empty() || caret.is_some() {
                 dl.texts.push(TextRun {
@@ -2326,7 +2326,7 @@ pub fn draw_list_with(
     dl
 }
 
-/// Re-express authored spans against the string as it will be DRAWN.
+/// Re-express authored spans against the string as it will be drawn.
 ///
 /// The authored string is what a caller measures, hashes and counts characters
 /// of, so spans are authored against it; the renderer draws the case-transformed
@@ -2418,7 +2418,7 @@ mod tests {
     }
 
     /// The scroll-view contract in one place: children shift up by the offset,
-    /// the view clips its subtree (draw AND hit-test share `scroll_clips`),
+    /// the view clips its subtree (draw and hit-test share `scroll_clips`),
     /// and `scroll_max` is exactly content-height − view-height (and 0 when
     /// the content fits — a fitting view must never scroll).
     #[test]
@@ -2455,7 +2455,7 @@ mod tests {
         assert_eq!(clips.get(&r0).map(|c| c.rect), Some([10.0, 20.0, 120.0, 100.0]));
         assert_eq!(clips.get(&r3).map(|c| c.rect), Some([10.0, 20.0, 120.0, 100.0]));
         assert!(!clips.contains_key(&roots[0].id), "the view itself is not clipped");
-        // Content is 190 tall in a 100-tall view → 90 of travel, at ANY offset.
+        // Content is 190 tall in a 100-tall view → 90 of travel, at any offset.
         // The rows are 120 wide in a 120-wide view, so there is no X travel —
         // which is also how the wheel knows this view scrolls vertically.
         assert_eq!(scroll_max(&roots, &placed, roots[0].id), [0.0, 90.0]);
@@ -2604,7 +2604,7 @@ mod tests {
         );
         let roots = [view];
         let placed = solve(&roots, [1280.0, 720.0], &m);
-        // Content slid LEFT by the horizontal offset; vertical is untouched.
+        // Content slid left by the horizontal offset; vertical is untouched.
         assert_eq!(rect_of(&placed, first)[0], 10.0 - 120.0);
         assert_eq!(rect_of(&placed, first)[1], 10.0);
         // 640 of content in a 300 view → 340 of horizontal travel, no vertical.
@@ -3056,7 +3056,7 @@ mod tests {
         Some(ShapeSpec { fill, ..Default::default() })
     }
 
-    /// THE headline behaviour change: `opacity` used to be self-only, so a
+    /// the headline behaviour change: `opacity` used to be self-only, so a
     /// parent could not fade its children and projects parked a black rect over
     /// the screen instead.
     #[test]
@@ -3214,7 +3214,7 @@ mod tests {
         assert_eq!(plain.tiled_uv(), [0.0, 0.0, 3.0, 2.0]);
     }
 
-    /// Every scene in Ty's projects was authored against the first cut. They
+    /// Every existing scene was authored against the first cut. They
     /// must load with no edits — this is the exact shape RON from
     /// `Fofighter/scenes/menu.ron`.
     #[test]
@@ -3263,7 +3263,7 @@ mod tests {
     /// `floptle/0172`: spans round-trip, and an old scene stays an old scene.
     ///
     /// The absence half is checked by `unused_extras_do_not_serialize`, which
-    /// names both new fields — this is the other direction: a run that DOES
+    /// names both new fields — this is the other direction: a run that does
     /// carry them has to survive a save and a load, or the colours are a
     /// runtime-only trick that a designer cannot author.
     #[test]
@@ -3294,7 +3294,7 @@ mod tests {
     /// Untouched extras must not appear in saved scenes, or every save churns
     /// the whole file and the diff stops being reviewable.
     ///
-    /// Checked against a REAL element shape (shape + text + image all present),
+    /// Checked against a real element shape (shape + text + image all present),
     /// because the first version of this test only covered `ShapeSpec` and
     /// happily let five new `TextSpec` fields into every save.
     #[test]
@@ -3379,7 +3379,7 @@ mod tests {
             assert!(!scroller.contains(absent), "`{absent}` leaked into {scroller}");
         }
 
-        // A default FIELD writes only the fact that it is one — the caret
+        // A default field writes only the fact that it is one — the caret
         // width, the mask character and the three "follow the text colour"
         // sentinels all stay out of the file.
         let f = ron::to_string(&ElementSpec {
@@ -3635,7 +3635,7 @@ mod tests {
         // The panel from the report: 486 rows over a 240-unit design.
         assert_eq!(pixel(false).scale_for([864.0, 486.0]), 2.025, "the old, fractional answer");
         assert_eq!(pixel(true).scale_for([864.0, 486.0]), 2.0, "…snapped down to whole pixels");
-        // Rounding DOWN, so nothing is pushed out of the viewport: the design
+        // Rounding down, so nothing is pushed out of the viewport: the design
         // canvas comes out slightly LARGER (243 units, not 240) and the extra
         // is margin — which is what keeps anchored elements against their edge
         // and means no offset, and therefore no pointer skew, is involved.
@@ -3662,7 +3662,7 @@ mod tests {
         assert_eq!(text_px(raw, 10.0), 40, "on: a whole 4 pixels per cell");
         assert_eq!(text_px(40.0, 10.0) % 10, 0);
 
-        // NEAREST, not down: a pixel font is as wrong one cell small as one
+        // nearest, not down: a pixel font is as wrong one cell small as one
         // cell large, and rounding down would shrink every label at every size.
         assert_eq!(text_px(46.0, 10.0), 50);
         assert_eq!(text_px(44.0, 10.0), 40);
@@ -3743,7 +3743,7 @@ mod tests {
         // Sorted by order; the two ties (2, 3) keep the order they were built in.
         assert_eq!(ids, vec![4, 2, 3, 1]);
 
-        // An untouched tree is EXACTLY scene order — the back-compat guarantee.
+        // An untouched tree is exactly scene order — the back-compat guarantee.
         let plain = Node::with_children(
             0,
             ElementSpec::default(),

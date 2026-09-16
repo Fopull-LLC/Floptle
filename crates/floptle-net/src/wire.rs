@@ -3,7 +3,7 @@
 //! [`Channel::UnreliableSequenced`] — only the newest matters, loss is healed
 //! by periodic keyframes (full-state snapshots), not resends.
 //!
-//! v1 deliberately sends full values for CHANGED entities (dirty-flag
+//! v1 deliberately sends full values for changed entities (dirty-flag
 //! detection) rather than baseline-delta compression — correct first, compact
 //! in phase 2e when the bandwidth profiler exists to measure it.
 
@@ -29,7 +29,7 @@ pub const CHECKSUM_EVERY: u64 = 30;
 /// client typed.
 ///
 /// `proof` is the part that makes this an identity rather than an assertion:
-/// a short-lived credential the SERVER can check with the provider, scoped so
+/// a short-lived credential the server can check with the provider, scoped so
 /// that handing it over does not hand over the account. Until such a credential
 /// exists (`contracts/identity-auth.md` has no third-party verification route
 /// today — see the follow-on task), it is `None`, the server records the claim
@@ -85,11 +85,11 @@ impl AnimLayerWire {
 }
 
 /// One animator's state in a snapshot: the controller-wide speed (signed
-/// 1/256ths — covers reverse playback) + its layers. `sub` addresses WHICH
+/// 1/256ths — covers reverse playback) + its layers. `sub` addresses which
 /// animator under the networked node: 0 = the node itself, N = the Nth
 /// animator-carrying descendant in the deterministic subtree walk — the
 /// standard avatar is a Networked capsule whose CHILD Model carries the
-/// controller. Sent only on CHANGE (a transition, a weight/speed edit, or
+/// controller. Sent only on change (a transition, a weight/speed edit, or
 /// unpredictable time — a looping clip's time is predicted, not re-sent),
 /// plus keyframes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,8 +123,8 @@ pub struct SnapEntry {
 }
 
 /// A serializable per-tick input snapshot — what a client's `fixedUpdate` saw,
-/// shipped to the server so the SAME controller script re-runs there with the
-/// SAME input (`docs/multiplayer.md` §6, the one-script model).
+/// shipped to the server so the same controller script re-runs there with the
+/// same input (`docs/multiplayer.md` §6, the one-script model).
 ///
 /// This carries **resolved actions**, not raw keys: bitmasks and axis values,
 /// which are both device-agnostic and fixed-size, so encoding is inherently
@@ -140,7 +140,7 @@ pub struct NetInput {
     /// shipping key-name strings every tick.
     ///
     /// The cost of indexing by position: both sides must agree on the map's
-    /// ORDER, which is what [`Msg::Hello`]'s `input_map` hash enforces.
+    /// order, which is what [`Msg::Hello`]'s `input_map` hash enforces.
     pub actions: u64,
     /// Actions whose down-edge landed on this tick.
     pub just_pressed: u64,
@@ -152,7 +152,7 @@ pub struct NetInput {
     pub axes2: Vec<(f32, f32)>,
     /// The owner's view direction — active-camera (yaw, pitch) at the tick.
     /// Camera-relative controllers read it via `input.aimYaw()` so movement is
-    /// IDENTICAL on client, server, and replay (a local camera node can't be).
+    /// identical on client, server, and replay (a local camera node can't be).
     pub aim: Option<[f32; 2]>,
 }
 
@@ -178,14 +178,14 @@ pub enum Msg {
     /// Client → server, first message on connect.
     ///
     /// `input_map` is [`floptle_input::InputMap::hash`] — a fingerprint of the
-    /// action map's SHAPE (its ordered names). Input commands index actions by
+    /// action map's shape (its ordered names). Input commands index actions by
     /// position, so two peers running differently-ordered maps would decode
     /// each other's input as the wrong actions and desync with no error
     /// anywhere. Refusing the connection is the only safe answer; a player's
     /// personal rebinds deliberately don't affect the hash.
     Hello { proto: u16, input_map: u64, identity: Option<IdentityClaim> },
     /// Server → client: accepted; your peer id, the current tick, the snapshot
-    /// cadence (ticks between snapshots), the CURRENT scene (project-root-
+    /// cadence (ticks between snapshots), the current scene (project-root-
     /// relative path + its epoch) — a late joiner lands in the scene the
     /// session is actually in, not whatever it had open — and the session's
     /// fixed rollback input delay.
@@ -225,7 +225,7 @@ pub enum Msg {
     /// authored fixed slots into the map scene instead and capped their player
     /// count at authoring time.
     ///
-    /// `id` numbers the ROOT. A descendant that carries its own `Networked`
+    /// `id` numbers the root. A descendant that carries its own `Networked`
     /// component is replicated in its own right, and its NetId is
     /// `id + <its index in this vector>` — derived rather than sent, because
     /// both ends spawn the same vector in the same order, so the indices are
@@ -262,12 +262,12 @@ pub enum Msg {
     ///
     /// It exists because the host cannot otherwise know when it is safe to stop
     /// re-sending a tick. Its own frontier says "I have everyone's input for
-    /// T", which is a different claim from "everyone HAS everyone's input for
+    /// T", which is a different claim from "everyone has everyone's input for
     /// T" — and dropping on the former is what let a single lost datagram
     /// deadlock a match permanently (floptle/0039).
     Input { entries: Vec<InputCmd>, confirmed: u64 },
     /// Either direction: a named remote call. `sender` is stamped by the
-    /// SERVER when relaying/receiving (clients can't spoof it). `tick` is the
+    /// server when relaying/receiving (clients can't spoof it). `tick` is the
     /// sender's PERCEIVED server tick (`{withInput = true}`, client → server
     /// only): the newest snapshot tick the client had applied when it fired —
     /// what lag compensation rewinds to (`docs/multiplayer.md` §7).
@@ -297,7 +297,7 @@ pub enum Msg {
     ///
     /// Re-sent whenever the roster changes, which restarts the match clock.
     RollbackStart { peers: Vec<PeerId>, input_delay: u8, seed: u64 },
-    /// Host → clients, every tick: a redundant window of EVERY peer's recent
+    /// Host → clients, every tick: a redundant window of every peer's recent
     /// APPLIED-tick inputs, so one lost packet costs nothing.
     ///
     /// The host is the arbiter and the fan-out point: peers send it their own
@@ -322,7 +322,7 @@ pub enum Msg {
     /// `net.on("desync")` so the game can end the match honestly rather than
     /// play out two different fights.
     Desync { tick: u64 },
-    /// Any peer → host, ONCE, after a `Desync`: that peer's labelled per-value
+    /// Any peer → host, once, after a `Desync`: that peer's labelled per-value
     /// breakdown of the offending tick.
     ///
     /// Sent only after the match is already lost, so it costs nothing in a
@@ -333,7 +333,7 @@ pub enum Msg {
     StateDetail { tick: u64, entries: Vec<(String, u64)> },
     /// Server → one client, periodically: input-timing feedback. `margin` is
     /// the smoothed number of ticks of that client's input still buffered
-    /// ahead when the server consumes one (negative = arriving LATE,
+    /// ahead when the server consumes one (negative = arriving late,
     /// repeat-last in use — mispredictions on the owner); `late` is the
     /// running repeat-last count for that peer. The client auto-tunes its
     /// input lead from this, so clock hitches and drift self-heal instead of

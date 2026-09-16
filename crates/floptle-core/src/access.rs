@@ -12,7 +12,7 @@
 //! deficiency — an engine that calls this "the game's problem" pushes it onto
 //! every game separately, and most will skip it.
 //!
-//! These are PLAYER settings, so a game's options menu drives them (`access.*`
+//! These are player settings, so a game's options menu drives them (`access.*`
 //! in Lua) and the engine honours them in the parts it owns: the UI's text sizes
 //! reflow, the post chain carries the filter, and UI transitions snap instead of
 //! sliding. What the engine cannot honour for you — a game's own camera shake —

@@ -173,7 +173,7 @@ impl History {
     /// The tick of an unconsumed press of `i` inside the window, if any.
     fn pending_press(&self, i: usize, within: u32) -> Option<u64> {
         let t = (*self.last_press.get(i)?)?;
-        // `tick` is the NEXT slot to write, so the tick just recorded is
+        // `tick` is the next slot to write, so the tick just recorded is
         // `tick - 1` and a press there has age 0. `within = 1` is therefore the
         // most recent tick alone, and `within = 4` covers ages 0..=3.
         let age = self.tick.checked_sub(1)?.checked_sub(t)?;
@@ -217,7 +217,7 @@ impl History {
         if motion.charge == 0 {
             return true;
         }
-        // A charge move additionally requires the FIRST direction to have been
+        // A charge move additionally requires the first direction to have been
         // held for `charge` ticks before the sequence ran. `age` is sitting on
         // the tick where that direction was matched, so count back from there.
         //
@@ -247,7 +247,7 @@ impl History {
         if n >= HISTORY_TICKS as u64 {
             return None;
         }
-        // `tick` is the NEXT slot to write, so the newest frame is at tick - 1.
+        // `tick` is the next slot to write, so the newest frame is at tick - 1.
         let abs = self.tick.checked_sub(n + 1)?;
         Some(self.ring[(abs % HISTORY_TICKS as u64) as usize])
     }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn qcf_rejects_a_skipped_diagonal() {
-        // 2 then 6 with no 3 between is NOT a quarter circle — this is the
+        // 2 then 6 with no 3 between is not a quarter circle — this is the
         // single most important negative case.
         let mut h = History::new();
         feed(&mut h, &[5, 5, 2, 2, 6, 6]);

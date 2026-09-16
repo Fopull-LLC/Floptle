@@ -239,7 +239,7 @@ fn doc_links_resolve() {
 fn published_pages_only_link_to_published_pages() {
     let root = repo().join("docs");
     let map = std::fs::read_to_string(root.join("site-map.json")).expect("docs/site-map.json");
-    // The published set is every path-shaped string BEFORE the `internal`
+    // The published set is every path-shaped string before the `internal`
     // object; everything after it is held back. Path-shaped means no
     // whitespace, which is what keeps the internal map's REASONS out — they
     // routinely end in a filename ("a proposal; the shipped guide is
@@ -306,13 +306,13 @@ fn published_pages_only_link_to_published_pages() {
 ///
 /// `floptle/0190`: three pages written for the people BUILDING the engine were
 /// classified as documentation for the people USING it, and the website
-/// publishes whatever the feed calls published. Ty found one of them on
+/// publishes whatever the feed calls published. One of them turned up on
 /// fopull.com — a north star telling a prospective user that the engine was not
 /// a product yet, four conditions after it had become one.
 ///
 /// The rule those three failed is in `site-map.json` under `//test`:
 /// **published = it helps somebody use the engine, and it is true today.** No
-/// machine can check the second half. What a machine CAN check is that a page
+/// machine can check the second half. What a machine can check is that a page
 /// does not say so itself — and every one of these documents announces what it
 /// is in its own opening lines, because an honest author writing a design
 /// record labels it as one. So the phrases below are not a style rule; they are

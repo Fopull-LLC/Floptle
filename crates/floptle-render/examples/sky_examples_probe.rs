@@ -1,7 +1,7 @@
 //! Contact sheet for every BUILT-IN Sky-stage example shader: each one is
 //! compiled through the production path, naga-validated against the real
 //! raymarch splice, and rendered at three times into one grid PNG (columns =
-//! shaders, rows = t seconds) — so a glance shows the look AND that it moves.
+//! shaders, rows = t seconds) — so a glance shows the look and that it moves.
 //!
 //! Asserts, per shader: the frame isn't flat (the sky actually drove the
 //! pixels) and the t=2 vs t=14 frames differ (the animation actually runs).
@@ -59,7 +59,7 @@ fn main() {
 
     let mut raymarch = Raymarch::new(&gpu);
     for (col, (name, sky)) in skies.iter().enumerate() {
-        // Validate the REAL splice before swapping it in (what the editor does).
+        // Validate the real splice before swapping it in (what the editor does).
         let src = Raymarch::preview_sky_source(&sky.sky_fn, floptle_shader::stdlib::SUPPORT_WGSL);
         floptle_shader::validate_module(&src)
             .unwrap_or_else(|e| panic!("{name}: spliced sky module invalid: {}", e.message));

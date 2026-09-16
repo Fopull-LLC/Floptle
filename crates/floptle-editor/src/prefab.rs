@@ -17,7 +17,7 @@ use crate::assets::{build_assets, unique_path};
 use crate::Editor;
 
 /// Parse a prefab file: pretty RON of `Vec<NodeDoc>`, tolerant of the node
-/// clipboard's `//floptle-nodes-v1` tag line (a pasted clipboard IS a prefab).
+/// clipboard's `//floptle-nodes-v1` tag line (a pasted clipboard is a prefab).
 pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
     let text = floptle_vfs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let body = text.trim_start().strip_prefix("//floptle-nodes-v1").unwrap_or(&text);
@@ -38,7 +38,7 @@ impl Editor {
     /// undo, Play. What differs is only where a save goes, and that is decided by
     /// `editing_prefab` being set — see [`Editor::save_scene`].
     ///
-    /// Note what a prefab does NOT bring with it. A scene open adopts terrain
+    /// Note what a prefab does not bring with it. A scene open adopts terrain
     /// fields, tilesets, map geometry and paint from beside the scene file; a
     /// prefab is nodes and nothing else. So those stores are cleared rather than
     /// left holding the previous scene's, which would otherwise sit under the
@@ -69,7 +69,7 @@ impl Editor {
         self.editing_prefab = Some(p.to_path_buf());
         // The prefab's own name, so every readout that says "which scene" says
         // which prefab instead. `scene_rel` stays the real path, which is what
-        // the title bar wants. Set BEFORE the adopts below, because the stores
+        // the title bar wants. Set before the adopts below, because the stores
         // they clear-then-reload are keyed by this name.
         self.scene_name = p
             .file_name()
@@ -222,7 +222,7 @@ impl Editor {
         }
     }
 
-    /// Instantiate a prefab into the open scene. `at` places the FIRST root
+    /// Instantiate a prefab into the open scene. `at` places the first root
     /// there (sibling roots keep their relative offsets); `None` keeps the
     /// authored placement. `parent` nests the new roots under a node (their
     /// authored root transforms become local offsets). Records undo and
@@ -307,9 +307,9 @@ impl Editor {
     }
 
     /// [`Self::cached_prefab_docs`] with the mtime supplied. `None` is what a
-    /// browser reports for EVERY file — a bundle has no clock — and it used to
+    /// browser reports for every file — a bundle has no clock — and it used to
     /// be read as "no file", so every `spawn()` in a web build silently did
-    /// nothing (the 2026-09-05 playtest: no NPCs, no entity, no tracers). A
+    /// nothing (a playtest: no NPCs, no entity, no tracers). A
     /// bundled file never changes, so `None` keys the cache like any other
     /// stamp: parsed once, good for the run. The file's existence was settled
     /// by `resolve_prefab_request`; a read that fails still reports.
@@ -372,7 +372,7 @@ impl Editor {
             self.apply_destroys(destroys);
         }
 
-        // `nav.rebake(centre, size)` — AFTER the spawns and the destroys, which
+        // `nav.rebake(centre, size)` — after the spawns and the destroys, which
         // is the whole point of it being a queue: a chunk asks for its box to be
         // re-measured in the same breath as it builds it, and the measurement
         // has to see the nodes rather than race them.
@@ -449,8 +449,8 @@ impl Editor {
                 self.register_meshes(fresh);
             }
             // Optional parenting (`spawn(name, pos, fn, parentNode)`): the
-            // spawned ROOTS go under the parent, keeping their WORLD pose —
-            // convert into the parent's local frame. Done BEFORE physics
+            // spawned ROOTS go under the parent, keeping their world pose —
+            // convert into the parent's local frame. Done before physics
             // wiring so ancestry rules (assembly parts) see the hierarchy.
             if let Some(pid) = req.parent {
                 let pe = self
@@ -488,7 +488,7 @@ impl Editor {
                 .zip(&docs)
                 .find(|(_, d)| d.parent.is_none())
                 .map(|(&e, _)| e);
-            // The callback runs BEFORE physics wiring (its transform writes
+            // The callback runs before physics wiring (its transform writes
             // flush inside call_spawn_callback): a spawned Static prop whose
             // callback orients it (a launchpad aligned to a planet surface)
             // must bake its collider at the ORIENTED pose, not the authored
@@ -630,7 +630,7 @@ impl Editor {
                     let new_root = self.perform_assembly_split(root, &parts, prefab.as_deref());
                     match (new_root, cb) {
                         (Some(nr), Some(cb)) => {
-                            // Re-feed the mirror FIRST: the callback's whole job
+                            // Re-feed the mirror first: the callback's whole job
                             // is to act on the fresh half (`assembly.info(stage)`
                             // → kick it clear, place it, read its mass), and the
                             // mirror it would otherwise see was fed before this
@@ -650,9 +650,9 @@ impl Editor {
         }
     }
 
-    /// Split `parts` out of the assembly rooted at `root_eid` into a NEW root
+    /// Split `parts` out of the assembly rooted at `root_eid` into a new root
     /// node named after the old vessel. With `prefab`, the detached half is
-    /// rooted at a fresh instance of that prefab (so it comes away as a LIVE,
+    /// rooted at a fresh instance of that prefab (so it comes away as a live,
     /// scripted craft — an undocked lander — instead of inert debris); the
     /// prefab's own RigidBody must carry the assembly flag. Returns the new
     /// root's entity index.
@@ -778,7 +778,7 @@ impl Editor {
         else {
             return false;
         };
-        // World poses BEFORE anything moves — the absorbed subtree must not
+        // World poses before anything moves — the absorbed subtree must not
         // shift a millimetre through the weld.
         let moving: Vec<Entity> = self
             .world
@@ -858,7 +858,7 @@ impl Editor {
             else {
                 continue; // already gone (double destroy is harmless)
             };
-            // A replicated node on a CLIENT is server-authoritative — destroying
+            // A replicated node on a client is server-authoritative — destroying
             // it locally would desync (the next snapshot resurrects it anyway).
             let client_owned = self.net_server.is_none()
                 && (self.net_client.as_ref().is_some_and(|(s, _)| s.net_id_of(target).is_some())
@@ -884,7 +884,7 @@ impl Editor {
             for e in doomed {
                 let idx = e.index();
                 gone.push(idx);
-                // On a server session, tracked nodes despawn THROUGH the session
+                // On a server session, tracked nodes despawn through the session
                 // (broadcasts to every client); everything else is local.
                 let tracked =
                     self.net_server.as_ref().is_some_and(|s| s.net_id_of(e).is_some());
@@ -908,7 +908,7 @@ impl Editor {
         }
         // Entity indices are recycled, so a `ui.make` behaviour closure left
         // on a destroyed element would fire on whatever node inherits its
-        // slot. Pruned here, at the ONE destroy path, rather than at each
+        // slot. Pruned here, at the one destroy path, rather than at each
         // caller.
         self.script_host.drop_ui_handlers(&gone);
         // Play-mode selections can now point at despawned entities.
@@ -924,7 +924,7 @@ mod tests {
 
     use crate::Editor;
 
-    /// The 2026-09-05 browser playtest: NPCs, the entity and the tracer pool
+    /// A browser playtest: NPCs, the entity and the tracer pool
     /// never spawned, with nothing in the log. In a browser every file's mtime
     /// is `None` (a bundle has no clock), and the prefab cache read `None` as
     /// "no such file" and gave up before the read. A stamp that is absent is a
@@ -949,7 +949,7 @@ mod tests {
         // never changes under the game and `None` keys the cache like a stamp.
         floptle_vfs::remove_file(&path).unwrap();
         assert!(ed.cached_prefab_docs_at(&path, None).is_some(), "parsed once, good for the run");
-        // A REAL stamp that differs is a change, and a change re-reads — which
+        // A real stamp that differs is a change, and a change re-reads — which
         // now fails, and says so, rather than serving the stale parse.
         assert!(ed.cached_prefab_docs_at(&path, Some(SystemTime::now())).is_none());
         assert!(
@@ -1256,14 +1256,14 @@ end
 
     /// Stop lands where it lands: after `update` has run and queued work, and
     /// before the driver drains the queue. Everything in flight belongs to the
-    /// session that just ended — a `createNode` applied on the NEXT Play names
+    /// session that just ended — a `createNode` applied on the next Play names
     /// a parent index the new scene has given to somebody else, and runs a
     /// callback closed over an environment that has been dropped.
     #[test]
     fn work_queued_on_the_last_frame_of_a_session_does_not_land_in_the_next_one() {
         let dir = std::env::temp_dir().join(format!("floptle_0061_q_{}", std::process::id()));
         let _ = floptle_vfs::create_dir_all(&dir);
-        // `parent` is the HUD layer's index in THIS session. Next session that
+        // `parent` is the HUD layer's index in this session. Next session that
         // index belongs to whatever the fresh world hands it to.
         floptle_vfs::write(
             dir.join("spawner.lua"),

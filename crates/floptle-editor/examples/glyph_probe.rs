@@ -1,5 +1,5 @@
 //! Renders every icon glyph the editor uses to a PNG, through the editor's real
-//! font stack, so a human can LOOK at the result.
+//! font stack, so a human can look at the result.
 //!
 //! Why not just ask egui? Because `Fonts::has_glyph` is unreliable on this font
 //! stack — it has reported glyphs missing that demonstrably render, and a
@@ -55,7 +55,7 @@ fn main() {
     let (w, h) = (cols * cell.0, rows * cell.1);
     let mut buf = vec![0u8; w * h * 4];
 
-    // A checkerboard of cells, so an empty glyph reads as an empty CELL rather
+    // A checkerboard of cells, so an empty glyph reads as an empty cell rather
     // than an ambiguous patch of background.
     for y in 0..h {
         for x in 0..w {

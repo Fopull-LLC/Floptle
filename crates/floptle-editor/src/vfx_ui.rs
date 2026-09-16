@@ -69,7 +69,7 @@ pub(crate) struct VfxUiState {
     /// The ScrollArea's offset last frame — the anchor for cursor-centred zoom.
     scroll_off: egui::Vec2,
     /// A scroll offset to force next frame (cursor-anchored zoom / Fit), applied
-    /// the SAME frame the zoom changes so the point under the cursor stays put.
+    /// the same frame the zoom changes so the point under the cursor stays put.
     scroll_target: Option<egui::Vec2>,
     /// Set by the Fit button; the canvas applies it once it knows the body width.
     fit_pending: bool,
@@ -362,7 +362,7 @@ pub(crate) enum LaneRef {
     /// A per-particle life-curve (x-domain = the particle's life, 0→1). Used for
     /// scalar (size) and colour props, which draw as one lane.
     Life(LifeProp),
-    /// ONE component (0=x,1=y,2=z) of a Vec3 life-curve, drawn as its own scalar
+    /// one component (0=x,1=y,2=z) of a Vec3 life-curve, drawn as its own scalar
     /// sub-lane with independent value dragging + auto-fit axis — the elegant way to
     /// automate a vector without wrestling a single 3-channel stop lane. The three
     /// sub-lanes share the underlying curve's key TIMES (a component edit rewrites
@@ -532,7 +532,7 @@ fn auto_fit_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
     (lo - pad, hi + pad)
 }
 
-/// Auto-fit ONE channel `ch` of a curve — each Vec3 sub-lane gets its own y-axis, so
+/// Auto-fit one channel `ch` of a curve — each Vec3 sub-lane gets its own y-axis, so
 /// e.g. a radians rotation channel and a 0..1 channel no longer share a cramped scale.
 fn auto_fit_channel(rt: &floptle_vfx::Curve, ch: usize) -> (f32, f32) {
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -1001,7 +1001,7 @@ fn starter_track(doc: &VfxEffectDoc) -> VfxTrackDoc {
 // Timeline canvas
 // ---------------------------------------------------------------------------
 
-/// Mouse-wheel navigation over the timeline, video-editor style. Handled BEFORE the
+/// Mouse-wheel navigation over the timeline, video-editor style. Handled before the
 /// ScrollArea so cursor-anchored zoom drives the offset the same frame the zoom
 /// changes (no lag): plain wheel zooms X about the cursor, Alt+wheel zooms Y (row
 /// height), and Ctrl/Shift+wheel fall through to the ScrollArea to pan. Also applies
@@ -1232,7 +1232,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 }
             });
 
-            // ---- clips (streams AND burst-trains — a burst is a clip whose Emit is
+            // ---- clips (streams and burst-trains — a burst is a clip whose Emit is
             // Burst; it draws with pulse ticks + a ×count label instead of a plain body) ----
             for (ci, clip) in track.clips.iter().enumerate() {
                 let x0 = view.time_to_x(clip.start.clamp(0.0, dur));
@@ -1486,7 +1486,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             shown,
             px,
         );
-        // What the effect DOES over time, under its ruler. The timeline's axis
+        // What the effect does over time, under its ruler. The timeline's axis
         // is already time and the one quantity that varies along it is how many
         // particles exist — so a change to a rate or a lane reads as a change to
         // the EFFECT here, not only as a change to a curve (`floptle/0099`).
@@ -1504,7 +1504,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
     st.scroll_off = out.state.offset;
 }
 
-/// Draw + edit ONE lane over the timeline (DAW-style) — a property shaped over the
+/// Draw + edit one lane over the timeline (DAW-style) — a property shaped over the
 /// particle's LIFE (velocity/size/rotation/colour) or an automation multiplier over
 /// the effect TIMELINE. Scalar lanes are a draggable point-curve on a fixed (auto)
 /// or auto-fit (life) range; vector/colour lanes draw their channels/gradient with
@@ -1526,7 +1526,7 @@ fn curve_lane_ui(
 ) {
     let Some(curve) = lane_curve(track, lref) else { return };
     let kind = curve.keys.first().map(|k| value_kind(&k.v)).unwrap_or(LaneVis::Scalar);
-    // A Vec3 sub-lane edits ONE channel of the shared curve as a draggable scalar; other
+    // A Vec3 sub-lane edits one channel of the shared curve as a draggable scalar; other
     // lanes keep their natural kind (scalar curve, colour strip, whole-vec3 stops).
     let channel: Option<usize> = match lref {
         LaneRef::LifeChannel(_, ch) => Some((ch as usize).min(2)),
@@ -1540,7 +1540,7 @@ fn curve_lane_ui(
     let rt = curve_from_doc(curve);
 
     // Value range: fixed for automation multipliers; auto-fit for life scalars (per
-    // channel for a Vec3 sub-lane, so each axis is independent), frozen while THIS lane's
+    // channel for a Vec3 sub-lane, so each axis is independent), frozen while this lane's
     // point is dragged so the fit can't feed back.
     let fit = || match channel {
         Some(ch) => auto_fit_channel(&rt, ch),
@@ -1607,7 +1607,7 @@ fn curve_lane_ui(
         *deferred = Some(DeferredEdit::DelLane(ti, lref));
     }
 
-    // ---- strip background + empty double-click-to-add (registered BEFORE the
+    // ---- strip background + empty double-click-to-add (registered before the
     // handles so the handles, drawn after, win the pointer where they overlap) ----
     painter.rect_filled(strip, 3.0, ui.visuals().extreme_bg_color);
     let sresp = ui.interact(strip, ui.id().with(("vfx-lane-strip", ti, lref)), Sense::click());

@@ -5,7 +5,7 @@
 //! possible without handing scripts a foot-gun.
 //!
 //! **Non-blocking, always.** A request is handed to a worker thread and the
-//! callback runs on a LATER TICK on the main thread, so it is safe to touch
+//! callback runs on a later tick on the main thread, so it is safe to touch
 //! nodes from it and a slow server can never stall a frame. There is no
 //! blocking form on purpose: the blocking form is the one everybody reaches
 //! for, and it turns a 300 ms round trip into a 300 ms freeze.
@@ -48,10 +48,10 @@ use crate::{LogLevel, ScriptLog};
 /// How many requests may be in flight at once. Past this, calls fail fast with
 /// `res.error` rather than queueing without bound.
 const MAX_IN_FLIGHT: usize = 8;
-/// How many may be STARTED per second. A script calling `http.get` every frame
+/// How many may be started per second. A script calling `http.get` every frame
 /// is a bug; this is where it finds out.
 const MAX_PER_SECOND: usize = 20;
-/// Largest body accepted in EITHER direction, in bytes. A reply past this fails
+/// Largest body accepted in either direction, in bytes. A reply past this fails
 /// with an error instead of buying a script an unbounded allocation; a request
 /// body past it is refused at the call, for the same reason from the other
 /// end — a script assembling a gigabyte to POST is a script that has gone
@@ -98,7 +98,7 @@ pub(crate) struct HttpState {
     generation: u64,
     /// Start times of this second's requests, for the per-second cap.
     recent: Vec<f64>,
-    /// The rate/in-flight caps announce themselves ONCE per session. Every
+    /// The rate/in-flight caps announce themselves once per session. Every
     /// frame would be a Console flood, and never would be a mystery.
     warned_rate: bool,
     warned_fixed: bool,
@@ -172,7 +172,7 @@ type ReadOpts = (Vec<(String, String)>, f64, Option<bool>);
 
 /// Read `opts` into (headers, timeout, explicit-json), refusing anything else.
 ///
-/// A misspelled `header = {...}` used to send the request WITHOUT the header —
+/// A misspelled `header = {...}` used to send the request without the header —
 /// so the server answered 401 and the game reported "the API is down".
 fn read_opts(
     call: &str,
@@ -213,7 +213,7 @@ fn read_opts(
 }
 
 /// Turn a `serde_json::Value` into a Lua value. Objects become tables, arrays
-/// become 1-based arrays, `null` becomes `nil` — which means a null FIELD
+/// become 1-based arrays, `null` becomes `nil` — which means a null field
 /// simply isn't there, the same thing a missing field looks like, and that is
 /// the right answer in Lua.
 pub(crate) fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
@@ -337,7 +337,7 @@ pub(crate) fn make_reply_table(
     if parse_json {
         match serde_json::from_str::<serde_json::Value>(body) {
             Ok(v) => t.set("json", json_to_lua(lua, &v)?)?,
-            // Malformed JSON SETS res.error rather than raising: a server
+            // Malformed JSON sets res.error rather than raising: a server
             // having a bad day must not take a script down with it.
             Err(e) if error.is_none() => {
                 t.set("ok", false)?;
@@ -357,7 +357,7 @@ fn reply_table(lua: &Lua, r: &HttpReply, want_json: bool) -> mlua::Result<Table>
     Ok(t)
 }
 
-/// Deliver every reply that has arrived. Called from the host's FRAME pass —
+/// Deliver every reply that has arrived. Called from the host's frame pass —
 /// never the tick pass, because a reply's arrival time is not reproducible and
 /// a replay must never see one.
 pub(crate) fn drain(
@@ -436,7 +436,7 @@ fn send(
             method.to_ascii_lowercase()
         )));
     }
-    // The address policy, applied to what the developer WROTE: a literal or a
+    // The address policy, applied to what the developer wrote: a literal or a
     // local name is refused here, at the call, with the hostname in the
     // message. What a name RESOLVES to is the resolver's job (`dispatch`), on
     // the worker thread, where a redirect's hop is checked the same way.
@@ -465,7 +465,7 @@ fn send(
         );
         s = state.borrow_mut();
     }
-    // A call from fixedUpdate warns ONCE. It is not an error — the request will
+    // A call from fixedUpdate warns once. It is not an error — the request will
     // work — but it can never be replayed, so a rollback match that depends on
     // it will diverge, and that is worth saying out loud exactly one time.
     if in_fixed.get() && !s.warned_fixed {
@@ -632,7 +632,7 @@ fn dispatch(
 /// The browser has no answer for this one yet — and says so, in the call, at the
 /// moment the script makes it.
 ///
-/// A browser CAN fetch; what it cannot do is any of it the way the rest of this
+/// A browser can fetch; what it cannot do is any of it the way the rest of this
 /// file assumes — a blocking agent on a thread of its own, with no regard for
 /// the origin the page was served from. That is `fetch` plus CORS plus an async
 /// reply, which is Phase 5 of the web plan and a real piece of work rather than
@@ -1125,7 +1125,7 @@ mod tests {
         drain(&lua, &state, &logs);
         assert_eq!(fired.get(), 1, "a live reply must reach its callback");
 
-        // Now Stop, then a reply stamped with the OLD generation arrives.
+        // Now Stop, then a reply stamped with the old generation arrives.
         let stale_gen = state.borrow().generation;
         {
             let f = fired.clone();
@@ -1155,7 +1155,7 @@ mod tests {
         assert_eq!(fired.get(), 1, "a reply to the previous session must fall on the floor");
     }
 
-    /// The `res` table: what `ok` means, that a 404's BODY still arrives (an
+    /// The `res` table: what `ok` means, that a 404's body still arrives (an
     /// API's error message lives in it), and that malformed JSON sets
     /// `res.error` instead of raising inside the callback.
     #[test]
@@ -1201,7 +1201,7 @@ mod tests {
 /// (floptle-platform `tasks/floptle/0054`). `#[ignore]`d: they need the
 /// network, so CI never runs them — `cargo test -p floptle-script -- --ignored
 /// --nocapture live_` when you want to prove the chain by hand.
-/// Where a request may GO — proved against a real socket on this machine, not
+/// Where a request may go — proved against a real socket on this machine, not
 /// against the classifier alone. Native only: the browser transport refuses
 /// every request before it has an address to judge.
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1255,7 +1255,7 @@ mod policy_tests {
                 .unwrap();
             lua.globals().set("__cb", cb).unwrap();
         }
-        // A refusal at the CALL is an error the script sees at once; one the
+        // A refusal at the call is an error the script sees at once; one the
         // resolver makes arrives through the callback. Both count.
         if let Err(e) = lua.load(code).exec() {
             return (false, 0, e.to_string(), String::new());
@@ -1275,7 +1275,7 @@ mod policy_tests {
     const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
 
     /// The whole point: under the refusing policy the listener on this
-    /// machine ACCEPTS NOTHING, and the script is told which rule said so.
+    /// machine ACCEPTS nothing, and the script is told which rule said so.
     #[test]
     fn a_game_cannot_reach_a_loopback_port_and_the_listener_sees_no_connection() {
         let (port, accepted) = serve(OK);
@@ -1478,7 +1478,7 @@ mod live_tests {
         );
     }
 
-    /// A real GET through the whole chain: worker thread, reply channel, the
+    /// A real get through the whole chain: worker thread, reply channel, the
     /// frame-pass drain, the `res` table, and the JSON parse. The discovery
     /// document is unauthenticated and stable, so this asserts on its content.
     #[test]

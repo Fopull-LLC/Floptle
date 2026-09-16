@@ -161,7 +161,7 @@ fn swap(
     let _ = tx.send(Progress::Verifying);
     verify_sha256(&archive, &artifact.sha256)?;
 
-    // Staged BESIDE the binary, because `rename` can't cross filesystems and the cache
+    // Staged beside the binary, because `rename` can't cross filesystems and the cache
     // routinely is one.
     let staging = dir.join(".floptle-hub-staging");
     let _ = std::fs::remove_dir_all(&staging);

@@ -1,7 +1,7 @@
 //! Every view draws the same world.
 //!
 //! The editor gathers draws twice: once for the main surface (the Scene view)
-//! and once in `render_world_into`, which every OTHER view comes through — the
+//! and once in `render_world_into`, which every other view comes through — the
 //! docked or split Game view, camera previews, and render targets.
 //!
 //! Those two have now drifted three times, and each time the symptom was
@@ -11,7 +11,7 @@
 //! game was invisible in the one view that *is* the game, and the Scene view
 //! insisted everything was fine.
 //!
-//! `render_world_into`'s match is exhaustive now, so a NEW kind of matter cannot
+//! `render_world_into`'s match is exhaustive now, so a new kind of matter cannot
 //! be dropped silently. This covers the other half: an existing kind being drawn
 //! in one gather and not the other. It is a source-level check because there is
 //! no way to ask a GPU-less test what a view drew.
@@ -60,7 +60,7 @@ const GATHERS: [(&str, &str); 12] = [
     // Game view posterizes its lighting while the Scene view does not
     // (`floptle/0127`).
     ("quantize_palette", "the palette quantize, before the 2D light"),
-    // Also not geometry: where the baked GI volume IS. The probe texture is
+    // Also not geometry: where the baked GI volume is. The probe texture is
     // shared, but the four uniform lanes that locate it are camera-relative, so
     // they have to be stamped per view. Stamped on one path only, the Game view
     // would render with no bounce at all while the Scene view looked right —
@@ -82,7 +82,7 @@ const GATHERS: [(&str, &str); 12] = [
     // views, so the window drew with the Game panel's depth buffer). The two
     // are one call now, which is why the name above covers both.
     ("wants_prepass", "the shared answer to whether this view needs a prepass"),
-    // Same shape as the GI volume above: the probe TEXTURE is shared, and the
+    // Same shape as the GI volume above: the probe texture is shared, and the
     // lanes that say where each probe's room is are camera-relative, so they
     // have to be stamped per view. Stamped on one path only, a docked Game
     // panel would reflect the sky indoors while the Scene view reflected the
@@ -94,9 +94,9 @@ const GATHERS: [(&str, &str); 12] = [
     // correctly while never publishing what it drew. A real 40-light scene
     // then read `lights=0` through the Game view (which comes through here)
     // while a Scene-view session of the very same scene read it correctly —
-    // the number was never THIS camera's, it was whichever gather had run
+    // the number was never this camera's, it was whichever gather had run
     // last. Draws, lights, nodes, chunks, particles: none of it reached
-    // `perf.counts()` from the one path that draws every OTHER view
+    // `perf.counts()` from the one path that draws every other view
     // (`floptle/0167`).
     ("set_counts", "the render counts a game reads via perf.counts()"),
 ];
@@ -196,7 +196,7 @@ fn the_two_gathers_are_actually_two() {
 /// from a copy of start-up that stopped one line too early.
 ///
 /// So the rule is that anything the draw binds is created in
-/// `Editor::init_gpu_side`, which is the ONE function both the window and the
+/// `Editor::init_gpu_side`, which is the one function both the window and the
 /// headless verb go through. This reads the bind list out of the source rather
 /// than restating it, so adding a seventh thing to the tuple and forgetting the
 /// setup fails here instead of in somebody's black PNG.
@@ -205,7 +205,7 @@ fn every_field_a_scene_render_binds_is_set_up_in_one_place() {
     let off = offscreen();
     // The six-way bind, as written: `self.<field>.as_ref()` / `.as_mut()` inside
     // the tuple that guards the draw.
-    // Anchored on the LAST member of the tuple and walked back to the `) = (`
+    // Anchored on the last member of the tuple and walked back to the `) = (`
     // that opens it: anchoring on the first member instead finds an earlier,
     // unrelated `self.raster.as_mut()` and reads a window that is not the bind.
     let last = off.find("self.tri_layer.as_mut(),").expect(

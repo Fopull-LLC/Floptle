@@ -56,7 +56,7 @@ pub enum RedirectError {
     /// store, or a different browser. The code cannot be spent without the
     /// verifier, so this is terminal rather than retryable.
     NoHandshake,
-    /// **`state` did not match, so the code was NOT spent.** The one check that
+    /// **`state` did not match, so the code was not spent.** The one check that
     /// has to happen before the code is worth anything.
     StateMismatch,
     /// The provider refused, with its own reason.
@@ -283,7 +283,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            // `+` is a space in a query string, which is NOT the same rule as in
+            // `+` is a space in a query string, which is not the same rule as in
             // a path — and an OAuth `error_description` is exactly the field
             // that arrives with spaces in it.
             b'+' => {
@@ -325,8 +325,8 @@ mod tests {
     /// **The client id must be on every request.** `client_id` is optional at
     /// `/oauth/token` and defaults to `floptle-hub`, so leaving it off does not
     /// fail as a missing parameter — it silently resolves to the Hub and is then
-    /// refused the grant. That is the exact silent-wrong-answer shape this
-    /// engine's bug ledger is full of, so it is pinned on all three requests.
+    /// refused the grant. That is the silent-wrong-answer shape, so it is
+    /// pinned on all three requests.
     #[test]
     fn every_request_names_the_web_client() {
         let c = client();
@@ -491,7 +491,7 @@ pub mod browser {
 
     /// Where the handshake waits while the player is away at fopull.com. It
     /// holds the PKCE verifier, so it is cleared the moment it is spent —
-    /// including when the exchange FAILS, because a code cannot be spent twice
+    /// including when the exchange fails, because a code cannot be spent twice
     /// and a verifier kept past its code is a secret with no purpose.
     const STASH_KEY: &str = "com.fopull.floptle.pkce";
 
@@ -508,7 +508,7 @@ pub mod browser {
         storage()?.set_item(STASH_KEY, &json).map_err(|_| "could not stash the sign-in".to_string())
     }
 
-    /// Read the handshake AND remove it in one go: a stash that survives its own
+    /// Read the handshake and remove it in one go: a stash that survives its own
     /// redirect is a replay window.
     pub fn take_stash() -> Option<Handshake> {
         let s = storage().ok()?;
@@ -657,7 +657,7 @@ pub mod browser {
     /// by asking who this is and what they are entitled to.
     ///
     /// Both calls are cross-origin fetches and therefore CORS; a failure here
-    /// leaves the player NOT signed in rather than half signed in, because a
+    /// leaves the player not signed in rather than half signed in, because a
     /// session with no identity is one the Inspector and the Hub would both
     /// render as blank.
     pub async fn identify(client: &WebClient, tokens: Tokens) -> Result<Session, String> {
@@ -668,7 +668,7 @@ pub mod browser {
         let who: crate::auth::UserInfo = serde_json::from_str(&body)
             .map_err(|e| format!("could not read the account: {e}"))?;
         // Entitlements are allowed to fail soft: not knowing the tier is a
-        // signed-in player, not a failed sign-in. What it is NOT is a player on
+        // signed-in player, not a failed sign-in. What it is not is a player on
         // the free tier — `floptle/0189`. A page has no keyring to read a last
         // known plan out of, so `unknown` is the whole of the fallback here.
         let ent = match get_bearer(&client.entitlements_url(), &tokens.access_token).await {
@@ -682,7 +682,7 @@ pub mod browser {
     /// Trade the stored refresh token for a fresh session, keeping the identity
     /// already known.
     ///
-    /// **The answer carries a NEW refresh token and the old one is dead the
+    /// **The answer carries a new refresh token and the old one is dead the
     /// moment it is used** (§6.2, rotation with reuse detection) — so the caller
     /// must persist what comes back before making another call, or the next
     /// refresh presents a rotated token and revokes the whole session.

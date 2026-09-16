@@ -1,5 +1,5 @@
 //! Spritesheet probe: a Material that slices its base texture into a grid must
-//! draw exactly ONE cell, filling the quad — no neighbours bleeding in, no
+//! draw exactly one cell, filling the quad — no neighbours bleeding in, no
 //! shrunken copy of the whole sheet.
 //!
 //! The mechanism under test is `Material::effective_tiling` composed with
@@ -163,7 +163,7 @@ fn main() {
                 let want = cell_color(cell % COLS, cell / COLS);
                 let d: i32 = (0..3).map(|k| (got[k] as i32 - want[k] as i32).abs()).max().unwrap();
                 println!("cell {cell:>2}: want {want:?}  got {:?}  Δ{d}", &got[..3]);
-                // A quad showing ONE cell is flat, so its corners must match its
+                // A quad showing one cell is flat, so its corners must match its
                 // centre — this is what a half-cell offset or a bleeding window
                 // would break even when the centre pixel looks right.
                 let quarter = HALF * 0.6;
@@ -182,7 +182,7 @@ fn main() {
             }
             None => {
                 // The control: no sheet ⇒ the whole 4×4 grid, so the quad's own
-                // quarters must NOT all be one colour. If they are, the "sheet"
+                // quarters must not all be one colour. If they are, the "sheet"
                 // texture had nothing to slice and every assert above was vacuous.
                 let l = at(sx(quad_x(i) - HALF * 0.6), 0.5);
                 let r = at(sx(quad_x(i) + HALF * 0.6), 0.5);

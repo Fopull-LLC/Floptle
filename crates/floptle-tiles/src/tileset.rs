@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// One side of a tile — which half a [`TileCollision::Half`] covers, named in
-/// the tile's OWN art orientation (before any rotation).
+/// the tile's own art orientation (before any rotation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TileSide {
     Top,
@@ -240,7 +240,7 @@ pub struct TileInfo {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub mask: u8,
     /// Extra cells this tile cycles through, `anim_fps` per second. The tile's
-    /// own index is frame 0 and is NOT repeated here, so a two-frame flicker is
+    /// own index is frame 0 and is not repeated here, so a two-frame flicker is
     /// a one-entry list.
     pub frames: Vec<u32>,
     /// Frames per second. Zero (the default) means "do not animate", which is
@@ -315,7 +315,7 @@ impl AutotileKind {
 
 /// One rule of an autotile group: a neighbourhood, and the tiles that draw it.
 ///
-/// `tiles` is a LIST, and both directions of that matter to somebody drawing a
+/// `tiles` is a list, and both directions of that matter to somebody drawing a
 /// tileset:
 ///
 /// * **The same tile may appear in any number of rules.** A plain fill square
@@ -411,7 +411,7 @@ impl AutotileGroup {
         self.rule_mut(mask).tiles.push(cell);
     }
 
-    /// Drop ONE occurrence of `cell` from a rule, at `nth` among its variants.
+    /// Drop one occurrence of `cell` from a rule, at `nth` among its variants.
     /// Removing by position rather than by value is what lets a duplicate be
     /// removed once without taking its twin with it.
     pub fn remove_variant(&mut self, mask: u8, nth: usize) {
@@ -464,7 +464,7 @@ pub struct TileSet {
     pub texture: String,
     pub sheet_cols: u32,
     pub sheet_rows: u32,
-    /// The sheets AFTER the first. `texture`/`sheet_cols`/`sheet_rows` above are
+    /// The sheets after the first. `texture`/`sheet_cols`/`sheet_rows` above are
     /// page 0; these are pages 1, 2, … in order (`floptle/0092`).
     ///
     /// Kept as a tail rather than folding page 0 into the list so a tileset
@@ -503,7 +503,7 @@ impl Default for TileSet {
 }
 
 impl TileSet {
-    /// How many cells the FIRST sheet has.
+    /// How many cells the first sheet has.
     ///
     /// Page 0's count, not the tileset's total — the total is not a meaningful
     /// number under paging (the index space between two pages is a gap, not a
@@ -584,7 +584,7 @@ impl TileSet {
     /// arms its autotile".
     ///
     /// A tile can now be drawn by more than one group, so this is a UI
-    /// convenience and NOT what masking asks — masking wants every group the
+    /// convenience and not what masking asks — masking wants every group the
     /// tile belongs to, which is [`Self::groups_of`] (and, in the inner loop,
     /// [`crate::Autotiler::counts_as`]).
     pub fn group_of(&self, cell: u32) -> Option<u16> {
@@ -621,7 +621,7 @@ impl TileSet {
     /// this code reads. Idempotent, and a no-op for anything already migrated.
     ///
     /// Runs on load ([`Self::from_ron`]), so the rest of the engine never sees
-    /// the old shape. Only groups with NO rules are migrated — a group that has
+    /// the old shape. Only groups with no rules are migrated — a group that has
     /// been authored since is left exactly alone, so re-reading a half-converted
     /// project cannot undo work.
     ///
@@ -638,7 +638,7 @@ impl TileSet {
         if legacy.is_empty() {
             return;
         }
-        // Decided BEFORE anything is written: a group that already has rules is
+        // Decided before anything is written: a group that already has rules is
         // authored, and folding the stale per-tile masks into it would resurrect
         // assignments somebody deliberately changed.
         let convert: Vec<bool> = self.groups.iter().map(|g| g.rules.is_empty()).collect();
@@ -693,7 +693,7 @@ impl TileSet {
     }
 
     /// Parse a tileset file, converting anything written before autotile rules
-    /// moved onto the group. This is the ONE parse point, so no other code has
+    /// moved onto the group. This is the one parse point, so no other code has
     /// to know the old shape existed.
     pub fn from_ron(text: &str) -> Result<Self, ron::de::SpannedError> {
         let mut set: Self = ron::from_str(text)?;
@@ -860,7 +860,7 @@ mod tests {
         assert_eq!(set.groups[0].tiles_for(1), &[1]);
         assert_eq!(set.groups[0].tiles_for(5), &[2]);
         assert_eq!(set.group_cells(0), vec![0, 1, 2]);
-        // Everything that was NOT autotile data is untouched.
+        // Everything that was not autotile data is untouched.
         assert_eq!(*set.collision(0), TileCollision::Full);
         assert_eq!(set.tags(9), ["ice"]);
 
@@ -887,7 +887,7 @@ mod tests {
         assert!(set.tiles.is_empty(), "the entry itself had nothing left to say");
     }
 
-    /// A group somebody has authored rules for is NOT re-converted — the stale
+    /// A group somebody has authored rules for is not re-converted — the stale
     /// per-tile masks would resurrect assignments that were deliberately moved.
     #[test]
     fn a_group_that_already_has_rules_is_left_alone() {

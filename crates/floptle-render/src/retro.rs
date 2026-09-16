@@ -146,7 +146,7 @@ impl Retro {
         &self.depth_view
     }
 
-    /// The depth TEXTURE behind [`depth_view`](Self::depth_view) — the copy target
+    /// The depth texture behind [`depth_view`](Self::depth_view) — the copy target
     /// when the opaque depth prepass primes the retro depth buffer.
     pub fn depth_texture(&self) -> &wgpu::Texture {
         &self.depth_tex
@@ -205,7 +205,7 @@ impl Retro {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // The pass clears the WHOLE target and the viewport confines the
+            // The pass clears the whole target and the viewport confines the
             // triangle to part of it, so the bars need no geometry of their own.
             if let Some([x, y, w, h]) = viewport
                 && w >= 1.0
@@ -259,7 +259,7 @@ fn make_targets_wh(
         dimension: wgpu::TextureDimension::D2,
         format: Gpu::DEPTH_FORMAT,
         // TEXTURE_BINDING so SSAO can sample the low-res depth in retro mode
-        // (the post chain runs AT this resolution, before the upscale, so AO —
+        // (the post chain runs at this resolution, before the upscale, so AO —
         // like every other effect — goes chunky with the pixels). COPY_DST so
         // the opaque depth prepass can prime it (see `Raster`).
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -291,13 +291,13 @@ fn make_bind(
     })
 }
 
-/// The largest WHOLE-number upscale of a `src`-sized image that fits inside
+/// The largest whole-number upscale of a `src`-sized image that fits inside
 /// `dest`, centred: `[x, y, w, h]` in pixels.
 ///
 /// A fractional upscale is the whole reason a pixel-art game looks different in
 /// every window. At 6.0x every source row is six screen rows; at 2.025x some
 /// are two and some are three, so a row of an 8px font is a different thickness
-/// depending where it sits — and it changes as you resize. Rounding DOWN is
+/// depending where it sits — and it changes as you resize. Rounding down is
 /// what makes every source pixel the same size as its neighbours, and the
 /// remainder becomes bars.
 ///

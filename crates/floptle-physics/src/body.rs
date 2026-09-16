@@ -23,7 +23,7 @@ pub enum BodyShape {
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: Vec3,
-    /// `pos` as of the START of the most recent fixed step. Rendering interpolates
+    /// `pos` as of the start of the most recent fixed step. Rendering interpolates
     /// between the two by the accumulator's leftover fraction, so on-screen motion
     /// is smooth even though the sim advances in whole 1/120 s steps (without this,
     /// frames alternate between covering 1 and 2 steps — visible micro-jitter).
@@ -80,8 +80,8 @@ pub struct Body {
     /// The position restored on locked axes: captured at spawn, re-captured per
     /// axis at the moment its lock engages (so locking mid-play freezes in place).
     pub(crate) home: Vec3,
-    /// Inactive bodies are skipped by the step AND the transform writeback —
-    /// a networked CLIENT deactivates server-authoritative bodies so local
+    /// Inactive bodies are skipped by the step and the transform writeback —
+    /// a networked client deactivates server-authoritative bodies so local
     /// physics never fights the interpolated snapshots driving their
     /// transforms (`docs/multiplayer.md` §6). Default true.
     pub active: bool,
@@ -91,7 +91,7 @@ pub struct Body {
     pub layer: u8,
     /// KINEMATIC: transform-driven — the step skips it entirely (no gravity,
     /// no depenetration; the node's transform is authoritative and the sim
-    /// follows it). Dynamic bodies collide WITH it via
+    /// follows it). Dynamic bodies collide with it via
     /// `PhysicsWorld::kin_hulls` — moving platforms that push the player.
     pub kinematic: bool,
     /// SENSOR (a `Trigger` on a rigidbody node): the body never blocks or gets
@@ -110,7 +110,7 @@ pub struct Body {
     /// Unlike `active = false`, a driven body is fully live: it collides, it
     /// raycasts, its transform writes back. Only *who calls the step* differs.
     pub driven: bool,
-    /// PUSHBOX ONLY (`RigidBody::pushbox_only`): integrate velocity, and stop
+    /// pushbox only (`RigidBody::pushbox_only`): integrate velocity, and stop
     /// there — no gravity, no depenetration, no ground detection, no locks. The
     /// body remains fully visible to raycasts and hulls; the script owns where
     /// it is allowed to be. The supported rollback profile
@@ -132,7 +132,7 @@ pub struct Body {
     ///
     /// Part of the body's own state, not a cache: a rollback resimulation
     /// that replays this body alone (`PhysicsWorld::step_body`'s "a single
-    /// body's step is EXACTLY the trajectory in a full step" contract) must
+    /// body's step is exactly the trajectory in a full step" contract) must
     /// reach this exact value on the exact same tick the live run did, or a
     /// resimulated peer could integrate ticks the other one skipped over
     /// something that was supposed to be standing still. See

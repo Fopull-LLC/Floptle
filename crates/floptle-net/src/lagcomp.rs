@@ -23,7 +23,7 @@ const HISTORY_CAP: usize = 40;
 
 /// One entity's recorded state at a tick: world position plus its scripts'
 /// `synced` vars (script kind → name/value pairs) — a parry flag must be read
-/// from the SAME rewound tick as the pose it's judged against.
+/// from the same rewound tick as the pose it's judged against.
 #[derive(Clone, Debug, Default)]
 pub struct HistEntry {
     pub pos: [f64; 3],
@@ -51,7 +51,7 @@ impl LagHistory {
     }
 
     /// The recorded state of entity `id` at `tick` — exact when recorded, else
-    /// the newest recorded tick BEFORE it (the state that was still current),
+    /// the newest recorded tick before it (the state that was still current),
     /// else the oldest held (deeper-than-history rewinds get the edge, which
     /// the [`MAX_REWIND_TICKS`] clamp keeps honest). None if the entity has no
     /// recorded state at all.

@@ -15,7 +15,7 @@
 //! - When geometry gets it wrong — a wrapping grid, a deliberate shortcut
 //!   across the screen — [`super::Nav`] names the element to go to instead.
 //!
-//! **What focus LOOKS like is not decided here.** There is no built-in ring:
+//! **What focus looks like is not decided here.** There is no built-in ring:
 //! the focused element resolves its style's `focus` block, which can change the
 //! border, the glow, the scale, the fill, anything. A hard-coded rectangle
 //! would be the engine picking a look, and the whole point of this system is

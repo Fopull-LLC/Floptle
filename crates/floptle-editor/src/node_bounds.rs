@@ -8,7 +8,7 @@
 //! microseconds and the cost of a wrong cull is geometry popping in and out at
 //! the screen edge.
 //!
-//! Radii are LOCAL — before the node's scale, which
+//! Radii are local — before the node's scale, which
 //! [`floptle_render::cull`] applies. Everything is derived from a real
 //! measurement with the source named; nothing here is a guess.
 
@@ -54,7 +54,7 @@ pub(crate) struct Measured {
     /// One sprite's drawn edge, in world units before the node's own scale.
     ///
     /// Needed because under pixels-per-unit the drawn size comes from the
-    /// TEXTURE, not from the `size` field — a 512-pixel cell at `ppu = 32` draws
+    /// texture, not from the `size` field — a 512-pixel cell at `ppu = 32` draws
     /// sixteen units across while `size` says one. Culling on `size` there is a
     /// radius twenty times too small, and a cull radius that is too small is a
     /// node that vanishes at the edge of the screen.
@@ -73,7 +73,7 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
             floptle_render::cull::radius_from_longest_edge(s, floptle_core::math::Vec3::ONE)
         }),
         // A tilemap's grid is `cols × rows` squares of `tile` units. Using the
-        // FULL extent as if it were the half-extent is twice as loose as it
+        // full extent as if it were the half-extent is twice as loose as it
         // needs to be, and deliberately so: where the generated mesh puts its
         // origin is a detail of the mesh builder, and a cull that silently
         // depends on that would break the day somebody recentres it.
@@ -86,7 +86,7 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
         // reach is measured from this frame's actual draws, which is the only
         // honest answer — and it is immediate-mode, so it is already to hand.
         Matter::SpriteBatch { .. } => m.sprite_reach,
-        // Unlike a batch, ONE sprite has a knowable extent: its own quad. The
+        // Unlike a batch, one sprite has a knowable extent: its own quad. The
         // pivot can push the drawn quad up to a whole edge off the origin, so
         // the radius is measured from the origin to the far corner in the worst
         // case rather than from the sprite's centre.
@@ -112,7 +112,7 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
             }
         },
         // A Blob is not an instance at all — it becomes an SDF primitive in the
-        // raymarch, where it also feeds shadows and AO for things that ARE on
+        // raymarch, where it also feeds shadows and AO for things that are on
         // screen. Culling it by the camera frustum would delete shadows cast
         // from off screen.
         Matter::Blob { .. } => None,

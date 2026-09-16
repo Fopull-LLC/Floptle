@@ -14,7 +14,7 @@
 //!
 //! Every one of those cost a round trip through the engine to discover a number
 //! the game could have read itself. Three of the four were diagnosable from a
-//! COUNT alone.
+//! count alone.
 //!
 //! # Deliberately not a profiler
 //!
@@ -46,10 +46,10 @@ use std::collections::HashMap;
 /// cannot disagree about what exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Bucket {
-    /// Lua: the WHOLE of every pass (`update`, `fixedUpdate`, `lateUpdate`) —
+    /// Lua: the whole of every pass (`update`, `fixedUpdate`, `lateUpdate`) —
     /// the per-instance setup and the hook calls alike, net of the scene mirror,
     /// which has its own bucket. [`FrameProfile::scripts`] breaks the hook time
-    /// down per script; that breakdown is a PART of this, not all of it, and
+    /// down per script; that breakdown is a part of this, not all of it, and
     /// the difference is what the engine spends getting to a hook.
     Scripts,
     /// The scene mirror: the ECS → Lua sync every script pass runs before it
@@ -319,7 +319,7 @@ impl FrameProfile {
             }
         }
         for (name, ms) in std::mem::take(&mut self.script_frame) {
-            // A script seen for the FIRST time is back-filled with the frames it
+            // A script seen for the first time is back-filled with the frames it
             // was not running for. Without this its mean starts from its own first
             // sample while every bucket's started from frame one, and the two are
             // then not comparable with the rows beside it, and a script that
@@ -389,7 +389,7 @@ impl FrameProfile {
     /// all outside every bucket. Presented as "accounted for" rather than
     /// "total" for exactly that reason — a readout claiming to add up to the
     /// frame time and not doing so is worse than one that never claimed it.
-    /// A bucket's total for the frame IN PROGRESS — before `end_frame` folds it
+    /// A bucket's total for the frame in PROGRESS — before `end_frame` folds it
     /// into the history. Read it either side of a call to record that call net
     /// of a bucket nested inside it (`Scripts` around `Mirror`), so the buckets
     /// still sum to the frame rather than counting the inner one twice.
@@ -484,7 +484,7 @@ mod tests {
         assert!((c.worst_ms - 6.0).abs() < 1e-3, "three ticks of one frame: {}", c.worst_ms);
     }
 
-    /// Per-script times are attributed BY NAME, and they do **not** write the
+    /// Per-script times are attributed by name, and they do **not** write the
     /// `Scripts` bucket.
     ///
     /// They used to do both from one call, so that the rows always summed to the

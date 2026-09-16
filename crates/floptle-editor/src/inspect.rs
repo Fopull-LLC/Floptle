@@ -157,7 +157,7 @@ fn rel(root: &Path, path: &Path) -> String {
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, select: Option<&str>, json: bool) -> i32 {
     // The same refusal, in the same words, with the same code as every other
-    // verb that takes a PROJECT. This used to print "no readable project.ron"
+    // verb that takes a project. This used to print "no readable project.ron"
     // as though it were an answer and exit 0 — so a caller pointed at the wrong
     // directory was told the run had succeeded.
     if !root.join("project.ron").is_file() {
@@ -316,7 +316,7 @@ fn report_selection(
     }
 
     if json {
-        // The WHOLE document per hit. Summarising here would decide for the
+        // The whole document per hit. Summarising here would decide for the
         // caller which fields matter, and the caller is usually a program about
         // to patch one of them.
         let nodes: Vec<serde_json::Value> = hits

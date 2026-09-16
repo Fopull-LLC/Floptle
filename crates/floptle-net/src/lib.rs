@@ -21,7 +21,7 @@ pub mod interest;
 pub mod lagcomp;
 pub mod predict;
 // No UDP socket in a browser — see this crate's manifest. The relay goes with
-// it rather than beside it: a relay leg IS a `QuicClient`, and the module's
+// it rather than beside it: a relay leg is a `QuicClient`, and the module's
 // first line is `use crate::quic`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod quic;
@@ -189,7 +189,7 @@ mod tests {
         server.register_scene(&sw);
         client.register_scene(&cw);
 
-        // Move, then STOP — the final resting position must still arrive even
+        // Move, then stop — the final resting position must still arrive even
         // if the snapshot that carried it was dropped (keyframes heal it).
         let mid = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 120, |w, t| {
             if let Some(tr) = w.get_mut::<Transform>(se[0]) {
@@ -291,7 +291,7 @@ mod tests {
             vec![("hp".into(), NetValue::Num(100.0)), ("parrying".into(), NetValue::Bool(false))],
         )]);
         let mid = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
-        // The join baseline + the first keyframe may BOTH deliver the initial
+        // The join baseline + the first keyframe may both deliver the initial
         // values (idempotent last-write-wins) — assert content, not count.
         let got = client.take_synced();
         assert!(!got.is_empty());
@@ -301,7 +301,7 @@ mod tests {
             assert_eq!(vars.len(), 2);
         }
 
-        // Unchanged values are NOT resent (until a keyframe).
+        // Unchanged values are not resent (until a keyframe).
         let mid2 = run(&hub, &mut server, &mut sw, &mut client, &mut cw, mid, 4, |_, _| {});
         assert!(client.take_synced().is_empty(), "unchanged vars must not resend");
 
@@ -324,7 +324,7 @@ mod tests {
         let (mut sw, _) = world_with(1);
         server.register_scene(&sw);
 
-        // Spawn a runtime node and move it, BEFORE any client exists.
+        // Spawn a runtime node and move it, before any client exists.
         let node = floptle_scene::NodeDoc {
             camera_2d: None,
             sort_mode: None,
@@ -384,7 +384,7 @@ mod tests {
             server.tick_server(&sw, t);
         }
 
-        // NOW a client joins late: it must receive the spawn + a baseline.
+        // now a client joins late: it must receive the spawn + a baseline.
         let mut client = NetSession::client(Box::new(hub.connect()), 0);
         let (mut cw, _) = world_with(1);
         client.register_scene(&cw);
@@ -413,7 +413,7 @@ mod tests {
         use floptle_core::ReplicationMode;
         // The 2c plumbing end-to-end over a LOSSY link: client inputs reach the
         // server (redundant window healing 30% loss), physics-synced snapshot
-        // entries carry vel/grounded, and the client's OWN predicted node's
+        // entries carry vel/grounded, and the client's own predicted node's
         // authoritative states go to the reconcile queue — never interpolation.
         let hub = MemoryHub::new();
         hub.set_conditions(0, 0.3);
@@ -464,7 +464,7 @@ mod tests {
         let (_, _, last) = upd.last().unwrap();
         assert_eq!(last.vel, [1.0, 0.0, 0.0], "physics-synced entries carry velocity");
         assert!(last.grounded, "…and grounded");
-        // The predicted node was NOT interpolated on its owner.
+        // The predicted node was not interpolated on its owner.
         assert_eq!(
             cw.get::<Transform>(ce[0]).unwrap().translation.x,
             0.0,
@@ -481,7 +481,7 @@ mod tests {
         server.register_scene(&sw);
         client.register_scene(&cw);
 
-        // Run until snapshots have flowed, so the client HAS a perceived tick.
+        // Run until snapshots have flowed, so the client has a perceived tick.
         let mid = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 10, |w, t| {
             w.get_mut::<Transform>(se[0]).unwrap().translation.x = t as f64;
         });
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn input_stamp_offset_translates_clock_domains() {
         // A real link runs two independent tick clocks: the client stamps its
-        // inputs into the SERVER's domain via the offset (harness leaves it 0).
+        // inputs into the server's domain via the offset (harness leaves it 0).
         let hub = MemoryHub::new();
         let (mut server, mut client) = connect_pair(&hub);
         let (mut sw, _) = world_with(0);
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn auto_lead_heals_a_late_input_clock() {
         // A client whose lead is too small (Welcome-time RTT guess, a frame
-        // hitch, clock drift) stamps inputs that arrive AFTER the server
+        // hitch, clock drift) stamps inputs that arrive after the server
         // simulated their tick — repeat-last forever, misprediction storms.
         // The server's InputAck margins must steer the offset back into band.
         let hub = MemoryHub::new();
@@ -558,7 +558,7 @@ mod tests {
             "auto-lead must have raised the offset out of the hole, got {}",
             client.input_stamp_offset()
         );
-        // Once retuned, inputs hit their tick exactly: no NEW late inputs.
+        // Once retuned, inputs hit their tick exactly: no new late inputs.
         let late_before = server.late_inputs();
         let _ = drive(&mut server, &mut client, mid, 120);
         assert_eq!(server.late_inputs(), late_before, "retuned clock must stop running late");
@@ -598,7 +598,7 @@ mod tests {
         server.register_scene(&sw);
         client.register_scene(&cw);
 
-        // A looping 2 s Idle whose clock just advances, with ONE transition to
+        // A looping 2 s Idle whose clock just advances, with one transition to
         // state 1 at tick 100. The send-side predictor must cover the steady
         // clock (zero non-keyframe sends), and the transition must arrive on
         // the interp-delayed timeline.
@@ -634,7 +634,7 @@ mod tests {
         }
         // The baseline applies promptly (a joiner doesn't idle out the delay)…
         assert!(updates.first().is_some_and(|(t, _)| *t <= 10), "baseline arrived late");
-        // …the steady loop then sends NOTHING between keyframes (the join
+        // …the steady loop then sends nothing between keyframes (the join
         // baseline + the tick-2 cadence keyframe both land before ~10)…
         let quiet = updates.iter().filter(|(t, _)| (12..59).contains(t)).count();
         assert_eq!(quiet, 0, "an undisturbed loop must cost zero non-keyframe sends");
@@ -683,8 +683,8 @@ mod tests {
         let (mut sw2, se2) = world_with(1);
         server.switch_scene("scenes/arena.ron");
         server.rebind_scene(&sw2);
-        // Server ticks keep flowing while the client hasn't rebound yet: NONE
-        // of the new scene's state may land on the OLD world's entities.
+        // Server ticks keep flowing while the client hasn't rebound yet: none
+        // of the new scene's state may land on the old world's entities.
         let frozen = cw.get::<Transform>(ce[0]).unwrap().translation.x;
         let t = run(&hub, &mut server, &mut sw2, &mut client, &mut cw, t, 20, |w, tick| {
             if let Some(tr) = w.get_mut::<Transform>(se2[0]) {
@@ -699,7 +699,7 @@ mod tests {
         );
 
         // The client loads the new scene locally and rebinds: replication
-        // resumes against the NEW ids (keyframes heal anything dropped).
+        // resumes against the new ids (keyframes heal anything dropped).
         let (mut cw2, ce2) = world_with(1);
         client.rebind_scene(&cw2);
         let _ = run(&hub, &mut server, &mut sw2, &mut client, &mut cw2, t, 80, |w, tick| {
@@ -768,7 +768,7 @@ mod tests {
     /// second opinion a round trip late. Applying it drags the node between the
     /// driver's tick pose and an interpolated one from the past, every frame,
     /// while the checksums (which hash body state, not transforms) stay green:
-    /// a match that LOOKS broken and REPORTS healthy.
+    /// a match that looks broken and REPORTS healthy.
     #[test]
     fn once_the_match_starts_the_host_stops_moving_the_fighter() {
         let hub = MemoryHub::new();
@@ -816,7 +816,7 @@ mod tests {
     ///
     /// The state ring is indexed by node position and the slot order comes from
     /// scene order, so nothing about a match survives the scene it was played
-    /// in. The host restarts its own driver; without this the CLIENT kept
+    /// in. The host restarts its own driver; without this the client kept
     /// `rollback` set, went on refusing the new scene's snapshots for nodes its
     /// dead driver still thought it owned, and waited for a `RollbackStart`
     /// that had already been and gone.
@@ -1207,7 +1207,7 @@ mod tests {
                 "host missing the client's tick {tick}: {at_host:?}"
             );
         }
-        // …and the client received the HOST's, without its own echoed back.
+        // …and the client received the host's, without its own echoed back.
         let at_client = client.take_rollback_inputs();
         for tick in 1..=6u64 {
             assert!(
@@ -1240,7 +1240,7 @@ mod tests {
 
         let mut seen_at_client = std::collections::HashSet::new();
         let mut seen_at_host = std::collections::HashSet::new();
-        // A driver's confirmed frontier: the newest tick BOTH peers' real
+        // A driver's confirmed frontier: the newest tick both peers' real
         // inputs are known for. Our own are 1..=N by construction, so it is the
         // longest unbroken prefix of what has arrived. Reported every tick,
         // exactly as `net_rollback_tick` does — the host retains against it, so
@@ -1272,14 +1272,14 @@ mod tests {
         }
     }
 
-    /// FIELD REGRESSION (floptle/0039 Symptom A): a live relay match froze on
+    /// field regression (floptle/0039 Symptom A): a live relay match froze on
     /// round one, the joiner stalled at warmup+depth having never received a
     /// host input, and every layer test passed.
     ///
     /// The window was doing two jobs out of one FIFO: **dedup memory** and
-    /// **fan-out payload**, capped at `INPUT_WINDOW × slots` across ALL peers.
+    /// **fan-out payload**, capped at `INPUT_WINDOW × slots` across all peers.
     /// So it carried "the last N admissions", not "everything still
-    /// unconfirmed" — and the host advancing evicted its OWN oldest ticks,
+    /// unconfirmed" — and the host advancing evicted its own oldest ticks,
     /// which are exactly the ticks a starved peer is waiting for. One dropped
     /// packet early in a match and that tick was gone for good: the client
     /// could never confirm, so it stopped sending, so the host's frontier froze
@@ -1338,12 +1338,12 @@ mod tests {
         );
     }
 
-    /// FIELD REGRESSION (floptle/0041): a referee that disagrees with EVERYONE
+    /// field regression (floptle/0041): a referee that disagrees with EVERYONE
     /// is the one that is wrong, and must not take the match down with it.
     ///
     /// The referee is the sole judge when one is running — deliberately, because
     /// a quorum of players could all be running the same modified build. But a
-    /// cheat changes ONE machine, while an engine or content fault in the
+    /// cheat changes one machine, while an engine or content fault in the
     /// referee changes only the referee. So "every peer disagrees with the
     /// referee and they all agree with each other" is overwhelmingly the second
     /// case, and answering it by desyncing the whole match is the worst
@@ -1382,7 +1382,7 @@ mod tests {
             "neither player is at fault, so neither is accused"
         );
 
-        // The anti-cheat property is unchanged: ONE peer out of step is still
+        // The anti-cheat property is unchanged: one peer out of step is still
         // judged against the referee, not against the other player.
         server.set_referee_hash(60, 0xAAAA);
         server.send_state_hash(60, 0xAAAA);
@@ -1418,7 +1418,7 @@ mod tests {
         assert!(server.take_desyncs().is_empty(), "matching checksums must stay quiet");
         assert!(client.take_desyncs().is_empty());
 
-        // Disagreement: both sides are told, and told WHICH tick.
+        // Disagreement: both sides are told, and told which tick.
         server.send_state_hash(60, 0xAAAA);
         client.send_state_hash(60, 0xBBBB);
         let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 4, |_, _| {});

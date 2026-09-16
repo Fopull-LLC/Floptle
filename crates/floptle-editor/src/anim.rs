@@ -47,9 +47,9 @@ pub struct RigAsset {
     /// is animating).
     pub rest_world: Vec<Mat4>,
     /// Placement offset (recenters the authored rig on the node origin —
-    /// kept OUT of the skeleton/clips so extracted clips stay portable).
+    /// kept out of the skeleton/clips so extracted clips stay portable).
     pub offset: Mat4,
-    /// Per registered part (parallel to `part_nodes`): `Some` for a TRUE vertex-skinned
+    /// Per registered part (parallel to `part_nodes`): `Some` for a true vertex-skinned
     /// part (its bind vertices + per-vertex joints/weights + bone palette inputs), which
     /// the draw path CPU-deforms each frame; `None` for a rigid-parented part (drawn at
     /// its node matrix, R6-style). This is what makes a skinned character actually move.
@@ -155,7 +155,7 @@ pub fn upload_skins(
 
 /// Per-entity vertex-buffer clones for CPU-SKINNED parts. The skinning bake
 /// writes world-pose vertices into a mesh's vertex buffer — so two entities
-/// sharing one .glb must NOT share one buffer, or the last entity baked wins
+/// sharing one .glb must not share one buffer, or the last entity baked wins
 /// for both (the "player 1's hair follows player 2's animation" bug). Each
 /// (entity, part) lazily gets a private clone of the part's buffer; buffers of
 /// dead entities pool by source mesh for reuse by later spawns of the asset.
@@ -229,7 +229,7 @@ pub struct AnimInstance {
     /// Mesh without a controller component).
     pub asset: Option<String>,
     /// The Mesh asset path this was bound against (a runtime model swap must
-    /// rebind so the pose targets the NEW skeleton).
+    /// rebind so the pose targets the new skeleton).
     pub mesh_path: Option<String>,
     /// The `AnimSystem::revision` this was bound at (stale → rebind).
     pub revision: u64,
@@ -341,7 +341,7 @@ impl AnimSystem {
                     }
                 } else if has_ext(fname, floptle_scene::SPRITE_ANIM_EXT) {
                     // (loaded below; the duplicate-key check follows the scan)
-                    // A sprite clip joins the SAME registry as a baked clip, so
+                    // A sprite clip joins the same registry as a baked clip, so
                     // it can go in a controller state, be crossfaded, carry
                     // events and play from Lua with nothing knowing the
                     // difference. Two ways to author, one thing to play.
@@ -433,16 +433,16 @@ impl AnimSystem {
     }
 
     /// Refresh the in-memory clip registry entry + bump the revision (so bound
-    /// animators rebind and previews reflect the edit) WITHOUT touching disk.
-    /// Used for LIVE edits held under the pointer — a bone gizmo/inspector DRAG
+    /// animators rebind and previews reflect the edit) without touching disk.
+    /// Used for live edits held under the pointer — a bone gizmo/inspector DRAG
     /// defers its disk save to pointer-up, but the preview must still update in
     /// real time as the bone moves; this is the cheap per-frame refresh that does it.
     pub fn register_clip(&mut self, key: &str, doc: &AnimClipDoc) {
         match self.clips.iter_mut().find(|(k, _)| k == key) {
-            // Only bump the revision when the doc actually CHANGED. Otherwise a clip
+            // Only bump the revision when the doc actually changed. Otherwise a clip
             // stuck `dirty` (Record armed with nothing moving, a held drag, or a clip
             // whose file was deleted) would re-register identical content every frame,
-            // bumping the revision each frame and forcing EVERY animator to fully rebind
+            // bumping the revision each frame and forcing every animator to fully rebind
             // each frame — the editor freeze. No change → no bump → no rebind storm.
             Some(slot) if slot.1 == *doc => {}
             Some(slot) => {
@@ -465,7 +465,7 @@ impl AnimSystem {
     /// Save a clip doc back to disk + refresh the registry entry in place.
     pub fn save_clip(&mut self, project_root: &Path, key: &str, doc: &AnimClipDoc) {
         if self.sprite_keys.contains(key) {
-            // `{key}.anim.ron` is a DIFFERENT file from the `{key}.spriteanim.ron`
+            // `{key}.anim.ron` is a different file from the `{key}.spriteanim.ron`
             // this came from, so writing it would leave two files claiming one
             // key and the rescan picking whichever it read last. Refused here
             // as well as in the UI: a save path that can invent a second source
@@ -562,7 +562,7 @@ impl AnimSystem {
         self.preview_restore_props.clear();
     }
 
-    /// Drop the preview snapshots WITHOUT applying them. Used when ● Record
+    /// Drop the preview snapshots without applying them. Used when ● Record
     /// stops: recording skips the per-frame restore (the world carries the
     /// previewed values), so the held snapshot is stale mid-record state —
     /// `stop_record_ui` restores the true pre-record scene instead.
@@ -681,7 +681,7 @@ pub fn clip_from_doc(doc: &AnimClipDoc, skeleton: &Skeleton) -> Clip {
 
 /// Per-key interpolation for the runtime, from the doc's `hold_times`.
 ///
-/// The doc stores WHICH TIMES hold; the runtime wants one mode per key, indexed,
+/// The doc stores which TIMES hold; the runtime wants one mode per key, indexed,
 /// because sampling has the index in hand and looking a float up in a list per
 /// sample would be absurd. This is the one place the two forms meet, which is
 /// also why the fragile parallel-array form never has to survive an edit: it is
@@ -931,7 +931,7 @@ fn scene_skeleton(world: &World, root: Entity) -> (Skeleton, Vec<Entity>) {
         }
     }
     walk(world, &children, root, None, &mut nodes, &mut ents);
-    // Duplicate names bind to the FIRST occurrence — make later ones unique so
+    // Duplicate names bind to the first occurrence — make later ones unique so
     // the name map stays deterministic.
     let mut seen = HashSet::new();
     for n in nodes.iter_mut() {
@@ -1123,7 +1123,7 @@ fn needs_bind(
                 return true;
             }
             // Rig-load race: a controller can bind the very first play frame,
-            // BEFORE its rigged mesh finished importing — falling back to a
+            // before its rigged mesh finished importing — falling back to a
             // node-skeleton binding (a static bind-pose T-pose that never
             // animates, since the clips are keyed by BONE name). None of the
             // keys above change when the rig later lands in the registry, so
@@ -1143,7 +1143,7 @@ fn needs_bind(
 }
 
 /// Advance every animator by `dt` (Play mode), applying this frame's Lua
-/// animator commands first. Binding happens BEFORE the commands so a command
+/// animator commands first. Binding happens before the commands so a command
 /// issued in a script's `start()` on the very first play frame still lands.
 /// Returns fired clip events as `(entity id, function name)`.
 pub fn advance_animators(
@@ -1206,7 +1206,7 @@ enum DiagBind {
 }
 
 /// One-shot per-entity diagnostic for the astronaut T-pose class of bug: a mesh
-/// that SHOULD animate but doesn't. Fires (once) to the Console when a wanted
+/// that should animate but doesn't. Fires (once) to the Console when a wanted
 /// animated entity ends up with no runtime instance, binds to Nodes despite its
 /// mesh carrying a rig, or produces no pose after advancing — the three states
 /// that render as a static bind pose. Costs nothing once each has warned.
@@ -1312,14 +1312,14 @@ pub fn apply_instance(
 }
 
 /// Make every `BoneAttach` node ride its target mesh's bone this frame. Writes the
-/// child's LOCAL transform = `bone_local · offset` (both in the mesh's model space);
+/// child's local transform = `bone_local · offset` (both in the mesh's model space);
 /// the ordinary [`floptle_core::world_transform`] parent-walk then re-applies the
 /// mesh's f64 world, so the attachment follows the bone jitter-free far from the
 /// origin and every consumer (render/physics/gizmo/particles) sees it through the one
 /// choke point. Uses the current animated pose when there is one, else the rig's rest
 /// pose (so it works at rest / with the anim tab closed). Cost = # of attachments.
 ///
-/// MUST run AFTER animation AND physics (physics moves the mesh ROOT — the pose only
+/// must run after animation and physics (physics moves the mesh root — the pose only
 /// bends the bones), and before anything reads the attached node's world transform.
 pub fn resolve_attachments(
     system: &AnimSystem,
@@ -1345,11 +1345,11 @@ pub fn resolve_attachments(
         // Model-space: bone TRS ∘ bone-local offset, composed COMPONENTWISE (the
         // scene graph's own rule) — not via matrices, whose decomposition would
         // pin a mirrored offset's negative scale to the X axis. The result is the
-        // child's LOCAL transform; world_transform re-applies the mesh f64 world
+        // child's local transform; world_transform re-applies the mesh f64 world
         // (Parent chain intact), so a negative-scale mesh mirrors consistently.
         let bone_offset = Transform::from_matrix(bone_local.as_dmat4()).mul_transform(&offset);
         // …but only while the node really is a child of the mesh, which is what
-        // `attach_to_bone` sets up and what makes the line above a LOCAL
+        // `attach_to_bone` sets up and what makes the line above a local
         // transform at all. Nothing holds that afterwards: drag the node
         // anywhere else in the Hierarchy and this kept writing a local in the
         // mesh's space onto a node whose parent chain is somebody else's, so
@@ -1357,7 +1357,7 @@ pub fn resolve_attachments(
         // it — with no error and no clue, because it still tracked the bone's
         // MOTION perfectly and was merely in the wrong place.
         //
-        // So place it by WORLD transform and divide out whatever parent it
+        // So place it by world transform and divide out whatever parent it
         // actually has. The normalized case takes the branch above and is
         // untouched, byte for byte.
         let parent = world.get::<floptle_core::Parent>(child).map(|p| p.0);
@@ -1380,7 +1380,7 @@ pub fn resolve_attachments(
 /// under the scene graph's componentwise composition, the exact frame
 /// `resolve_attachments` places a `BoneAttach` into (uses the current animated pose,
 /// else the rig rest pose, matching that function's bone lookup). `inv_mul` it against
-/// a desired child WORLD transform to get the `BoneAttach.offset` (bone-local) so the
+/// a desired child world transform to get the `BoneAttach.offset` (bone-local) so the
 /// move gizmo edits the attachment instead of a `Transform` the resolve would clobber
 /// — TRS end-to-end, so a mirrored (negative-scale) mesh keeps its sign on the right
 /// axis. `None` if `mesh` isn't a rigged mesh or the bone name is gone (re-import).
@@ -1407,7 +1407,7 @@ pub fn bone_world_transform(
     )
 }
 
-/// Preview (edit-mode) apply for ONE entity at an explicit time: bind if
+/// Preview (edit-mode) apply for one entity at an explicit time: bind if
 /// needed, seek the base layer, advance(0), apply. Scene bindings snapshot
 /// the transforms they touch so the preview can be undone.
 /// The property-carrying components a preview may overwrite, captured so the
@@ -1539,7 +1539,7 @@ fn anim_subtree_in(
 
 /// Gather every networked animator's replicable state for the session's
 /// snapshot diffing (`docs/multiplayer.md`): each `Replicated.animator`
-/// node contributes its own animator AND its subtree's (addressed by the
+/// node contributes its own animator and its subtree's (addressed by the
 /// deterministic `sub` walk index). Cheap: (state index, time, weight) per
 /// layer, no poses, no strings.
 pub fn collect_net_states(
@@ -1752,7 +1752,7 @@ pub fn rig_from_model(
     // FOLLOW-THE-OBJECT for skinned chains: skinned vertices follow their JOINTS,
     // never the mesh node — so a flow-rig bone chain whose root sits at the model
     // root ignores the hair object being parented under "Head" (the hair stays
-    // put while the head turns). Auto-parent each skin's ROOT joints under the
+    // put while the head turns). Auto-parent each skin's root joints under the
     // skinned part's own effective parent, so wherever the user parents the hair
     // object, the chain — and thus the hair — rides along. Only unparented chain
     // roots are touched (a proper rig's structure is left alone), an explicit
@@ -1788,7 +1788,7 @@ pub fn rig_from_model(
     // Rotation PIVOTS. Default each object node's pivot to its geometry centroid (in
     // node-local space) — far more useful than the model origin for a baked object —
     // then let the `.rig.ron` sidecar override per node by name. Bones (no geometry)
-    // keep pivot ZERO (their origin already is the joint).
+    // keep pivot zero (their origin already is the joint).
     let mut centroid_sum = vec![(Vec3::ZERO, 0usize); skeleton.nodes.len()];
     for (part, &node) in model.parts.iter().zip(&part_nodes) {
         if let Some(slot) = centroid_sum.get_mut(node) {
@@ -1964,7 +1964,7 @@ pub fn new_clip_key(project_root: &Path, name: &str) -> String {
     let _ = floptle_vfs::create_dir_all(&dir);
     let mut key = format!("animations/{name}");
     let mut i = 2;
-    // BOTH extensions, because both land in the one clip registry under the
+    // both extensions, because both land in the one clip registry under the
     // same key — see `clip_file_exists`.
     while clip_file_exists(project_root, &key) {
         key = format!("animations/{name}{i}");
@@ -2047,7 +2047,7 @@ impl crate::Editor {
                 n += 1;
             }
             match floptle_scene::save_sprite_anim(&doc, &out) {
-                // The file that was ACTUALLY written, not the tag it came from.
+                // The file that was actually written, not the tag it came from.
                 // They differ whenever the import stepped over an existing file,
                 // which is exactly when somebody needs to be told.
                 Ok(()) => written.push(
@@ -2166,7 +2166,7 @@ mod tests {
                     cell: 1,
                 }),
             ],
-            // Deliberately WRONG: a file that says this lane may interpolate.
+            // Deliberately wrong: a file that says this lane may interpolate.
             step: false,
             hold_times: Vec::new(),
         };
@@ -2215,7 +2215,7 @@ mod tests {
 
     /// The standard avatar shape — a Networked CAPSULE whose CHILD Model
     /// carries the Animation Controller — must be addressable for animator
-    /// replication: the subtree walk finds the child (Ty's LAN test failed
+    /// replication: the subtree walk finds the child (a LAN test failed
     /// exactly here — the gather only looked at the Replicated node itself),
     /// deterministically, root-first when the root also animates.
     #[test]
@@ -2233,14 +2233,14 @@ mod tests {
         w.insert(sibling, floptle_core::Parent(capsule));
 
         assert_eq!(anim_subtree(&w, &registry, capsule), vec![model], "child controller found");
-        // Root carrying its own controller comes FIRST (sub 0), child after.
+        // Root carrying its own controller comes first (sub 0), child after.
         w.insert(capsule, AnimController { asset: "animation_controllers/Root".into() });
         assert_eq!(anim_subtree(&w, &registry, capsule), vec![capsule, model]);
     }
 
     /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
-    /// blend interpolates. This is the math that makes a vertex-skinned mesh (Ty) animate.
+    /// blend interpolates. This is the math that makes a vertex-skinned mesh animate.
     /// The CPU skinning cost, at a stated character count — the "before" number
     /// for `floptle/0080`, kept because it is still the FALLBACK path's cost.
     ///
@@ -2258,7 +2258,7 @@ mod tests {
     /// cargo test -p floptle-editor --bin floptle cpu_skinning_cost -- --ignored --nocapture
     /// ```
     ///
-    /// What it does NOT measure is the other half of the cost: every skinned
+    /// What it does not measure is the other half of the cost: every skinned
     /// entity's deformed vertices are re-uploaded to its own vertex buffer every
     /// frame, which is bandwidth rather than arithmetic. A GPU path removes both,
     /// and the upload is the half that scales with vertex count rather than with
@@ -2308,7 +2308,7 @@ mod tests {
         assert!(!out.is_empty());
     }
 
-    /// The AFTER number for `floptle/0080`, as a ratio rather than a duration.
+    /// The after number for `floptle/0080`, as a ratio rather than a duration.
     ///
     /// Moving the deform to the vertex shader does not make the CPU's share
     /// *zero* — every skinned draw still builds a bone palette, one
@@ -2382,7 +2382,7 @@ mod tests {
             1.0 / ratio.max(f64::MIN_POSITIVE),
         );
         // Generous by an order of magnitude: the measured ratio is well under 1%.
-        // What this guards is the SHAPE — a change that made the palette scale with
+        // What this guards is the shape — a change that made the palette scale with
         // vertices again (or reintroduced the per-frame vertex-buffer upload) would
         // blow through 10% long before it got near the old cost.
         assert!(
@@ -2615,7 +2615,7 @@ mod tests {
         assert_eq!(name, "Run", "the first-frame play() command must land");
     }
 
-    /// REGRESSION (Ty's astronaut T-pose): binding the solar demo's real
+    /// regression (the astronaut T-pose): binding the solar demo's real
     /// character controller through the registry path (`layers_from_doc` →
     /// `AnimSystem::clip`) must yield NON-EMPTY clips that actually move the
     /// rig. The prior offline check fed `clip_from_doc` directly and so never

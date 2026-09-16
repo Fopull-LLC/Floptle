@@ -1,9 +1,9 @@
 //! Headless probe for the hullPanels.flsl fixture — the fix for "the
-//! grid changes size as I move closer/farther" bug. It renders the REAL shader
+//! grid changes size as I move closer/farther" bug. It renders the real shader
 //! file through the production path on a ROW of identical boxes receding into
 //! the distance. Because the shader now samples `objectPos` (surface-locked
 //! object-local space) instead of `worldPos` (camera-relative, ADR-0015), every
-//! box must show the SAME panel grid, just perspective-smaller with distance —
+//! box must show the same panel grid, just perspective-smaller with distance —
 //! the grid is locked to the hull, not swimming with the camera. A left sphere
 //! and a big foreground box show the seams + weathering up close.
 //!
@@ -76,7 +76,7 @@ fn main() {
     let tf = |x: f64, y: f64, z: f64| {
         Transform::from_translation(DVec3::new(x, y, z)).render_matrix(cam.world_position)
     };
-    // A row of IDENTICAL boxes receding in Z (each shows the same grid) + a big
+    // A row of identical boxes receding in Z (each shows the same grid) + a big
     // foreground box and a sphere on the left for close-up seams.
     let flsl: Vec<floptle_render::FlslDraw> = vec![
         (box_mesh, None, bind, instance_of_mat(tf(-4.6, 0.0, 2.0), &mp)),

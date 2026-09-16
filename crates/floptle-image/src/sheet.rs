@@ -1,4 +1,4 @@
-//! Sprite-sheet packing — and specifically the ONE layout the engine can read.
+//! Sprite-sheet packing — and specifically the one layout the engine can read.
 //!
 //! `TexSetting.sheet_cols`/`sheet_rows` slice a texture into a **uniform grid**
 //! that UI images address by `cell` (animatable in the dopesheet) and VFX

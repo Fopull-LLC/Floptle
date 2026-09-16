@@ -6,7 +6,7 @@
 //! and reports back what actually happened.
 //!
 //! ```text
-//!   GET /desired ─▶ ensure engine + bundle ─▶ reconcile units ─▶ POST /status
+//!   get /desired ─▶ ensure engine + bundle ─▶ reconcile units ─▶ POST /status
 //!        ▲                                                            │
 //!        └──────────────────── every --interval seconds ◀─────────────┘
 //! ```

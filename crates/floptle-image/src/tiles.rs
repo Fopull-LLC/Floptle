@@ -111,7 +111,7 @@ impl TileGrid {
     }
 
     /// Run `f(x, y, &mut px)` over every pixel of `rect` ∩ canvas, walking each
-    /// affected tile ONCE (one copy-on-write per tile, not per pixel). This is the
+    /// affected tile once (one copy-on-write per tile, not per pixel). This is the
     /// hot path every brush dab and filter goes through.
     pub fn edit_rect(&mut self, rect: Rect, mut f: impl FnMut(i32, i32, &mut [u8; 4])) {
         let r = rect.intersect(self.bounds());
@@ -287,7 +287,7 @@ mod tests {
         // Same pixels, and the clone was cheap (Arc bumps only).
         assert_eq!(b.get(200, 200), [10, 20, 30, 255]);
         a.set(200, 200, [99, 0, 0, 255]);
-        // The snapshot did NOT follow the edit.
+        // The snapshot did not follow the edit.
         assert_eq!(b.get(200, 200), [10, 20, 30, 255]);
         assert_eq!(a.get(200, 200), [99, 0, 0, 255]);
     }

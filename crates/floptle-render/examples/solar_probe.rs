@@ -169,7 +169,7 @@ fn main() {
         },
     ];
     let light = Vec3::new(0.55, 0.6, 0.35).normalize();
-    // STARS MODE when FLOPTLE_STARS=1: the same sun as a luminous body 25k
+    // STARS mode when FLOPTLE_STARS=1: the same sun as a luminous body 25k
     // units out along the old light direction — reproduces in-game lighting
     // (per-star inverse-square + marched shadows against the bound volume).
     let stars = std::env::var("FLOPTLE_STARS").ok().as_deref() == Some("1");

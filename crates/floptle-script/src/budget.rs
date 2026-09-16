@@ -71,7 +71,7 @@ impl Budget {
     /// The interrupt body: cheap on every call; every [`CHECK_EVERY`] a clock
     /// read against the deadline and a heap read against [`MEMORY_LIMIT`].
     ///
-    /// The heap is checked HERE rather than through mlua's allocator limit.
+    /// The heap is checked here rather than through mlua's allocator limit.
     /// That limit works, but the moment one is set mlua stops trusting any
     /// allocation and wraps every push into Lua in a protected call — which
     /// costs about ten kilobytes of Lua heap per scripted node per pass, and

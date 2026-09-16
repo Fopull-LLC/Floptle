@@ -1,6 +1,6 @@
 //! Persistence for texture paint: `<project>/paint/<scene>.tpaint`.
 //!
-//! ONE container per scene (like `.vpaint`), but the payload is PNG-encoded rather than raw
+//! one container per scene (like `.vpaint`), but the payload is PNG-encoded rather than raw
 //! — a paint atlas is up to 2048² RGBA (16 MB) and mostly flat, so PNG shrinks it by an
 //! order of magnitude. The header carries, per node/part, the atlas `edge` and a geometry
 //! hash; on load the atlas is rebuilt (its layout is DETERMINISTIC, so an unchanged mesh
@@ -123,10 +123,10 @@ impl Editor {
 
     /// Write every texture-painted node's images beside the scene. Called from `save_scene`.
     ///
-    /// Entries the last adopt could NOT apply (`paint_tex_orphans`) ride along
+    /// Entries the last adopt could not apply (`paint_tex_orphans`) ride along
     /// unchanged while a node still references them and they weren't repainted —
     /// same data-loss guard as `save_paint`.
-    /// Whether everything that should be on disk IS — see `save_paint`.
+    /// Whether everything that should be on disk is — see `save_paint`.
     pub(crate) fn save_tex_paint(&mut self) -> bool {
         let referenced: std::collections::HashSet<u32> = self
             .world
@@ -192,11 +192,11 @@ impl Editor {
 
     /// Reload texture paint for the current scene, rebuilding each painted node's atlas and
     /// dropping the saved pixels onto it. Called after any scene load, next to `adopt_paint`.
-    /// MUST run with gpu/raster live — atlases and textures are GPU allocations.
+    /// must run with gpu/raster live — atlases and textures are GPU allocations.
     pub(crate) fn adopt_tex_paint(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() {
-            // A silent no-op here LOSES saved paint (the boot-order bug of 2026-07-16:
-            // adopt ran before `self.gpu = Some(..)`). Shout so it can't hide again.
+            // A silent no-op here loses saved paint (a boot-order bug once ran
+            // adopt before `self.gpu = Some(..)`). Shout so it can't hide again.
             log::error!("adopt_tex_paint called before gpu/raster exist — saved texture paint NOT loaded");
             return;
         }

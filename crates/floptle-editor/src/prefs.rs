@@ -17,7 +17,7 @@ pub(crate) struct GridConfig {
     pub(crate) alpha: f32,
     /// Snap moved/created objects to the grid.
     pub(crate) snap: bool,
-    /// How far BELOW the camera the grid plane sits (world units, snapped to `size`).
+    /// How far below the camera the grid plane sits (world units, snapped to `size`).
     pub(crate) y_offset: f32,
 }
 
@@ -37,7 +37,7 @@ impl Default for GridConfig {
 
 // ---- "Open in IDE" (ADR-0011): launch the user's external editor ------------
 
-/// Is `cmd` (a binary name) resolvable on PATH?
+/// Is `cmd` (a binary name) resolvable on path?
 pub(crate) fn on_path(cmd: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&path).any(|dir| {
@@ -47,7 +47,7 @@ pub(crate) fn on_path(cmd: &str) -> bool {
     })
 }
 
-/// Pick a sensible default external editor by probing PATH (VSCode first).
+/// Pick a sensible default external editor by probing path (VSCode first).
 pub(crate) fn auto_detect_editor() -> String {
     for c in ["code", "codium", "code-insiders", "zed", "subl", "nvim", "vim", "nano"] {
         if on_path(c) {
@@ -159,7 +159,7 @@ pub(crate) fn save_play_tint(enabled: bool, tint: [u8; 3]) {
     }
 }
 
-/// Whether Lua `gizmo.*` shapes also draw over the GAME view. Off by default, and
+/// Whether Lua `gizmo.*` shapes also draw over the game view. Off by default, and
 /// persisted, because a project that wants hit/hurtboxes while playing wants them every
 /// session, not once.
 pub(crate) fn game_gizmos_path() -> Option<PathBuf> {
@@ -326,7 +326,7 @@ pub(crate) fn save_viewport_panels(p: &crate::viewport_panel::ViewportPanels) {
 /// exactly the zoom you need it at, and a grey checker under grey art says
 /// nothing at all (`floptle/0097`).
 ///
-/// Per-user and not per-document: this is how somebody likes to LOOK at images,
+/// Per-user and not per-document: this is how somebody likes to look at images,
 /// not a fact about one image. (The cell grid's size is the fact — that lives in
 /// the document.)
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -335,7 +335,7 @@ pub(crate) struct CanvasLook {
     pub(crate) checker: bool,
     pub(crate) checker_a: [u8; 3],
     pub(crate) checker_b: [u8; 3],
-    /// Checker square edge in SCREEN pixels, so it neither moirés at high zoom
+    /// Checker square edge in screen pixels, so it neither moirés at high zoom
     /// nor vanishes at low zoom.
     pub(crate) checker_px: f32,
 

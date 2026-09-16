@@ -1087,7 +1087,7 @@ mod tests {
     }
 
     /// ⚠ **Every flag `serve` accepts is in the published CLI docs**, and the
-    /// list comes off this file's OWN match arms rather than a second
+    /// list comes off this file's own match arms rather than a second
     /// hand-written one.
     ///
     /// `cli.json` is generated from the verb table and published to the website
@@ -1117,7 +1117,7 @@ mod tests {
         }
         parsed.sort_unstable();
         parsed.dedup();
-        // ⚠ Without this the guard passes by finding NOTHING the day the parser
+        // ⚠ Without this the guard passes by finding nothing the day the parser
         // is reformatted — measuring nothing while reporting success.
         assert!(
             parsed.len() >= 10,
@@ -1143,7 +1143,7 @@ mod tests {
         // engine's own design.
         //
         // `--build` is an internal alias for the project path used by the export
-        // path, not a second way for a person to say PROJECT.
+        // path, not a second way for a person to say project.
         const UNPUBLISHED: &[&str] = &["--game-key", "--build"];
 
         for flag in &parsed {
@@ -1192,7 +1192,7 @@ mod tests {
             "a port that is not bound must not be published as an address"
         );
 
-        // Direct hosting is the case where the port IS the handle, and a region
+        // Direct hosting is the case where the port is the handle, and a region
         // with no relay has nothing else to publish.
         let direct = ServerArgs { port: Some(30000), relay: None, ..blank_args() };
         assert_eq!(
@@ -1267,7 +1267,7 @@ mod tests {
 /// **Every one of these was watched failing against the server this replaced**
 /// — the one that re-derived a subset of the tick and drained no `NetCmd`. They
 /// are not written against `ServerWorld`-shaped internals on purpose: what a
-/// server does is only observable on the CLIENT's world, so that is where they
+/// server does is only observable on the client's world, so that is where they
 /// assert.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod server_tests {
@@ -1284,10 +1284,10 @@ mod server_tests {
     /// (`floptle/0199` §3) and it is what a developer looks at when a match
     /// "felt bad", so it has to be the statistic that can actually say so.
     ///
-    /// Note what p95 does NOT promise, because the first version of this test
+    /// Note what p95 does not promise, because the first version of this test
     /// asserted it and was wrong: at exactly one bad tick in twenty, five per
     /// cent of ticks are worse than the answer, so the 95th percentile is the
-    /// last GOOD one. That is p95 behaving correctly. To show, a stutter has to
+    /// last good one. That is p95 behaving correctly. To show, a stutter has to
     /// be more than five per cent of ticks — which is also the threshold at
     /// which a player notices it.
     #[test]
@@ -1342,7 +1342,7 @@ mod server_tests {
     /// A client's world takes **~4× longer than you think** to show what the
     /// server did: the snapshot has to arrive, and then interpolation has to
     /// walk the node to it (`interp_delay` is 6 ticks by itself). Twelve ticks
-    /// reads as a false pass — see the rc4 note in `.internal/docs/HANDOFF.md`.
+    /// reads as a false pass.
     const SETTLE: u32 = 120;
 
     fn temp(tag: &str) -> PathBuf {
@@ -1716,7 +1716,7 @@ mod server_tests {
     ///
     /// With no keyboard attached, running an unclaimed avatar's controller
     /// against permanently-empty input simulates a player who is not there —
-    /// and then ships every client snapshots of them. Asserted on the SCRIPT,
+    /// and then ships every client snapshots of them. Asserted on the script,
     /// not on the filter sets: whether a controller ran is the thing that
     /// matters, and the filters are two of them with different rules.
     #[test]
@@ -1766,7 +1766,7 @@ mod server_tests {
     /// **What this can and cannot hold.** The memory hub delivers in-process,
     /// so removing the flush entirely leaves this green — over a real UDP link
     /// it would not, because a reliable send is retransmitted until it is
-    /// acknowledged and retransmission happens in TICKS. Rather than claim
+    /// acknowledged and retransmission happens in ticks. Rather than claim
     /// coverage it does not have, the guard asserts the flush *ran*: the
     /// server's tick advanced while saying goodbye, which is the thing a queued-
     /// and-immediately-exited version would not do. The delivery itself is
@@ -1971,7 +1971,7 @@ mod server_tests {
     /// The state mirror that answers `net.role()` used to run only at the
     /// bottom of a tick, so the very first handler ran while the role still
     /// said `offline` — and `net.spawn`, `net.kick`, `net.setOwner` and
-    /// `net.setRelevant` all check that role and refuse. The FIRST player to
+    /// `net.setRelevant` all check that role and refuse. The first player to
     /// join got no avatar and no moderation and the rest were fine, which reads
     /// as a flaky link rather than as a bug. Watched failing.
     #[test]
