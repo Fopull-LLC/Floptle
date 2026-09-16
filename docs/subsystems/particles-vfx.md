@@ -159,6 +159,10 @@ trail records no history and pays for none.
 `flipbook` plays a sprite sheet over a particle's life. `lit` puts a particle
 through the full scene lighting — sun, point lights, field shadow, AO — and
 `cast_shadows` lets the track's live cloud cast into the field shadow march.
+`soft` is the distance, in world units, over which a billboard fades out in
+front of whatever it intersects — the *soft edges* field in the Inspector — so
+smoke crossing a floor or a wall shows no hard line where the depth test cuts
+it; 0 is a hard edge, and 0.5 is the default.
 
 ### Automation lanes
 

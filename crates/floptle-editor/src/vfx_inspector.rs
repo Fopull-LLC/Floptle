@@ -417,6 +417,19 @@ fn look_section(
         flipbook_editor(ui, track, dirty);
         trail_editor(ui, track, asset_tree, project_root, dirty);
     }
+    if !is_mesh {
+        ui.horizontal(|ui| {
+            ui.label("soft edges");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut track.soft).speed(0.01).range(0.0..=20.0).max_decimals(2))
+                .on_hover_text(
+                    "fade out over this many units in front of whatever the particle \
+                     intersects, so a sprite crossing a floor or a wall has no hard line. \
+                     0 = a hard edge",
+                )
+                .changed();
+        });
+    }
     // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
     // MESH particles — the billboard pass draws unlit textured quads — so grey them
     // out for billboards rather than offering a dead knob.

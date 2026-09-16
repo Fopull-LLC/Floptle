@@ -47,6 +47,7 @@ fn main() {
                 cam_up: [0.0, 1.0, 0.0, 0.0],
                 fog_color: [0.0; 4],
                 fog_params: [0.0; 4],
+                proj_z: [0.0; 4],
             },
             &[floptle_render::particles::ParticleInstance {
                 pos_rot: [0.0, 0.0, -3.0, 0.0],
@@ -54,6 +55,7 @@ fn main() {
                 color: [1.0, 1.0, 1.0, 1.0],
                 basis_right: [1.0, 0.0, 0.0, 0.0],
                 basis_up: [0.0, 1.0, 0.0, 0.0],
+                params: [0.0; 4],
             }],
             &[floptle_render::particles::ParticleBatch { texture: Some(id), range: 0..1, blend: floptle_render::particles::ParticleBlend::Alpha }],
             &raster,

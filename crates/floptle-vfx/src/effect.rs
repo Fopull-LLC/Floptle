@@ -289,6 +289,9 @@ impl Default for Trail {
 
 /// The rendered look of a track. Lighting and shadow casting are per-track opt-ins,
 /// both off by default (classic crisp VFX costs nothing until asked).
+/// The soft-edge distance a track starts with.
+pub const DEFAULT_SOFT: f32 = 0.5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     pub render: RenderMode,
@@ -306,6 +309,10 @@ pub struct Look {
     pub flipbook: Option<Flipbook>,
     /// Full scene lighting per particle: sun + point lights + field shadow + AO.
     pub lit: bool,
+    /// Billboards fade out over this many world units in front of whatever they
+    /// intersect, so a sprite crossing a floor or a wall shows no hard line.
+    /// 0 = a hard edge.
+    pub soft: f32,
     /// The track's live cloud casts into the field shadow march (aggregate proxy).
     pub cast_shadows: bool,
 }
@@ -320,6 +327,7 @@ impl Default for Look {
             stretch: 1.0,
             flipbook: None,
             lit: false,
+            soft: DEFAULT_SOFT,
             cast_shadows: false,
         }
     }

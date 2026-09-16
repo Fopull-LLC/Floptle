@@ -24,16 +24,31 @@ struct ParticleGlobals {
     cam_up: vec4<f32>,
     fog_color: vec4<f32>,   // rgb = fog color
     fog_params: vec4<f32>,  // x start, y end, z on (0/1)
+    proj_z: vec4<f32>,      // x P[2][2], y P[3][2], z 1 = orthographic
 };
 
 @group(0) @binding(0) var<uniform> g: ParticleGlobals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+// The scene's depth as drawn so far, for the soft edges.
+@group(2) @binding(0) var scene_depth: texture_depth_2d;
 
 // The RGB a particle fades TOWARD in full fog — the blend mode's no-op identity, set
 // per pipeline: 0 for alpha/additive/screen/premultiplied (fade to nothing), 1 for
 // Multiply (fade to white = stop darkening). Alpha always fades to 0 alongside.
 override fog_identity: f32 = 0.0;
+// 1 when the blend mode weights the colour by alpha itself (alpha, additive), so
+// a fade scales alpha alone; 0 when the weight lives in the colour and both fade.
+override fades_by_alpha: f32 = 0.0;
+
+// The particle at `keep` (1 = as authored, 0 = gone), faded the way its blend
+// mode needs: toward the mode's identity in colour, or by alpha alone.
+fn attenuate(col: vec4<f32>, keep: f32) -> vec4<f32> {
+    if (fades_by_alpha > 0.5) {
+        return vec4<f32>(col.rgb, col.a * keep);
+    }
+    return vec4<f32>(mix(vec3<f32>(fog_identity), col.rgb, keep), col.a * keep);
+}
 
 struct VsIn {
     // Unit quad corner in [-0.5, 0.5]².
@@ -48,6 +63,8 @@ struct VsIn {
     @location(4) basis_right: vec4<f32>,
     // Instance: the quad's in-plane +Y axis (xyz); its length carries stretch.
     @location(5) basis_up: vec4<f32>,
+    // Instance: x = soft-edge distance in world units (0 = hard).
+    @location(6) params: vec4<f32>,
 };
 
 struct VsOut {
@@ -56,6 +73,7 @@ struct VsOut {
     @location(1) color: vec4<f32>,
     // Camera-relative position, so the fragment can compute its own view distance.
     @location(2) view_pos: vec3<f32>,
+    @location(3) @interpolate(flat) soft: f32,
 };
 
 @vertex
@@ -83,7 +101,16 @@ fn vs(in: VsIn) -> VsOut {
     out.uv = base_uv * rect.zw + rect.xy;
     out.color = in.color;
     out.view_pos = world;
+    out.soft = in.params.x;
     return out;
+}
+
+// A depth-buffer value as a distance in front of the camera.
+fn view_distance(ndc_z: f32) -> f32 {
+    if (g.proj_z.z > 0.5) {
+        return -(ndc_z - g.proj_z.y) / g.proj_z.x;
+    }
+    return g.proj_z.y / (ndc_z + g.proj_z.x);
 }
 
 // Dither thresholds (this module is standalone — it isn't concatenated with
@@ -106,12 +133,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (col.a <= 0.001) {
         discard;
     }
-    // Depth fog: fade the contribution toward the blend mode's identity with distance
-    // (attenuation, not a tint), so it's correct across every blend family — alpha
-    // particles vanish, additive/screen light dims, premultiplied fades out, and
-    // Multiply fades to white (no darkening) via the per-pipeline `fog_identity`
-    // override — instead of adding fog-coloured light. `view_pos` is camera-relative,
-    // so length = view distance.
+    // Soft edges: fade out over the last `soft` units before the surface behind,
+    // so a sprite crossing a floor or a wall has no hard line through it.
+    if (in.soft > 0.0) {
+        let behind = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0);
+        let gap = view_distance(behind) - view_distance(in.clip.z);
+        col = attenuate(col, clamp(gap / in.soft, 0.0, 1.0));
+    }
+    // Depth fog: attenuate with distance rather than tint, so it is right for
+    // every blend family — alpha particles vanish, additive light dims, Multiply
+    // fades to white. `view_pos` is camera-relative, so length = view distance.
     if (g.fog_params.z > 0.5) {
         let denom = max(g.fog_params.y - g.fog_params.x, 1e-4);
         var f = clamp((length(in.view_pos) - g.fog_params.x) / denom, 0.0, 1.0);
@@ -123,7 +154,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
             let d = select(bayer4(pix), ign(pix), g.fog_params.w > 0.5);
             f = clamp(f + (d - 0.5) * amp * 0.06, 0.0, 1.0);
         }
-        col = vec4<f32>(mix(col.rgb, vec3<f32>(fog_identity), f), col.a * (1.0 - f));
+        col = attenuate(col, 1.0 - f);
     }
     return col;
 }

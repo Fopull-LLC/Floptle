@@ -53,6 +53,7 @@ pub fn collect_billboards(
         let aspect = inst.track_aspect(ti);
         let stretch = ct.look.stretch.max(1e-3);
         let flip = ct.look.flipbook;
+        let soft = ct.look.soft.max(0.0);
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
@@ -71,6 +72,7 @@ pub fn collect_billboards(
                 color: s.color,
                 basis_right: [right.x, right.y, right.z, uv[2]],
                 basis_up: [up.x, up.y, up.z, uv[3]],
+                params: [soft, 0.0, 0.0, 0.0],
             });
         });
         if instances.len() == start {
@@ -106,6 +108,7 @@ pub fn collect_billboards(
 /// along-length `v` slice instead — `v = r0` at the `a` end, `r1` at the `b` end,
 /// `u` running 0→1 across the width. (Ribbon slicing and flipbooks are therefore
 /// mutually exclusive; trails/beams simply don't use flipbooks.)
+#[allow(clippy::too_many_arguments)]
 fn ribbon_segment(
     a: Vec3,
     b: Vec3,
@@ -114,6 +117,7 @@ fn ribbon_segment(
     r0: f32,
     r1: f32,
     cam_right: Vec3,
+    soft: f32,
 ) -> ParticleInstance {
     let mid = 0.5 * (a + b);
     let seg = b - a;
@@ -134,6 +138,7 @@ fn ribbon_segment(
         // v = r1 at b and v = r0 at a — v increases tail→head along the ribbon.
         basis_right: [right.x, right.y, right.z, 1.0],
         basis_up: [seg.x, seg.y, seg.z, r0 - r1],
+        params: [soft, 0.0, 0.0, 0.0],
     }
 }
 
@@ -206,6 +211,7 @@ pub fn collect_trails(
                     r0,
                     r1,
                     cam_right,
+                    ct.look.soft.max(0.0),
                 ));
             }
         });
@@ -293,7 +299,7 @@ pub fn collect_beams(
             let next = point(k + 1);
             let r0 = (k as f32 / n as f32 - shift).rem_euclid(1.0);
             let r1 = r0 + 1.0 / n as f32;
-            instances.push(ribbon_segment(prev, next, width, color, r0, r1, cam_right));
+            instances.push(ribbon_segment(prev, next, width, color, r0, r1, cam_right, ct.look.soft.max(0.0)));
             prev = next;
         }
         draws.push(BillboardDraw {

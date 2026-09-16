@@ -587,6 +587,7 @@ pub fn particle_globals(
         cam_up: [u.x, u.y, u.z, 0.0],
         fog_color,
         fog_params,
+        proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
     }
 }
 
@@ -645,6 +646,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         wave_frequency: 2.0,
         scroll: 0.0,
         lit: false,
+        soft: floptle_scene::vfx::DEFAULT_SOFT,
         cast_shadows: false,
         space: floptle_scene::VfxSpaceDoc::Local,
         // A continuous stream over the whole 1 s loop; each particle lives the clip's
@@ -830,6 +832,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     stretch: t.stretch,
                     flipbook: t.flipbook.as_ref().map(flipbook_from_doc),
                     lit: t.lit,
+                    soft: t.soft,
                     cast_shadows: t.cast_shadows,
                 },
                 space: match t.space {

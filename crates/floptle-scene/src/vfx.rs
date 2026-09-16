@@ -341,6 +341,10 @@ pub struct VfxTrackDoc {
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
+    /// Billboards fade out over this many world units in front of whatever they
+    /// intersect (0 = a hard edge).
+    #[serde(default = "default_soft", skip_serializing_if = "is_default_soft")]
+    pub soft: f32,
     /// The track's cloud casts field shadows via an aggregate proxy (default off).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_shadows: bool,
@@ -478,6 +482,18 @@ fn true_bool() -> bool {
 fn is_true(b: &bool) -> bool {
     *b
 }
+/// The soft-edge distance a track starts with; the runtime's `Look::soft`
+/// default is the same number.
+pub const DEFAULT_SOFT: f32 = 0.5;
+
+fn default_soft() -> f32 {
+    DEFAULT_SOFT
+}
+
+fn is_default_soft(v: &f32) -> bool {
+    *v == DEFAULT_SOFT
+}
+
 fn one_f32() -> f32 {
     1.0
 }
@@ -673,6 +689,7 @@ mod tests {
                 wave_frequency: 2.0,
                 scroll: 0.0,
                 lit: false,
+                soft: DEFAULT_SOFT,
                 cast_shadows: false,
                 space: VfxSpaceDoc::Local,
                 clips: vec![

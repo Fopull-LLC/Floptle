@@ -80,6 +80,16 @@ impl ParticleBlend {
             _ => 0.0,
         }
     }
+
+    /// Whether the blend weights the colour by alpha on its own, so fading the
+    /// particle means scaling alpha only; scaling the colour too would fade it
+    /// twice. The other modes carry their weight in the colour.
+    fn fades_by_alpha(self) -> f64 {
+        match self {
+            ParticleBlend::Alpha | ParticleBlend::Additive => 1.0,
+            _ => 0.0,
+        }
+    }
 }
 
 /// Per-particle GPU data: camera-relative position + spin, size, tint, and the
@@ -103,6 +113,10 @@ pub struct ParticleInstance {
     /// The quad's in-plane +Y axis (xyz; w unused). Length scales height — velocity
     /// stretch bakes the motion-length here so the shader needs no stretch term.
     pub basis_up: [f32; 4],
+    /// x = soft-edge distance in world units: the particle fades out over that
+    /// much depth in front of whatever it intersects, so a sprite crossing a
+    /// floor has no hard line. 0 = a hard edge. yzw unused.
+    pub params: [f32; 4],
 }
 
 /// One instanced draw: a contiguous `range` of this frame's instance array, with
@@ -131,6 +145,17 @@ pub struct ParticleGlobals {
     pub fog_color: [f32; 4],
     /// Depth fog: x = start dist, y = end dist, z = enabled (0/1), w unused.
     pub fog_params: [f32; 4],
+    /// How a depth-buffer value becomes a view distance, for the soft edges:
+    /// x, y = the projection's `[2][2]` and `[3][2]`, z = 1 for an orthographic
+    /// projection (0 for perspective), w unused.
+    pub proj_z: [f32; 4],
+}
+
+impl ParticleGlobals {
+    /// The `proj_z` lane for a projection matrix.
+    pub fn proj_z(proj: &glam::Mat4, ortho: bool) -> [f32; 4] {
+        [proj.z_axis.z, proj.w_axis.z, if ortho { 1.0 } else { 0.0 }, 0.0]
+    }
 }
 
 pub struct Particles {
@@ -138,6 +163,10 @@ pub struct Particles {
     pipelines: Vec<wgpu::RenderPipeline>,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
+    depth_layout: wgpu::BindGroupLayout,
+    /// The depth view bound last frame and its bind group, remade when the
+    /// view changes (a resize, or a different target).
+    depth_bind: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     /// White 1×1 for untextured tracks (the tint shows through unchanged).
     default_bind: wgpu::BindGroup,
     quad_vbuf: wgpu::Buffer,
@@ -159,12 +188,13 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 5 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 6 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -201,16 +231,32 @@ impl Particles {
         // in two places" stops being true the moment one side gains a slot, which
         // is exactly what the surface maps did.
         let tex_layout = crate::raster::surface_bind_layout(device);
+        // Group 2: the scene's depth, read for the soft edges. The pass attaches
+        // the same depth read-only for its test, which is what lets one texture
+        // be both the attachment and a binding.
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("particles-depth"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particles"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout), Some(&depth_layout)],
             immediate_size: 0,
         });
 
-        let make_pipeline = |label: &str, blend: wgpu::BlendState, fog_identity: f64| {
+        let make_pipeline = |label: &str, blend: wgpu::BlendState, fog_identity: f64, fades_by_alpha: f64| {
             // Per-pipeline fog identity (see ParticleBlend::fog_identity) via a WGSL
             // override constant on the fragment stage.
-            let fs_consts = [("fog_identity", fog_identity)];
+            let fs_consts = [("fog_identity", fog_identity), ("fades_by_alpha", fades_by_alpha)];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -251,7 +297,7 @@ impl Particles {
         // One pipeline per blend mode, in discriminant order (indexed by `blend as usize`).
         let pipelines: Vec<wgpu::RenderPipeline> = ParticleBlend::ALL
             .iter()
-            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state(), b.fog_identity()))
+            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state(), b.fog_identity(), b.fades_by_alpha()))
             .collect();
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -322,6 +368,8 @@ impl Particles {
             pipelines,
             globals_buf,
             globals_bind,
+            depth_layout,
+            depth_bind: None,
             default_bind,
             quad_vbuf,
             quad_ibuf,
@@ -367,6 +415,18 @@ impl Particles {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.ensure_instances(gpu, instances.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
+        if self.depth_bind.as_ref().is_none_or(|(v, _)| v != depth) {
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("particles-depth"),
+                layout: &self.depth_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                }],
+            });
+            self.depth_bind = Some((depth.clone(), bind));
+        }
+        let depth_bind = &self.depth_bind.as_ref().expect("bound above").1;
 
         let mut encoder = gpu
             .device
@@ -380,12 +440,11 @@ impl Particles {
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
+                // Read-only: the pass tests against the depth and samples it
+                // for the soft edges, and writes nothing to it.
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
+                    depth_ops: None,
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -393,6 +452,7 @@ impl Particles {
                 multiview_mask: None,
             });
             rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_bind_group(2, depth_bind, &[]);
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);

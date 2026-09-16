@@ -307,6 +307,7 @@ fn main() {
         cam_up: [u.x, u.y, u.z, 0.0],
         fog_color: [0.0; 4],
         fog_params: [0.0; 4], // fog off in the probe
+        proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
     };
     let (cam_right, cam_up) = (r, u);
 

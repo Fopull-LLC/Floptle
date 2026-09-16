@@ -198,6 +198,7 @@ fn main() {
         cam_up: [u.x, u.y, u.z, 0.0],
         fog_color: [0.0; 4],
         fog_params: [0.0; 4],
+        proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
     };
 
     // the SCALE REFERENCE, and the reason this probe is worth having. A floor, a
