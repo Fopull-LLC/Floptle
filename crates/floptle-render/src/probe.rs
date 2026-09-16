@@ -56,6 +56,7 @@ pub fn readback_bytes(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
 }
 
 /// Write RGBA8 pixels as a PNG.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_png(px: &[u8], w: u32, h: u32, path: &str) {
     let file = std::fs::File::create(path).unwrap_or_else(|e| panic!("create {path}: {e}"));
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
@@ -67,6 +68,7 @@ pub fn write_png(px: &[u8], w: u32, h: u32, path: &str) {
 }
 
 /// Read a texture back and write it as a PNG.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {
     write_png(&readback_bytes(gpu, tex), tex.width(), tex.height(), path);
 }
