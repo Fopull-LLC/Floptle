@@ -1257,6 +1257,9 @@ impl Editor {
             cmd.focus_particles = true;
             self.vfx_ui.open(key);
         }
+        if let Some(at) = cmd.look_at {
+            self.focus_point(at, 6.0);
+        }
         if cmd.focus_particles
             && let Some(dock) = self.dock_state.as_mut() {
                 if let Some(path) = dock.find_tab(&EditorTab::Particles) {

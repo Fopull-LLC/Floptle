@@ -61,13 +61,25 @@ pub(crate) fn value_or_curve(
     floor: Option<f32>,
 ) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.add_sized([70.0, 18.0], egui::Label::new(label).truncate());
-        match prop {
-            VfxPropDoc::Const(v) => {
-                changed |= const_editor(ui, v);
-                // Both promote buttons render every frame; the value is read once
-                // afterwards so reassigning `prop` can't conflict with `v`'s borrow.
+    // The label column, then the value fields sized to what is left so a
+    // three-field vector and its two buttons never run off the panel.
+    let label_w = 70.0;
+    let buttons_w = 2.0 * 26.0;
+    let field_w = |ui: &egui::Ui, n: f32| {
+        ((ui.available_width() - label_w - buttons_w - 8.0) / n - 4.0).clamp(34.0, 72.0)
+    };
+    let row_label = |ui: &mut egui::Ui, text: &str| {
+        ui.add_sized([label_w, 18.0], egui::Label::new(text).truncate());
+    };
+    // A promotion or demotion replaces the whole property, after the row that
+    // asked for it has finished borrowing it.
+    let mut replace: Option<VfxPropDoc> = None;
+    match prop {
+        VfxPropDoc::Const(v) => {
+            ui.horizontal(|ui| {
+                row_label(ui, label);
+                let w = field_w(ui, fields_of(v) as f32);
+                changed |= const_editor(ui, v, w);
                 let to_range = ui
                     .small_button("🎲")
                     .on_hover_text("randomize per particle between two values")
@@ -79,40 +91,48 @@ pub(crate) fn value_or_curve(
                 let start = *v;
                 if to_range {
                     // Seed both bounds at the current value; the artist widens the high one.
-                    *prop = VfxPropDoc::Range(start, start);
-                    changed = true;
+                    replace = Some(VfxPropDoc::Range(start, start));
                 } else if to_curve {
                     // Seed a flat curve at the current constant, first channel.
-                    *prop = VfxPropDoc::Curve(VfxCurveDoc {
+                    replace = Some(VfxPropDoc::Curve(VfxCurveDoc {
                         keys: vec![
                             VfxKeyDoc { t: 0.0, v: start, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 },
                             VfxKeyDoc { t: 1.0, v: start, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 },
                         ],
                         extrapolate: VfxExtrapolateDoc::Clamp,
-                    });
+                    }));
                     *expanded = Some(label.to_string());
                     *vrange = None;
-                    changed = true;
                 }
-            }
-            VfxPropDoc::Range(a, b) => {
-                changed |= const_editor(ui, a);
-                ui.label("🎲")
-                    .on_hover_text("random per particle between the low and high value");
-                changed |= const_editor(ui, b);
-                let demote = ui
+            });
+        }
+        VfxPropDoc::Range(a, b) => {
+            // Low bound on the property's row, high bound on the row beneath.
+            ui.horizontal(|ui| {
+                row_label(ui, label);
+                let w = field_w(ui, fields_of(a) as f32);
+                changed |= const_editor(ui, a, w);
+                ui.label("🎲").on_hover_text("random per particle between this and the value below");
+            });
+            ui.horizontal(|ui| {
+                row_label(ui, "   to");
+                let w = field_w(ui, fields_of(b) as f32);
+                changed |= const_editor(ui, b, w);
+                if ui
                     .small_button("•")
                     .on_hover_text("back to a single value (the low bound)")
-                    .clicked();
-                let low = *a;
-                if demote {
-                    *prop = VfxPropDoc::Const(low);
-                    changed = true;
+                    .clicked()
+                {
+                    replace = Some(VfxPropDoc::Const(*a));
                 }
-            }
-            VfxPropDoc::Curve(c) => {
+            });
+        }
+        VfxPropDoc::Curve(c) => {
+            ui.horizontal(|ui| {
+                row_label(ui, label);
                 let kind = c.keys.first().map(|k| kind_of(&k.v)).unwrap_or(CurveKind::Scalar);
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(90.0, 18.0), Sense::click());
+                let w = (ui.available_width() - 30.0).clamp(60.0, 160.0);
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::click());
                 sparkline(ui, c, kind, rect);
                 if resp.on_hover_text("click to edit the curve").clicked() {
                     *vrange = None;
@@ -125,15 +145,18 @@ pub(crate) fn value_or_curve(
                 }
                 if ui.small_button("•").on_hover_text("back to a constant (value at t=0)").clicked() {
                     let v0 = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
-                    *prop = VfxPropDoc::Const(v0);
+                    replace = Some(VfxPropDoc::Const(v0));
                     if expanded.as_deref() == Some(label) {
                         *expanded = None;
                     }
-                    changed = true;
                 }
-            }
+            });
         }
-    });
+    }
+    if let Some(p) = replace {
+        *prop = p;
+        changed = true;
+    }
     if let VfxPropDoc::Curve(c) = prop
         && expanded.as_deref() == Some(label)
     {
@@ -142,16 +165,29 @@ pub(crate) fn value_or_curve(
     changed
 }
 
-/// Inline editor for a constant value (drag-float / xyz / colour swatch).
-fn const_editor(ui: &mut egui::Ui, v: &mut VfxValueDoc) -> bool {
+/// How many drag fields a constant needs on its row.
+fn fields_of(v: &VfxValueDoc) -> usize {
+    match v {
+        VfxValueDoc::F32(_) => 1,
+        VfxValueDoc::Vec3(_) => 3,
+        VfxValueDoc::Rgba(_) => 1,
+    }
+}
+
+/// Inline editor for a constant value (drag-float / xyz / colour swatch), each
+/// field `width` wide.
+fn const_editor(ui: &mut egui::Ui, v: &mut VfxValueDoc, width: f32) -> bool {
     let mut changed = false;
+    let size = [width, 18.0];
     match v {
         VfxValueDoc::F32(x) => {
-            changed |= ui.add(egui::DragValue::new(x).speed(0.01)).changed();
+            changed |= ui.add_sized(size, egui::DragValue::new(x).speed(0.01)).changed();
         }
         VfxValueDoc::Vec3(xyz) => {
             for (i, p) in ["x", "y", "z"].iter().enumerate() {
-                changed |= ui.add(egui::DragValue::new(&mut xyz[i]).speed(0.01).prefix(*p)).changed();
+                changed |= ui
+                    .add_sized(size, egui::DragValue::new(&mut xyz[i]).speed(0.01).prefix(*p))
+                    .changed();
             }
         }
         VfxValueDoc::Rgba(rgba) => {
@@ -507,7 +543,7 @@ pub(crate) fn curve_editor(
         ui.horizontal(|ui| {
             ui.small(format!("key {i} @"));
             changed |= ui.add(egui::DragValue::new(&mut k.t).speed(0.005).range(0.0..=1.0)).changed();
-            changed |= const_editor(ui, &mut k.v);
+            changed |= const_editor(ui, &mut k.v, 56.0);
         });
         k.t = k.t.clamp(0.0, 1.0);
     }

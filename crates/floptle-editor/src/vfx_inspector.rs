@@ -56,9 +56,6 @@ impl EditorTabViewer<'_> {
             ui.weak(format!("· {effect_name}"));
         });
 
-        // Selected clip / burst numeric detail (the thing you just grabbed).
-        clip_burst_detail(ui, st, &mut doc, &mut dirty);
-
         // Name + enable + reorder + delete.
         let mut reorder: i32 = 0;
         let mut delete = false;
@@ -114,6 +111,11 @@ impl EditorTabViewer<'_> {
                 section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
                     emission_section(ui, ti, track, &mut dirty)
                 });
+                if let Some(title) = clip_section_title(st, ti, track) {
+                    section(ui, "vfx_clip", &title, true, &mut |ui| {
+                        clip_detail(ui, st, track, &mut dirty)
+                    });
+                }
             }
             section(ui, "vfx_life", "📈  Over each particle's life", true, &mut |ui| {
                 particle_section(ui, track, st, &mut dirty)
@@ -134,34 +136,59 @@ impl EditorTabViewer<'_> {
     }
 }
 
+/// A wrapped one-line note under a section title.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).small().weak()).wrap());
+}
+
+/// The heading of the selected clip's section, when the selection is a clip on
+/// this track: what it is and where it starts.
+fn clip_section_title(
+    st: &crate::vfx_ui::VfxUiState,
+    ti: usize,
+    track: &floptle_scene::VfxTrackDoc,
+) -> Option<String> {
+    use crate::vfx_ui::VfxSel;
+    let Some(VfxSel::Clip(sel_t, ci)) = st.sel else { return None };
+    let c = (sel_t == ti).then(|| track.clips.get(ci)).flatten()?;
+    let kind = match c.emit {
+        Some(VfxEmitDoc::Burst { .. }) => "burst",
+        _ => "stream",
+    };
+    Some(format!("▪  Selected {kind} at {:.2}s", c.start))
+}
+
 /// The selected clip's editor: placement (start + length, where length is the particle
 /// lifetime), lifetime jitter, and its emission mode — a continuous stream (rate) or a
 /// burst-train (count ± jitter, repeated `pulses` times every `interval` ± jitter).
-fn clip_burst_detail(
+fn clip_detail(
     ui: &mut egui::Ui,
     st: &crate::vfx_ui::VfxUiState,
-    doc: &mut floptle_scene::VfxEffectDoc,
+    track: &mut floptle_scene::VfxTrackDoc,
     dirty: &mut bool,
 ) {
     use crate::vfx_ui::VfxSel;
-    let Some(VfxSel::Clip(ti, ci)) = st.sel else { return };
-    let Some(c) = doc.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) else { return };
+    let Some(VfxSel::Clip(_, ci)) = st.sel else { return };
+    let Some(c) = track.clips.get_mut(ci) else { return };
     // A legacy clip may have no emit yet (normally filled on load) — default to a stream.
     if c.emit.is_none() {
         c.emit = Some(VfxEmitDoc::Rate { rate: 10.0 });
     }
     let is_burst = matches!(c.emit, Some(VfxEmitDoc::Burst { .. }));
+    fn secs(v: &mut f32, speed: f64, max: f32) -> egui::DragValue<'_> {
+        egui::DragValue::new(v).speed(speed).range(0.0..=max).suffix("s").max_decimals(2)
+    }
 
-    ui.horizontal(|ui| {
-        ui.small(if is_burst { "✳ burst clip" } else { "▪ stream clip" });
+    egui::Grid::new("vfx_clip_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+        ui.label("emits");
         egui::ComboBox::from_id_salt("vfx_emit_mode")
-            .selected_text(if is_burst { "burst" } else { "stream" })
+            .selected_text(if is_burst { "in bursts" } else { "a stream" })
             .show_ui(ui, |ui| {
-                if ui.selectable_label(!is_burst, "stream (rate)").clicked() && is_burst {
+                if ui.selectable_label(!is_burst, "a stream (particles per second)").clicked() && is_burst {
                     c.emit = Some(VfxEmitDoc::Rate { rate: 10.0 });
                     *dirty = true;
                 }
-                if ui.selectable_label(is_burst, "burst (pulses)").clicked() && !is_burst {
+                if ui.selectable_label(is_burst, "in bursts (a count, in pulses)").clicked() && !is_burst {
                     c.emit = Some(VfxEmitDoc::Burst {
                         count: 12,
                         count_jitter: 0.0,
@@ -172,73 +199,78 @@ fn clip_burst_detail(
                     *dirty = true;
                 }
             });
-    });
+        ui.end_row();
 
-    // Placement: start + length. Length is authoritative for lifetime.
-    ui.horizontal(|ui| {
         ui.label("start");
-        *dirty |= ui.add(egui::DragValue::new(&mut c.start).speed(0.01).range(0.0..=100_000.0).suffix("s")).changed();
-        ui.label("life");
-        let mut life = (c.end - c.start).max(1e-3);
-        if ui
-            .add(egui::DragValue::new(&mut life).speed(0.01).range(0.001..=100_000.0).suffix("s"))
-            .on_hover_text("the clip's LENGTH on the timeline — how long its particles live")
-            .changed()
-        {
-            c.end = c.start + life.max(1e-3);
-            *dirty = true;
-        }
-        ui.label("± life");
-        *dirty |= ui
-            .add(egui::DragValue::new(&mut c.lifetime_jitter).speed(0.01).range(0.0..=1.0))
-            .on_hover_text("± fraction of random variance on each particle's lifetime")
-            .changed();
-    });
-    if c.end < c.start + 1e-3 {
-        c.end = c.start + 1e-3;
-    }
+        *dirty |= ui.add(secs(&mut c.start, 0.01, 100_000.0)).changed();
+        ui.end_row();
 
-    // Emission-mode parameters.
-    match c.emit.as_mut() {
-        Some(VfxEmitDoc::Rate { rate }) => {
-            ui.horizontal(|ui| {
+        // Placement: start + length. Length is authoritative for lifetime.
+        ui.label("length");
+        ui.horizontal(|ui| {
+            let mut life = (c.end - c.start).max(1e-3);
+            if ui
+                .add(secs(&mut life, 0.01, 100_000.0))
+                .on_hover_text("how long the clip runs — and how long each of its particles lives")
+                .changed()
+            {
+                c.end = c.start + life.max(1e-3);
+                *dirty = true;
+            }
+            ui.label("±");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut c.lifetime_jitter).speed(0.01).range(0.0..=1.0).max_decimals(2))
+                .on_hover_text("random variance on each particle's lifetime, as a fraction")
+                .changed();
+        });
+        ui.end_row();
+        if c.end < c.start + 1e-3 {
+            c.end = c.start + 1e-3;
+        }
+
+        match c.emit.as_mut() {
+            Some(VfxEmitDoc::Rate { rate }) => {
                 ui.label("rate");
                 *dirty |= ui
-                    .add(egui::DragValue::new(rate).speed(0.5).range(0.0..=100_000.0).suffix("/s"))
+                    .add(egui::DragValue::new(rate).speed(0.5).range(0.0..=100_000.0).suffix("/s").max_decimals(1))
                     .on_hover_text("particles per second across the whole clip")
                     .changed();
-            });
-        }
-        Some(VfxEmitDoc::Burst { count, count_jitter, pulses, interval, interval_jitter }) => {
-            ui.horizontal(|ui| {
+                ui.end_row();
+            }
+            Some(VfxEmitDoc::Burst { count, count_jitter, pulses, interval, interval_jitter }) => {
                 ui.label("count");
-                *dirty |= ui.add(egui::DragValue::new(count).speed(0.2).range(0..=1_000_000)).changed();
-                ui.label("± count");
-                *dirty |= ui
-                    .add(egui::DragValue::new(count_jitter).speed(0.01).range(0.0..=1.0))
-                    .on_hover_text("± fraction of random variance on each pulse's count")
-                    .changed();
-            });
-            ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    *dirty |= ui.add(egui::DragValue::new(count).speed(0.2).range(0..=1_000_000)).changed();
+                    ui.label("±");
+                    *dirty |= ui
+                        .add(egui::DragValue::new(count_jitter).speed(0.01).range(0.0..=1.0).max_decimals(2))
+                        .on_hover_text("random variance on each pulse's count, as a fraction")
+                        .changed();
+                });
+                ui.end_row();
                 ui.label("pulses");
                 *dirty |= ui
                     .add(egui::DragValue::new(pulses).speed(0.1).range(1..=100_000))
                     .on_hover_text("how many bursts fire, from the clip start")
                     .changed();
+                ui.end_row();
                 ui.label("every");
-                *dirty |= ui
-                    .add(egui::DragValue::new(interval).speed(0.01).range(0.0..=1000.0).suffix("s"))
-                    .on_hover_text("delay between pulses")
-                    .changed();
-                ui.label("± delay");
-                *dirty |= ui
-                    .add(egui::DragValue::new(interval_jitter).speed(0.01).range(0.0..=1.0))
-                    .on_hover_text("± fraction of random variance on each gap")
-                    .changed();
-            });
+                ui.horizontal(|ui| {
+                    *dirty |= ui
+                        .add(secs(interval, 0.01, 1000.0))
+                        .on_hover_text("delay between pulses")
+                        .changed();
+                    ui.label("±");
+                    *dirty |= ui
+                        .add(egui::DragValue::new(interval_jitter).speed(0.01).range(0.0..=1.0).max_decimals(2))
+                        .on_hover_text("random variance on each gap, as a fraction")
+                        .changed();
+                });
+                ui.end_row();
+            }
+            None => {}
         }
-        None => {}
-    }
+    });
 }
 
 fn look_section(
@@ -347,7 +379,7 @@ fn look_section(
                         }
                     });
             });
-            ui.small("mesh particles are lit + sun-shadowed like scene meshes");
+            hint(ui, "Mesh particles are lit and shadowed like scene meshes.");
         }
     }
     // Blend applies to the particle pass — billboards and beams (mesh particles
@@ -499,10 +531,11 @@ fn beam_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty:
             .on_hover_text("ripple cycles along the beam, animated by effect time")
             .changed();
     });
-    ui.small(
-        "one origin→end ribbon; emission is ignored. Width = the size row, tint = the \
-         color row, both sampled at the effect's timeline position. From a script: \
-         node:particles():setBeamEnd(x, y, z) aims it at a world point.",
+    hint(
+        ui,
+        "One ribbon from the emitter to its end point; width is the size row and tint the \
+         colour row, both read at the timeline position. A script aims it with \
+         node:particles():setBeamEnd(x, y, z).",
     );
 }
 
@@ -618,8 +651,38 @@ fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::Vfx
     // Rate / lifetime / burst counts are per CLIP now (a clip is one emission, its length
     // is the particle lifetime). Select a clip on the timeline to edit them; the emit
     // shape below is shared by every clip on the track.
-    ui.small("⏱ Emission is per clip — click a clip on the timeline to set its rate/burst, length (= lifetime) & jitter.");
+    hint(ui, "Rate, bursts and lifetime belong to each clip — select one on the timeline.");
     shape_editor(ui, ti, track, dirty);
+    pool_editor(ui, ti, track, dirty);
+}
+
+/// The track's pool: how many of its particles can be alive at once. Sized from
+/// the clips unless overridden, and the readout beside the transport says when
+/// that is not enough.
+fn pool_editor(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label("pool");
+        let auto = track.max_alive.is_none();
+        egui::ComboBox::from_id_salt(("vfx_pool", ti))
+            .selected_text(if auto { "sized from the clips" } else { "fixed" })
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(auto, "sized from the clips").clicked() && !auto {
+                    track.max_alive = None;
+                    *dirty = true;
+                }
+                if ui.selectable_label(!auto, "fixed").clicked() && auto {
+                    track.max_alive = Some(256);
+                    *dirty = true;
+                }
+            });
+        if let Some(n) = track.max_alive.as_mut() {
+            *dirty |= ui
+                .add(egui::DragValue::new(n).speed(1.0).range(1..=65_536))
+                .on_hover_text("the most particles this track can have alive at once")
+                .changed();
+        }
+    });
 }
 
 fn shape_editor(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
@@ -687,13 +750,13 @@ fn particle_section(
     st: &mut crate::vfx_ui::VfxUiState,
     dirty: &mut bool,
 ) {
-    ui.small("hover a value, tap 📈 to animate it over the particle's life");
+    hint(ui, "🎲 randomises a value per particle · 📈 animates it over the particle's life.");
     let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
     *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr, None);
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr, Some(0.0));
     *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr, None);
     *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr, None);
-    ui.small("rotation/angular are Euler radians (x=pitch, y=yaw, z=roll). Meshes use all three; billboards use roll (z) only — and 'velocity'/'upright' alignment ignore roll.");
+    hint(ui, "Rotation is Euler radians (x pitch, y yaw, z roll); a billboard uses roll only.");
     *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr, Some(0.0));
     ui.horizontal(|ui| {
         ui.label("gravity ×");
@@ -748,51 +811,71 @@ fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dir
         *dirty = true;
     }
     if track.forces.is_empty() {
-        ui.small("none — add wind, an attractor, a vortex, or turbulence");
+        hint(ui, "None yet — wind, an attractor, a vortex or turbulence.");
         return;
     }
-    // Small inline drag helpers (a scalar and an xyz vector).
     let dv = |ui: &mut egui::Ui, v: &mut f32, dirty: &mut bool| {
-        *dirty |= ui.add(egui::DragValue::new(v).speed(0.05)).changed();
+        *dirty |= ui.add(egui::DragValue::new(v).speed(0.05).max_decimals(2)).changed();
     };
     let vec3 = |ui: &mut egui::Ui, a: &mut [f32; 3], dirty: &mut bool| {
+        let w = ((ui.available_width() - 8.0) / 3.0 - 4.0).clamp(34.0, 72.0);
         for (i, p) in ["x", "y", "z"].iter().enumerate() {
-            *dirty |= ui.add(egui::DragValue::new(&mut a[i]).speed(0.05).prefix(*p)).changed();
+            *dirty |= ui
+                .add_sized([w, 18.0], egui::DragValue::new(&mut a[i]).speed(0.05).prefix(*p).max_decimals(2))
+                .changed();
         }
     };
     let mut remove = None;
     for (i, f) in track.forces.iter_mut().enumerate() {
+        let title = match f {
+            F::Directional { .. } => "💨 wind",
+            F::Point { .. } => "🎯 attractor",
+            F::Vortex { .. } => "🌀 vortex",
+            F::Turbulence { .. } => "〰 turbulence",
+        };
         ui.horizontal(|ui| {
-            match f {
-                F::Directional { dir, strength } => {
-                    ui.small("💨 dir");
-                    vec3(ui, dir, dirty);
-                    ui.small("×");
-                    dv(ui, strength, dirty);
-                }
-                F::Point { center, strength } => {
-                    ui.small("🎯 at");
-                    vec3(ui, center, dirty);
-                    ui.small("pull");
-                    dv(ui, strength, dirty);
-                }
-                F::Vortex { center, axis, strength } => {
-                    ui.small("🌀 at");
-                    vec3(ui, center, dirty);
-                    ui.small("axis");
-                    vec3(ui, axis, dirty);
-                    ui.small("×");
-                    dv(ui, strength, dirty);
-                }
-                F::Turbulence { frequency, strength } => {
-                    ui.small("〰 freq");
-                    dv(ui, frequency, dirty);
-                    ui.small("×");
-                    dv(ui, strength, dirty);
-                }
-            }
+            ui.strong(title);
             if ui.small_button("🗑").on_hover_text("remove force").clicked() {
                 remove = Some(i);
+            }
+        });
+        egui::Grid::new(("vfx_force", i)).num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            match f {
+                F::Directional { dir, strength } => {
+                    ui.label("direction");
+                    ui.horizontal(|ui| vec3(ui, dir, dirty));
+                    ui.end_row();
+                    ui.label("strength");
+                    dv(ui, strength, dirty);
+                    ui.end_row();
+                }
+                F::Point { center, strength } => {
+                    ui.label("centre");
+                    ui.horizontal(|ui| vec3(ui, center, dirty));
+                    ui.end_row();
+                    ui.label("pull");
+                    dv(ui, strength, dirty);
+                    ui.end_row();
+                }
+                F::Vortex { center, axis, strength } => {
+                    ui.label("centre");
+                    ui.horizontal(|ui| vec3(ui, center, dirty));
+                    ui.end_row();
+                    ui.label("axis");
+                    ui.horizontal(|ui| vec3(ui, axis, dirty));
+                    ui.end_row();
+                    ui.label("strength");
+                    dv(ui, strength, dirty);
+                    ui.end_row();
+                }
+                F::Turbulence { frequency, strength } => {
+                    ui.label("frequency");
+                    dv(ui, frequency, dirty);
+                    ui.end_row();
+                    ui.label("strength");
+                    dv(ui, strength, dirty);
+                    ui.end_row();
+                }
             }
         });
     }
@@ -815,10 +898,10 @@ fn selected_point_section(
 ) {
     ui.horizontal(|ui| {
         ui.strong("Lanes");
-        ui.small("(expand a track ⏷ on the timeline to draw its curves)");
+        hint(ui, "Expand a track ⏷ on the timeline to draw its curves.");
     });
     let Some((ati, lref, ki)) = st.auto_sel else {
-        ui.small("Click a breakpoint on a timeline lane to fine-tune it here.");
+        hint(ui, "Click a point on a timeline lane to set its exact time and value here.");
         return;
     };
     if ati != ti {

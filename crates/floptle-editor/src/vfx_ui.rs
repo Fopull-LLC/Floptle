@@ -210,42 +210,50 @@ const ROW_SCALE_MAX: f32 = 4.0;
 /// capacity` both existed and neither reached a person, so raising a rate past
 /// the pool silently gave you fewer particles than you asked for — the engine's
 /// most-filed failure shape, in the tab where over-asking is easiest.
-fn cost_readout(ui: &mut egui::Ui, st: &VfxUiState) {
+fn cost_readout(ui: &mut egui::Ui, st: &VfxUiState, doc: &VfxEffectDoc) {
     let p = &st.profile;
     let cap: u32 = p.capacity.iter().copied().sum();
-    ui.label(egui::RichText::new(format!("◈ {} peak", p.peak)).small())
-        .on_hover_text(format!(
-            "the most particles alive at once across the whole effect, measured by \
-             simulating it — pools total {cap}"
-        ));
+    ui.label(format!("◈ {} alive at peak", p.peak)).on_hover_text(format!(
+        "the most particles alive at once across the whole effect, measured by \
+         simulating it — the pools hold {cap}"
+    ));
     if !p.over_capacity() {
         return;
     }
     // Which track, and how much it lost. "Something is being dropped" is not
-    // actionable; "track 2 asked for 4,100 it could not have" is.
+    // actionable; "Sparks asked for 4,100 it could not have" is.
+    let track_name = |i: usize| {
+        doc.tracks.get(i).map(|t| t.name.clone()).unwrap_or_else(|| format!("track {}", i + 1))
+    };
     let worst = p
         .dropped
         .iter()
         .enumerate()
         .max_by_key(|&(_, d)| *d)
-        .map(|(i, &d)| (i, d))
-        .unwrap_or((0, 0));
-    let names: Vec<String> = p
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let lines: Vec<String> = p
         .dropped
         .iter()
         .enumerate()
         .filter(|&(_, d)| *d > 0)
-        .map(|(i, &d)| format!("track {i}: {d} dropped, pool {}", p.capacity.get(i).copied().unwrap_or(0)))
+        .map(|(i, &d)| {
+            format!(
+                "{}: {d} refused, pool of {}",
+                track_name(i),
+                p.capacity.get(i).copied().unwrap_or(0)
+            )
+        })
         .collect();
     ui.colored_label(
         Color32::from_rgb(255, 200, 80),
-        format!("⚠ track {} is over its pool", worst.0),
+        format!("⚠ {} is dropping particles", track_name(worst)),
     )
     .on_hover_text(format!(
         "The effect on screen is not the effect you authored — these births were \
-         refused because the pool was full:\n{}\n\nRaise the track's max alive, \
-         or lower its rate or burst count.",
-        names.join("\n")
+         refused because the track's pool was full:\n{}\n\nRaise the track's pool \
+         (Inspector ▸ Emission), or lower its rate or burst count.",
+        lines.join("\n")
     ));
 }
 
@@ -636,12 +644,30 @@ impl EditorTabViewer<'_> {
         let mut dirty = false;
 
         transport_ui(ui, st, &mut doc, &mut dirty);
+        // Where the preview is drawn, and a way to get the camera there.
+        let anchor = anchor_for(self.world, &key);
+        ui.horizontal(|ui| {
+            match anchor {
+                Some(e) => {
+                    let name = self
+                        .world
+                        .get::<floptle_core::Name>(e)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|| "a node".into());
+                    ui.weak(format!("previewing on {name}"));
+                }
+                None => {
+                    ui.weak("previewing at the world origin — no node in this scene plays it");
+                }
+            }
+            if ui.small_button("frame").on_hover_text("bring the Scene camera to the preview").clicked() {
+                let at = anchor
+                    .map(|e| floptle_core::world_transform(self.world, e).translation)
+                    .unwrap_or_default();
+                self.cmd.look_at = Some(at);
+            }
+        });
         ui.separator();
-        ui.small(
-            "Select a track → edit it in the Inspector.  Double-click a row = clip · right-click \
-             = track menu (burst / lanes) · expand ⏷ for curves.  Scroll = zoom · Alt+scroll = \
-             row height · Shift+scroll = pan · Space play · ←/→ step · F fit · Del remove.",
-        );
         // The timeline canvas is full-width; track settings live in the Inspector.
         canvas_ui(ui, st, &mut doc, &mut dirty);
 
@@ -743,9 +769,8 @@ impl EditorTabViewer<'_> {
                 .width(combo_w)
                 .selected_text(format!("✨ {cur_name}"))
                 .show_ui(ui, |ui| {
-                    for (k, name) in &effects {
-                        let label = if name == k { k.clone() } else { format!("{name}  ·  {k}") };
-                        if ui.selectable_label(*k == cur_key, label).clicked() && *k != cur_key {
+                    for (k, _) in &effects {
+                        if ui.selectable_label(*k == cur_key, k).clicked() && *k != cur_key {
                             pick = Some(k.clone());
                         }
                     }
@@ -800,8 +825,6 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
     // Wrapped so a narrow/vertical panel flows the controls onto extra rows instead
     // of overlapping (no right-to-left sub-layout to collide with the left widgets).
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new(format!("✨ {}", doc.name)).strong());
-        ui.separator();
         if ui.button("⏮").on_hover_text("to start").clicked() {
             st.playhead = 0.0;
         }
@@ -819,7 +842,7 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
         };
         ui.monospace(format!("{shown:>5.2}s / {:.2}s", doc.lifetime));
         ui.separator();
-        cost_readout(ui, st);
+        cost_readout(ui, st, doc);
         ui.separator();
 
         ui.label("lifetime");
@@ -984,6 +1007,31 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
                     }
                 }
             });
+        ui.menu_button("⌨ Shortcuts", |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            for line in [
+                "— Tracks —",
+                "click a track = edit it in the Inspector",
+                "⏷ on a track = show its curve lanes",
+                "right-click a track = add a burst or a lane",
+                "— Clips —",
+                "double-click a row = new clip there",
+                "drag a clip = move · drag its edge = trim",
+                "click a clip = its settings in the Inspector",
+                "Del / Backspace = delete the selection",
+                "— Navigation —",
+                "Space = play/pause · ←/→ = step a frame",
+                "F = fit · wheel = zoom · Alt+wheel = row height",
+                "Shift+wheel = pan",
+            ] {
+                if line.starts_with('—') {
+                    ui.add_space(3.0);
+                    ui.strong(line);
+                } else {
+                    ui.label(line);
+                }
+            }
+        });
     });
 }
 

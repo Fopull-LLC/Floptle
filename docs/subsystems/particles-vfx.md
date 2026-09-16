@@ -209,7 +209,11 @@ shards from being one shard drawn sixteen times.
 An effect is **compiled** before it runs — every curve baked to a LUT, every
 derived value precomputed — into a `CompiledEffect` of `CompiledTrack`s. The sim
 is structure-of-arrays per track, and every track has a hard `capacity`, either
-authored as `max_alive` or derived from the clips. That ceiling is why a busy
+authored as `max_alive` (the Inspector's *pool*) or derived from the clips: a
+stream's rate × lifetime, a burst's count × pulses, and in a looping effect
+whose particles outlive the loop, one generation per loop still alive. The
+Particles tab measures the effect and names the track when the pool is short.
+That ceiling is why a busy
 frame cannot ask for unbounded work: `perf.counts()` reports `particles`,
 `effects` and `effectsDropped`, and a non-zero `effectsDropped` means a ceiling
 refused something this frame — a number rather than a screenshot.

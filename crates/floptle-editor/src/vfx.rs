@@ -136,6 +136,11 @@ impl Default for VfxSystem {
     }
 }
 
+/// The effect's name as shown in the editor: the file stem of its key.
+pub(crate) fn effect_stem(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
+}
+
 impl VfxSystem {
     /// Re-scan `assets/` for particle effects (compiling curves to LUTs).
     pub fn rescan(&mut self, project_root: &Path) {
@@ -156,9 +161,13 @@ impl VfxSystem {
                 }
                 let Some(fname) = p.file_name().and_then(|s| s.to_str()) else { continue };
                 if fname.ends_with(VFX_EXT)
-                    && let Ok(doc) = floptle_scene::load_vfx_effect(&p)
+                    && let Ok(mut doc) = floptle_scene::load_vfx_effect(&p)
                 {
-                    self.effects.push((asset_key(&p, &root, VFX_EXT), VfxAsset::build(doc)));
+                    let key = asset_key(&p, &root, VFX_EXT);
+                    // An effect is named by its file, so renaming the file
+                    // renames the effect everywhere it is shown.
+                    doc.name = effect_stem(&key).to_string();
+                    self.effects.push((key, VfxAsset::build(doc)));
                 }
             }
         }
@@ -198,6 +207,7 @@ impl VfxSystem {
     /// re-spawn any live play-mode instances of it so edits land immediately.
     pub fn save(&mut self, project_root: &Path, key: &str, doc: &VfxEffectDoc) {
         let path = project_root.join(format!("{key}{VFX_EXT}"));
+        let doc = &VfxEffectDoc { name: effect_stem(key).to_string(), ..doc.clone() };
         if let Err(e) = floptle_scene::save_vfx_effect(doc, &path) {
             floptle_say::say_err!("  save effect {key} failed: {e}");
             return;

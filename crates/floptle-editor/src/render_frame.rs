@@ -286,6 +286,7 @@ impl Editor {
         self.refresh_gi();
         self.step_gi_bake();
         self.drive_auto_bake();
+        self.drive_auto_open();
         // The navmesh's own two: take a finished background bake, then decide
         // whether the level has changed enough to want another. In that order,
         // so a bake that has just landed is the one the watcher compares

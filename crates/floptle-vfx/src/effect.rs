@@ -562,14 +562,26 @@ fn prop1_peak(p: &Prop1) -> f32 {
 /// `rate × lifetime`; a burst-train can hold `count × pulses` (all pulses' particles
 /// alive at once in the worst case). Jitter widens both, and the peak Rate/Count
 /// automation multipliers scale them so a lane swell above 1× isn't silently clipped.
-fn derive_capacity(clips: &[Clip], rate_peak: f32, count_peak: f32) -> u32 {
+fn derive_capacity(clips: &[Clip], rate_peak: f32, count_peak: f32, loop_period: Option<f32>) -> u32 {
     let mut total = 0.0f32;
     for c in clips {
         let life = c.lifetime() * (1.0 + c.lifetime_jitter.clamp(0.0, 1.0));
         total += match c.emit {
-            Emit::Rate { rate } => rate.max(0.0) * rate_peak * life,
-            Emit::Burst { count, count_jitter, pulses, .. } => {
-                count as f32 * (1.0 + count_jitter.clamp(0.0, 1.0)) * count_peak * pulses.max(1) as f32
+            // One seat of headroom: at exactly one birth per lifetime the next
+            // particle is born the instant its predecessor dies.
+            Emit::Rate { rate } => rate.max(0.0) * rate_peak * life + 1.0,
+            Emit::Burst { count, count_jitter, pulses, interval, .. } => {
+                let pulses = pulses.max(1);
+                let per_loop =
+                    count as f32 * (1.0 + count_jitter.clamp(0.0, 1.0)) * count_peak * pulses as f32;
+                // In a loop shorter than the particles' lives, the previous
+                // loops' bursts are still alive when this one fires.
+                let last_death = (pulses - 1) as f32 * interval.max(0.0) + life;
+                let generations = match loop_period {
+                    Some(p) if p > 1e-3 => (last_death / p).floor() + 1.0,
+                    _ => 1.0,
+                };
+                per_loop * generations
             }
         };
     }
@@ -577,7 +589,7 @@ fn derive_capacity(clips: &[Clip], rate_peak: f32, count_peak: f32) -> u32 {
 }
 
 impl Track {
-    fn compile(&self, lifetime: f32) -> CompiledTrack {
+    fn compile(&self, lifetime: f32, playback: Playback) -> CompiledTrack {
         let mut clips = self.clips.clone();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
         // Sanitize each clip: a positive length (so lifetime > 0), clamped jitters, ≥ 1
@@ -604,7 +616,10 @@ impl Track {
         let lane_count = fold_lanes1(&self.automation, LaneTarget::Count, lifetime);
         let capacity = self
             .max_alive
-            .unwrap_or_else(|| derive_capacity(&clips, prop1_peak(&lane_rate), prop1_peak(&lane_count)))
+            .unwrap_or_else(|| {
+                let period = (playback == Playback::Looping).then_some(lifetime);
+                derive_capacity(&clips, prop1_peak(&lane_rate), prop1_peak(&lane_count), period)
+            })
             .max(1);
         CompiledTrack {
             name: self.name.clone(),
@@ -651,7 +666,7 @@ impl ParticleEffect {
             playback: self.playback,
             end: self.end,
             seed: self.seed,
-            tracks: self.tracks.iter().map(|t| t.compile(lifetime)).collect(),
+            tracks: self.tracks.iter().map(|t| t.compile(lifetime, self.playback)).collect(),
             gravity_mode: self.gravity_mode,
         }
     }
@@ -677,7 +692,7 @@ mod tests {
             ],
             ..Track::default()
         };
-        assert_eq!(t.compile(2.0).capacity, 22);
+        assert_eq!(t.compile(2.0, Playback::OneShot).capacity, 23);
     }
 
     #[test]
@@ -700,14 +715,52 @@ mod tests {
             automation: vec![lane(LaneTarget::Count)],
             ..Track::default()
         };
-        assert_eq!(burst.compile(1.0).capacity, 300, "3x Count lane sizes the pool for 300");
+        assert_eq!(burst.compile(1.0, Playback::OneShot).capacity, 300, "3x Count lane sizes the pool for 300");
         // A rate stream with a 3× Rate lane: 10/s × 3 × 2 s life = 60.
         let stream = Track {
             clips: vec![Clip { start: 0.0, end: 2.0, lifetime_jitter: 0.0, emit: Emit::Rate { rate: 10.0 } }],
             automation: vec![lane(LaneTarget::Rate)],
             ..Track::default()
         };
-        assert_eq!(stream.compile(1.0).capacity, 60);
+        assert_eq!(stream.compile(1.0, Playback::OneShot).capacity, 61);
+    }
+
+    /// A looping effect whose particles outlive the loop has several generations
+    /// alive at once, and the pool has to hold all of them.
+    #[test]
+    fn capacity_holds_every_generation_of_a_looping_burst() {
+        let fx = ParticleEffect {
+            lifetime: 2.0,
+            playback: Playback::Looping,
+            tracks: vec![Track {
+                clips: vec![Clip {
+                    start: 0.0,
+                    end: 3.0,
+                    lifetime_jitter: 0.0,
+                    emit: Emit::Burst { count: 10, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+                }],
+                ..Track::default()
+            }],
+            ..ParticleEffect::default()
+        };
+        let compiled = std::sync::Arc::new(fx.compile());
+        assert_eq!(compiled.tracks[0].capacity, 20);
+        let mut inst = crate::EffectInstance::new(compiled, 1);
+        for _ in 0..480 {
+            inst.advance(1.0 / 60.0, Vec3::ZERO);
+        }
+        assert_eq!(inst.track_dropped(0), 0, "a burst was refused for want of pool");
+    }
+
+    /// A stream at exactly one particle per lifetime is born the instant its
+    /// predecessor dies; the pool needs one seat of headroom for that.
+    #[test]
+    fn capacity_has_headroom_for_a_fencepost_birth() {
+        let t = Track {
+            clips: vec![Clip { start: 0.0, end: 0.5, lifetime_jitter: 0.0, emit: Emit::Rate { rate: 2.0 } }],
+            ..Track::default()
+        };
+        assert_eq!(t.compile(2.0, Playback::OneShot).capacity, 2);
     }
 
     #[test]
@@ -720,7 +773,7 @@ mod tests {
             },
         };
         let t = Track { automation: vec![mk(2.0, 2.0), mk(3.0, 3.0)], ..Track::default() };
-        let c = t.compile(1.0);
+        let c = t.compile(1.0, Playback::OneShot);
         assert!((c.lane_rate.sample(0.5) - 6.0).abs() < 1e-4);
         // Untouched targets stay free constant-1 multipliers.
         assert!(matches!(c.lane_speed, Prop1::Const(v) if v == 1.0));

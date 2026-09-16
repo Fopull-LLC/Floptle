@@ -102,6 +102,7 @@ mod fonts;
 mod ext_wire;
 mod game_keys;
 mod gi_bake;
+mod harness;
 mod nav_bake;
 #[cfg(feature = "editor-ui")]
 mod model_convert;
@@ -461,6 +462,8 @@ struct EditorCmd {
     open_particle_editor: Option<String>,
     /// Bring the Particles tab to the front (re-adding it if closed).
     focus_particles: bool,
+    /// Glide the Scene camera until this world point sits in front of it.
+    look_at: Option<floptle_core::math::DVec3>,
     /// Toggle the static MeshCollider marker on a Mesh node (`true` = add, `false` = remove).
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
