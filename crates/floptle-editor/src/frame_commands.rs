@@ -27,8 +27,25 @@ impl Editor {
     /// gpu/egui borrow has ended, so `self` is fully free again.
     #[cfg(feature = "editor-ui")]
     pub(crate) fn apply_frame_commands(&mut self, mut cmd: EditorCmd, frame_pointer_down: bool) {
-        // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
-        if let Some(action) = cmd.project_action {
+        // In this order: a later group may read a flag an earlier one set.
+        self.apply_editing_commands(&mut cmd);
+        self.apply_add_commands(&mut cmd);
+        self.apply_ui_layout_commands(&mut cmd);
+        self.apply_lighting_commands(&mut cmd, frame_pointer_down);
+        self.apply_session_commands(&mut cmd);
+        self.apply_component_commands(&mut cmd);
+        self.apply_layer_commands(&mut cmd);
+        self.apply_model_commands(&mut cmd);
+        self.apply_tab_commands(&mut cmd);
+        self.apply_terrain_commands(&mut cmd);
+        self.apply_dock_commands(&mut cmd);
+        self.apply_file_commands(&mut cmd);
+    }
+
+    /// The project menu, the tool, opening scripts, the edit verbs and enabling nodes.
+    #[cfg(feature = "editor-ui")]
+    fn apply_editing_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some(action) = cmd.project_action.take() {
             match action {
                 ProjectAction::New(p) => self.new_project(PathBuf::from(p)),
                 ProjectAction::Open(p) => {
@@ -42,16 +59,16 @@ impl Editor {
                 ProjectAction::Close => self.close_project(),
             }
         }
-        if let Some(tool) = cmd.set_tool {
+        if let Some(tool) = cmd.set_tool.take() {
             self.set_tool(tool);
         }
-        if let Some(path) = cmd.open_script {
+        if let Some(path) = cmd.open_script.take() {
             self.ide.open_file(&path);
         }
-        if let Some(path) = cmd.open_script_pref {
+        if let Some(path) = cmd.open_script_pref.take() {
             self.open_script_preferred(&path);
         }
-        if let Some((name, line)) = cmd.open_log_source {
+        if let Some((name, line)) = cmd.open_log_source.take() {
             self.open_source_at(&name, line);
         }
         if cmd.focus_learn
@@ -84,7 +101,7 @@ impl Editor {
         if cmd.delete {
             self.delete_selected();
         }
-        if let Some((ents, on)) = cmd.set_enabled {
+        if let Some((ents, on)) = cmd.set_enabled.take() {
             self.record();
             for e in ents {
                 if on {
@@ -98,7 +115,12 @@ impl Editor {
             // or the switched-off node keeps colliding with nothing on screen.
             self.rebuild_sim();
         }
-        if let Some(m) = cmd.add {
+    }
+
+    /// Adding nodes and UI elements, and the Map tool's operations.
+    #[cfg(feature = "editor-ui")]
+    fn apply_add_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some(m) = cmd.add.take() {
             let name = match &m {
                 MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
                 MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
@@ -158,7 +180,7 @@ impl Editor {
             };
             self.add_node(name, m);
         }
-        if let Some(what) = cmd.add_ui {
+        if let Some(what) = cmd.add_ui.take() {
             self.add_ui_node(what);
             // Bring the ◫ UI tab up: the thing you just added is a flat screen
             // element, and hunting for the tab that shows it is the kind of
@@ -167,7 +189,7 @@ impl Editor {
                 crate::dock::focus_ui_tab(dock);
             }
         }
-        if let Some(shape) = cmd.add_map_shape {
+        if let Some(shape) = cmd.add_map_shape.take() {
             self.add_map_shape(shape);
         }
         if let Some(op) = cmd.map_op.take() {
@@ -178,11 +200,11 @@ impl Editor {
             let cmds = std::mem::take(&mut cmd.tile_cmds);
             self.apply_tile_cmds(cmds);
         }
-        if let Some(mode) = cmd.set_map_mode {
+        if let Some(mode) = cmd.set_map_mode.take() {
             // Converts rather than clears — see `set_map_mode`.
             self.set_map_mode(mode);
         }
-        if let Some(on) = cmd.set_map_knife {
+        if let Some(on) = cmd.set_map_knife.take() {
             self.set_map_knife(on);
             // Cutting needs the tool, same as drawing does.
             if on && self.tool != Tool::MapEdit {
@@ -190,7 +212,7 @@ impl Editor {
                 self.set_map_knife(true); // set_tool clears it on the way in
             }
         }
-        if let Some(arm) = cmd.set_map_arm {
+        if let Some(arm) = cmd.set_map_arm.take() {
             self.map_draw = None;
             self.set_map_knife(false); // drawing and cutting both own the click
             self.map_arm = arm;
@@ -204,7 +226,7 @@ impl Editor {
         if cmd.map_detach {
             self.map_detach_selection();
         }
-        if let Some(q) = cmd.map_turn {
+        if let Some(q) = cmd.map_turn.take() {
             self.map_turn(q);
         }
         if cmd.map_prune {
@@ -225,6 +247,11 @@ impl Editor {
         // frame of the gesture via the pre-edit frame_snapshot; closed when the
         // pointer releases and `editing` resets). Without this, dragging/resizing
         // a UI element in the Scene view left no undo point.
+    }
+
+    /// The UI designer's moves, resizes and reordering.
+    #[cfg(feature = "editor-ui")]
+    fn apply_ui_layout_commands(&mut self, cmd: &mut EditorCmd) {
         if !cmd.ui_move.is_empty() || cmd.ui_resize.is_some() {
             self.begin_edit();
         }
@@ -240,7 +267,7 @@ impl Editor {
         // Rect-tool resize: grow/shrink toward the dragged side, keeping the
         // OPPOSITE edge visually fixed — Free positions and Pin offsets get the
         // exact compensation for their placement mode.
-        if let Some((idx, dsize, from_min, cur)) = cmd.ui_resize {
+        if let Some((idx, dsize, from_min, cur)) = cmd.ui_resize.take() {
             let ent = self.world.entity_with::<Transform>(idx);
             if let Some(e) = ent
                 && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
@@ -355,6 +382,11 @@ impl Editor {
         if cmd.ui_reload_styles {
             self.reload_ui_styles();
         }
+    }
+
+    /// The Inspector's lighting, GI, probe and navmesh requests.
+    #[cfg(feature = "editor-ui")]
+    fn apply_lighting_commands(&mut self, cmd: &mut EditorCmd, frame_pointer_down: bool) {
         if cmd.inspector_changed {
             self.begin_edit();
         }
@@ -362,11 +394,11 @@ impl Editor {
         if cmd.gi_changed {
             self.gi_dirty = true;
         }
-        if let Some(v) = cmd.gi_show_only {
+        if let Some(v) = cmd.gi_show_only.take() {
             self.gi_show_only = v;
             self.gi_dirty = true;
         }
-        if let Some(v) = cmd.gi_show_probes {
+        if let Some(v) = cmd.gi_show_probes.take() {
             self.gi_show_probes = v;
         }
         if cmd.recapture_probes {
@@ -431,6 +463,11 @@ impl Editor {
                 self.anim_ui.clip_dirty = false;
             }
         }
+    }
+
+    /// Play, the network session, exports, stepping, drops and preferences.
+    #[cfg(feature = "editor-ui")]
+    fn apply_session_commands(&mut self, cmd: &mut EditorCmd) {
         if cmd.toggle_selection_lock {
             self.toggle_selection_lock();
         }
@@ -449,13 +486,13 @@ impl Editor {
         if cmd.net_stop_session {
             self.net_stop("panel");
         }
-        if let Some(port) = cmd.net_host_quic {
+        if let Some(port) = cmd.net_host_quic.take() {
             self.net_host_quic(port);
         }
-        if let Some(p) = cmd.net_play_replay {
+        if let Some(p) = cmd.net_play_replay.take() {
             self.net_play_replay(&p);
         }
-        if let Some(addr) = cmd.net_join_quic {
+        if let Some(addr) = cmd.net_join_quic.take() {
             let a = addr.trim().to_string();
             if let Some(rest) = a.strip_prefix("relay://") {
                 match rest.rsplit_once('/') {
@@ -470,10 +507,10 @@ impl Editor {
                 self.net_join_quic(a.trim_start_matches("quic://"));
             }
         }
-        if let Some(addr) = cmd.net_host_relay {
+        if let Some(addr) = cmd.net_host_relay.take() {
             self.net_host_relay(addr.trim());
         }
-        if let Some((dir, target)) = cmd.export_game {
+        if let Some((dir, target)) = cmd.export_game.take() {
             self.begin_export(dir, target);
         }
         if cmd.step_tick {
@@ -485,38 +522,38 @@ impl Editor {
         if cmd.toggle_pause {
             self.toggle_pause();
         }
-        if let Some(path) = cmd.drop_asset {
+        if let Some(path) = cmd.drop_asset.take() {
             self.drop_asset(&path);
         }
-        if let Some(path) = cmd.convert_model {
+        if let Some(path) = cmd.convert_model.take() {
             self.start_model_conversion(&path);
         }
         // Free until one is running: a `try_recv` on nothing is a branch.
         self.poll_model_conversion();
-        if let Some(path) = cmd.import_map {
+        if let Some(path) = cmd.import_map.take() {
             // The Assets browser's "Add to scene": no drop point, so the group
             // lands in front of the camera (the `add_node_at` convention).
             self.import_map_file(&path, None);
         }
-        if let Some((path, e)) = cmd.drop_script_on {
+        if let Some((path, e)) = cmd.drop_script_on.take() {
             self.attach_script_file(&path, Some(e));
         }
-        if let Some((script_path, e)) = cmd.attach_named {
+        if let Some((script_path, e)) = cmd.attach_named.take() {
             let path = self.project_root.join(&script_path);
             self.attach_script_file(&path.to_string_lossy(), Some(e));
         }
-        if let Some(file) = cmd.open_in_editor {
+        if let Some(file) = cmd.open_in_editor.take() {
             open_external_editor(&self.external_editor, &self.project_root, &file, 1);
         }
-        if let Some(c) = cmd.set_external_editor {
+        if let Some(c) = cmd.set_external_editor.take() {
             save_external_editor(&c);
             self.external_editor = c;
         }
-        if let Some(v) = cmd.set_prefer_external {
+        if let Some(v) = cmd.set_prefer_external.take() {
             save_prefer_external(v);
             self.prefer_external_editor = v;
         }
-        if let Some((en, tint)) = cmd.set_play_tint {
+        if let Some((en, tint)) = cmd.set_play_tint.take() {
             save_play_tint(en, tint);
             self.play_tint_enabled = en;
             self.play_tint = tint;
@@ -524,22 +561,27 @@ impl Editor {
         if cmd.save_grid {
             save_grid(&self.grid);
         }
-        if let Some(i) = cmd.set_engine_theme {
+        if let Some(i) = cmd.set_engine_theme.take() {
             self.engine_theme = i;
             save_theme_index(engine_theme_path(), i);
         }
-        if let Some(i) = cmd.set_code_theme {
+        if let Some(i) = cmd.set_code_theme.take() {
             self.code_theme = i;
             save_theme_index(code_theme_path(), i);
         }
-        if let Some((name, doc)) = cmd.save_material {
+    }
+
+    /// Materials, textures and the components a node gains or loses, physics included.
+    #[cfg(feature = "editor-ui")]
+    fn apply_component_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some((name, doc)) = cmd.save_material.take() {
             let dir = self.materials_dir();
             let _ = floptle_scene::save_material(&name, &doc, &dir);
             self.materials = self.load_materials();
             self.mat_name_buf.clear();
             self.asset_tree = build_assets(&self.project_root);
         }
-        if let Some(e) = cmd.add_material {
+        if let Some(e) = cmd.add_material.take() {
             self.record();
             for e in self.selected_group(e) {
                 // Seed from each node's own primitive color (else white), so a
@@ -551,7 +593,7 @@ impl Editor {
                 self.world.insert(e, Material::tinted(base));
             }
         }
-        if let Some(e) = cmd.reset_transform {
+        if let Some(e) = cmd.reset_transform.take() {
             self.record();
             // The whole selection, like every other component action here: a
             // reset that only reached the node you happened to click would be a
@@ -566,7 +608,7 @@ impl Editor {
         // everything a dev wants to do next with a model's art (layer over it,
         // recolour it, point one part at a different copy) starts with the file
         // existing.
-        if let Some(path) = cmd.extract_model_textures {
+        if let Some(path) = cmd.extract_model_textures.take() {
             let abs = self.resolve_asset_path(&path);
             match crate::model_textures::extract_model_textures(&abs, &path, &self.project_root) {
                 Ok(written) => {
@@ -594,7 +636,7 @@ impl Editor {
         // looks like — its imported colour and, if the model brought one, its
         // texture (extracted on the spot, because an override that names no
         // texture draws untextured and "override" must not mean "go blank").
-        if let Some((e, key, model)) = cmd.override_object_material {
+        if let Some((e, key, model)) = cmd.override_object_material.take() {
             self.record();
             let (base, textured, material) = self
                 .mesh_registry
@@ -644,47 +686,47 @@ impl Editor {
             om.0.insert(key, mat);
             self.world.insert(e, om);
         }
-        if let Some(e) = cmd.remove_material {
+        if let Some(e) = cmd.remove_material.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.remove::<Material>(e);
             }
         }
-        if let Some(e) = cmd.add_rigidbody {
+        if let Some(e) = cmd.add_rigidbody.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.insert(e, floptle_core::RigidBody::default());
             }
             self.rebuild_sim();
         }
-        if let Some(e) = cmd.remove_rigidbody {
+        if let Some(e) = cmd.remove_rigidbody.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.remove::<floptle_core::RigidBody>(e);
             }
             self.rebuild_sim();
         }
-        if let Some(e) = cmd.add_celestial {
+        if let Some(e) = cmd.add_celestial.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.insert(e, floptle_core::CelestialBody::default());
             }
             self.rebuild_sim(); // they're gravity sources now
         }
-        if let Some(e) = cmd.remove_celestial {
+        if let Some(e) = cmd.remove_celestial.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.remove::<floptle_core::CelestialBody>(e);
             }
             self.rebuild_sim();
         }
-        if let Some(e) = cmd.add_networked {
+        if let Some(e) = cmd.add_networked.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.insert(e, floptle_core::Replicated::default());
             }
         }
-        if let Some((e, key)) = cmd.add_particles {
+        if let Some((e, key)) = cmd.add_particles.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.insert(
@@ -705,10 +747,10 @@ impl Editor {
         // first is also the only order that is safe: a `.vfx.ron` renamed after
         // the fact leaves the `ParticleSystem.asset` on the node pointing at the
         // old key.
-        if let Some(e) = cmd.new_particles {
+        if let Some(e) = cmd.new_particles.take() {
             self.new_asset_prompt = Some((crate::NewAsset::Effect(e), String::new()));
         }
-        if let Some((e, name)) = cmd.do_new_particles {
+        if let Some((e, name)) = cmd.do_new_particles.take() {
             // Sanitised into a filename here rather than refused in the modal: a
             // space in an effect name is a reasonable thing to type.
             let stem = crate::assets::sanitize_asset_name(&name);
@@ -740,19 +782,19 @@ impl Editor {
                 cmd.open_particle_editor = Some(key);
             }
         }
-        if let Some(e) = cmd.remove_particles {
+        if let Some(e) = cmd.remove_particles.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.remove::<floptle_core::ParticleSystem>(e);
             }
         }
-        if let Some(e) = cmd.add_audio {
+        if let Some(e) = cmd.add_audio.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.insert(e, floptle_audio::AudioSource::default());
             }
         }
-        if let Some(e) = cmd.remove_audio {
+        if let Some(e) = cmd.remove_audio.take() {
             self.record();
             for e in self.selected_group(e) {
                 self.world.remove::<floptle_audio::AudioSource>(e);
@@ -772,7 +814,7 @@ impl Editor {
             let mixer = self.project.mixer.clone();
             self.audio.apply_mixer(&mixer);
         }
-        if let Some((e, on)) = cmd.set_mesh_collider {
+        if let Some((e, on)) = cmd.set_mesh_collider.take() {
             self.record();
             for e in self.selected_group(e) {
                 if on {
@@ -783,7 +825,7 @@ impl Editor {
             }
             self.rebuild_sim();
         }
-        if let Some((e, on)) = cmd.set_collidable {
+        if let Some((e, on)) = cmd.set_collidable.take() {
             self.record();
             for e in self.selected_group(e) {
                 if on {
@@ -796,7 +838,7 @@ impl Editor {
             }
             self.rebuild_sim();
         }
-        if let Some((e, on)) = cmd.set_nav_exclude {
+        if let Some((e, on)) = cmd.set_nav_exclude.take() {
             self.record();
             for e in self.selected_group(e) {
                 if on {
@@ -809,7 +851,7 @@ impl Editor {
         if cmd.rebuild_physics {
             self.rebuild_sim();
         }
-        if let Some((e, on)) = cmd.set_trigger {
+        if let Some((e, on)) = cmd.set_trigger.take() {
             self.record();
             for e in self.selected_group(e) {
                 if on {
@@ -820,7 +862,12 @@ impl Editor {
             }
             self.rebuild_sim(); // the sensor flag bakes into the static collider
         }
-        if let Some((e, layer, order)) = cmd.set_sorting {
+    }
+
+    /// 2D sorting and lighting, collision layers, matter, visibility and presets.
+    #[cfg(feature = "editor-ui")]
+    fn apply_layer_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some((e, layer, order)) = cmd.set_sorting.take() {
             self.record();
             // Default-at-0 is the absence of the component, so a node put back
             // to the default stops carrying one and its scene stops mentioning
@@ -844,7 +891,7 @@ impl Editor {
                 self.world.insert(e, floptle_core::Sorting { layer, order, mode });
             }
         }
-        if let Some((e, mode)) = cmd.set_sort_mode {
+        if let Some((e, mode)) = cmd.set_sort_mode.take() {
             self.record();
             let cur = self.world.get::<floptle_core::Sorting>(e).cloned().unwrap_or_default();
             // Same default test as the layer/order path above, with the mode in
@@ -860,7 +907,7 @@ impl Editor {
             }
             self.scene_dirty = true;
         }
-        if let Some((e, p)) = cmd.set_parallax {
+        if let Some((e, p)) = cmd.set_parallax.take() {
             self.record();
             // Identity is the absence of the component, the same rule sorting
             // and 2D lighting follow — so a layer put back to 1,1 stops carrying
@@ -872,7 +919,7 @@ impl Editor {
             }
             self.scene_dirty = true;
         }
-        if let Some((e, lit)) = cmd.set_lighting_2d {
+        if let Some((e, lit)) = cmd.set_lighting_2d.take() {
             self.record();
             // Auto with no layer list is the absence of the component, exactly
             // as with sorting above — so a node put back to the default stops
@@ -883,7 +930,7 @@ impl Editor {
                 self.world.insert(e, lit);
             }
         }
-        if let Some((e, cast)) = cmd.set_shadow_2d {
+        if let Some((e, cast)) = cmd.set_shadow_2d.take() {
             self.record();
             if cast == floptle_core::Cast2D::Auto {
                 self.world.remove::<floptle_core::Shadow2D>(e);
@@ -891,7 +938,7 @@ impl Editor {
                 self.world.insert(e, floptle_core::Shadow2D(cast));
             }
         }
-        if let Some((e, c)) = cmd.set_camera_2d {
+        if let Some((e, c)) = cmd.set_camera_2d.take() {
             self.record();
             match c {
                 // The live half (where the follow has got to, any shake running)
@@ -924,14 +971,14 @@ impl Editor {
                 });
             }
         }
-        if let Some(a) = cmd.access {
+        if let Some(a) = cmd.access.take() {
             // One set of values, two ways in: this pane and a game's own options
             // menu (`access.*`). Pushed into the host so Lua reads back what the
             // editor just set, rather than the two disagreeing.
             self.access = a;
             self.script_host.set_access(a);
         }
-        if let Some((old, new)) = cmd.rename_layer {
+        if let Some((old, new)) = cmd.rename_layer.take() {
             // The open scene's nodes follow a Project-Settings layer rename
             // (fires per keystroke, so they never detach mid-edit). "Default"
             // as the new name = the component becomes redundant — drop it.
@@ -950,7 +997,7 @@ impl Editor {
             }
             self.rebuild_sim();
         }
-        if let Some((e, mt)) = cmd.set_matter {
+        if let Some((e, mt)) = cmd.set_matter.take() {
             // Switch the node's "type" (mutually-exclusive components). Terrain owns an
             // out-of-ECS SDF field, so never morph one through here — and the mandatory
             // PostProcess node keeps its type (nothing else may become one either).
@@ -968,37 +1015,42 @@ impl Editor {
                 self.rebuild_sim();
             }
         }
-        if let Some(path) = cmd.import_model {
+        if let Some(path) = cmd.import_model.take() {
             self.import_model(&path);
         }
-        if let Some((e, vis)) = cmd.set_visible {
+        if let Some((e, vis)) = cmd.set_visible.take() {
             self.record();
             self.world.insert(e, floptle_core::Visible(vis));
         }
-        if let Some(clip) = cmd.copy_component {
+        if let Some(clip) = cmd.copy_component.take() {
             self.component_clip = Some(clip);
         }
-        if let Some(e) = cmd.paste_component {
+        if let Some(e) = cmd.paste_component.take() {
             self.paste_onto(e);
         }
-        if let Some((e, name)) = cmd.apply_preset
+        if let Some((e, name)) = cmd.apply_preset.take()
             && let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
                 let mat = doc.to_material();
                 self.record();
                 self.world.insert(e, mat);
             }
-        if let Some(path) = cmd.extract_textures {
+        if let Some(path) = cmd.extract_textures.take() {
             self.extract_textures(&path);
         }
-        if let Some((mesh, idx)) = cmd.select_bone {
+    }
+
+    /// Bones, pivots, parents, mirrors, hair rigs, clips and controllers of a model.
+    #[cfg(feature = "editor-ui")]
+    fn apply_model_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some((mesh, idx)) = cmd.select_bone.take() {
             // Select a model object/bone from the Inspector's Objects & Rig lists —
             // the same rule as the Hierarchy tree and the viewport rig.
             self.select_bone(mesh, idx);
         }
-        if let Some((mesh, name, p)) = cmd.set_object_pivot {
+        if let Some((mesh, name, p)) = cmd.set_object_pivot.take() {
             self.apply_object_pivot(mesh, &name, Vec3::from(p));
         }
-        if let Some((child, mesh, bone)) = cmd.attach_to_bone {
+        if let Some((child, mesh, bone)) = cmd.attach_to_bone.take() {
             // A BoneAttach's local Transform is in the target model's space, so it
             // must be a direct child of that Mesh.  Preserve the scene-world pose as
             // its bone-local offset before normalizing the hierarchy; this supports
@@ -1025,7 +1077,7 @@ impl Editor {
             self.world.insert(child, floptle_core::Parent(mesh));
             self.world.insert(child, floptle_core::BoneAttach { target: mesh, bone, offset });
         }
-        if let Some((mesh, child, parent)) = cmd.set_object_parent {
+        if let Some((mesh, child, parent)) = cmd.set_object_parent.take() {
             // Persist an object re-parent to the model's `.rig.ron` sidecar, then
             // re-import the model so the new hierarchy takes effect live and every
             // instance rebinds against the reordered skeleton.
@@ -1047,7 +1099,7 @@ impl Editor {
                 self.bone_selection = None; // node indices changed after the re-sort
             }
         }
-        if let Some((path, filter)) = cmd.set_model_filter {
+        if let Some((path, filter)) = cmd.set_model_filter.take() {
             // Persist the embedded-texture filter to the model's sidecar, then drop
             // the registration — the ensure sweep re-imports it next frame with the
             // new sampling (skin variants self-heal on the new MeshIds).
@@ -1063,7 +1115,7 @@ impl Editor {
             }
             self.mesh_registry.remove(&path);
         }
-        if let Some(mesh) = cmd.mirror_model
+        if let Some(mesh) = cmd.mirror_model.take()
             && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
         {
             let abs = self.resolve_asset_path(&asset_path);
@@ -1103,7 +1155,7 @@ impl Editor {
                 ),
             }
         }
-        if let Some((mesh, object)) = cmd.add_hair_rig
+        if let Some((mesh, object)) = cmd.add_hair_rig.take()
             && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
         {
             let abs = self.resolve_asset_path(&asset_path);
@@ -1141,7 +1193,7 @@ impl Editor {
                 ),
             }
         }
-        if let Some(path) = cmd.extract_anims {
+        if let Some(path) = cmd.extract_anims.take() {
             self.anim_ui.probes.remove(&path); // refresh the model's clip list
             match anim::extract_clips(&mut self.anim, &self.project_root, &path) {
                 Ok(keys) => {
@@ -1162,7 +1214,7 @@ impl Editor {
                 ),
             }
         }
-        if let Some((e, key)) = cmd.set_anim_controller {
+        if let Some((e, key)) = cmd.set_anim_controller.take() {
             self.record();
             match key {
                 Some(k) => {
@@ -1174,7 +1226,12 @@ impl Editor {
             }
             // Live in Play: the runtime rebinds lazily on the next animator advance.
         }
-        if let Some(key) = cmd.open_anim_graph {
+    }
+
+    /// The graph, image and particle editors, and which tab comes to the front.
+    #[cfg(feature = "editor-ui")]
+    fn apply_tab_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some(key) = cmd.open_anim_graph.take() {
             cmd.focus_anim_graph = true;
             self.anim_ui.graph_key = Some(key);
             self.anim_ui.graph_doc = None; // reload the working copy
@@ -1182,7 +1239,7 @@ impl Editor {
             self.anim_ui.sel_state = None;
             self.anim_ui.sel_trans = None;
         }
-        if let Some(attach) = cmd.new_anim_controller {
+        if let Some(attach) = cmd.new_anim_controller.take() {
             cmd.focus_anim_graph = true;
             self.anim_ui.new_ctl_buf = Some(String::new());
             self.anim_ui.focus_prompt = true;
@@ -1194,28 +1251,28 @@ impl Editor {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
             });
         }
-        if let Some(path) = cmd.open_shader_graph {
+        if let Some(path) = cmd.open_shader_graph.take() {
             self.open_shader_in_graph(&path);
         }
-        if let Some(path) = cmd.import_aseprite {
+        if let Some(path) = cmd.import_aseprite.take() {
             self.import_aseprite_sheet(&path);
         }
-        if let Some((path, cols, rows)) = cmd.new_sprite_anim {
+        if let Some((path, cols, rows)) = cmd.new_sprite_anim.take() {
             self.write_sprite_anim(&path, cols, rows);
         }
-        if let Some(path) = cmd.open_image {
+        if let Some(path) = cmd.open_image.take() {
             self.open_image_doc(&path);
         }
-        if let Some(form) = cmd.image_new {
+        if let Some(form) = cmd.image_new.take() {
             self.new_image_doc(&form);
         }
         if cmd.image_save {
             self.save_image_doc();
         }
-        if let Some(name) = cmd.image_save_as {
+        if let Some(name) = cmd.image_save_as.take() {
             self.save_image_doc_as(&name);
         }
-        if let Some(what) = cmd.image_export {
+        if let Some(what) = cmd.image_export.take() {
             self.export_image(what);
         }
         if cmd.image_save_palette {
@@ -1228,16 +1285,16 @@ impl Editor {
         if cmd.image_close {
             self.close_image_doc(None);
         }
-        if let Some(i) = cmd.image_close_tab {
+        if let Some(i) = cmd.image_close_tab.take() {
             self.close_image_doc(Some(i));
         }
-        if let Some(i) = cmd.image_activate {
+        if let Some(i) = cmd.image_activate.take() {
             self.activate_image_doc(i);
         }
         if cmd.image_new_from_clipboard {
             self.new_image_from_clipboard();
         }
-        if let Some(which) = cmd.image_discard {
+        if let Some(which) = cmd.image_discard.take() {
             self.discard_image_doc(which);
         }
         if cmd.image_save_then_close {
@@ -1253,11 +1310,11 @@ impl Editor {
                 self.image.toast("give it a name first — then close it");
             }
         }
-        if let Some(key) = cmd.open_particle_editor {
+        if let Some(key) = cmd.open_particle_editor.take() {
             cmd.focus_particles = true;
             self.vfx_ui.open(key);
         }
-        if let Some(at) = cmd.look_at {
+        if let Some(at) = cmd.look_at.take() {
             self.focus_point(at, 6.0);
         }
         if cmd.focus_particles
@@ -1284,10 +1341,15 @@ impl Editor {
                     dock.push_to_focused_leaf(EditorTab::AnimGraph);
                 }
             }
-        if let Some((children, parent)) = cmd.reparent {
+    }
+
+    /// Reparenting, painting, terrain and cameras.
+    #[cfg(feature = "editor-ui")]
+    fn apply_terrain_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some((children, parent)) = cmd.reparent.take() {
             self.reparent_many(&children, parent);
         }
-        if let Some((matter, parent)) = cmd.add_parented {
+        if let Some((matter, parent)) = cmd.add_parented.take() {
             self.add_parented(matter, parent);
         }
         if cmd.paint_fill {
@@ -1313,20 +1375,20 @@ impl Editor {
         if cmd.open_new_terrain {
             self.new_terrain_cfg = Some(NewTerrainCfg::default());
         }
-        if let Some(cfg) = cmd.create_terrain {
+        if let Some(cfg) = cmd.create_terrain.take() {
             self.create_terrain(&cfg);
             self.focus_terrain();
         }
-        if let Some(parent) = cmd.add_camera {
+        if let Some(parent) = cmd.add_camera.take() {
             self.add_camera_node(parent);
         }
         if let Some((path, setting)) = cmd.set_texture_setting.take() {
             self.apply_texture_setting(&path, setting);
         }
-        if let Some(e) = cmd.set_active_camera {
+        if let Some(e) = cmd.set_active_camera.take() {
             self.set_active_camera(e);
         }
-        if let Some(e) = cmd.camera_from_view {
+        if let Some(e) = cmd.camera_from_view.take() {
             self.camera_to_view(e);
         }
         if cmd.clear_terrain {
@@ -1344,7 +1406,7 @@ impl Editor {
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
         }
-        if let Some(fill) = cmd.fill_terrain
+        if let Some(fill) = cmd.fill_terrain.take()
             && let Some(e) = self.target_terrain() {
                 // Snapshot for undo (one step), then fill the whole field. Fills only
                 // modify EXISTING chunks, so the stored set is the exact undo cover.
@@ -1406,6 +1468,11 @@ impl Editor {
                     self.mirror_terrain_chunks_to_sim(e, &coords);
                 }
             }
+    }
+
+    /// Bringing a tab to the front, and resetting the layout or the window.
+    #[cfg(feature = "editor-ui")]
+    fn apply_dock_commands(&mut self, cmd: &mut EditorCmd) {
         if cmd.focus_terrain {
             self.focus_terrain();
         }
@@ -1452,7 +1519,12 @@ impl Editor {
                 let _ = window.request_inner_size(winit::dpi::LogicalSize::new(d.width, d.height));
             }
         }
-        if let Some(path) = cmd.open_scene {
+    }
+
+    /// Scenes, prefabs, the asset tree, imports, crash reports and trust.
+    #[cfg(feature = "editor-ui")]
+    fn apply_file_commands(&mut self, cmd: &mut EditorCmd) {
+        if let Some(path) = cmd.open_scene.take() {
             // Opening a scene ends any play session first — Stop restores the
             // pre-Play scene (name, world, terrain), so the unsaved-changes
             // prompt and its save below operate on real edit state, never on
@@ -1468,7 +1540,7 @@ impl Editor {
                 self.open_scene_file(&path);
             }
         }
-        if let Some(path) = cmd.open_prefab {
+        if let Some(path) = cmd.open_prefab.take() {
             // Same shape as opening a scene, for the same reason: this replaces
             // the world.
             if self.playing {
@@ -1480,7 +1552,7 @@ impl Editor {
                 self.open_prefab_file(&path);
             }
         }
-        if let Some((path, save_first)) = cmd.do_open_scene {
+        if let Some((path, save_first)) = cmd.do_open_scene.take() {
             if save_first {
                 self.save_all();
             }
@@ -1493,14 +1565,14 @@ impl Editor {
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
         }
-        if let Some((e, kind, func)) = cmd.run_editor_action {
+        if let Some((e, kind, func)) = cmd.run_editor_action.take() {
             self.run_editor_action(e, &kind, &func);
         }
         // Adopt any finished background planet generations. (The runtime queue
         // DRAINS earlier in the frame — before residency, see render_frame's
         // ordering comment; editor actions drain inside `run_editor_action`.)
         self.poll_terrain_generates();
-        if let Some(name) = cmd.new_scene {
+        if let Some(name) = cmd.new_scene.take() {
             self.new_scene(&name);
         }
         if cmd.refresh_assets {
@@ -1509,13 +1581,13 @@ impl Editor {
             self.vfx.rescan(&self.project_root);
             self.anim_ui.probes.clear(); // re-probe model animation lists
         }
-        if let Some(dir) = cmd.new_folder_in {
+        if let Some(dir) = cmd.new_folder_in.take() {
             self.new_folder(&dir);
         }
-        if let Some(dir) = cmd.new_script_in {
+        if let Some(dir) = cmd.new_script_in.take() {
             self.new_script(&dir);
         }
-        if let Some(dir) = cmd.new_shader_in {
+        if let Some(dir) = cmd.new_shader_in.take() {
             self.new_shader(&dir);
             // The graph tab's ✚ New: show the fresh shader on the canvas too
             // (the naming modal from new_shader stays up over it).
@@ -1525,7 +1597,7 @@ impl Editor {
                 self.open_shader_in_graph(&p);
             }
         }
-        if let Some(path) = cmd.rename_asset {
+        if let Some(path) = cmd.rename_asset.take() {
             // Seed the rename modal with the current base name (the extension is shown as a
             // fixed suffix in the modal, so you edit just the name).
             let p = Path::new(&path);
@@ -1539,23 +1611,23 @@ impl Editor {
             };
             self.rename_target = Some((path, name));
         }
-        if let Some((from, to)) = cmd.do_rename {
+        if let Some((from, to)) = cmd.do_rename.take() {
             self.rename_asset(&from, &to);
         }
-        if let Some(paths) = cmd.delete_asset {
+        if let Some(paths) = cmd.delete_asset.take() {
             // Deleting files/folders is irreversible — always confirm first.
             self.delete_confirm = Some(paths);
         }
-        if let Some(paths) = cmd.do_delete_asset {
+        if let Some(paths) = cmd.do_delete_asset.take() {
             self.delete_assets(&paths);
         }
-        if let Some((sources, dest)) = cmd.move_assets {
+        if let Some((sources, dest)) = cmd.move_assets.take() {
             self.move_assets(&sources, &dest);
         }
-        if let Some((sources, dest)) = cmd.import_files {
+        if let Some((sources, dest)) = cmd.import_files.take() {
             self.import_files(&sources, &dest);
         }
-        if let Some(dir) = cmd.pick_import_dir {
+        if let Some(dir) = cmd.pick_import_dir.take() {
             self.open_import_dialog(dir);
         }
         // Drain a completed native import dialog (see open_import_dialog).
@@ -1570,10 +1642,10 @@ impl Editor {
                 crate::native_dialog::Answer::Closed => self.import_rx = None,
             }
         }
-        if let Some((roots, dir)) = cmd.save_prefab {
+        if let Some((roots, dir)) = cmd.save_prefab.take() {
             self.save_prefab(&roots, &dir);
         }
-        if let Some((path, parent)) = cmd.instantiate_prefab {
+        if let Some((path, parent)) = cmd.instantiate_prefab.take() {
             // No parent = place in front of the camera (like Add-menu nodes);
             // with a parent, the authored root transform is the local offset.
             let at = parent.is_none().then(|| {
@@ -1582,12 +1654,12 @@ impl Editor {
             });
             self.instantiate_prefab(&path, at, parent);
         }
-        if let Some(dir) = cmd.open_folder {
+        if let Some(dir) = cmd.open_folder.take() {
             // Empty path = "the project root" (the File-menu shortcut).
             let target = if dir.as_os_str().is_empty() { self.project_root.clone() } else { dir };
             crate::project::open_in_file_manager(&target);
         }
-        if let Some(send) = cmd.crash_report {
+        if let Some(send) = cmd.crash_report.take() {
             if let Some(note) = self.crash_prompt.take()
                 && send
             {
@@ -1595,10 +1667,10 @@ impl Editor {
             }
             self.crash_prompt = None;
         }
-        if let Some(answer) = cmd.project_trust {
+        if let Some(answer) = cmd.project_trust.take() {
             self.answer_project_trust(answer);
         }
-        if let Some(restore) = cmd.autosave_action {
+        if let Some(restore) = cmd.autosave_action.take() {
             if restore {
                 self.restore_autosave();
             } else if let Some(auto) = self.autosave_prompt.take() {
