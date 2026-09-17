@@ -146,6 +146,39 @@ impl Editor {
     /// ghost-client sessions, and dispatch received RPCs/events into scripts.
     pub(crate) fn net_tick(&mut self, tick: u64) {
         self.voice_tick();
+        self.net_relay_notices();
+        if let Some(s) = self.net_server.as_mut() {
+            let said = s.take_notices();
+            if let Some(last) = said.last() {
+                // Kept for `net.notice()` so a game can put it on its own lobby
+                // screen, where the players who cannot get in are looking.
+                self.net_notice = Some(last.clone());
+            }
+            for line in said {
+                self.console.push(floptle_script::LogLevel::Debug, line, None);
+            }
+        }
+        self.apply_net_commands();
+        if let Some(hub) = &self.net_hub {
+            hub.set_conditions(self.net_latency_ticks, self.net_loss);
+            hub.set_now(tick);
+        }
+        // --- "Test as remote player" (2c): client prediction + hidden server ---
+        if self.net_play_client.is_some() {
+            self.net_client_tick(tick);
+            self.net_hidden_tick(tick);
+            return; // this mode owns the state mirror; 2b paths don't apply
+        }
+        // --- server: synced collection → tick → dispatch received RPC/events ---
+        let (rpcs, events) = self.net_server_tick(tick);
+        self.net_dispatch(tick, rpcs, events);
+        self.net_ghost_tick();
+        self.net_mirror_server_state();
+    }
+
+    /// What the relay had to say to the developer, and the lobby code it
+    /// minted — followed from the transport each tick.
+    fn net_relay_notices(&mut self) {
         // **What the relay had to say to the developer**.
         // A managed relay runs on somebody else's machine, so "your game
         // filled up, here is where to raise the ceiling" reaches the operator's
@@ -196,17 +229,11 @@ impl Editor {
                 self.net_lobby_code = now;
             }
         }
-        if let Some(s) = self.net_server.as_mut() {
-            let said = s.take_notices();
-            if let Some(last) = said.last() {
-                // Kept for `net.notice()` so a game can put it on its own lobby
-                // screen, where the players who cannot get in are looking.
-                self.net_notice = Some(last.clone());
-            }
-            for line in said {
-                self.console.push(floptle_script::LogLevel::Debug, line, None);
-            }
-        }
+    }
+
+    /// The `net.*` commands scripts queued this frame: host, join, leave,
+    /// RPCs, spawns, kicks, relevance and ownership.
+    fn apply_net_commands(&mut self) {
         for cmd in self.script_host.take_net_commands() {
             match cmd {
                 NetCmd::Host {
@@ -516,17 +543,11 @@ impl Editor {
                 }
             }
         }
-        if let Some(hub) = &self.net_hub {
-            hub.set_conditions(self.net_latency_ticks, self.net_loss);
-            hub.set_now(tick);
-        }
-        // --- "Test as remote player" (2c): client prediction + hidden server ---
-        if self.net_play_client.is_some() {
-            self.net_client_tick(tick);
-            self.net_hidden_tick(tick);
-            return; // this mode owns the state mirror; 2b paths don't apply
-        }
-        // --- server: synced collection → tick → dispatch received RPC/events ---
+    }
+
+    /// The host side of a tick: collect synced state, tick the session, and
+    /// return the RPCs and events that arrived.
+    fn net_server_tick(&mut self, tick: u64) -> (Vec<floptle_net::ReceivedRpc>, Vec<floptle_net::NetEvent>) {
         let hosting = self.net_server.is_some();
         let (rpcs, events) = if hosting {
             // exact post-tick poses first: the frame-end writeback renders
@@ -610,6 +631,12 @@ impl Editor {
         } else {
             (Vec::new(), Vec::new())
         };
+        (rpcs, events)
+    }
+
+    /// Dispatch received RPCs and events to the scripts, with the colliders
+    /// lent so their handlers can raycast.
+    fn net_dispatch(&mut self, tick: u64, rpcs: Vec<floptle_net::ReceivedRpc>, events: Vec<floptle_net::NetEvent>) {
         if !rpcs.is_empty() || !events.is_empty() {
             // Lend colliders + hulls so onRpc / net.on handlers can raycast
             // (physics already stepped this tick; reclaimed right after).
@@ -719,6 +746,11 @@ impl Editor {
                 sim.world.colliders = self.script_host.take_colliders();
             }
         }
+    }
+
+    /// The ghost client: apply snapshots into its hidden world and follow
+    /// scene switches like a remote client would.
+    fn net_ghost_tick(&mut self) {
         // --- ghost client: apply snapshots into its hidden world ---
         if let Some((c, cw)) = self.net_client.as_mut() {
             c.tick_client(cw);
@@ -752,7 +784,6 @@ impl Editor {
                 }
             }
         }
-        self.net_mirror_server_state();
     }
 
     /// Mirror the server session's state into Lua — `net.role()`, `net.peers()`,
