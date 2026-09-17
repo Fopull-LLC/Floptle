@@ -14,6 +14,20 @@ impl EditorTabViewer<'_> {
         // gating; the Game tab caches its own rect (so the editor can size the offscreen
         // Game target to it) and, when split, paints that offscreen render over itself.
         let rect = ui.max_rect();
+        self.game_picture(ui, rect, game);
+        self.viewport_banners(ui, rect, game);
+        let tools_rect = self.viewport_tool_strip(ui, rect, game);
+        self.gizmo_toggle(ui, rect, game);
+        self.resolution_frame(ui, rect);
+        self.edit_telegraphs(ui, rect, game);
+        self.scene_gizmos(ui, rect, game);
+        self.script_and_package_overlays(ui, rect, game, tools_rect);
+        self.particle_and_mesh_wire(ui, rect, game);
+    }
+
+    /// The Game tab's picture: the tab body edge to edge, cached as the offscreen
+    /// target's rect and painted over itself when the views are split.
+    fn game_picture(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         if game {
             // The Game panel is its picture, edge to edge — the tab body's own
             // inner margin included.
@@ -178,7 +192,9 @@ impl EditorTabViewer<'_> {
                 }
             }
         }
-
+    }
+    /// The no-active-camera warning and the Play banner.
+    fn viewport_banners(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         // The Game tab is the active-camera gameplay view — no editor tools/gizmos.
         // Warn if there's no active camera (the render falls back to the editor view).
         // Not in a shipped build: it names "the editor view", which a player
@@ -240,7 +256,10 @@ impl EditorTabViewer<'_> {
                         });
                 });
         }
-
+    }
+    /// The tool strip and, under it, the map tool's panel. Returns the strip's rect so
+    /// later overlays can sit beneath it.
+    fn viewport_tool_strip(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) -> egui::Rect {
         // Overlay toolbar: tools + resolution simulator. Editor view only.
         //
         // A `viewport_panel`, not a bare Area: it is placed against this tab's
@@ -524,7 +543,10 @@ impl EditorTabViewer<'_> {
                     });
                 });
         }
-
+        tools_rect
+    }
+    /// The gizmos master toggle and its per-type filter, top-right of the viewport.
+    fn gizmo_toggle(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         // Gizmos master toggle — top-right of the viewport (editor view only). Off hides
         // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
         // selected node's.
@@ -673,7 +695,9 @@ impl EditorTabViewer<'_> {
                 },
             );
         }
-
+    }
+    /// The resolution simulator: a centered device frame for the chosen aspect.
+    fn resolution_frame(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         // Resolution simulator: a centered device frame for the chosen aspect.
         if let Some(r) = self.aspect.ratio() {
             let avail = rect.shrink(10.0);
@@ -696,7 +720,10 @@ impl EditorTabViewer<'_> {
             painter.rect_filled(egui::Rect::from_min_max(egui::pos2(frame.right(), frame.top()), egui::pos2(rect.right(), frame.bottom())), 0.0, shade);
             painter.rect_stroke(frame, 2.0, egui::Stroke::new(1.5, egui::Color32::from_gray(180)), egui::StrokeKind::Inside);
         }
-
+    }
+    /// The transform gizmo and the brush telegraphs: terrain, vertex paint, tiles, and
+    /// the map tool's wireframe.
+    fn edit_telegraphs(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         // The gizmo paints on a layer above the scene, clipped to this tab (editor only).
         if let Some(g) = self.gizmo.filter(|_| !game) {
             let painter = ui
@@ -942,7 +969,10 @@ impl EditorTabViewer<'_> {
                 painter.circle_stroke(pt(from), 7.0, egui::Stroke::new(1.5, cut_col));
             }
         }
-
+    }
+    /// The scene's own gizmos: cameras, volumes, lights, rigs, GI probes, colliders,
+    /// terrain, and the navmesh.
+    fn scene_gizmos(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         // Camera frustums (active = bright green, others = dim) so cameras are visible.
         if !game && !self.camera_gizmos.is_empty() {
             let painter = ui
@@ -1161,7 +1191,10 @@ impl EditorTabViewer<'_> {
                 painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.0, col));
             }
         }
-
+    }
+    /// Script `gizmo.*` lines, package `handles.*` paint, and package Scene-view
+    /// overlay panels.
+    fn script_and_package_overlays(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool, tools_rect: egui::Rect) {
         // Script debug gizmos (`gizmo.*`). The Game view stays clean by default — it's
         // what the player would see — but "Also in Game view" opts in, because checking
         // whether a hitbox reaches is something you do with the controller in your hands.
@@ -1299,7 +1332,9 @@ impl EditorTabViewer<'_> {
                 }
             }
         }
-
+    }
+    /// The selected particle track's emitter gizmo and mesh collider wireframes.
+    fn particle_and_mesh_wire(&mut self, ui: &mut egui::Ui, rect: egui::Rect, game: bool) {
         // Selected particle track's emitter/force gizmo — birth shape (warm), emit
         // direction (cyan-green), and force arrows (magenta), each carrying its color.
         if !game && !self.particle_gizmo.is_empty() {
