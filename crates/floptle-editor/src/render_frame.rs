@@ -4,12 +4,10 @@
 //! through `offscreen`; GPU-side scene resources are kept in step by `scene_sync`.
 
 use floptle_core::math::DVec3;
-#[cfg(feature = "editor-ui")]
-use crate::dock::default_dock;
 use crate::{Editor, anim};
 use crate::offscreen::read_back_frame;
 #[cfg(feature = "editor-ui")]
-use crate::frame_ui::FrameUi;
+use crate::frame_ui::{FrameAfter, FrameUi};
 #[cfg(feature = "editor-ui")]
 use crate::gather::FrameGather;
 
@@ -614,32 +612,15 @@ impl Editor {
             view_proj,
         } = gather;
         let FrameUi {
-            mut cmd,
             ctx,
-            ext_menu_click,
-            ext_shortcut_click,
-            frame_pointer_down,
             shapes,
             textures_delta,
             egui_ppp,
             glass,
-            perf_toggle,
-            pkg_action,
             ppp,
             ssr_on,
-            want_exit,
-            want_save,
-            want_save_all,
-            want_save_project,
+            after,
         } = ui;
-        let _dock_state = self.dock_state.get_or_insert_with(default_dock);
-        let _grid = &mut self.grid;
-        let _input_scan = &self.input_scan;
-        let _project = &mut self.project;
-        let _project_root = self.project_root.as_path();
-        let _scene_rect = &mut self.scene_rect;
-        let _show_gizmos = &mut self.show_gizmos;
-        let _world = &mut self.world;
         // ---- draw: scene into the retro target, blit, then egui on top ----
         // Timed, because blocking here is not the same thing as being slow — see
         // `present_wait_ms`.
@@ -1210,7 +1191,27 @@ impl Editor {
                 gpu.resize(size.width, size.height);
             }
         }
+        self.after_draw(&ctx, elapsed, after);
+    }
 
+    /// Acts on what the frame's UI asked for, once the picture is on screen:
+    /// saves and the quit, the Settings tab's upkeep, the queued editor
+    /// commands, the packages' clicks, the profiler toggle; then closes the
+    /// frame's profile.
+    #[cfg(feature = "editor-ui")]
+    fn after_draw(&mut self, ctx: &egui::Context, elapsed: f32, after: FrameAfter) {
+        let FrameAfter {
+            mut cmd,
+            ext_menu_click,
+            ext_shortcut_click,
+            frame_pointer_down,
+            perf_toggle,
+            pkg_action,
+            want_exit,
+            want_save,
+            want_save_all,
+            want_save_project,
+        } = after;
         if want_save_all {
             // Quit-time full save (scene + project + scripts), with its own toast.
             self.save_all();
@@ -1298,6 +1299,5 @@ impl Editor {
         // A no-op while collection is off.
         self.script_host.profile().borrow_mut().end_frame();
     }
-
 }
 

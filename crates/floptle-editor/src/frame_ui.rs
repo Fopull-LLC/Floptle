@@ -35,22 +35,30 @@ use std::path::PathBuf;
 use crate::map_edit::MapSubMode;
 use floptle_render::ViewLock;
 
-/// What building the frame's UI hands to the draw.
+/// What building the frame's UI hands to the draw: the picture to paint, and
+/// the decisions to act on once it is painted.
 pub(crate) struct FrameUi {
-    pub(crate) cmd: EditorCmd,
     pub(crate) ctx: egui::Context,
-    pub(crate) ext_menu_click: Option<usize>,
-    pub(crate) ext_shortcut_click: Option<usize>,
-    pub(crate) frame_pointer_down: bool,
     /// What egui produced, minus the platform output the UI phase already handled.
     pub(crate) shapes: Vec<egui::epaint::ClippedShape>,
     pub(crate) textures_delta: egui::TexturesDelta,
     pub(crate) egui_ppp: f32,
     pub(crate) glass: bool,
-    pub(crate) perf_toggle: Option<bool>,
-    pub(crate) pkg_action: crate::packages_ui::PackagesAction,
     pub(crate) ppp: f32,
     pub(crate) ssr_on: bool,
+    pub(crate) after: FrameAfter,
+}
+
+/// What the frame's UI asked for, applied after the draw: saves, the quit,
+/// the packages' menu and shortcut clicks, the profiler toggle, and the
+/// editor commands the panels queued.
+pub(crate) struct FrameAfter {
+    pub(crate) cmd: EditorCmd,
+    pub(crate) ext_menu_click: Option<usize>,
+    pub(crate) ext_shortcut_click: Option<usize>,
+    pub(crate) frame_pointer_down: bool,
+    pub(crate) perf_toggle: Option<bool>,
+    pub(crate) pkg_action: crate::packages_ui::PackagesAction,
     pub(crate) want_exit: bool,
     pub(crate) want_save: bool,
     pub(crate) want_save_all: bool,
@@ -478,23 +486,25 @@ impl Editor {
         Some((
             gather,
             FrameUi {
-                cmd,
                 ctx,
-                ext_menu_click,
-                ext_shortcut_click,
-                frame_pointer_down,
                 shapes,
                 textures_delta,
                 egui_ppp,
                 glass,
-                perf_toggle,
-                pkg_action,
                 ppp,
                 ssr_on,
-                want_exit,
-                want_save,
-                want_save_all,
-                want_save_project,
+                after: FrameAfter {
+                    cmd,
+                    ext_menu_click,
+                    ext_shortcut_click,
+                    frame_pointer_down,
+                    perf_toggle,
+                    pkg_action,
+                    want_exit,
+                    want_save,
+                    want_save_all,
+                    want_save_project,
+                },
             },
         ))
     }
