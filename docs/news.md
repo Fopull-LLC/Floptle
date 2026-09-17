@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.94.0-rc2 — "Leaves A Trail"** (beta). A particle trail can **follow the
+emitter**, so one still particle at a blade tip is a sword trail in one
+effect asset, and scripts have `draw.quad` for a textured ribbon in the
+world. A spawn sent while a client is still changing scenes now arrives when
+it has; `floptle run --join` keeps real time; `floptle shot` tells its scripts
+the picture is the viewport; `floptle serve` passes every flag it takes.
+
 **v0.94.0-rc1 — "Squash And Stretch"** (beta). Particles gain a **squash**
 property — width times, height over, animated over each particle's life —
 plus stretch by speed for velocity-aligned sprites and a box emit shape; and
