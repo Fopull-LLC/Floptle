@@ -682,6 +682,36 @@ pub(crate) struct MatEditResult {
     /// this runs with the material borrowed.
     pub(crate) open_shader: Option<String>,
 }
+
+/// Everything the material editor reads besides the material itself: the
+/// project's presets and asset tree, the shader caches, and the id salt every
+/// picker hangs off.
+struct MatCtx<'a> {
+    presets: &'a [(String, floptle_scene::MaterialDoc)],
+    asset_tree: &'a [crate::assets::AssetEntry],
+    project_root: &'a Path,
+    name_buf: &'a mut String,
+    flsl: &'a crate::shaders::FlslCache,
+    sdf: &'a crate::shaders::SdfCache,
+    texture_settings: &'a std::collections::HashMap<String, crate::assets::TexSetting>,
+    salt: egui::Id,
+}
+
+impl MatCtx<'_> {
+    // The base texture's spritesheet grid comes from the texture's asset settings
+    // (slice the .png once, every material using it inherits the same cells), so
+    // re-slicing an asset re-slices its materials. A cell that no longer exists
+    // falls back into range instead of drawing off the end of the sheet.
+    fn sheet_of(&self, m: &Material) -> (u32, u32) {
+        crate::assets::tex_setting(
+            self.texture_settings,
+            self.project_root,
+            m.texture.as_deref().unwrap_or_default(),
+        )
+        .sheet()
+    }
+}
+
 /// In-depth material property editors — shared by the Inspector's Material section
 /// and the floating Material Editor window. Edits `m` in place (so undo coalesces
 /// via `inspector_changed`); preset apply/save/remove come back as intents.
@@ -707,20 +737,34 @@ pub(crate) fn material_props_ui(
     // frame it opened and the texture could never be picked. One salt per call
     // site is what makes them independent.
     let salt = ui.id();
-
-    // The base texture's spritesheet grid comes from the texture's asset settings
-    // (slice the .png once, every material using it inherits the same cells), so
-    // re-slicing an asset re-slices its materials. A cell that no longer exists
-    // falls back into range instead of drawing off the end of the sheet.
-    let sheet_of = |m: &Material| {
-        crate::assets::tex_setting(
-            texture_settings,
-            project_root,
-            m.texture.as_deref().unwrap_or_default(),
-        )
-        .sheet()
+    let mut ctx = MatCtx {
+        presets,
+        asset_tree,
+        project_root,
+        name_buf,
+        flsl,
+        sdf,
+        texture_settings,
+        salt,
     };
-    let (sc, sr) = sheet_of(m);
+    mat_base_ui(ui, &mut ctx, m, &mut r);
+    mat_cell_ui(ui, &mut ctx, m, &mut r);
+    mat_shader_ui(ui, &mut ctx, m, &mut r);
+    mat_maps_ui(ui, &mut ctx, m, &mut r);
+    mat_shading_ui(ui, &mut ctx, m, &mut r);
+    mat_retro_ui(ui, &mut ctx, m, &mut r);
+    mat_classic_ui(ui, m, &mut r);
+    mat_rim_ui(ui, m, &mut r);
+    mat_presets_ui(ui, &mut ctx, m, &mut r);
+    r
+}
+
+fn mat_base_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let asset_tree = ctx.asset_tree;
+    let project_root = ctx.project_root;
+    let texture_settings = ctx.texture_settings;
+    let salt = ctx.salt;
+    let (sc, sr) = ctx.sheet_of(m);
     if (m.sheet_cols, m.sheet_rows) != (sc, sr) {
         (m.sheet_cols, m.sheet_rows) = (sc, sr);
         m.cell = m.cell.min((sc * sr).saturating_sub(1));
@@ -805,12 +849,15 @@ pub(crate) fn material_props_ui(
             .changed();
         ui.end_row();
     });
+}
 
+fn mat_cell_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let salt = ctx.salt;
     // ---- spritesheet: which cell of the sliced texture this surface draws.
     // Outside the grid, on its own full-width row — a 21-wide sheet's cell grid
     // needs the whole panel, not a grid cell. (`m.texture` may have changed in the
     // rows above, so the grid is re-read here.)
-    let (sc, sr) = sheet_of(m);
+    let (sc, sr) = ctx.sheet_of(m);
     if sc * sr > 1 {
         r.changed |= crate::ui_widgets::sheet_cell_picker(
             ui,
@@ -821,7 +868,14 @@ pub(crate) fn material_props_ui(
             &mut m.cell,
         );
     }
+}
 
+fn mat_shader_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let asset_tree = ctx.asset_tree;
+    let project_root = ctx.project_root;
+    let flsl = ctx.flsl;
+    let sdf = ctx.sdf;
+    let salt = ctx.salt;
     // ---- custom shader: pick a .flsl; its exposed uniforms and
     // texture slots become the rows below, live-editing the group(3) params.
 
@@ -966,39 +1020,12 @@ pub(crate) fn material_props_ui(
             ui.small("compiling…");
         }
     }
+}
 
-    // One surface-map slot: a texture picker over an `Option<String>`, showing
-    // the file name and offering "none". Returns whether it changed.
-    fn map_slot_picker(
-        ui: &mut egui::Ui,
-        salt: egui::Id,
-        project_root: &Path,
-        asset_tree: &[crate::assets::AssetEntry],
-        slot: &mut Option<String>,
-    ) -> bool {
-        let cur = slot
-            .as_deref()
-            .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
-            .unwrap_or_else(|| "none".into());
-        let picked = crate::ui_widgets::asset_picker(
-            ui,
-            salt,
-            project_root,
-            if cur.is_empty() { "none" } else { &cur },
-            Some("none"),
-            asset_tree,
-            crate::assets::is_texture,
-            160.0,
-        );
-        match picked {
-            Some(p) => {
-                *slot = p;
-                true
-            }
-            None => false,
-        }
-    }
-
+fn mat_maps_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let asset_tree = ctx.asset_tree;
+    let project_root = ctx.project_root;
+    let salt = ctx.salt;
     // ---- the surface maps. The answer to "where do I put a normal map".
     //
     // Above the lighting model on purpose: a normal map and an occlusion map
@@ -1078,7 +1105,12 @@ pub(crate) fn material_props_ui(
                 });
             });
     });
+}
 
+fn mat_shading_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let asset_tree = ctx.asset_tree;
+    let project_root = ctx.project_root;
+    let salt = ctx.salt;
     // ---- the lighting model, and the knobs that belong to whichever one is on.
     ui.add_enabled_ui(!m.unlit, |ui| {
         crate::responsive::grid(ui, "mat_model", |ui| {
@@ -1214,7 +1246,10 @@ pub(crate) fn material_props_ui(
             });
         });
     }
+}
 
+fn mat_retro_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let salt = ctx.salt;
     // ---- the deliberate PS1/N64 artefacts. Its own section, collapsed unless
     // something is on, because these are a look you opt into — not a quality
     // setting anyone should stumble across while tuning a material.
@@ -1280,7 +1315,9 @@ pub(crate) fn material_props_ui(
                 });
             });
     });
+}
 
+fn mat_classic_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
     // These only affect the lit path, so grey them out when unlit.
     ui.add_enabled_ui(!m.unlit && matches!(m.shading, floptle_core::Shading::Classic), |ui| {
         crate::responsive::grid(ui, "mat_lit", |ui| {
@@ -1298,7 +1335,9 @@ pub(crate) fn material_props_ui(
             ui.end_row();
         });
     });
+}
 
+fn mat_rim_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
     // Rim, ambient and opacity are not part of either lighting model — a rim
     // glow is art direction and opacity is opacity — so they stay live whichever
     // model is selected.
@@ -1323,7 +1362,11 @@ pub(crate) fn material_props_ui(
             ui.end_row();
         });
     });
+}
 
+fn mat_presets_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    let presets = ctx.presets;
+    let name_buf = &mut *ctx.name_buf;
     ui.separator();
     ui.horizontal_wrapped(|ui| {
         if !presets.is_empty() {
@@ -1345,8 +1388,40 @@ pub(crate) fn material_props_ui(
     if ui.button("🗑 Remove material").clicked() {
         r.remove = true;
     }
-    r
 }
+
+// One surface-map slot: a texture picker over an `Option<String>`, showing
+// the file name and offering "none". Returns whether it changed.
+fn map_slot_picker(
+    ui: &mut egui::Ui,
+    salt: egui::Id,
+    project_root: &Path,
+    asset_tree: &[crate::assets::AssetEntry],
+    slot: &mut Option<String>,
+) -> bool {
+    let cur = slot
+        .as_deref()
+        .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .unwrap_or_else(|| "none".into());
+    let picked = crate::ui_widgets::asset_picker(
+        ui,
+        salt,
+        project_root,
+        if cur.is_empty() { "none" } else { &cur },
+        Some("none"),
+        asset_tree,
+        crate::assets::is_texture,
+        160.0,
+    );
+    match picked {
+        Some(p) => {
+            *slot = p;
+            true
+        }
+        None => false,
+    }
+}
+
 /// What the per-type editors read from the tab besides the node's own
 /// Matter: the command sink, and the editor-wide facts a type's knobs show
 /// (the asset tree, bake status, the light cap, the camera preview).
