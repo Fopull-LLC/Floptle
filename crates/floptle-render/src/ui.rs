@@ -20,8 +20,8 @@ use floptle_ui::{Align, Blend, DrawList, ImageFit, Overflow, QuadKind};
 ///
 /// **Attribute budget.** This uses shader locations 1–13; location 0 is the
 /// unit-quad corner. WebGPU guarantees 16, so there are two spare. That is
-/// deliberate headroom: the raster pipeline is already at 16/16 and adding an
-/// attribute there is now a refactor rather than an edit. If a future feature
+/// headroom: the raster pipeline is at 16/16 and adding an attribute there is
+/// a refactor rather than an edit. If a future feature
 /// needs more than two lanes, move the gradient stops to a storage buffer
 /// indexed by instance (the `vpaint` pattern) rather than packing harder.
 #[repr(C)]

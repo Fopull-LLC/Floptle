@@ -740,7 +740,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // ---- color -----------------------------------------------------------
     // A plain `{r, g, b, a}` table (also indexable [1]..[4]) rather than a
     // userdata: it prints, it serialises into a save, it compares, and any
-    // `{1, 0, 0}` a project already had lying around is now a colour. Channels
+    // `{1, 0, 0}` a project has lying around is a colour. Channels
     // are 0..1 to match every other colour in the engine.
     {
         let ctor = lua.create_function(|lua, args: mlua::MultiValue| {

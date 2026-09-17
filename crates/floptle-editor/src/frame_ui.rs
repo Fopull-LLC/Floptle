@@ -835,7 +835,7 @@ impl Editor {
                     self.show_perf_panel = !self.show_perf_panel;
                     out.perf_toggle = Some(self.show_perf_panel);
                 }
-                // The view is now chosen by the Scene / Game dock tabs (the editor
+                // The view is chosen by the Scene / Game dock tabs (the editor
                 // free-fly view vs the active-camera gameplay view), not a toggle here.
 
                 // ---- save status (right end of the bar, always visible) ----

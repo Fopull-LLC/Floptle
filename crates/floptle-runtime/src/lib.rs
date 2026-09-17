@@ -1,5 +1,5 @@
-//! The runtime's library face — currently just the dedicated server, and that
-//! is now somebody else's code.
+//! The runtime's library face — the dedicated server, which is the editor's
+//! code.
 //!
 //! `floptle-runtime --server` and `floptle serve` are the same server, and as
 //! of this release so is the *engine* under it: `floptle_editor::dedicated` is

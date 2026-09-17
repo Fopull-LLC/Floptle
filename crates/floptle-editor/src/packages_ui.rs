@@ -696,10 +696,10 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
 
 // ---- Browse ----------------------------------------------------------------
 //
-// A **catalogue**, not a list. The registry started as editor extensions, where
-// a name and a paragraph is a fair description of a package; it now has to hold
-// texture kits, SFX libraries and model packs, and a texture kit described in
-// words is a texture kit nobody installs.
+// A catalogue, not a list. A name and a paragraph is a fair description of an
+// editor extension; the registry also holds texture kits, SFX libraries and
+// model packs, and a texture kit described in words is a texture kit nobody
+// installs.
 //
 // So: a grid of thumbnails, filtered by what a package *is* (the author's
 // declared categories) and by what it demonstrably *holds* (facets derived from

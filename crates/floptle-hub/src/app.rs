@@ -27,9 +27,9 @@ const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 /// (U+2715), and any emoji carrying a U+FE0F variation selector. Prefer U+2795 / U+2714 /
 /// U+2716 instead.
 ///
-/// `every_icon_is_drawable` asserts that against the real font stack, so this is now a
-/// checked claim rather than a warning to be careful. It was a warning for four releases
-/// and two glyphs still shipped as boxes.
+/// `every_icon_is_drawable` asserts that against the real font stack, so this is a
+/// checked claim rather than a warning to be careful — a warning lets a glyph ship
+/// as a box.
 mod ico {
     pub const NEWS: &str = "📰";
     pub const NEW: &str = "➕";

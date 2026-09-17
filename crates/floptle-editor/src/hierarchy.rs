@@ -540,7 +540,7 @@ impl EditorTabViewer<'_> {
                     egui::RichText::new(label)
                 };
                 let text = if off { text.weak().italics() } else { text };
-                // The label is now purely what you read. Everything you DO to
+                // The label is purely what you read. Everything you do to
                 // the row happens on `resp` below, which spans the row's full
                 // width — see [`row_hit_rect`].
                 ui.add(egui::Label::new(text).selectable(false)).rect

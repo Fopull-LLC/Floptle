@@ -457,9 +457,7 @@ impl Session {
     /// The tier to **enforce** against, which is `free` when the plan is
     /// unknown.
     ///
-    /// This is the half that must not change behaviour: failing soft was always
-    /// the right instinct, and 0189 was never a request to start locking people
-    /// out. The fix is that the guess is now labelled, not that it is refused.
+    /// This is the half that fails soft: a guess is labelled, never refused.
     pub fn effective_tier(&self) -> &str {
         if self.plan_known() { self.tier.as_str() } else { "free" }
     }
@@ -526,8 +524,8 @@ pub trait TokenStore {
 /// as one JSON blob — the tokens never hit disk in plaintext. Cheap to construct (two owned
 /// strings), so worker threads build their own rather than doing keyring I/O on the UI thread.
 ///
-/// **The Hub and every game share this entry**, and the `floptle-hub` name in it is now
-/// historical rather than descriptive. That sharing is the feature: sign in once, in
+/// The Hub and every game share this entry, whatever the `floptle-hub` name in it
+/// suggests. That sharing is the feature: sign in once, in
 /// whichever of them you happened to open, and the rest already know you. Renaming it would
 /// sign everybody out for nothing.
 #[cfg(not(target_arch = "wasm32"))]

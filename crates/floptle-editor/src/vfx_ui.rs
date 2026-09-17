@@ -26,7 +26,7 @@ use crate::vfx::{curve_from_doc, effect_from_doc, starter_effect_doc, VfxPreview
 use crate::EditorTabViewer;
 
 /// What's selected on the timeline (drives the side panel's detail section). A burst is
-/// now just a `Clip` with `Emit::Burst`, so there's a single clip selection.
+/// a `Clip` with `Emit::Burst`, so there's a single clip selection.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VfxSel {
     Clip(usize, usize),

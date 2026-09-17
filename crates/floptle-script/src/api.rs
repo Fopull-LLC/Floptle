@@ -788,12 +788,12 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     // Not only the three spritesheet fields: a script can set the rest through
     // `node:setMaterial{...}`, but this list also decides what the animation
     // system can key, because the timeline's record
-    // pass reads this map to notice a change. A material's opacity could be set
-    // from Lua and could not be animated, and the Animating tab said nothing
-    // about why: the field was simply not in the list.
+    // pass reads this map to notice a change: a field missing here can be set
+    // from Lua and cannot be animated, and the Animating tab says nothing
+    // about why.
     //
-    // So the rule is now: **anything `apply_component_field` can write, this can
-    // read.** The two are a pair — a field readable but not writable keys and
+    // So the rule is: anything `apply_component_field` can write, this can
+    // read. The two are a pair — a field readable but not writable keys and
     // never plays back, and one writable but not readable can be keyed by hand
     // and never picked up by record. Both failures are silent.
     //
@@ -2570,7 +2570,7 @@ fn tile_cell(v: &Value) -> mlua::Result<u32> {
         }
     };
     if n < 0.0 {
-        // The whole point of the task: the obvious guess is now the right answer.
+        // The obvious guess is the right answer.
         return Ok(floptle_core::EMPTY_TILE);
     }
     if n > f64::from(u32::MAX) {

@@ -1,11 +1,10 @@
 //! The ⚙ Settings dock tab — everything project-wide, one section at a time.
 //!
-//! This was a fixed-size modal window with four topics stacked into a 430 px
-//! column, which meant scrolling past Rendering to reach Layers and squinting
-//! at binding chips. It's now a real tab (drag it anywhere, split it beside the
-//! viewport, close it) laid out as **nav on the left, one section on the
-//! right** — the shape every settings screen uses, because it keeps each topic
-//! short enough to read.
+//! A real tab (drag it anywhere, split it beside the viewport, close it) laid
+//! out as nav on the left, one section on the right — the shape every settings
+//! screen uses, because it keeps each topic short enough to read. Four topics
+//! stacked into one 430 px column means scrolling past Rendering to reach
+//! Layers and squinting at binding chips.
 //!
 //! The search box spans every section: type "gravity" or "jump" and you get the
 //! matching rows wherever they live, with their section named, instead of

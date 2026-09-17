@@ -912,10 +912,9 @@ pub(crate) struct NodeSpec {
 
 /// Every key a node document has, checked against what a package sent.
 ///
-/// **This exists because serde ignores a key it does not recognise.** Without
-/// it, `{ taggs = {"cover"} }` is accepted, does nothing, and reports success —
-/// the exact silent-failure shape that is the single most common bug in this
-/// engine's history. A misspelt property is now a Console line naming the key.
+/// This exists because serde ignores a key it does not recognise. Without
+/// it, `{ taggs = {"cover"} }` is accepted, does nothing, and reports success.
+/// A misspelt property is a Console line naming the key.
 ///
 /// The exhaustive `let NodeDoc { .. }` is the maintenance contract: a field
 /// added to `NodeDoc` stops this compiling, and whoever adds it puts the name in

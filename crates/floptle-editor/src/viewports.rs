@@ -655,7 +655,7 @@ impl Editor {
                     }
                 }
             }
-            // Always configured, not only when an effect is on: the chain is now
+            // Always configured, not only when an effect is on: the chain is
             // the only route from the scene's floating-point target to the sRGB
             // texture egui shows.
             if let Some(post) = self.game_post.as_mut() {
