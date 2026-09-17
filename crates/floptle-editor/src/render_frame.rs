@@ -886,79 +886,20 @@ impl Editor {
                         vp_mat,
                         &ui_world,
                     );
-                    for (_, placed, origin, right, down, design_vp) in &ui_world {
-                        let rel = floptle_core::math::Vec3::new(
-                            (origin[0] - cam.world_position.x) as f32,
-                            (origin[1] - cam.world_position.y) as f32,
-                            (origin[2] - cam.world_position.z) as f32,
+                    // Project element rects → Scene-tab overlay entries
+                    // (gizmos — the master Gizmos toggle hides them, the
+                    // canvas content stays since it's your actual UI).
+                    if ui_gizmos {
+                        project_ui_canvases(
+                            &ui_world,
+                            cam.world_position,
+                            vp_mat,
+                            (w_px, h_px),
+                            ppp,
+                            srect,
+                            &mut self.ui_overlay,
+                            &mut self.ui_canvas,
                         );
-                        let r3 = floptle_core::math::Vec3::from(*right);
-                        let d3 = floptle_core::math::Vec3::from(*down);
-                        // Project element rects → Scene-tab overlay entries
-                        // (gizmos — the master Gizmos toggle hides them, the
-                        // canvas content stays since it's your actual UI).
-                        if !ui_gizmos {
-                            continue;
-                        }
-                        let to_screen = |p: floptle_core::math::Vec3| -> Option<egui::Pos2> {
-                            let clip = vp_mat * p.extend(1.0);
-                            if clip.w <= 0.01 {
-                                return None;
-                            }
-                            let ndc = clip / clip.w;
-                            Some(egui::pos2(
-                                (ndc.x * 0.5 + 0.5) * w_px,
-                                (1.0 - (ndc.y * 0.5 + 0.5)) * h_px,
-                            ))
-                        };
-                        for pl in placed {
-                            let [x, y, w, h] = pl.rect;
-                            let corners = [
-                                rel + r3 * x + d3 * y,
-                                rel + r3 * (x + w) + d3 * y,
-                                rel + r3 * x + d3 * (y + h),
-                                rel + r3 * (x + w) + d3 * (y + h),
-                            ];
-                            let pts: Vec<egui::Pos2> =
-                                corners.iter().filter_map(|c| to_screen(*c)).collect();
-                            if pts.len() < 4 {
-                                continue;
-                            }
-                            let (mut minx, mut miny, mut maxx, mut maxy) =
-                                (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-                            for p in &pts {
-                                minx = minx.min(p.x);
-                                miny = miny.min(p.y);
-                                maxx = maxx.max(p.x);
-                                maxy = maxy.max(p.y);
-                            }
-                            // px → egui points, relative to the Scene rect.
-                            let sx = (minx / ppp) - srect.min.x;
-                            let sy = (miny / ppp) - srect.min.y;
-                            let sw = (maxx - minx) / ppp;
-                            let sh = (maxy - miny) / ppp;
-                            // Drag scale: overlay points per design unit.
-                            let scale = if w > 0.5 { sw / w } else { 1.0 };
-                            self.ui_overlay.push((pl.id, [sx, sy, sw, sh], scale.max(0.001)));
-                        }
-                        // Canvas bounds gizmo: the layer's design viewport as a
-                        // projected quadrilateral (Scene-tab points).
-                        let (cw, chh) = (design_vp[0], design_vp[1]);
-                        let corners = [
-                            rel,
-                            rel + r3 * cw,
-                            rel + r3 * cw + d3 * chh,
-                            rel + d3 * chh,
-                        ];
-                        let pts: Vec<egui::Pos2> =
-                            corners.iter().filter_map(|c| to_screen(*c)).collect();
-                        if pts.len() == 4 {
-                            let mut quad = [[0.0f32; 2]; 4];
-                            for (i, p) in pts.iter().enumerate() {
-                                quad[i] = [p.x / ppp - srect.min.x, p.y / ppp - srect.min.y];
-                            }
-                            self.ui_canvas.push(quad);
-                        }
                     }
                 }
 
@@ -1151,39 +1092,7 @@ impl Editor {
                 for id in &textures_delta.free {
                     egui.renderer.free_texture(id);
                 }
-                // `FLOPTLE_FRAME_DUMP=<dir>`: photograph every presented frame
-                // into that directory, out of the swapchain image itself. A
-                // glitch that lasts one frame while the camera moves cannot be
-                // caught by a screenshot key or a headless render; a stream of
-                // the frames the player actually saw can be scanned for it
-                // afterwards. A diagnostic, not a feature — a readback per frame.
-                if let Some(dir) = std::env::var_os("FLOPTLE_FRAME_DUMP")
-                    && let Some(px) = read_back_frame(gpu, &frame.surface.texture)
-                {
-                    let (w, h) = (frame.surface.texture.width(), frame.surface.texture.height());
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("frame-{:05}.png", self.frame_no));
-                    // Encoded off the frame thread, at most a handful at a
-                    // time: a frame that arrives while the encoders are all
-                    // busy is dropped, named by its number, rather than
-                    // queued up until the machine runs out of memory.
-                    static BUSY: std::sync::atomic::AtomicUsize =
-                        std::sync::atomic::AtomicUsize::new(0);
-                    use std::sync::atomic::Ordering::SeqCst;
-                    if BUSY.fetch_add(1, SeqCst) < 6 {
-                        std::thread::spawn(move || {
-                            if let Some(buf) = image::RgbaImage::from_raw(w, h, px) {
-                                let _ = std::fs::create_dir_all(
-                                    path.parent().unwrap_or(std::path::Path::new(".")),
-                                );
-                                let _ = buf.save(&path);
-                            }
-                            BUSY.fetch_sub(1, SeqCst);
-                        });
-                    } else {
-                        BUSY.fetch_sub(1, SeqCst);
-                    }
-                }
+                dump_presented_frame(gpu, &frame.surface.texture, self.frame_no);
                 frame.present();
             }
             None => {
@@ -1301,3 +1210,123 @@ impl Editor {
     }
 }
 
+/// Projects each Scene-view UI canvas — its element rects and its design
+/// viewport — into Scene-tab overlay entries, for the select/drag overlay
+/// and the canvas bounds gizmo.
+#[cfg(feature = "editor-ui")]
+#[allow(clippy::too_many_arguments)] // the frame's projection facts, and the two lists they fill
+fn project_ui_canvases(
+    ui_world: &[WorldCanvas],
+    cam_pos: DVec3,
+    vp_mat: floptle_core::math::Mat4,
+    (w_px, h_px): (f32, f32),
+    ppp: f32,
+    srect: egui::Rect,
+    ui_overlay: &mut Vec<(u32, [f32; 4], f32)>,
+    ui_canvas: &mut Vec<[[f32; 2]; 4]>,
+) {
+    for (_, placed, origin, right, down, design_vp) in ui_world {
+        let rel = floptle_core::math::Vec3::new(
+            (origin[0] - cam_pos.x) as f32,
+            (origin[1] - cam_pos.y) as f32,
+            (origin[2] - cam_pos.z) as f32,
+        );
+        let r3 = floptle_core::math::Vec3::from(*right);
+        let d3 = floptle_core::math::Vec3::from(*down);
+        let to_screen = |p: floptle_core::math::Vec3| -> Option<egui::Pos2> {
+            let clip = vp_mat * p.extend(1.0);
+            if clip.w <= 0.01 {
+                return None;
+            }
+            let ndc = clip / clip.w;
+            Some(egui::pos2(
+                (ndc.x * 0.5 + 0.5) * w_px,
+                (1.0 - (ndc.y * 0.5 + 0.5)) * h_px,
+            ))
+        };
+        for pl in placed {
+            let [x, y, w, h] = pl.rect;
+            let corners = [
+                rel + r3 * x + d3 * y,
+                rel + r3 * (x + w) + d3 * y,
+                rel + r3 * x + d3 * (y + h),
+                rel + r3 * (x + w) + d3 * (y + h),
+            ];
+            let pts: Vec<egui::Pos2> =
+                corners.iter().filter_map(|c| to_screen(*c)).collect();
+            if pts.len() < 4 {
+                continue;
+            }
+            let (mut minx, mut miny, mut maxx, mut maxy) =
+                (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for p in &pts {
+                minx = minx.min(p.x);
+                miny = miny.min(p.y);
+                maxx = maxx.max(p.x);
+                maxy = maxy.max(p.y);
+            }
+            // px → egui points, relative to the Scene rect.
+            let sx = (minx / ppp) - srect.min.x;
+            let sy = (miny / ppp) - srect.min.y;
+            let sw = (maxx - minx) / ppp;
+            let sh = (maxy - miny) / ppp;
+            // Drag scale: overlay points per design unit.
+            let scale = if w > 0.5 { sw / w } else { 1.0 };
+            ui_overlay.push((pl.id, [sx, sy, sw, sh], scale.max(0.001)));
+        }
+        // Canvas bounds gizmo: the layer's design viewport as a
+        // projected quadrilateral (Scene-tab points).
+        let (cw, chh) = (design_vp[0], design_vp[1]);
+        let corners = [
+            rel,
+            rel + r3 * cw,
+            rel + r3 * cw + d3 * chh,
+            rel + d3 * chh,
+        ];
+        let pts: Vec<egui::Pos2> =
+            corners.iter().filter_map(|c| to_screen(*c)).collect();
+        if pts.len() == 4 {
+            let mut quad = [[0.0f32; 2]; 4];
+            for (i, p) in pts.iter().enumerate() {
+                quad[i] = [p.x / ppp - srect.min.x, p.y / ppp - srect.min.y];
+            }
+            ui_canvas.push(quad);
+        }
+    }
+}
+
+/// `FLOPTLE_FRAME_DUMP=<dir>`: photographs every presented frame into that
+/// directory, out of the swapchain image itself. A glitch that lasts one frame
+/// while the camera moves cannot be caught by a screenshot key or a headless
+/// render; a stream of the frames the player actually saw can be scanned for
+/// it afterwards. A diagnostic, not a feature — a readback per frame.
+#[cfg(feature = "editor-ui")]
+fn dump_presented_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture, frame_no: u64) {
+    if let Some(dir) = std::env::var_os("FLOPTLE_FRAME_DUMP")
+        && let Some(px) = read_back_frame(gpu, tex)
+    {
+        let (w, h) = (tex.width(), tex.height());
+        let path = std::path::PathBuf::from(dir)
+            .join(format!("frame-{:05}.png", frame_no));
+        // Encoded off the frame thread, at most a handful at a
+        // time: a frame that arrives while the encoders are all
+        // busy is dropped, named by its number, rather than
+        // queued up until the machine runs out of memory.
+        static BUSY: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        use std::sync::atomic::Ordering::SeqCst;
+        if BUSY.fetch_add(1, SeqCst) < 6 {
+            std::thread::spawn(move || {
+                if let Some(buf) = image::RgbaImage::from_raw(w, h, px) {
+                    let _ = std::fs::create_dir_all(
+                        path.parent().unwrap_or(std::path::Path::new(".")),
+                    );
+                    let _ = buf.save(&path);
+                }
+                BUSY.fetch_sub(1, SeqCst);
+            });
+        } else {
+            BUSY.fetch_sub(1, SeqCst);
+        }
+    }
+}
