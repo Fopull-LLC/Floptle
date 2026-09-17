@@ -252,7 +252,7 @@ pub struct Image {
     /// The uniform cell grid this image is cut into, if it is a sheet —
     /// `(cols, rows)`, the one layout the engine can address.
     ///
-    /// A property of the IMAGE and not of the view, because it is a fact about
+    /// A property of the image and not of the view, because it is a fact about
     /// the art: a 16x16 tileset is 16x16 whoever opens it. Kept here so the
     /// grid you drew against is the grid you get back, and so a material and a
     /// tileset can be told the numbers rather than have them re-typed (and
@@ -745,7 +745,7 @@ fn rot_vec(v: [f32; 2], t: i32) -> [f32; 2] {
 mod tests {
     use super::*;
 
-    /// A canvas flip takes the layer's MASK with it. The tab used to flip only
+    /// A canvas flip takes the layer's mask with it. The tab used to flip only
     /// the pixels and drop every mask on the floor — silently.
     #[test]
     fn flipping_carries_masks_and_the_selection() {

@@ -1,4 +1,4 @@
-//! Generic procedural PLANET fill — the native backend of the Lua
+//! Generic procedural planet fill — the native backend of the Lua
 //! `terrain.generatePlanet(id, opts)` API.
 //!
 //! Deliberately game-agnostic: what to build (solar systems, archetypes,
@@ -29,7 +29,7 @@ pub struct LayerPaint {
 }
 
 /// Sparse glowing pockets (crystal/ore): painted where a dedicated fbm field
-/// exceeds `threshold`, below `min_depth`. Use a palette GLOW slot to make
+/// exceeds `threshold`, below `min_depth`. Use a palette glow slot to make
 /// them self-lit; higher thresholds = rarer.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GlowPockets {
@@ -39,7 +39,7 @@ pub struct GlowPockets {
 }
 
 /// Thin vein seams (magma/ore filaments): painted where a seam noise field
-/// sits within `width` of `center` — a BAND, so seams read as veins running
+/// sits within `width` of `center` — a band, so seams read as veins running
 /// through the rock instead of flooding whole walls.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SeamSpec {
@@ -204,7 +204,7 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
             let vary = noise.fbm(p * 0.05 + Vec3::splat(83.0), 2);
             let patch = noise.fbm(dir * 9.0 + Vec3::splat(37.0), 3);
 
-            // Molten core zone (usually a GLOW slot): a deep dig reads hot
+            // Molten core zone (usually a glow slot): a deep dig reads hot
             // before the core itself appears.
             if spec.core_paint.slot != 0 && cave_depth > 0.0 && r < core_r + core_r.min(10.0) {
                 return rgba(tint(spec.core_paint.color, vary), spec.core_paint.slot);
@@ -216,7 +216,7 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
                     return rgba(tint(pk.paint.color, vary), pk.paint.slot);
                 }
             }
-            // Vein seams: a thin BAND of the seam field — filaments through
+            // Vein seams: a thin band of the seam field — filaments through
             // the rock, not glowing walls.
             if let Some(sm) = &spec.seam
                 && depth > sm.min_depth
@@ -272,7 +272,7 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    /// The seam band paints VEINS, not walls: a banded seam must color far
+    /// The seam band paints veins, not walls: a banded seam must color far
     /// fewer voxels than a threshold at the same level would.
     #[test]
     fn seam_band_is_sparse() {

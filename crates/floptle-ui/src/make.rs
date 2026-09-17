@@ -12,7 +12,7 @@
 //! Two properties make this a builder rather than a node factory:
 //!
 //! 1. **It reconciles.** Calling it again with different data spawns and
-//!    destroys only the DIFFERENCE, so a list that gains a row keeps the other
+//!    destroys only the difference, so a list that gains a row keeps the other
 //!    nine — with their scroll position, their in-flight style transitions and
 //!    what the player typed into them. A builder that rebuilt the subtree would
 //!    make a screen that flickers and forgets, which is exactly the hand-rolled
@@ -295,7 +295,7 @@ impl MadeNode {
     /// then the state the player owns carried across.
     ///
     /// Everything the description doesn't mention resets, on purpose. These
-    /// four don't, because none of them is something the description SAID: a
+    /// four don't, because none of them is something the description said: a
     /// scroll position, what was typed into a field, which chip is selected,
     /// and where a draggable slider was left are the player's answers, and a
     /// re-render that threw them away would make the screen fight its user.
@@ -328,7 +328,7 @@ impl MadeNode {
     }
 }
 
-/// Properties that decide the PLACEMENT mode, and so must land before the
+/// Properties that decide the placement mode, and so must land before the
 /// numbers that live inside it.
 fn is_place_mode(name: &str) -> bool {
     matches!(name, "pin" | "inset" | "stretch")
@@ -738,7 +738,7 @@ fn anchor(s: &str) -> Option<Anchor> {
 /// The values an enumerated property takes, or `None` for a property that takes
 /// free text, a number or a boolean.
 ///
-/// Used to REFUSE anything else, and to say what was expected. `ui.make` has
+/// Used to refuse anything else, and to say what was expected. `ui.make` has
 /// always raised on a property name it doesn't know — "a declarative screen
 /// that silently ignores a line is worse than one that stops" — and a value it
 /// doesn't know is the same bug wearing different clothes. `pin = "topCenter"`
@@ -905,7 +905,7 @@ pub fn plan(existing: &[Existing], wanted: &[MadeNode]) -> Vec<Op> {
         }
     }
     // Then the unkeyed ones, in order, against whatever is left over. An
-    // existing element that CARRIES a key is not available to an unkeyed slot:
+    // existing element that carries a key is not available to an unkeyed slot:
     // its identity was stated, and quietly reusing it would move a keyed row's
     // state into an anonymous one.
     let mut cursor = 0usize;
@@ -1047,7 +1047,7 @@ mod tests {
         );
         assert_eq!(spec, before, "a refused value still changed the element");
 
-        // …and the two spellings people actually write are ANSWERED, not
+        // …and the two spellings people actually write are answered, not
         // refused. The other seven anchors are `topLeft` and friends; the two
         // that take a bare direction are the two you have to look up.
         for (wrote, meant) in [

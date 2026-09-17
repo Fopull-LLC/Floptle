@@ -87,7 +87,7 @@ pub struct SkinStream {
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     let (doc, buffers, images) = crate::gltf_import::read_gltf(path, true)?;
     // Keep the structure if the file is animated or skinned (a rig authored
-    // elsewhere, clips to be keyed IN-ENGINE — the astronaut_male case) or it has
+    // elsewhere, clips to be keyed in-engine — the astronaut_male case) or it has
     // two or more mesh objects (the multi-part unrigged character — Sae). A single
     // mesh with no rig has no sub-objects to expose, so it stays a plain baked prop.
     let mesh_objects = doc.nodes().filter(|n| n.mesh().is_some()).count();
@@ -242,7 +242,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
             for idx in indices {
                 part.mesh.indices.push(base + idx);
             }
-            // Keep the skin streams PARALLEL to the vertex list: a primitive
+            // Keep the skin streams parallel to the vertex list: a primitive
             // that lacks JOINTS_0/WEIGHTS_0 in an otherwise-skinned part pads
             // with zero weights (the shader then falls back to the node
             // transform) so slots never misalign.
@@ -356,7 +356,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     }
 
     // ---- measure the rest-pose bounds. The skeleton and clips are kept
-    // exactly as authored — the bounds CENTER is returned as a placement
+    // exactly as authored — the bounds center is returned as a placement
     // offset the renderer applies, so extracted clips never embed an
     // import-time framing artifact (re-exports and retargets stay stable). ----
     let skeleton = Skeleton::new(nodes);

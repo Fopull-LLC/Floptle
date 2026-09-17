@@ -8,7 +8,7 @@
 //! heaving surface lifts you instead of swallowing you.
 //!
 //! The design was vetted by an adversarial panel: the visible crust is a fractal,
-//! but the COLLISION field is an explicitly-designed smooth, solid planetoid
+//! but the collision field is an explicitly-designed smooth, solid planetoid
 //! (core sphere + blended hills), which is genuinely walkable and never empty.
 //!
 //! Controls: WASD move (camera-relative, on the surface), Space jump, Shift
@@ -30,7 +30,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
-// ---- macro field constants (LOCK-STEP with walk.wgsl) ----
+// ---- macro field constants (lock-step with walk.wgsl) ----
 const R0: f32 = 30.0;
 const KB: f32 = 4.0;
 const WARP_A: f32 = 1.0;
@@ -45,7 +45,7 @@ const BUMPS: [([f32; 3], f32); 6] = [
     ([0.5, 0.2, -1.0], 8.0),
     ([-0.4, -0.5, -0.8], 6.0),
 ];
-/// Swirling-branch "arm" parameters (LOCK-STEP with walk.wgsl).
+/// Swirling-branch "arm" parameters (lock-step with walk.wgsl).
 const ARM_STEPS: usize = 10;
 const SWIRLS: f32 = 1.25;
 const LAT0: f32 = -0.25;
@@ -222,7 +222,7 @@ impl Character {
         for _ in 0..n {
             let up = self.up_smooth;
 
-            // (1) SURFACE-VELOCITY CARRY — analytic df/dt = grad . dw/dt, so a
+            // (1) surface-velocity carry — analytic df/dt = grad . dw/dt, so a
             //     rising wall lifts the rider instead of swallowing them.
             let gn = grad(self.pos, time, EPS_N);
             let gm = gn.length();
@@ -243,11 +243,11 @@ impl Character {
                 self.v_surface = 0.0;
             }
 
-            // (2) GRAVITY
+            // (2) gravity
             let gdir = gravity_down(self.pos, time);
             self.vel += gdir * G_MAG * sub;
 
-            // (3) INPUT (tangential) + friction
+            // (3) input (tangential) + friction
             if wish.length_squared() > 1e-6 {
                 let s = if sprint { 1.8 } else { 1.0 };
                 self.vel += wish.normalize() * ACCEL * s * sub;
@@ -258,10 +258,10 @@ impl Character {
                 self.vel = v_n + v_t * (-FRIC * sub).exp();
             }
 
-            // (4) INTEGRATE (substep keeps the move < 0.5r, so no tunneling)
+            // (4) integrate (substep keeps the move < 0.5r, so no tunneling)
             self.pos += self.vel * sub;
 
-            // (5) DEPENETRATION — 3 spheres along the segment; position only,
+            // (5) depenetration — 3 spheres along the segment; position only,
             //     never momentum; clamped so a fast morph nudges, never launches.
             let max_shove = V_SHOVE_MAX * sub;
             let caps = [
@@ -293,19 +293,19 @@ impl Character {
             }
             self.pos += correction / 3.0;
 
-            // (6) SLIDE — kill into-surface velocity
+            // (6) slide — kill into-surface velocity
             if deepest_f < CAP_R + 0.02 {
                 let into = self.vel.dot(contact_n).min(0.0);
                 self.vel -= contact_n * into;
             }
 
-            // (7) GROUNDED + up target
+            // (7) grounded + up target
             let lo = self.pos - up * CAP_HH;
             let f_lo = f_c(lo, time);
             let n_lo = grad(lo, time, EPS_N).try_normalize().unwrap_or(up);
             self.grounded = f_lo <= CAP_R + GROUND_EPS && n_lo.dot(up) > SLOPE_COS;
 
-            // (7b) GROUND STICK: glue the foot to the surface and kill outward
+            // (7b) ground stick: glue the foot to the surface and kill outward
             // velocity so you hug convex hills instead of launching off them.
             // Skipped briefly after a jump so the jump can actually leave.
             if self.grounded && self.jump_lock <= 0.0 {

@@ -67,7 +67,7 @@ pub struct Binding {
     /// It exists for the case a pad can't cover: **two players sharing one keyboard**.
     /// There is only one keyboard, so `Key(KeyJ)` otherwise fires `Light` for both
     /// fighters at once, and the only way out was to duplicate the whole action set
-    /// under `Light2` names. Scoping the BINDING rather than the action keeps the action
+    /// under `Light2` names. Scoping the binding rather than the action keeps the action
     /// list — and therefore the netcode's positional indexing and [`InputMap::hash`] —
     /// untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,7 +211,7 @@ impl Axis1Binding {
 /// One contributor to a 2D axis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Axis2Binding {
-    /// WASD-style: four digital sources. Scoping these to a slot is what lets one
+    /// Wasd-style: four digital sources. Scoping these to a slot is what lets one
     /// `Move` axis carry WASD for player 1 and the arrow keys for player 2 — which in
     /// turn makes the map-level motion axis (`dir()`, `qcf`, …) correct for both.
     Keys {
@@ -231,7 +231,7 @@ pub enum Axis2Binding {
         /// Restrict to one local player slot — see [`Binding::player`].
         ///
         /// Without this a two-player map could not express "P1 on pad 1, P2 on
-        /// pad 2" at all: `PadId::Slot(n)` names a DEVICE, not a player, so two
+        /// pad 2" at all: `PadId::Slot(n)` names a device, not a player, so two
         /// slot-named stick bindings each contributed to both players and
         /// largest-magnitude-wins meant whichever stick was pushed harder drove
         /// both characters. The `Keys` arm beside it had the field all along,
@@ -407,7 +407,7 @@ impl InputMap {
     /// this and refuses a mismatch. Bindings do not contribute —
     /// a player rebinding Jump to their own liking must not lock them out.
     pub fn hash(&self) -> u64 {
-        // FNV-1a, spelled out so no dependency (and no hasher-version drift)
+        // Fnv-1a, spelled out so no dependency (and no hasher-version drift)
         // can change the value between builds.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |bytes: &[u8]| {
@@ -487,7 +487,7 @@ impl InputMap {
         added
     }
 
-    /// Fill gaps at BINDING granularity — the editor's explicit "add the
+    /// Fill gaps at binding granularity — the editor's explicit "add the
     /// starter bindings" button, where the user has just asked for exactly this.
     ///
     /// Not used by migration: see [`Self::top_up_missing`] for why.
@@ -826,7 +826,7 @@ mod tests {
     }
 
     /// Scoping a binding to a local player must not move the handshake hash — the wire
-    /// indexes actions by position, and a per-player BINDING doesn't change the action
+    /// indexes actions by position, and a per-player binding doesn't change the action
     /// list. Round-tripping it through RON matters for the same reason: a hand-edit that
     /// silently dropped `player` would put both fighters back on one set of keys.
     #[test]

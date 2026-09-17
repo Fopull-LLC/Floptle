@@ -46,7 +46,7 @@ fn run(version: &str, artifact: &Artifact, paths: &Paths, token: Option<&str>, t
 
     let _ = tx.send(Progress::Unpacking);
     let dest = paths.version_dir(version);
-    // Unpack into a STAGING dir and require the editor binary before committing, then
+    // Unpack into a staging dir and require the editor binary before committing, then
     // atomically rename into place. So a corrupt/partial bundle never leaves a half-
     // populated versions/<v>/ that reads as "installed", and a failed re-install/upgrade
     // never destroys the previously working copy.

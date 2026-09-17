@@ -107,7 +107,7 @@ pub struct UserInfo {
 /// people pay for: the fallback now looks like a working plan that is simply
 /// smaller, which is a billing complaint rather than an outage report.
 ///
-/// So the failure has its own value, [`UNKNOWN`](Self::UNKNOWN), and every path
+/// So the failure has its own value, [`UNKNOWN`](Self::unknown), and every path
 /// that could not ask uses [`unknown`](Self::unknown) rather than the default.
 /// Nothing is blocked by it — [`Session::effective_tier`] still enforces `free`
 /// — but a caller that wants to say so can now tell the two apart, and the Hub
@@ -134,7 +134,7 @@ impl Entitlements {
         Self { tier: Self::UNKNOWN.into() }
     }
 
-    /// Did the server actually tell us this? False for [`UNKNOWN`](Self::UNKNOWN)
+    /// Did the server actually tell us this? False for [`UNKNOWN`](Self::unknown)
     /// and for an empty tier.
     pub fn is_known(&self) -> bool {
         !self.tier.is_empty() && self.tier != Self::UNKNOWN
@@ -250,7 +250,7 @@ impl Provider for HttpProvider {
                 .map(PollOutcome::Granted)
                 .map_err(|e| format!("unexpected token response: {e}")),
             // The device grant signals "keep waiting" / "back off" / a real rejection as an
-            // OAuth error body on a 4xx. A 5xx / 429 / unparseable body is a TRANSIENT upstream
+            // OAuth error body on a 4xx. A 5xx / 429 / unparseable body is a transient upstream
             // failure while the device code is still valid — back off, don't abort.
             Err(ureq::Error::Status(code, resp)) => {
                 let err = resp.into_json::<OauthError>().map(|e| e.error).unwrap_or_default();
@@ -447,8 +447,8 @@ impl Session {
     /// **Did the server actually say what this plan is?**
     ///
     /// False when `/entitlements` could not be reached — see [`Entitlements`].
-    /// Anything that RENDERS a plan should ask this first; anything that
-    /// ENFORCES one should use [`effective_tier`](Self::effective_tier), which
+    /// Anything that renders a plan should ask this first; anything that
+    /// Enforces one should use [`effective_tier`](Self::effective_tier), which
     /// keeps failing soft.
     pub fn plan_known(&self) -> bool {
         !self.tier.is_empty() && self.tier != Entitlements::UNKNOWN
@@ -856,7 +856,7 @@ mod tests {
 
         assert_eq!(access_token_issuer(&jwt("https://fopull.com")).as_deref(), Some("https://fopull.com"));
         assert!(session(jwt("https://fopull.com")).issued_by("https://fopull.com"));
-        // Compared by HOST, so a trailing slash or a path on the configured base is not a
+        // Compared by host, so a trailing slash or a path on the configured base is not a
         // reason to sign somebody out.
         assert!(session(jwt("https://fopull.com")).issued_by("https://fopull.com/"));
         assert!(!session(jwt("https://dev-auth.fopull.com")).issued_by("https://fopull.com"));
@@ -904,7 +904,7 @@ mod tests {
     /// The values here are chosen so a regression cannot pass: `"free"` is a
     /// real tier the server sells, so asserting `tier != "free"` on the unknown
     /// case is asserting against the exact string the bug produced. And
-    /// `effective_tier` is asserted to STILL be `"free"`, because the fix was
+    /// `effective_tier` is asserted to still be `"free"`, because the fix was
     /// never to start locking anybody out — a developer whose network blinked
     /// keeps working, they just are not told a guess as though it were fact.
     #[test]
@@ -912,7 +912,7 @@ mod tests {
         let tok = || Tokens { access_token: "a".into(), refresh_token: None, scope: None };
         let who = || UserInfo { sub: "u1".into(), email: None, name: None };
 
-        // The server ANSWERED, and it said free.
+        // The server answered, and it said free.
         let said_free =
             Session::from_parts(tok(), who(), Entitlements { tier: "free".into() });
         assert_eq!(said_free.tier, "free");

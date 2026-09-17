@@ -49,9 +49,9 @@ pub struct ShapeSpec {
     pub rings: u32,
     pub steps: u32,
     pub arch_segments: u32,
-    /// Arch opening WIDTH, as a fraction of the shape's half-width.
+    /// Arch opening width, as a fraction of the shape's half-width.
     pub arch_width: f32,
-    /// Arch opening HEIGHT (jamb + arc), as a fraction of the shape's height.
+    /// Arch opening height (jamb + arc), as a fraction of the shape's height.
     pub arch_height: f32,
 }
 
@@ -273,7 +273,7 @@ pub fn cylinder(radius: f32, half_height: f32, sides: u32) -> MapMesh {
 /// -Z. Solid: per-step tread + riser, a stacked band per step down each side,
 /// plus the back wall and floor.
 ///
-/// The side bands and the back wall carry COLLINEAR corners at every step
+/// The side bands and the back wall carry collinear corners at every step
 /// level. That looks redundant until you drag a face: without them the side of
 /// the staircase would have vertices sitting in the middle of the back wall's
 /// edge (a T-junction), and pulling the back wall would tear it off the sides
@@ -367,7 +367,7 @@ pub fn stairs(size: Vec3, steps: u32) -> MapMesh {
 pub fn arch(half: Vec3, opening: Vec2, segments: u32) -> MapMesh {
     let (hx, hy, hz) = (half.x.max(0.1), half.y.max(0.1), half.z.max(0.05));
     // Order matters: the arc is a semicircle of the opening's half-width, so a
-    // WIDE, low arch has to give up width or the cap wouldn't fit under the
+    // Wide, low arch has to give up width or the cap wouldn't fit under the
     // ceiling. Capping `w` first also keeps the `h` clamp's bounds ordered —
     // `f32::clamp` panics outright when min > max, and a broad, short arch
     // would take the whole editor down with it.
@@ -469,7 +469,7 @@ mod tests {
         }
     }
 
-    /// No vertex may sit in the MIDDLE of another face's edge.
+    /// No vertex may sit in the middle of another face's edge.
     ///
     /// A T-junction looks harmless in a render (the seam is watertight enough)
     /// and is anything but in an editor: the two faces along that seam share

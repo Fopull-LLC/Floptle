@@ -13,7 +13,7 @@ pub struct Project {
     pub path: PathBuf,
     #[serde(default)]
     pub engine_version: Option<String>,
-    /// ISO-8601 stamp of the last launch (the Hub never computes dates itself — the
+    /// Iso-8601 stamp of the last launch (the Hub never computes dates itself — the
     /// caller supplies "now" so the core stays testable/deterministic).
     #[serde(default)]
     pub last_opened: Option<String>,

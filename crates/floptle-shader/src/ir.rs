@@ -131,13 +131,13 @@ pub enum Input {
     Uv,
     /// Surface normal, normalized (`vec3`). Fragment only.
     Normal,
-    /// CAMERA-RELATIVE position (`vec3`) — the engine's floating-origin space
+    /// Camera-relative position (`vec3`) — the engine's floating-origin space
     ///: the camera sits at the origin. Both stages.
     WorldPos,
-    /// SURFACE-LOCKED object position (`vec3`) — the mesh-local position scaled
+    /// Surface-locked object position (`vec3`) — the mesh-local position scaled
     /// to world units (`in.pos * modelScale`), the same coordinate triplanar
     /// projects along. Unlike `worldPos` it does not ride the floating origin,
-    /// so procedural detail (panel seams, rivets, weathering) STICKS to the
+    /// so procedural detail (panel seams, rivets, weathering) sticks to the
     /// surface instead of swimming/rescaling as the camera moves. Fragment only.
     ObjectPos,
     /// Unit vector from the surface toward the camera (`vec3`). Fragment only.
@@ -147,7 +147,7 @@ pub enum Input {
     /// The node's own Material tint + alpha (`vec4`) — so one shader composes
     /// with per-node coloring. Fragment only.
     InstanceColor,
-    /// The world-space RAY DIRECTION (`vec3`, normalized) for a Sky shader — the
+    /// The world-space RAY direction (`vec3`, normalized) for a Sky shader — the
     /// direction the camera ray travels toward the horizon/zenith. Sky only.
     SkyDir,
 }
@@ -204,7 +204,7 @@ impl Input {
             Stage::Ui => matches!(self, Input::Uv | Input::InstanceColor | Input::Time),
             // A post pass has no surface and no instance — it has a screen. The
             // frame itself comes through `sceneColor`/`sceneDepth`/`sceneNormal`
-            // rather than as varyings, because those are sampled at an ARBITRARY
+            // rather than as varyings, because those are sampled at an arbitrary
             // uv and a varying can only ever describe this pixel.
             Stage::Post => matches!(self, Input::Uv | Input::Time),
         }
@@ -445,7 +445,7 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
     let mut ck = Checked { types: vec![None; ir.exprs.len()], calls: BTreeMap::new() };
     let mut errors = Vec::new();
 
-    // Lets are ordered and may only reference EARLIER lets (the parser
+    // Lets are ordered and may only reference earlier lets (the parser
     // guarantees it by construction; graph edits must too), so one pass in
     // order types everything.
     let mut let_ty: Vec<Option<Ty>> = vec![None; ir.lets.len()];

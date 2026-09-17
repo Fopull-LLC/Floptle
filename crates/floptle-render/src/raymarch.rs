@@ -118,7 +118,7 @@ pub struct RaymarchGlobals {
     pub vol_tight_c: [[f32; 4]; 16],
     /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
     pub vol_tight_h: [[f32; 4]; 16],
-    /// Field Shapes (the Sdf stage): x = active count (0..=4).
+    /// Field Shapes (the SDF stage): x = active count (0..=4).
     pub shape_meta: [f32; 4],
     /// Per shape: xyz = camera-relative position, w = uniform scale.
     pub shape_pos: [[f32; 4]; 4],

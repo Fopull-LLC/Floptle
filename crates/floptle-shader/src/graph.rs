@@ -6,7 +6,7 @@
 //!
 //! 1. **What are the nodes and wires?** [`build_view`] explodes the IR's
 //!    expression trees structurally — every call / operator / swizzle is its
-//!    own node, literal arguments stay INLINE on their consumer's port row
+//!    own node, literal arguments stay inline on their consumer's port row
 //!    (editable in place), and inputs/uniforms/texture slots appear once as
 //!    shared source nodes. Named `let`s keep their names; everything else is
 //!    anonymous until the artist touches it.
@@ -222,7 +222,7 @@ impl GNode {
 
 // ---- view building ----------------------------------------------------------
 
-/// Is this expression rendered INLINE on its consumer's port row (rather than
+/// Is this expression rendered inline on its consumer's port row (rather than
 /// as its own node)? Literals, negated literals, strings, colors, and vecN
 /// constructors whose components are all literals.
 fn inline_val(ir: &ShaderIr, id: ExprId) -> Option<InlineVal> {
@@ -301,7 +301,7 @@ pub fn build_view(ir: &ShaderIr, ck: Option<&Checked>) -> Vec<GNode> {
     build_view_padded(ir, ck, &|_| 0.0)
 }
 
-/// [`build_view`] with per-node EXTRA height fed into the auto-layout — the
+/// [`build_view`] with per-node extra height fed into the auto-layout — the
 /// editor passes each node's preview-thumbnail strip so freshly laid-out
 /// columns never stack nodes into each other.
 pub fn build_view_padded(
@@ -358,7 +358,7 @@ pub fn build_view_padded(
     }
 
     // Every declared uniform/texture is a node too, even before anything
-    // reads it — a freshly added knob has to APPEAR to be wireable at all.
+    // reads it — a freshly added knob has to appear to be wireable at all.
     for u in &ir.uniforms {
         b.emit_source(NodeKey::Uniform(u.name.clone()));
     }
@@ -401,7 +401,7 @@ impl ViewBuilder<'_> {
         self.ck.and_then(|c| c.types.get(id.0 as usize).copied().flatten())
     }
 
-    /// Ensure the node for `id`'s VALUE exists (source node, let node, or an
+    /// Ensure the node for `id`'s value exists (source node, let node, or an
     /// anonymous expression node) — recursing through arguments.
     fn visit(&mut self, id: ExprId) {
         if inline_val(self.ir, id).is_some() {
@@ -639,7 +639,7 @@ pub fn node_height(n: &GNode) -> f32 {
     NODE_HEADER_H + n.inputs.len() as f32 * NODE_ROW_H + extra + 8.0
 }
 
-/// A REPARSE-STABLE identity string per node, for the editor's session
+/// A reparse-stable identity string per node, for the editor's session
 /// position cache. `NodeKey::Anon` carries an arena index that shifts on
 /// every reprint→reparse; but an anonymous node hangs off exactly one
 /// consumer port, so "consumer's stable key / port index" names it stably
@@ -965,7 +965,7 @@ pub fn connect(ir: &mut ShaderIr, src: &NodeKey, site: Site) -> Result<(), EditE
         }
         NodeKey::Anon(e) => {
             // The expression currently lives at exactly one site. Moving it?
-            // No — wiring it somewhere ELSE means sharing: promote to a let.
+            // No — wiring it somewhere else means sharing: promote to a let.
             let l = promote_to_let(ir, *e)?;
             push(ir, ExprKind::Let(l))
         }
@@ -1503,12 +1503,12 @@ pub fn duplicate_nodes(ir: &mut ShaderIr, keys: &[NodeKey]) -> Result<Vec<NodeKe
     Ok(out)
 }
 
-/// Graft nodes from ANOTHER shader (or the same one) into `ir` as fresh named
+/// Graft nodes from another shader (or the same one) into `ir` as fresh named
 /// lets, placed around `at`. The pasted chunk is self-contained: a `let` the
 /// selection reads but doesn't include comes along too, and a knob or texture
 /// slot it reads is re-declared here unless a slot of that name already exists
 /// (in which case it binds to the local one — pasting into a shader that
-/// already has `tint` should use YOUR `tint`).
+/// already has `tint` should use your `tint`).
 ///
 /// Returns the pasted nodes' keys, in the order they were asked for.
 pub fn paste_nodes(
@@ -1988,7 +1988,7 @@ shader plasma {
 
     #[test]
     fn fresh_knobs_and_slots_appear_before_anything_reads_them() {
-        // The palette's "knob"/"texture slot" entries only DECLARE — the view
+        // The palette's "knob"/"texture slot" entries only declare — the view
         // must still show them or adding one looks like nothing happened.
         let mut ir = parse("shader s {\n  stage fragment\n  output color = vec4(1, 1, 1, 1)\n}\n")
             .unwrap();

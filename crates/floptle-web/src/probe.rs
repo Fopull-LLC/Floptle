@@ -207,7 +207,7 @@ fn shader_modules() -> Vec<(&'static str, String)> {
 /// unparenthesised `*` before a `^` in the stdlib's hash, which naga accepts
 /// and a browser does not).
 ///
-/// Each example is compiled and REGISTERED, not reassembled here: a copy of
+/// Each example is compiled and registered, not reassembled here: a copy of
 /// the splice would drift from the real one and pass while the real one broke.
 /// Returns how many were refused.
 async fn flsl_census(gpu: &Gpu, raster: &mut Raster) -> usize {

@@ -301,10 +301,10 @@ mod tests {
     /// **The `./` prefix every real bundle carries is normal, and everything
     /// that climbs out is refused.**
     ///
-    /// The prefix is the half that must be ACCEPTED — it is what both artifacts
+    /// The prefix is the half that must be accepted — it is what both artifacts
     /// a developer produced actually look like, and a guard that rejected it would
     /// refuse every real bundle. The escapes are the half that must be
-    /// REFUSED, and they are refused by name so the journal says which entry.
+    /// Refused, and they are refused by name so the journal says which entry.
     #[test]
     fn a_dot_slash_prefix_is_fine_and_everything_that_escapes_is_not() {
         // What a real bundle is written with.

@@ -245,7 +245,7 @@ impl VoiceJitter {
                 None if self.held.is_empty() => return released,
                 None => {
                     // The slot is due, its packet is not here, and something
-                    // NEWER is — so it is genuinely missing rather than merely
+                    // Newer is — so it is genuinely missing rather than merely
                     // not sent yet. Conceal and move on: waiting for it would
                     // turn one lost datagram into a permanent delay for the
                     // rest of the session.

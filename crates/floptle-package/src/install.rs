@@ -192,7 +192,7 @@ fn finish_git(
     let result = install_from_dir(project_root, src, replace);
     let _ = std::fs::remove_dir_all(clone_dir);
     let mut entry = result?;
-    // Record the REMOTE, not the temp folder the clone happened to land in.
+    // Record the remote, not the temp folder the clone happened to land in.
     entry.source = Source::Git { url: url.to_string(), rev: rev.map(|r| r.to_string()) };
     let mut reg = Registry::load(project_root).map_err(InstallError::Io)?;
     reg.upsert(entry.clone());

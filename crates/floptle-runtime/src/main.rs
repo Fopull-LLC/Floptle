@@ -14,7 +14,7 @@
 
 mod app;
 mod runner;
-// The server lives in this crate's LIBRARY half, so `floptle serve` can call
+// The server lives in this crate's library half, so `floptle serve` can call
 // the same function this binary does instead of a copy of it.
 use floptle_runtime::server;
 

@@ -119,7 +119,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     // `[Service]` systemd logs "Unknown key name … ignoring" and the
     // give-up-after-five-starts promised below never happens, so a build that
     // cannot start restarts forever and the journal fills with one traceback
-    // (defect three). The guard checks the SECTION.
+    // (defect three). The guard checks the section.
     s.push_str("StartLimitIntervalSec=300\nStartLimitBurst=5\n\n");
 
     s.push_str("[Service]\n");
@@ -198,7 +198,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
     s.push_str("SystemCallFilter=@system-service\n");
     // **A game server runs a developer's Lua, on a box the developer does not
     // own.** What a script can reach inside the process is the engine's job
-    // (`floptle_script::http_policy`); what the PROCESS can reach is this
+    // (`floptle_script::http_policy`); what the process can reach is this
     // unit's. Link-local is where a cloud box's metadata service answers, and
     // there is nothing at that address a game server has any business with.
     // Not loopback or the private ranges: the relay may share the box.
@@ -344,7 +344,7 @@ mod tests {
     /// name … ignoring" and the documented give-up-after-five-starts never
     /// happens, so a build that cannot start restarts forever, writing the
     /// same traceback into a journal the agent then ships every ten seconds.
-    /// Asserted by SECTION rather than by substring, because the substring was
+    /// Asserted by section rather than by substring, because the substring was
     /// there all along.
     #[test]
     fn the_start_limit_is_where_systemd_reads_it() {
@@ -466,7 +466,7 @@ mod tests {
     }
 
     /// **The process cannot reach the box's metadata service, and its files
-    /// are its own.** Asserted by SECTION, the lesson of the start-limit keys:
+    /// are its own.** Asserted by section, the lesson of the start-limit keys:
     /// a directive in the wrong section is logged and ignored.
     #[test]
     fn the_unit_denies_link_local_and_keeps_its_directories_private() {

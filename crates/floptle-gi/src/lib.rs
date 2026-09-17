@@ -232,7 +232,7 @@ impl ProbeGrid {
     /// A grid over `center ± half_extent` with probes about `spacing` apart.
     ///
     /// The spacing is a *request*: the real spacing is whatever divides the box
-    /// into a whole number of steps, and an over-budget grid is COARSENED rather
+    /// into a whole number of steps, and an over-budget grid is coarsened rather
     /// than trimmed. Coarsening keeps the grid isotropic and keeps a
     /// flat volume — a corridor, a room one storey high — flat. Trimming the
     /// longest axis instead would quietly turn every large volume into a cube of

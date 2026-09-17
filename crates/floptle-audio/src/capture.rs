@@ -1,6 +1,6 @@
 //! The microphone.
 //!
-//! A cpal INPUT stream, resampled and downmixed to the one shape the rest of
+//! A cpal input stream, resampled and downmixed to the one shape the rest of
 //! the voice path speaks: 48 kHz mono, handed out in 20 ms frames.
 //!
 //! Everything here is designed around a machine that has no microphone, which
@@ -61,7 +61,7 @@ impl Shared {
 ///
 /// Old microphone audio is worthless: if the game has not collected for a
 /// quarter of a second, sending the backlog would put every listener that far
-/// behind for the rest of the conversation. Here the OLDEST is dropped, which
+/// behind for the rest of the conversation. Here the oldest is dropped, which
 /// is the opposite of the playback ring's rule and right for the same reason —
 /// on the way in, the freshest audio is the useful audio.
 const MAX_QUEUED_FRAMES: usize = 12;
@@ -251,7 +251,7 @@ impl Capture {
         self.shared.frames.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or_default()
     }
 
-    /// TESTING / the in-editor harness: push audio in as though it had come
+    /// Testing / the in-editor harness: push audio in as though it had come
     /// from a microphone.
     ///
     /// This is what makes voice routing testable on one desk with no hardware

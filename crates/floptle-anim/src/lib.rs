@@ -62,7 +62,7 @@ impl TransformTRS {
     /// model space) rotate about a chosen joint — the pivot point stays put as the
     /// rotation changes.
     ///
-    /// This form assumes the node's REST rotation/scale are identity (the baked
+    /// This form assumes the node's rest rotation/scale are identity (the baked
     /// object-model case it was written for). A node with a rotated rest — a mesh
     /// bone-parented in Blender carries the bone's axis flip — must use
     /// [`Self::matrix_about_rest`], or the pivot displaces it at rest.
@@ -294,7 +294,7 @@ impl<T: Copy> Track<T> {
         let (a, b) = (hi - 1, hi);
         let (ta, tb) = (self.times[a], self.times[b]);
         let k = if tb > ta { ((t - ta) / (tb - ta)).clamp(0.0, 1.0) } else { 0.0 };
-        // The mode belongs to the key the playhead is LEAVING — the segment
+        // The mode belongs to the key the playhead is leaving — the segment
         // after key `a` — which is the convention every keyframe editor uses and
         // the only one that lets a single hold be authored without touching the
         // key on the far side of it.
@@ -705,7 +705,7 @@ impl Layer {
 pub type FiredEvent = String;
 
 /// One layer's replicable playback state (see [`Controller::net_state`]).
-/// Both peers load the same controller asset, so a state INDEX + a time fully
+/// Both peers load the same controller asset, so a state index + a time fully
 /// describe what's playing — no strings or poses on the wire.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetLayerState {
@@ -978,7 +978,7 @@ impl Controller {
     /// ships instead of poses: per layer, the playing state index, clip time,
     /// and blend weight (plus the global speed). Each peer runs the same
     /// controller asset, so an index and a time reproduce the pose locally.
-    /// `dur`/`looped`/`rate` ride along for the SENDER's change detection (a
+    /// `dur`/`looped`/`rate` ride along for the sender's change detection (a
     /// looping clip's time is predictable, so it needn't be re-sent every
     /// snapshot); they're ignored on apply, which reads its own clips.
     pub fn net_state(&self) -> NetAnimState {
@@ -1056,7 +1056,7 @@ impl Controller {
                         }
                         _ => {
                             // Transition with the state's own fade rules, then
-                            // land at the replicated time KEEPING the fade
+                            // land at the replicated time keeping the fade
                             // (seek() would kill it — that's for scrubbing).
                             self.play(li, si, None);
                             if let Some(cur) = self.layers[li].cur.as_mut() {
@@ -1357,7 +1357,7 @@ mod tests {
     fn a_pivot_never_moves_a_node_with_a_rotated_rest() {
         // A mesh bone-parented in Blender exports with the bone's axis flip baked
         // into its rest rotation (180° about X is the usual one). Give such a node
-        // the centroid pivot the editor auto-assigns to every object node: the REST
+        // the centroid pivot the editor auto-assigns to every object node: the rest
         // pose must come out bit-identical to `rest.matrix()`. The old
         // `T(t + pivot)·R·S·T(-pivot)` form displaced it by `pivot - R·pivot`, which
         // flung an R6 character's limbs off the body on import.
@@ -1374,7 +1374,7 @@ mod tests {
             assert!((a - b).length() < 1e-6, "rest displaced by the pivot: {a} vs {b}");
         }
 
-        // ...and posing it still orbits the pivot: the pivot POINT stays where rest
+        // ...and posing it still orbits the pivot: the pivot point stays where rest
         // put it, no matter what rotation is keyed on top.
         let at_rest = plain.transform_point3(pivot);
         let keyed = TransformTRS { r: Quat::from_rotation_z(0.7) * rest.r, ..rest };
@@ -1393,7 +1393,7 @@ mod tests {
     /// beats the animator chose, not a clip that never interpolates anywhere —
     /// and not keying the same value twice and hoping nobody retimes it.
     ///
-    /// The mode belongs to the key the playhead is LEAVING — the segment after
+    /// The mode belongs to the key the playhead is leaving — the segment after
     /// it — which is the convention every keyframe editor uses and the only one
     /// under which a single hold can be authored without touching the key on the
     /// far side of it. Sampling inside both segments is what pins that down: a
@@ -1413,7 +1413,7 @@ mod tests {
         assert_eq!(tr.sample(0.99), Some(0.0));
         // …and arrives exactly on the next key.
         assert_eq!(tr.sample(1.0), Some(10.0));
-        // Segment 1→2 EASES.
+        // Segment 1→2 eases.
         assert_eq!(tr.sample(1.5), Some(15.0));
         assert_eq!(tr.sample(2.0), Some(20.0));
     }
@@ -1511,7 +1511,7 @@ mod tests {
         let stepped = Track { interp: Interp::Step, ..base.clone() };
         assert_eq!(stepped.sample(0.5), Some(0.0));
         assert_eq!(stepped.interp_at(0), Interp::Step);
-        // …and a per-key entry OVERRIDES the lane in both directions, so the
+        // …and a per-key entry overrides the lane in both directions, so the
         // lane flag is a default and not a ceiling.
         let eased = Track { key_interp: vec![Interp::Linear, Interp::Linear], ..stepped.clone() };
         assert_eq!(eased.sample(0.5), Some(5.0), "a per-key Linear must beat a Step lane");
@@ -1845,7 +1845,7 @@ mod tests {
 
     #[test]
     fn interrupted_fade_freezes_rest_not_identity() {
-        // Regression: the frozen snapshot must seed from REST — node 1 (rest
+        // Regression: the frozen snapshot must seed from rest — node 1 (rest
         // t = (0,1,0)) is untouched by all clips and must never collapse to
         // the origin while a double-interrupted fade blends.
         let mut c = one_layer_ctl(

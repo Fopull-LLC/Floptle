@@ -163,7 +163,7 @@ pub fn offset_wrap(buf: &mut [u8], w: u32, h: u32, dx: i32, dy: i32) {
 /// Make an image tile without a visible seam, by mirror-blending both edge bands
 /// into each other.
 ///
-/// Each pixel inside the band blends toward its MIRROR across the canvas, with a
+/// Each pixel inside the band blends toward its mirror across the canvas, with a
 /// weight that reaches ½ exactly at the edge — so the first and last columns end
 /// up as the same average and the seam is arithmetically gone, not merely
 /// softened. `width` is the band in pixels. Follow it with the clone stamp over

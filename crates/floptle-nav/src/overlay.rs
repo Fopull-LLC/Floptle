@@ -171,7 +171,7 @@ impl Overlay {
         let cell = mesh.cell_size;
         let y_of = |i: usize| mesh.polys[i].centre[1] + lift;
         // What a character can actually reach, once the links are counted.
-        // Colouring by REGION was right when a region was the only kind of
+        // Colouring by region was right when a region was the only kind of
         // connection there was; it is actively misleading now, because a ledge
         // and the floor its drop lands on are two regions and one place.
         let island = mesh.islands();
@@ -351,7 +351,7 @@ mod tests {
         quad(0.0, size, 0.0, size, y)
     }
 
-    /// A link is drawn where the BAKE put it, and an end that missed the floor
+    /// A link is drawn where the bake put it, and an end that missed the floor
     /// has to look different from one that landed — that difference is the only
     /// thing that says why a door does nothing.
     #[test]

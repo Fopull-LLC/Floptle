@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// The dotted-ellipse bug: a stroked curve is many overlapping pieces, and
-    /// under nonzero winding a piece wound the other way CANCELS its neighbour.
+    /// under nonzero winding a piece wound the other way cancels its neighbour.
     /// Every sample around the ring must be solid.
     #[test]
     fn a_stroked_curve_is_solid_all_the_way_round() {

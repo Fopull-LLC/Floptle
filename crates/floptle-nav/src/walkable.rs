@@ -102,7 +102,7 @@ impl WalkableGrid {
                             hf.origin[2] + (z as f32 + 0.5) * hf.cell_size,
                         ];
                         let mut carved = false;
-                        // Later volumes win AMONG PAINTS, so a designer can
+                        // Later volumes win among paints, so a designer can
                         // paint a patch of mud and then a path across it and
                         // get the path. A carve is different: blocking is a
                         // fact about the level, and a paint volume that
@@ -138,7 +138,7 @@ impl WalkableGrid {
         let mut near: Vec<usize> = Vec::with_capacity(8);
 
         // ---- erode -------------------------------------------------------
-        // A cell is an EDGE if any of its four directions has nothing to step
+        // A cell is an edge if any of its four directions has nothing to step
         // to — the lip of a drop, the foot of a wall, the rim of a hole. Then a
         // breadth-first sweep out from every edge gives each cell its distance
         // to the nearest one, and anything closer than the agent's radius goes.

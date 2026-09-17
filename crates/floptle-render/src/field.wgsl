@@ -71,7 +71,7 @@ struct Globals {
     // standing inside the brick must not pay to march (and fetch) through it.
     vol_tight_c: array<vec4<f32>, 16>,
     vol_tight_h: array<vec4<f32>, 16>,
-    // ---- Field Shapes (the Sdf stage): up to 4 authored SDF shaders in
+    // ---- Field Shapes (the SDF stage): up to 4 authored SDF shaders in
     // the scene, each contributing a distance (`custom_d`) min-folded into the
     // field. Shader code is SPLICED into this module by the renderer; per-shape
     // transform/params live here so edits are uniform writes, not recompiles.

@@ -463,7 +463,7 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
 /// the same — this has to keep `None` (the registry did not say) apart from
 /// `Some(vec![])` (declares none), so it cannot just be `lenient_list` behind
 /// `#[serde(default)]`: that would collapse both onto an empty `Vec`. `#[serde(default)]`
-/// on the field already gives `None` for an ABSENT key without this function
+/// on the field already gives `None` for an absent key without this function
 /// running at all; this only has to cover a key that is present — `null`
 /// reads the same as absent, an array keeps whatever entries this build
 /// recognises (unlike `lenient_list`, one bad entry does not need to be able
@@ -1047,7 +1047,7 @@ mod tests {
 
     /// The chip this field exists to drive (`permission_chip`,
     /// `floptle-editor/src/packages_ui.rs`) shows nothing when `permissions`
-    /// is `None`. A value that is PRESENT but unreadable must not resolve to
+    /// is `None`. A value that is present but unreadable must not resolve to
     /// `None` too, or the one field whose entire job is warning someone before
     /// they install something reads as "nothing to see here" on exactly the
     /// listings it could least afford to.

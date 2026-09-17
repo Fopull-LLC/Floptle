@@ -309,7 +309,7 @@ pub struct UsageSample {
     /// The developer's question is "is my key being used by someone who is
     /// not me", and the control plane's first move on it is to count and
     /// show, not to refuse — a CI runner, a LAN party and a whole ISP behind
-    /// CGNAT all look like "many lobbies from one address" and are honest.
+    /// Cgnat all look like "many lobbies from one address" and are honest.
     /// Empty on a relay whose transport cannot name addresses; absent on a
     /// relay too old to send it.
     pub hosts: Vec<HostAddress>,

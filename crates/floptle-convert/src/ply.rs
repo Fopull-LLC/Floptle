@@ -94,7 +94,7 @@ impl Val {
         self.0 as f32
     }
     /// Colour channels are `uchar` 0..255 in nearly every file, but `float`
-    /// 0..1 exists. Told apart by the declared TYPE rather than by the range —
+    /// 0..1 exists. Told apart by the declared type rather than by the range —
     /// a file whose colours happen to all be dark would otherwise be read as
     /// floats and come out white.
     fn u8(self, ty: Ty) -> u8 {

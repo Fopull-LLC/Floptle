@@ -106,7 +106,7 @@ pub enum Place {
     /// between them, then insets by `margin` = `[left, top, right, bottom]`
     /// design units.
     ///
-    /// On an axis where `max > min` the element STRETCHES to fill that span
+    /// On an axis where `max > min` the element stretches to fill that span
     /// (its own `size` on that axis is ignored) — e.g. `min:(0,0) max:(1,1)
     /// margin:(16,16,16,16)` is "16 units in from all four edges, at any
     /// window size". On an axis where `min == max` it's a point anchor: the
@@ -221,7 +221,7 @@ pub struct ShapeSpec {
     /// Optional per-pixel noise over the fill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<GrainSpec>,
-    /// A 9-sliced sprite drawn as this shape's EDGE, in place of a drawn border.
+    /// A 9-sliced sprite drawn as this shape's edge, in place of a drawn border.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<FrameSpec>,
     /// How this shape composites against what is already drawn.
@@ -372,7 +372,7 @@ pub struct TextSpec {
 /// those would change the layout, and a field that quietly did nothing would be
 /// worse than its absence.
 ///
-/// **`len` is CHARACTERS, not bytes.** This is text a human authored, and "the
+/// **`len` is characters, not bytes.** This is text a human authored, and "the
 /// fifth character" and "the fifth byte" disagree the moment anyone types
 /// anything but ASCII — in bytes it would panic on a slice boundary in front of
 /// whoever was writing the dialogue.
@@ -451,7 +451,7 @@ pub struct ImageSpec {
     /// Which cell to show (row-major, clamped into range).
     #[serde(default)]
     pub cell: u32,
-    /// **9-slice** insets `[L, T, R, B]` as a FRACTION of the sampled region
+    /// **9-slice** insets `[L, T, R, B]` as a fraction of the sampled region
     /// (0 = off). The four corners keep their size, the four edges stretch
     /// along one axis, and the middle stretches both — so one small texture
     /// dresses a panel at any size.
@@ -544,9 +544,9 @@ impl ImageSpec {
 }
 
 /// A value-driven bar/slider (health bars, progress, volume…). The slider node
-/// is the TRACK; its child elements marked [`SliderPart::Fill`] scale along
+/// is the track; its child elements marked [`SliderPart::Fill`] scale along
 /// `dir` with the value, and [`SliderPart::Handle`] children ride the value's
-/// position. The parts are ORDINARY elements — retexture, recolor, move, and
+/// position. The parts are ordinary elements — retexture, recolor, move, and
 /// resize them freely; the slider only drives the value axis and respects your
 /// offsets on it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -594,7 +594,7 @@ impl SliderSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SliderPart {
     /// Scales along the slider's axis with the value. Its authored size is the
-    /// FULL-value size; anchoring picks the direction it empties toward.
+    /// Full-value size; anchoring picks the direction it empties toward.
     Fill,
     /// Its center rides the value's position along the slider's axis (the
     /// authored position on that axis becomes an extra offset). The cross axis
@@ -610,7 +610,7 @@ pub struct MaskSpec {
     pub targets: Vec<String>,
 }
 
-/// A vertical SCROLL view: children keep their authored layout but shift up by
+/// A vertical scroll view: children keep their authored layout but shift up by
 /// `offset` and clip to this element's rounded rect (an implicit mask over its
 /// own subtree — draw and hit-testing). The wheel drives `offset` while the
 /// pointer is anywhere inside the view, clamped so the content can never
@@ -748,7 +748,7 @@ pub struct ElementSpec {
     /// other element sharing the group name. Tabs, difficulty pickers, weapon
     /// slots, a character-select grid.
     ///
-    /// Groups are resolved within a LAYER, so two screens can reuse a name
+    /// Groups are resolved within a layer, so two screens can reuse a name
     /// without interfering — and a group of one is just a toggle that can't be
     /// turned off, which is occasionally exactly what you want.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -756,7 +756,7 @@ pub struct ElementSpec {
     /// Drive a named scroll view's offset: this element becomes a scrollbar
     /// track, and its `part: Handle` child becomes the thumb.
     ///
-    /// A scrollbar is two of YOUR elements, styled however you like, reusing
+    /// A scrollbar is two of your elements, styled however you like, reusing
     /// the slider machinery that was already there. The engine draws no
     /// scrollbar of its own, because a scrollbar is one of the most
     /// style-defining things on a screen.
@@ -865,7 +865,7 @@ pub struct FieldSpec {
     /// script never reads it back as content.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub placeholder: String,
-    /// Cap on the number of CHARACTERS (0 = no cap). Characters, not bytes, so
+    /// Cap on the number of characters (0 = no cap). Characters, not bytes, so
     /// a name field behaves the same for every alphabet.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_len: u32,
@@ -1065,12 +1065,12 @@ pub enum UiSpace {
 /// unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiScaleMode {
-    /// `design_height` design units always span the window HEIGHT; width floats
+    /// `design_height` design units always span the window height; width floats
     /// with the aspect. The classic default — every existing layer behaves
     /// exactly as before.
     #[default]
     MatchHeight,
-    /// `reference_width` design units always span the window WIDTH; height
+    /// `reference_width` design units always span the window width; height
     /// floats. Good for wide HUDs that must keep their horizontal layout.
     MatchWidth,
     /// Blend between match-width and match-height by `match_wh` (0 = width,
@@ -1093,11 +1093,11 @@ pub enum UiScaleMode {
 /// across window sizes and monitor aspects.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiLayer {
-    /// The reference HEIGHT in design units — the vertical half of the canvas's
+    /// The reference height in design units — the vertical half of the canvas's
     /// reference resolution. In `MatchHeight` (and as the height reference for
     /// `Blend`/`Expand`/`Shrink`) this many units span the window height.
     pub design_height: f32,
-    /// The reference WIDTH in design units — the horizontal half of the
+    /// The reference width in design units — the horizontal half of the
     /// reference resolution. Used by `MatchWidth`/`Blend`/`Expand`/`Shrink`
     /// (ignored by `MatchHeight`, where width just follows the aspect).
     #[serde(default = "default_reference_width")]
@@ -1275,7 +1275,7 @@ impl UiLayer {
         //
         // Rounding down rather than to the nearest keeps every element inside
         // the viewport, and the leftover becomes margin: the design canvas is
-        // solved slightly LARGER (243 units, not 240), so anchored elements
+        // solved slightly larger (243 units, not 240), so anchored elements
         // stay against their edges and centred ones stay centred. That is the
         // same thing `MatchHeight` already does horizontally, and it is why
         // this needs no offset — and therefore cannot put a click somewhere
@@ -1770,7 +1770,7 @@ pub struct TextRun {
     pub glyph_offsets: Vec<[f32; 2]>,
 }
 
-/// A text caret and selection, in CHARACTER indices into [`TextRun::text`]
+/// A text caret and selection, in character indices into [`TextRun::text`]
 /// (the string as drawn — masked, case-transformed, whatever it ended up).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Caret {
@@ -1822,7 +1822,7 @@ impl Default for TextRun {
 pub struct EditState {
     /// The element being edited.
     pub id: u32,
-    /// Caret position, in characters into the element's VALUE (the authored
+    /// Caret position, in characters into the element's value (the authored
     /// string — masking and case happen afterwards).
     pub caret: usize,
     /// The other end of the selection.
@@ -1981,7 +1981,7 @@ pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> [f32; 2]
     let rects: std::collections::HashMap<u32, [f32; 4]> =
         placed.iter().map(|p| (p.id, p.rect)).collect();
     let Some(&view) = rects.get(&scroll_id) else { return [0.0, 0.0] };
-    // Content extents, measured from the SHIFTED rects and then un-shifted, so
+    // Content extents, measured from the shifted rects and then un-shifted, so
     // the answer doesn't depend on where the view happens to be scrolled to.
     let mut far = [view[0] - off[0], view[1] - off[1]];
     let mut stack: Vec<&Node> = n.children.iter().collect();
@@ -2055,7 +2055,7 @@ pub fn draw_list_with(
             }
         }
     }
-    // Opacity and tint CASCADE: an element's effective multiplier is its own
+    // Opacity and tint cascade: an element's effective multiplier is its own
     // times every ancestor's. This is what lets one `opacity` fade a whole
     // menu — before it, `opacity` was self-only and fading a panel meant
     // parking a black rectangle over the screen.
@@ -2159,7 +2159,7 @@ pub fn draw_list_with(
                 });
             }
             // The 9-sliced edge sprite, over the fill and the inset shadow because it
-            // is the element's EDGE — the thing everything else sits inside. Tinted by
+            // is the element's edge — the thing everything else sits inside. Tinted by
             // `border_color`, which is the same channel a drawn border uses and the
             // reason a frame inherits a style's hover transition for nothing.
             if let Some(f) = &s.frame
@@ -2184,7 +2184,7 @@ pub fn draw_list_with(
             // corner radii ride along so the transpiled shader can clip its
             // output to the element's rounded rect (no spill past the corners).
             // The element's image (if any) binds at group(1), so the shader can
-            // sample it with `baseTexture(uv)` — the shader then OWNS the image
+            // sample it with `baseTexture(uv)` — the shader then owns the image
             // (the plain image quad below is suppressed).
             let img_tex = spec
                 .image
@@ -2367,7 +2367,7 @@ fn grow_radius(r: [f32; 4], d: f32) -> [f32; 4] {
 /// Effective colour multiplier per element: own `tint` (with `opacity` folded
 /// into alpha) times every ancestor's.
 ///
-/// Computed over the TREE, not the placed list, because an invisible parent
+/// Computed over the tree, not the placed list, because an invisible parent
 /// still parents its children's cascade — and hidden subtrees never reach the
 /// draw list anyway.
 fn inherited_tints(roots: &[Node]) -> std::collections::HashMap<u32, [f32; 4]> {
@@ -2660,7 +2660,7 @@ mod tests {
         assert_eq!([r[2], r[3]], [200.0, 100.0]);
     }
 
-    /// Text scaling REFLOWS: the box grows and its neighbour moves down.
+    /// Text scaling reflows: the box grows and its neighbour moves down.
     ///
     /// The failure this rules out is the one that makes a text-size setting
     /// useless: bigger glyphs painted into the same rect, clipped at exactly the
@@ -3277,7 +3277,7 @@ mod tests {
         assert_eq!(back, t);
         // The authored string is the authored string — a caller still measures,
         // hashes and counts characters of it, and a reveal animation counts
-        // CHARACTERS, so nothing may have been folded into it.
+        // Characters, so nothing may have been folded into it.
         assert_eq!(back.text, "press the red button");
 
         // A scene written before any of this loads with neither.
@@ -3351,7 +3351,7 @@ mod tests {
         .unwrap();
         assert!(!bare.contains("tint"), "the group tint leaked into {bare}");
 
-        // A default LAYER writes no new keys either. This is the one that got
+        // A default layer writes no new keys either. This is the one that got
         // away: `nav_delay` / `nav_repeat` had `serde(default)` but no
         // `skip_serializing_if`, so every saved scene grew two lines per layer.
         // Caught by round-tripping the real projects, not by this file — which
@@ -3632,7 +3632,7 @@ mod tests {
         assert_eq!(pixel(false).scale_for([864.0, 486.0]), 2.025, "the old, fractional answer");
         assert_eq!(pixel(true).scale_for([864.0, 486.0]), 2.0, "…snapped down to whole pixels");
         // Rounding down, so nothing is pushed out of the viewport: the design
-        // canvas comes out slightly LARGER (243 units, not 240) and the extra
+        // canvas comes out slightly larger (243 units, not 240) and the extra
         // is margin — which is what keeps anchored elements against their edge
         // and means no offset, and therefore no pointer skew, is involved.
         assert!(486.0 / pixel(true).scale_for([864.0, 486.0]) >= 240.0);

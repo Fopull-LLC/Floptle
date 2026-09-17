@@ -4,7 +4,7 @@
 //! Every other update in this app writes to a directory. This one has to replace a file
 //! the OS currently has open and executing, which is the only genuinely awkward part.
 //!
-//! **The trick is that a running executable can be RENAMED even where it cannot be
+//! **The trick is that a running executable can be renamed even where it cannot be
 //! deleted.** Windows holds an image lock that refuses `DeleteFile` on a running binary
 //! but permits `MoveFile`; on Unix a rename just repoints the directory entry and the
 //! running process keeps its open inode. So the swap is two renames — current → `.old`,
@@ -290,7 +290,7 @@ mod tests {
         let exe = dir.join(hub_bin_name());
         std::fs::write(&exe, b"OLD HUB").unwrap();
 
-        // A valid archive whose contents are wrong: the checksum PASSES and the unpack
+        // A valid archive whose contents are wrong: the checksum passes and the unpack
         // succeeds — it just doesn't contain a Hub.
         let archive = tmp.path().join("hub.tar.gz");
         let gz = flate2::write::GzEncoder::new(

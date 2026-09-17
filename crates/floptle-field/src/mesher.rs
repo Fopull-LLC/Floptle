@@ -13,7 +13,7 @@
 //!
 //! # The one choice that matters
 //!
-//! **Vertex normals come from the field GRADIENT, not from the triangles.** Face normals
+//! **Vertex normals come from the field gradient, not from the triangles.** Face normals
 //! (or their averages) would reintroduce exactly the faceting this whole effort exists to
 //! kill. `ChunkField::grad` samples the f32 field and the rasterizer interpolates the
 //! result across each triangle — which is what makes terrain shade like every imported
@@ -30,7 +30,7 @@ use floptle_core::math::Vec3;
 
 use crate::chunks::{ChunkField, CHUNK};
 
-/// One chunk's extracted geometry. Positions are CHUNK-LOCAL (small numbers); `origin`
+/// One chunk's extracted geometry. Positions are chunk-local (small numbers); `origin`
 /// places them in field space, which is what the per-chunk instance matrix carries —
 /// keeping vertex coordinates tiny is what makes this floating-origin-safe.
 #[derive(Clone, Debug, Default)]
@@ -88,8 +88,8 @@ pub struct MeshScratch {
 
 impl MeshScratch {
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
-        // Corners span [base - stride, base + CHUNK]: the borrowed -1 cell layer reaches a
-        // whole STRIDE below the chunk, not one voxel. Gradients then need ±1 voxel around
+        // Corners span [base - stride, base + chunk]: the borrowed -1 cell layer reaches a
+        // whole stride below the chunk, not one voxel. Gradients then need ±1 voxel around
         // a vertex and trilinear the cell around that, so add 2 more.
         //
         // The margin must scale with stride. Fixed at 2, LOD strides ≥ 2 read their -1
@@ -199,14 +199,14 @@ pub fn mesh_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32, skirt: bool)
 }
 
 /// Gather everything `mesh_scratch` needs for one chunk into a self-contained scratch —
-/// the CHEAP part (~0.07 ms bulk copy), done on the thread that owns the field. The
+/// the cheap part (~0.07 ms bulk copy), done on the thread that owns the field. The
 /// returned scratch can be shipped to a worker thread and meshed there without ever
 /// touching the field again (the async remesh pipeline's contract, trap T4).
 pub fn scratch_for_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32) -> MeshScratch {
     MeshScratch::new(field, chunk, stride.max(1))
 }
 
-/// The HEAVY half of [`mesh_chunk`] (surface nets + per-vertex gradients, ~1-2 ms):
+/// The heavy half of [`mesh_chunk`] (surface nets + per-vertex gradients, ~1-2 ms):
 /// meshes entirely from the scratch, safe on any thread.
 pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     let chunk = s.chunk;
@@ -225,10 +225,10 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     let cells = n as usize;
     // Cell indices run -1 ..= cells-1 on every axis, stored offset by +1.
     //
-    // The extra NEGATIVE layer is not an optimisation, it is what closes the mesh. A quad
+    // The extra negative layer is not an optimisation, it is what closes the mesh. A quad
     // for an edge on this chunk's -x/-y/-z face needs the four cells around that edge,
     // and two of them live in the neighbour. Without them each chunk could only emit its
-    // strictly-interior edges, so every chunk boundary was a one-cell-wide HOLE — 336 of
+    // strictly-interior edges, so every chunk boundary was a one-cell-wide hole — 336 of
     // a sphere's 3120 edges (see `the_assembled_field_mesh_has_no_holes`). Rasterized,
     // those holes showed the solid's inside face; the raymarch had never revealed them
     // because it hit the field, not the triangles.
@@ -335,7 +335,7 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
             m.indices.extend_from_slice(&[a, c, b, a, d, c]);
         }
     };
-    // Every edge whose MIN CORNER is this chunk's own voxel — that ownership rule is
+    // Every edge whose MIN corner is this chunk's own voxel — that ownership rule is
     // what makes the global cover exact (each edge emitted by exactly one chunk).
     for cz in 0..hi {
         for cy in 0..hi {
@@ -457,11 +457,11 @@ mod tests {
         f
     }
 
-    /// Triangles must WIND counter-clockwise seen from outside the solid — i.e. each
+    /// Triangles must wind counter-clockwise seen from outside the solid — i.e. each
     /// face's geometric normal (the cross product, which is what the rasterizer's
     /// `front_facing` is computed from) must agree with the outward field gradient.
     ///
-    /// Nothing consumed winding until the P2 render swap, and it was globally INVERTED:
+    /// Nothing consumed winding until the P2 render swap, and it was globally inverted:
     /// every terrain triangle reported `front_facing == false`, so the shader flipped
     /// every shading normal and the whole terrain rendered ambient-black. The old
     /// `facing_normal`, which took its cue from the interpolated normal instead of the
@@ -662,7 +662,7 @@ mod tests {
         assert!(checked > 20, "seam test didn't examine enough shared vertices ({checked})");
     }
 
-    /// Realistic sculpted terrain, and the guard is a RATIO rather than a duration.
+    /// Realistic sculpted terrain, and the guard is a ratio rather than a duration.
     ///
     /// The paint-brush freeze taught us that perf tests on synthetic shapes pass while
     /// real content hangs (T7), so the field is a slab with 24 real brush strokes on it.
@@ -681,8 +681,8 @@ mod tests {
     ///
     /// ## What the two timings are
     ///
-    /// Meshing a chunk is a fixed voxel SCAN (visit every voxel to find the surface)
-    /// plus per-VERTEX gradient work. Measuring both separates them:
+    /// Meshing a chunk is a fixed voxel scan (visit every voxel to find the surface)
+    /// plus per-vertex gradient work. Measuring both separates them:
     ///
     /// * an **empty** chunk — full voxel count, zero vertices — is the scan alone;
     /// * the **busiest** chunk is the scan plus every vertex.

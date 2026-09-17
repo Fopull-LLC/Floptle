@@ -127,7 +127,7 @@ pub struct SteamPlatform {
     /// call is accepted — but see `store_failed` for why "accepted" isn't
     /// "confirmed".
     dirty: Arc<AtomicBool>,
-    /// Set by the `UserStatsStored` callback when a store's ASYNC server
+    /// Set by the `UserStatsStored` callback when a store's async server
     /// round-trip comes back failed (offline, a transient backend error) —
     /// `flush` re-checks this and re-marks `dirty` rather than trusting the
     /// synchronous `store_stats()` call's own `Ok` (which only means "the
@@ -921,7 +921,7 @@ fn compare_to_steam(c: LobbyCompare) -> steamworks::ComparisonFilter {
     }
 }
 
-/// Refuse a lobby key/value the binding would PANIC on rather than reject.
+/// Refuse a lobby key/value the binding would panic on rather than reject.
 ///
 /// `steamworks` builds a `CString` with `.unwrap()` and a `LobbyKey` with a
 /// length assertion, so an interior NUL or an over-long key takes the whole
@@ -1092,7 +1092,7 @@ impl Leaderboards for SteamPlatform {
         };
         let results = self.lb_results.clone();
         // `start`/`end` are signed on purpose and the binding takes `usize`:
-        // an around-user request uses NEGATIVE ranks for "better than me", and
+        // an around-user request uses negative ranks for "better than me", and
         // the binding casts straight back down to a C `int`. The sign-extend
         // out and truncate back in round-trips exactly, which is the only
         // reason passing a negative rank through a `usize` is correct here.
@@ -1183,7 +1183,7 @@ impl SteamPlatform {
 impl Lobbies for SteamPlatform {
     fn create(&self, kind: LobbyKind, max_members: u32) -> u64 {
         let request = self.lobby_next();
-        // `steamworks::create_lobby` ASSERTS on this rather than returning an
+        // `steamworks::create_lobby` asserts on this rather than returning an
         // error, so checking after the call is checking after the panic.
         if max_members == 0 || max_members > MAX_LOBBY_MEMBERS {
             Self::lobby_push(
@@ -1510,7 +1510,7 @@ mod tests {
         assert!(matches!(method_to_steam(UploadMethod::ForceUpdate), Method::ForceUpdate));
     }
 
-    /// The two lobby inputs `steamworks` PANICS on rather than rejecting must
+    /// The two lobby inputs `steamworks` panics on rather than rejecting must
     /// be refused before the call.
     ///
     /// `LobbyKey::new` asserts on a key past 255 bytes, and the binding builds

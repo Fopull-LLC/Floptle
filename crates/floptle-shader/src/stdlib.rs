@@ -189,7 +189,7 @@ pub static OPS: &[OpSpec] = &[
 
     // ---- screen (post shaders: the finished frame, readable anywhere) --------
     //
-    // Every one of these takes an OPTIONAL uv and defaults to this pixel's. That
+    // Every one of these takes an optional uv and defaults to this pixel's. That
     // default is what makes a colour grade a one-liner; the argument is what makes
     // an edge detect, a blur and a warp possible at all, and no varying could
     // offer it.
@@ -249,7 +249,7 @@ pub const SUPPORT_WGSL: &str = r#"
 // ---- floptle-shader stdlib support (generated modules only) ----------------
 
 // Floored modulo. NOT WGSL's `%`, which truncates toward zero
-// and so returns a NEGATIVE remainder for negative x — the wrong half of the
+// and so returns a negative remainder for negative x — the wrong half of the
 // answer for every wrapping use there is. An angle from `atan2` is negative for
 // half the circle, which is exactly when you reach for this.
 fn flsl_mod1(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
@@ -294,7 +294,7 @@ fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
 // **The parentheses around each `*` before a `^` are required, not style.**
 // WGSL's spec refuses a mix of `*` and `^` without them, and a browser's
 // compiler (Tint) enforces that while naga does not — so an unparenthesised
-// version validates on the desktop, ships, and is refused WHOLE in a tab,
+// version validates on the desktop, ships, and is refused whole in a tab,
 // taking every pipeline in the module with it. That is exactly what happened
 // to any game shader using noise for a long time. The probe's shader census
 // (`tools/web/shot.py`) compiles the shipped examples through a real browser
@@ -304,7 +304,7 @@ fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
 // straight-edged constant sheets (sky shaders hit this instantly: a cloud
 // plane projected toward the horizon runs through hundreds of cells). The
 // lattice ids these receive are integers (± constant offsets), so hashing
-// their BITS is exact at any distance from the origin.
+// their bits is exact at any distance from the origin.
 fn flsl_hash2(p: vec2<f32>) -> f32 {
     let xi = bitcast<u32>(i32(round(p.x * 8.0)));
     let yi = bitcast<u32>(i32(round(p.y * 8.0)));
@@ -553,7 +553,7 @@ fn flsl_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
 
 // A texture slot sampled through its material tiling block.
 // ta = (count.xy, offset.xy); tb = (mode, rotation_rad, triplanar_scale, blend).
-// The branch condition loads from a UNIFORM buffer, so control flow stays
+// The branch condition loads from a uniform buffer, so control flow stays
 // uniform and plain textureSample is legal inside.
 fn flsl_tiled_sample(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, ta: vec4<f32>, tb: vec4<f32>) -> vec4<f32> {
     let mode = u32(tb.x + 0.5);

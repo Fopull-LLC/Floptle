@@ -968,7 +968,7 @@ impl RandomSampler {
     /// A point on the walkable surface, weighted by area so a big room stays
     /// likelier than a corridor.
     ///
-    /// `u` and `v` are two uniform numbers in `0..1` supplied by the CALLER
+    /// `u` and `v` are two uniform numbers in `0..1` supplied by the caller
     /// rather than drawn here — this engine rolls back and re-simulates, so a
     /// wander destination has to come from the same seeded stream as everything
     /// else the tick decided. A navmesh that reached for its own randomness

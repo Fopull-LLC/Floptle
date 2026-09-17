@@ -231,7 +231,7 @@ pub fn collect_trails(
 /// [`BillboardDraw`] per track. The chain runs from the effect origin to the
 /// track's endpoint (script override via `set_beam_end`, else the authored
 /// `beam_end`), subdivided into `segments` camera-facing quads. Width and color
-/// come from the track's `size`/`color` properties sampled at the EFFECT's
+/// come from the track's `size`/`color` properties sampled at the effect's
 /// normalized time; `wave_amplitude`/`wave_frequency` add a time-animated sine
 /// ripple (pinned at both endpoints), and `scroll` flows the texture along the
 /// beam (segments wrap their `v` slice together, so a seam only ever lands inside
@@ -411,7 +411,7 @@ fn billboard_basis(
 /// One mesh-render track's live particles as camera-relative model matrices +
 /// tints. The caller resolves `asset_path` to GPU mesh(es) and appends these to
 /// the raster pass's instance list — so mesh particles are lit, sun-shadowed, and
-/// SDF-AO'd exactly like scene meshes (proposal §5.2).
+/// SDF-ao'd exactly like scene meshes (proposal §5.2).
 #[derive(Clone, Debug)]
 pub struct MeshDraw {
     pub asset_path: String,

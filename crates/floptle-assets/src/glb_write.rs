@@ -5,7 +5,7 @@
 //! and packs all geometry + embedded PNG textures + inverse-bind matrices into one
 //! BIN chunk.
 //!
-//! Scope is narrow: triangle meshes with POSITION/NORMAL, optional
+//! Scope is narrow: triangle meshes with position/normal, optional
 //! TEXCOORD_0 / COLOR_0 / JOINTS_0+WEIGHTS_0, a node tree with TRS + optional skin,
 //! PBR base-color (factor + optional embedded texture), and skins with
 //! inverse-bind matrices. That's the exact surface our importer round-trips.
@@ -158,7 +158,7 @@ pub fn write_glb(nodes: &[WriteNode], skins: &[WriteSkin], textures: &[TextureDa
         if m.positions.is_empty() || m.indices.is_empty() {
             continue;
         }
-        // POSITION (with required min/max).
+        // Position (with required min/max).
         let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
         for p in &m.positions {
             for k in 0..3 {

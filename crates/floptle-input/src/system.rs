@@ -62,7 +62,7 @@ pub struct InputSystem {
     map: InputMap,
     frame: Vec<ActionRuntime>,
     tick: Vec<ActionRuntime>,
-    /// A THIRD runtime set, used only by [`InputSystem::sample_tick`]: in a
+    /// A third runtime set, used only by [`InputSystem::sample_tick`]: in a
     /// rollback session the tick domain is written entirely by the driver
     /// ([`InputSystem::set_tick_state`]), so sampling the local devices through
     /// `tick` would push history twice per tick and desync every motion window.
@@ -479,7 +479,7 @@ mod tests {
         }
     }
 
-    /// Why a rollback peer must sample its own DEVICE slot rather than its
+    /// Why a rollback peer must sample its own device slot rather than its
     /// roster slot.
     ///
     /// On a couch the two are the same number and everything works by
@@ -573,7 +573,7 @@ mod tests {
 
         // The real couch shape, and the one Fofighter actually ships: each
         // seat's pad is pinned, P1 to pad 0 and P2 to pad 1. `Slot(n)` never
-        // consults the resolving slot — but the BINDING SCOPE does, and that is
+        // consults the resolving slot — but the binding scope does, and that is
         // enough. Sampled at roster slot 1, only player-two's bindings serve,
         // and they name a second pad that a lone joiner does not own. Their
         // controller drives nothing, with no error anywhere.
@@ -742,7 +742,7 @@ mod tests {
     }
 
     /// The buffer/motion state must survive a rollback intact. `consume` is the
-    /// case that proves it: it records a DECISION the script made, which no
+    /// case that proves it: it records a decision the script made, which no
     /// amount of replaying the raw inputs can reconstruct — so a replay that
     /// didn't restore it would let one buffered press fire the attack twice.
     #[test]

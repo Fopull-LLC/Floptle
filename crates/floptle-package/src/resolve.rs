@@ -151,7 +151,7 @@ pub fn resolve(project_root: &Path, engine_version: &Version) -> LoadReport {
         if manifest.version != entry.version {
             // Not fatal: editing a linked package's version while it is
             // installed is exactly what a package author does all day. The
-            // MANIFEST wins, and the list gets corrected.
+            // Manifest wins, and the list gets corrected.
             report.problems.push(Problem {
                 id: Some(entry.id.clone()),
                 severity: Severity::Warning,

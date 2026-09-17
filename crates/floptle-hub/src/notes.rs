@@ -189,7 +189,7 @@ fn runs(s: &str) -> Vec<(Style, String)> {
             i = end + 2;
             continue;
         }
-        // A LONE asterisk is italic, and must be tried after `**` so bold still wins.
+        // A lone asterisk is italic, and must be tried after `**` so bold still wins.
         // Guarded on a non-space neighbour so `2 * 3` and a bare `*` stay literal.
         if b[i] == '*'
             && b.get(i + 1).is_some_and(|c| !c.is_whitespace())

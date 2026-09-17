@@ -163,7 +163,7 @@ impl NavMesh {
             match node.via {
                 None => run.push(node.poly),
                 Some((at, forwards)) => {
-                    // By INDEX — the search knew exactly which link it crossed,
+                    // By index — the search knew exactly which link it crossed,
                     // and ids are author data (a duplicated node can repeat one;
                     // resolving by id here once spliced the wrong ladder's
                     // landing into the walk). The id is only for the caller.
@@ -239,7 +239,7 @@ impl NavMesh {
         let (mut closest, mut closest_h) = (start, h(start));
 
         while let Some(Ranked(f, i)) = open.pop() {
-            // Lazy deletion doubling as a REOPEN: a stale entry (something
+            // Lazy deletion doubling as a reopen: a stale entry (something
             // found `i` cheaper after this was queued) is skipped, and a node
             // improved after it was expanded simply comes round again. Links
             // make the estimate inconsistent even when it is admissible, and a
@@ -745,7 +745,7 @@ mod tests {
         let p = mesh.path([2.0, 0.0, 2.0], [38.0, 0.0, 2.0]).unwrap();
         assert!(p.complete);
         assert_eq!(p.crossings.len(), 1, "the portal is the cheap way: {:?}", p.points);
-        // The WALKED legs are short — everything long is the crossing itself.
+        // The walked legs are short — everything long is the crossing itself.
         let c = p.crossings[0].at;
         let walked: f32 = p
             .points

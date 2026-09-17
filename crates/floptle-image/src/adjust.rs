@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(&b[4..], &[0, 0, 0, 255]);
     }
 
-    /// An ORDERED dither must depend only on absolute canvas position, so a
+    /// An ordered dither must depend only on absolute canvas position, so a
     /// dirty-rect recomposite matches the full-canvas one exactly.
     #[test]
     fn ordered_dither_is_position_stable() {

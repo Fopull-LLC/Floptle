@@ -156,7 +156,7 @@ was missing is the untracked path that refuses to start instead.
                     i += 2;
                 }
                 // Printed and exit 0, rather than refused as an unknown flag
-                // or — as the July binary did — parsed as a PORT NUMBER, which
+                // or — as the July binary did — parsed as a port number, which
                 // is how the two builds were told apart on the box.
                 "--help" | "-h" => {
                     print!("{}", Self::HELP);
@@ -371,7 +371,7 @@ mod arg_tests {
             "the scrape found {flags:?} — it has stopped seeing the match arms, so this \
              guard is measuring nothing"
         );
-        // The flags the table actually LISTS: the leading token of a row, not
+        // The flags the table actually lists: the leading token of a row, not
         // any mention anywhere. A plain `contains` passes on a flag named only
         // in passing — `--token`'s row says "Prefer --token-file", which
         // documented `--token-file` by accident — and every short flag is a
@@ -381,7 +381,7 @@ mod arg_tests {
             .lines()
             .map(str::trim)
             .filter(|l| l.starts_with('-'))
-            // The flag COLUMN — everything before the two-space gutter that
+            // The flag column — everything before the two-space gutter that
             // starts the description — so a row spelling two names (`--help,
             // -h`) lists both.
             .flat_map(|l| {
@@ -404,8 +404,8 @@ mod arg_tests {
 
     /// …and the other direction: `--help` is a flag, not a port.
     ///
-    /// The July open relay on the live box parsed `--help` as a positional PORT
-    /// NUMBER, which is how the two builds were told apart. A managed binary
+    /// The July open relay on the live box parsed `--help` as a positional port
+    /// Number, which is how the two builds were told apart. A managed binary
     /// has to answer it, so the check an operator runs before installing means
     /// something.
     #[test]

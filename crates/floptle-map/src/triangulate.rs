@@ -14,9 +14,9 @@ pub struct SlotMesh {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
-    /// Per-TRIANGLE (indices.len()/3 entries) source face index in the MapMesh.
+    /// Per-triangle (indices.len()/3 entries) source face index in the MapMesh.
     pub tri_faces: Vec<u32>,
-    /// Per-VERTEX source `(face index, MapMesh vertex index)`. Corners are not
+    /// Per-vertex source `(face index, MapMesh vertex index)`. Corners are not
     /// shared between faces, so this is what lets paint follow the surface
     /// across a re-triangulation: the editor turns it into a durable key and
     /// carries the colours over (see `map_paint`).
@@ -109,7 +109,7 @@ fn face_tris(mesh: &MapMesh, face: &Face, n: Vec3) -> Vec<[u32; 3]> {
             break; // self-intersecting or degenerate — fall back below
         }
         let m = idx.len();
-        // Only REFLEX corners can invalidate an ear, and only reflex corners are worth
+        // Only reflex corners can invalidate an ear, and only reflex corners are worth
         // testing with the inclusive rule above — testing every corner that way would
         // reject ears whose neighbours merely touch them, which is most of them.
         let reflex: Vec<bool> = (0..m)
@@ -313,7 +313,7 @@ mod tests {
     }
 
     /// Total triangle area must equal the polygon's own area. A fan from corner 0 on a
-    /// CONCAVE face emits triangles that stick out past the outline, so the total comes
+    /// Concave face emits triangles that stick out past the outline, so the total comes
     /// out larger — that overspill is what "the face folds over itself" looks like.
     #[test]
     fn a_concave_face_does_not_spill_outside_its_outline() {
@@ -407,7 +407,7 @@ mod tests {
         for rot in 1..4 {
             assert_eq!(diagonal_of(rot), base, "corner order {rot} chose a different diagonal");
         }
-        // And it is genuinely the SHORTER one: 0–2 spans the lift, 1–3 does not.
+        // And it is genuinely the shorter one: 0–2 spans the lift, 1–3 does not.
         assert!(
             base[0].distance(base[1]) < corners[0].distance(corners[2]) - 1e-4,
             "picked the long diagonal"

@@ -26,7 +26,7 @@
 //! A gap in the network is a gap in the sound. [`StreamRing::pop`] returns
 //! `None`, the voice emits silence, and [`StreamRing::starved`] counts it so
 //! the jitter buffer can widen. The one thing that must never happen is the
-//! stream ENDING because a packet was late — a voice that finished cannot be
+//! stream ending because a packet was late — a voice that finished cannot be
 //! resumed, and the player would go permanently silent halfway through a
 //! sentence. Nothing in here can mark a voice done.
 
@@ -89,7 +89,7 @@ impl StreamRing {
         self.len() as f32 * 1000.0 / STREAM_RATE as f32
     }
 
-    /// PRODUCER: append samples. Returns how many were taken; a short return
+    /// Producer: append samples. Returns how many were taken; a short return
     /// means the ring is full.
     ///
     /// A full ring means the far end is sending faster than this machine plays,
@@ -115,7 +115,7 @@ impl StreamRing {
         take
     }
 
-    /// CONSUMER: take the next sample, or `None` if none has arrived.
+    /// Consumer: take the next sample, or `None` if none has arrived.
     ///
     /// Counted when it comes up empty, because "the voice went quiet" and "the
     /// network went quiet" are indistinguishable to a listener and very
@@ -131,7 +131,7 @@ impl StreamRing {
         Some(s)
     }
 
-    /// CONSUMER: throw away everything buffered — a hard resync after a long
+    /// Consumer: throw away everything buffered — a hard resync after a long
     /// stall, where playing the backlog would only add the stall to the delay.
     pub fn clear(&self) {
         self.read.store(self.write.load(Ordering::Acquire), Ordering::Release);
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(ring.starved(), 2, "a listener cannot tell silence from loss; this can");
     }
 
-    /// A full ring refuses the NEWEST audio. Dropping the oldest would skip the
+    /// A full ring refuses the newest audio. Dropping the oldest would skip the
     /// listener forward through the middle of a word — the artefact is far
     /// worse than the delay it saves, and it compounds every time it happens.
     #[test]

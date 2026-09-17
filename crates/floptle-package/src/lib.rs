@@ -45,7 +45,7 @@
 pub mod contents;
 pub mod index;
 // Installing, linking and scaffolding write a project's folder. Authoring;
-// a browser build only READS packages, from the bundle the export packed.
+// a browser build only reads packages, from the bundle the export packed.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod install;
 pub mod manifest;

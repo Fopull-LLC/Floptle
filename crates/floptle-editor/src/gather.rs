@@ -1703,7 +1703,7 @@ impl Editor {
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
         let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
-        // Gpu-skinned parts, gathered alongside the plain ones and
+        // GPU-skinned parts, gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
@@ -1953,7 +1953,7 @@ impl Editor {
                 }
                 Matter::Blob { scale } => {
                     // Blobs render in the raymarch pass — a custom fragment
-                    // shader doesn't apply (the Sdf stage is their world).
+                    // shader doesn't apply (the SDF stage is their world).
                     let mp = mat.as_ref().map(material_params).unwrap_or_else(blob_default_material);
                     blobs.push((t.translation, scale * t.scale.x, mp));
                 }

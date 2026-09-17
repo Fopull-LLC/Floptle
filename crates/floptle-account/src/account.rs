@@ -362,7 +362,7 @@ impl Account {
         // writes down as "free", so an outage and a real free account produced
         // byte-identical sessions. Two things are different now: the fallback
         // says `unknown` so a caller can tell, and a plan we were told about
-        // EARLIER beats a plan we are guessing at — "your tier as of last time"
+        // Earlier beats a plan we are guessing at — "your tier as of last time"
         // is a better answer than "free" for every purpose a client has, and the
         // stored session is where it already is.
         let ent = provider.entitlements(&tokens.access_token).unwrap_or_else(|e| {
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(s.access_token, "at");
     }
 
-    /// …and a stored plan belonging to somebody ELSE is never carried forward.
+    /// …and a stored plan belonging to somebody else is never carried forward.
     ///
     /// The keyring entry is shared between the Hub and every game, so the
     /// session sitting in it can perfectly well be the previous person to sign
@@ -829,7 +829,7 @@ mod tests {
         assert!(store.load().is_none());
     }
 
-    /// Against the LIVE provider. Ignored so CI stays offline:
+    /// Against the live provider. Ignored so CI stays offline:
     /// `cargo test -p floptle-account -- --ignored live_`
     ///
     /// Only the half a machine can do alone — asking for a device code. It

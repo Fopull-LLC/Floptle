@@ -56,7 +56,7 @@ pub fn transform_verts(mesh: &mut MapMesh, verts: &[u32], m: &Mat4) {
 /// - The selected faces move (their vertices are duplicated first so shared
 ///   unselected geometry stays put; verts shared by two selected faces are
 ///   duplicated once — the region stays welded).
-/// - Side wall quads are created only on the region's BOUNDARY edges (edges
+/// - Side wall quads are created only on the region's boundary edges (edges
 ///   used by exactly one selected face), winding outward; each wall inherits
 ///   the slot of the selected face that owned the boundary edge.
 /// - Returns the face indices of the (moved) selected faces, so the editor
@@ -138,7 +138,7 @@ pub fn extrude_faces(mesh: &mut MapMesh, faces: &[u32], distance: f32) -> Vec<u3
 /// own plane, joined to the original border by a ring of side quads.
 ///
 /// Semantics:
-/// - Faces inset INDIVIDUALLY (each keeps its own border), which is what a
+/// - Faces inset individually (each keeps its own border), which is what a
 ///   blockout needs — pick one face, inset, extrude, and you have a recess.
 /// - Corners move along their angle bisector by `amount` (a true edge offset,
 ///   not a centroid shrink), clamped so a face can never turn inside out; a
@@ -515,10 +515,10 @@ pub fn weld(mesh: &mut MapMesh, verts: &[u32], eps: f32) -> usize {
         while f.verts.len() > 1 && f.verts.first() == f.verts.last() {
             f.verts.pop();
         }
-        // …and any corner that repeats NON-consecutively, which `dedup` cannot see.
+        // …and any corner that repeats non-consecutively, which `dedup` cannot see.
         // Welding two opposite corners of a quad leaves the ring [r, b, r, d]: three
         // distinct indices, so the `>= 3` keep-test below passed it, but the ring is a
-        // BOWTIE. Its Newell sum is zero, so the normal fell back to +Y and every
+        // Bowtie. Its Newell sum is zero, so the normal fell back to +Y and every
         // triangle came out degenerate — an invisible, un-pickable, zero-area face that
         // still held its vertices alive and still polluted edge lists, loops and
         // select-invert. Keeping the first run and dropping the rest turns it back into
@@ -545,7 +545,7 @@ pub fn set_face_slot(mesh: &mut MapMesh, faces: &[u32], slot: u16) {
 /// smoothing — positions don't move). Edge midpoints are shared between two
 /// selected faces that share the edge (dedupe by canonical edge key) so the
 /// result stays welded; edges bordering unselected faces get their midpoint
-/// INSERTED into that neighbour's corner list too, so the seam has no
+/// Inserted into that neighbour's corner list too, so the seam has no
 /// T-junction and dragging either side stretches the other instead of tearing
 /// away from it. Returns the new face indices.
 pub fn subdivide_faces(mesh: &mut MapMesh, faces: &[u32]) -> Vec<u32> {
@@ -875,7 +875,7 @@ mod tests {
         assert!(m.faces.len() > faces_after_one);
     }
 
-    /// A ring that is not made of quads is REFUSED, and refused before anything
+    /// A ring that is not made of quads is refused, and refused before anything
     /// is written — there is no opposite edge to cut toward on a triangle, and a
     /// half-applied cut would be worse than none.
     #[test]
@@ -904,7 +904,7 @@ mod tests {
         assert!(moved > 0, "corners moved");
         m.validate().expect("a bevel leaves a valid mesh");
         let after = m.bounds().unwrap();
-        // Every corner pulled INWARD, so the box can only have shrunk.
+        // Every corner pulled inward, so the box can only have shrunk.
         assert!(after.0.x >= before.0.x - 1e-5 && after.1.x <= before.1.x + 1e-5);
     }
 

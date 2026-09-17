@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn version_key_orders_numerically_and_prereleases_first() {
-        // Numeric (0.10 > 0.9), pre-releases before the final, DOTTED numeric identifiers
+        // Numeric (0.10 > 0.9), pre-releases before the final, dotted numeric identifiers
         // compared numerically (rc.2 < rc.10, not lexical), and a short "1.0" == "1.0.0".
         let mut vs = ["0.10.0", "0.2.0", "1.0.0", "1.0.0-rc.10", "1.0.0-rc.2", "0.9.0", "1.0"];
         vs.sort_by(|a, b| version_key(a).cmp(&version_key(b)).then(a.cmp(b)));

@@ -29,8 +29,8 @@
 //! ```
 //!
 //! North is up on screen, which for a tilemap means *row - 1* — worth stating,
-//! because `data` is row-major from the TOP-LEFT, so the north neighbour is the
-//! one at the LOWER row index.
+//! because `data` is row-major from the top-left, so the north neighbour is the
+//! one at the lower row index.
 //!
 //! ## The corner rule
 //!
@@ -375,7 +375,7 @@ mod tests {
         for raw in 0u16..=255 {
             assert!(at.resolve(0, raw as u8).is_some(), "no answer for {raw:#010b}");
         }
-        // …and it answers CONSISTENTLY: two raw masks that canonicalise the same
+        // …and it answers consistently: two raw masks that canonicalise the same
         // must resolve to the same tile.
         for raw in 0u16..=255 {
             let a = at.resolve(0, raw as u8);
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(at.resolve(0, gap), None);
     }
 
-    /// Two tiles on one rule are VARIANTS, not a conflict. This is the thing the
+    /// Two tiles on one rule are variants, not a conflict. This is the thing the
     /// old model could not express at all: a mask held one cell, so a second
     /// tile for the same shape silently replaced the first or was ignored.
     #[test]

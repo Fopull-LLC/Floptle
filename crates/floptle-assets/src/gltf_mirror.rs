@@ -55,7 +55,7 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
     let size = (hi - lo).max_element().max(1e-4);
     // "Straddles the plane" (already double-sided) vs "sits fully to one side".
     let eps = size * 0.02;
-    // A mirror SEAM sits on the plane (Blender welds it to x=0); a lateral limb's
+    // A mirror seam sits on the plane (Blender welds it to x=0); a lateral limb's
     // inner edge is measurably offset. So the closest vertex approach to the plane —
     // not the min x — is what separates a half-head (seam at 0) from a leg (gap).
     let seam_eps = size * 0.002;

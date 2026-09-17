@@ -978,7 +978,7 @@ struct EditorTabViewer<'a> {
     ui_tokens: &'a floptle_ui::Tokens,
     /// The ◫ UI tab's state (view, guides, snapping, selection tools).
     ui_design: &'a mut crate::ui_design::UiDesignState,
-    /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
+    /// Parsed SDF-stage shaders (Field Shapes) — the Material section falls
     /// back to this schema when the picked shader is `stage sdf`.
     sdf_cache: &'a shaders::SdfCache,
     /// The active Sky shader's uniform schema (empty when no sky shader) — the
@@ -3258,7 +3258,7 @@ struct Editor {
     gi_show_only: bool,
     /// Draw the probes themselves in the Scene view.
     gi_show_probes: bool,
-    /// Parsed Sdf-stage shaders by material path (Field Shapes, mtime-cached).
+    /// Parsed SDF-stage shaders by material path (Field Shapes, mtime-cached).
     sdf_cache: shaders::SdfCache,
     /// Live Field Shape entities → their splice slot (0..4).
     flsl_shape_slots: HashMap<Entity, usize>,

@@ -36,7 +36,7 @@ pub const HUB_APP_ID: &str = "floptle-hub";
 pub const ICON_NAME: &str = "floptle";
 
 /// The full logo: mark and wordmark, white on transparency, 820 × 820. For a
-/// dark ground; on a light one it is invisible, which is why the ICONS sit on
+/// dark ground; on a light one it is invisible, which is why the icons sit on
 /// a tile.
 pub const LOGO_PNG: &[u8] = include_bytes!("../../../branding/floptle-logo.png");
 

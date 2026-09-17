@@ -6,7 +6,7 @@
 //! roughly every sixty days, at an hour nobody chose. A relay that read its
 //! certificate only at startup would need a restart to present the renewal,
 //! and a relay restart ends every lobby on the box. So the
-//! files are WATCHED: every [`POLL_INTERVAL`] the relay stats both paths, and
+//! files are watched: every [`POLL_INTERVAL`] the relay stats both paths, and
 //! when either has changed it loads them again and hands the result to
 //! [`floptle_net::RelayServer::set_certificate`], which swaps the chain for
 //! new handshakes only. Nobody is dropped; `touch fullchain.pem` forces one.

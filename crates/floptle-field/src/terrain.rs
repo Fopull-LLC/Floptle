@@ -310,7 +310,7 @@ impl Terrain {
             (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
         let [w, h, d] = self.baked.dims;
         // Continuous grid coords (voxel centers at integer+0.5). For a point outside the
-        // box these clamp to the edge, so the trilinear value below is the nearest EDGE
+        // box these clamp to the edge, so the trilinear value below is the nearest edge
         // voxel's distance.
         let g = |r: f32, hi: f32, n: u32| ((r / (2.0 * hi) + 0.5) * n as f32 - 0.5).clamp(0.0, n as f32 - 1.0);
         let gx = g(rel[0], hf[0], w);
@@ -327,7 +327,7 @@ impl Terrain {
         let c11 = lerp(s(x0, y1, z1), s(x1, y1, z1), fx);
         let interior = lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz);
         if outside > 1e-4 {
-            // Outside the box, continue the field as AIR: box distance PLUS the nearest
+            // Outside the box, continue the field as AIR: box distance plus the nearest
             // edge's air gap. Without this the box face dips to ~0 even in mid-air, and
             // that near-zero "shell" reappears when terrains are combined (each terrain's
             // box face becomes a faint membrane). A solid edge (interior ≤ 0) gives a
@@ -472,7 +472,7 @@ impl Terrain {
                                 .round()
                                 .clamp(0.0, 255.0) as u8;
                         }
-                        // Slot (alpha) from the NEARER surface, never blended.
+                        // Slot (alpha) from the nearer surface, never blended.
                         col[3] = if hh >= 0.5 { col[3] } else { scol[3] };
                     }
                     let oi = ((iz * h + iy) * w + ix) as usize;
@@ -738,7 +738,7 @@ mod tests {
 
     /// Sphere tracing (and everything that marches the field — shading normals, SDF
     /// AO, sun shadows) assumes the field is 1-Lipschitz: |∇d| ≤ 1, i.e. `d` never
-    /// grows faster than distance itself can. Break that and the march STEPS PAST the
+    /// grows faster than distance itself can. Break that and the march steps past the
     /// surface; the symptom is blotchy AO and speckle, not an obvious crash.
     ///
     /// `grow` fills new cells with `max`, not `box_distance(..) + edge_air`: summing two

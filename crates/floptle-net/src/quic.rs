@@ -371,7 +371,7 @@ impl ServerCertificate {
     }
 }
 
-/// Sha-256 of a DER certificate as `AB:CD:…` (openssl's spelling).
+/// SHA-256 of a DER certificate as `AB:CD:…` (openssl's spelling).
 pub fn fingerprint_of(der: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, der);
     digest

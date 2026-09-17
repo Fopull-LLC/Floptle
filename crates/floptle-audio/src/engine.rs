@@ -93,7 +93,7 @@ fn renderer(
     let mut meters_scratch: Vec<(String, f32)> = Vec::new();
     move |data: &mut [f32]| {
         drain_commands(&rx, &mut core);
-        // Render planar in BLOCK chunks, interleave into `data`.
+        // Render planar in block chunks, interleave into `data`.
         let frames = data.len() / channels.max(1);
         let mut at = 0;
         while at < frames {

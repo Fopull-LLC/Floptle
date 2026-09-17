@@ -94,7 +94,7 @@ impl TileColliders {
 
 /// The collider set for a tilemap grid.
 ///
-/// `cells` is the SHEET's `cols * rows` — needed because a cell index past the
+/// `cells` is the sheet's `cols * rows` — needed because a cell index past the
 /// end of the sheet is an empty square, and an empty square is never solid
 /// however the tileset feels about the index it holds.
 pub fn collision_shapes(
@@ -110,7 +110,7 @@ pub fn collision_shapes(
     }
     let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
     // The local-space rect of a sub-rect `(rx, ry, rw, rh)` of the tile at
-    // (col, row), where the sub-rect is measured from the tile's BOTTOM-LEFT.
+    // (col, row), where the sub-rect is measured from the tile's bottom-left.
     let place = |col: u32, row: u32, rx: f32, ry: f32, rw: f32, rh: f32| {
         let x0 = col as f32 * tile - w + rx * tile;
         // Row 0 is the top of the map, so the tile's bottom edge is the lower y
@@ -428,7 +428,7 @@ mod tests {
         // The top surface of the merged box, in local space.
         let top = b.cy + b.hy;
         assert!((top - 0.5).abs() < 1e-5, "the floor's top should be at y = 0.5, got {top}");
-        // A 0.85-radius sphere resting on it settles with its CENTRE that far above.
+        // A 0.85-radius sphere resting on it settles with its centre that far above.
         // Anything else means the box is not where the tile is drawn.
         let bottom = b.cy - b.hy;
         assert!((bottom - -0.5).abs() < 1e-5, "…and its underside at -0.5, got {bottom}");

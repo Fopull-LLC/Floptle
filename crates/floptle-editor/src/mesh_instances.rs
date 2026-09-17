@@ -242,7 +242,7 @@ pub(crate) fn push_mesh_instances(
     variants: &mut anim::SkinVariants,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
-    // Gpu-skinned parts land here instead of `instances`: same
+    // GPU-skinned parts land here instead of `instances`: same
     // mesh, same material, but drawn through the `vs_skin` pipelines with this
     // draw's bone palette. Several characters of one model stay one draw call,
     // which the CPU path could not manage — it had to give each entity a private

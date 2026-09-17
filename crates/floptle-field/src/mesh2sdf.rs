@@ -133,7 +133,7 @@ pub fn bake(
     }
 }
 
-/// Bake `positions`/`indices` into a shadow-OCCLUDER volume: an **unsigned,
+/// Bake `positions`/`indices` into a shadow-occluder volume: an **unsigned,
 /// conservative** distance-to-surface field, fast enough to run at scene load for
 /// whole level meshes (where [`bake`]'s exact signed brute force would take
 /// minutes). Surfaces are voxelized with exact point-to-triangle distances, the
@@ -145,7 +145,7 @@ pub fn bake(
 ///
 /// Color is left white — occluder volumes are never drawn, only marched by
 /// `light_vis` (the sun-shadow ray). Voxels are cubic; `res` sets the voxel count
-/// along the mesh's LONGEST axis (other axes scale down proportionally).
+/// along the mesh's longest axis (other axes scale down proportionally).
 pub fn bake_occluder(positions: &[[f32; 3]], indices: &[u32], res: u32) -> BakedSdf {
     let res = res.max(4);
     let mut min = Vec3::splat(f32::INFINITY);
@@ -353,7 +353,7 @@ fn solid_angle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
 fn sample_albedo(texture: &Option<TexRef>, uv: [f32; 2], tint: [f32; 3]) -> [u8; 4] {
     let base = match texture {
         Some(t) if t.width > 0 && t.height > 0 => {
-            // nearest + REPEAT, matching the raster path's retro sampler
+            // nearest + repeat, matching the raster path's retro sampler
             let x = ((uv[0].rem_euclid(1.0)) * t.width as f32) as u32 % t.width;
             let y = ((uv[1].rem_euclid(1.0)) * t.height as f32) as u32 % t.height;
             let i = ((y * t.width + x) * 4) as usize;
@@ -465,7 +465,7 @@ mod tests {
         // a grid corner (well off the surface) is a safe positive lower bound
         let far = sample(center + half - Vec3::splat(voxel));
         assert!(far > 0.0, "far corner should be positive, got {far}");
-        // ...and never OVER-estimates the true distance (sphere tracing safety):
+        // ...and never over-estimates the true distance (sphere tracing safety):
         // true distance from that corner to the cube is ~|corner| - cube reach
         let corner = center + half - Vec3::splat(voxel);
         let true_d = (corner - Vec3::new(1.0, 1.0, 1.0)).length().min(corner.length() - 1.0);

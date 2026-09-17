@@ -65,7 +65,7 @@ enum Tab {
 
 /// Force `project.ron`'s `engine_version` to `version`. The HUB is the authority on which
 /// engine it installed/selected, so it corrects whatever the editor subprocess stamped —
-/// this keeps create/upgrade correct even against an OLDER editor binary that ignores
+/// this keeps create/upgrade correct even against an older editor binary that ignores
 /// `--engine-version` and writes its own compiled-in version (the exact reason a bundle
 /// installed as "0.1.0" could otherwise pin projects to "0.0.0"). Best-effort and
 /// idempotent: uses the same `save_project` the editor does, so the file stays byte-for-byte
@@ -159,7 +159,7 @@ struct NewProjectForm {
 
 /// The starter projects an engine bundle offers: `(name, one-line blurb)`.
 ///
-/// Asked of the BINARY rather than assumed from its version number: an engine
+/// Asked of the binary rather than assumed from its version number: an engine
 /// old enough not to know `--template` reports nothing, the picker doesn't
 /// appear, and creating a project there behaves exactly as it always did. No
 /// version comparison to get wrong, and a future engine that adds a template
@@ -338,7 +338,7 @@ impl HubApp {
     }
 
     /// The install a project resolves to. For an explicit version, that exact install; for
-    /// the fallback (no pin), the default if it's VALID, else the newest valid install — a
+    /// the fallback (no pin), the default if it's valid, else the newest valid install — a
     /// corrupt newest install shouldn't shadow an older working one.
     fn install_for(&self, version: Option<&str>) -> Option<&Install> {
         match version {
@@ -559,7 +559,7 @@ impl HubApp {
         let mut sign_in = false;
         let mut sign_out = false;
         let mut cancel = false;
-        // Only an INTERACTIVE sign-in takes over the panel; a silent refresh does not.
+        // Only an interactive sign-in takes over the panel; a silent refresh does not.
         let signing_in = matches!(&self.auth_job, Some(j) if j.kind == AuthKind::SignIn);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -970,7 +970,7 @@ impl HubApp {
             self.save();
         }
         let bin = install.editor_bin();
-        // Pin the project to the version the user PICKED, not the binary's compiled-in one
+        // Pin the project to the version the user picked, not the binary's compiled-in one
         // (a bundle reports its own version.json label; passing it explicitly is the
         // authority so the new project's engine matches an installed one and can be opened).
         let pin = install.version.clone();
@@ -1147,7 +1147,7 @@ impl eframe::App for HubApp {
                 let mark = self.mark_texture(ui.ctx());
                 ui.add(egui::Image::new((mark.id(), egui::vec2(22.0, 22.0))));
                 ui.heading("Floptle Hub");
-                // the HUB'S own VERSION, always in view. Three different things share one
+                // the HUB'S own version, always in view. Three different things share one
                 // version number here — the Hub, the engine, and the engine a project is
                 // pinned to — and until this line the only one with its name attached was
                 // on the About tab. Somebody reading "0.22.1" in the Installs list had
@@ -1165,7 +1165,7 @@ impl eframe::App for HubApp {
                 ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
                 ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
 
-                // the CHIP that never goes AWAY. Both banners below can be put away — one
+                // the chip that never goes away. Both banners below can be put away — one
                 // for the session, one for a version — and this cannot be put away at
                 // all. It stays until the update is actually installed. That is the
                 // difference between "we told you once" and "you cannot be running
@@ -1221,7 +1221,7 @@ impl eframe::App for HubApp {
             });
         });
 
-        // the HUB itself is out of DATE. Above the engine banner, because an old Hub is
+        // the HUB itself is out of date. Above the engine banner, because an old Hub is
         // the thing that would stop the rest of this working — and it is the one update a
         // user cannot perform any other way without leaving the app.
         if let Some(r) = self.hub_update_available()
@@ -1276,7 +1276,7 @@ impl eframe::App for HubApp {
             }
         }
 
-        // UPDATE BANNER: a new engine version on the user's channel, newer than
+        // Update banner: a new engine version on the user's channel, newer than
         // anything installed, with a bundle for this platform. One click
         // installs; ✖ mutes the banner for that version (anything newer brings
         // it back). This is how users get notified of releases.
@@ -1424,7 +1424,7 @@ impl HubApp {
                         });
                     ui.end_row();
 
-                    // Ask the CHOSEN bundle what it can scaffold, and re-ask
+                    // Ask the chosen bundle what it can scaffold, and re-ask
                     // whenever that choice changes.
                     if self.templates_for.as_deref() != Some(form.version.as_str()) {
                         self.templates = self
@@ -1433,7 +1433,7 @@ impl HubApp {
                             .unwrap_or_default();
                         self.templates_for = Some(form.version.clone());
                         // Always hold a name that is actually in the list, so
-                        // what the box SAYS and what gets scaffolded can never
+                        // what the box says and what gets scaffolded can never
                         // be two different things. The engine lists the blank
                         // project first and calls it `empty`.
                         if !self.templates.iter().any(|(n, _)| *n == form.template) {
@@ -1684,7 +1684,7 @@ impl HubApp {
         // Two columns, hand-allocated rather than an egui SidePanel: a panel wants to be
         // a child of a window or another panel, and this is already inside the tab body.
         //
-        // The list takes a QUARTER of the tab rather than a fixed 196 px. At 196 the
+        // The list takes a quarter of the tab rather than a fixed 196 px. At 196 the
         // column was narrower than the thing it lists on a wide window — a stripe of
         // version numbers pinned to the edge with the notes sprawling beside it — and on
         // a narrow one the state word wrapped under the date. A share of the width reads
@@ -1736,7 +1736,7 @@ impl HubApp {
                                 label = label.strong();
                             }
                             ui.label(label);
-                            // words, not GLYPHS. The Hub ships egui's default fonts, which
+                            // words, not glyphs. The Hub ships egui's default fonts, which
                             // have no ● and no ✔ — both draw as an empty box, and a list of
                             // empty boxes is worse than no marker at all. "installed" also
                             // needs no legend.
@@ -1801,7 +1801,7 @@ impl HubApp {
                 });
             });
 
-            // say it before the INSTALL BUTTON, not in the NOTES below it. v0.22.1's notes
+            // say it before the install button, not in the notes below it. v0.22.1's notes
             // did say the engine was unchanged — in an "Upgrading" section under several
             // screens of Hub changes, directly contradicted by the Install button at the
             // top of the same pane. One line, where the decision is actually made.
@@ -1815,7 +1815,7 @@ impl HubApp {
                 }).weak());
             }
 
-            // BUTTONS you can HIT. These were egui's defaults — text plus a few pixels of
+            // Buttons you can HIT. These were egui's defaults — text plus a few pixels of
             // padding, so "Install" was a ~60×20 target for the primary action of the
             // whole tab. A minimum size makes every one of them a deliberate object
             // rather than a word with a box round it, and the row gets breathing space
@@ -2279,7 +2279,7 @@ impl HubApp {
 mod tests {
     use super::pin_engine_version;
 
-    /// Render the Installs tab to a PNG so a layout change can be LOOKED at.
+    /// Render the Installs tab to a PNG so a layout change can be looked at.
     ///
     /// Ignored: it needs a GPU, and CI has none. Run it —
     /// `cargo test -p floptle-hub -- --ignored --nocapture` — and open the path it
@@ -2363,7 +2363,7 @@ mod tests {
         }
 
         // The News tab, with the real docs/news.md — so the snapshot shows the page
-        // somebody will actually read, and the 📰 in the tab strip gets LOOKED at. The
+        // somebody will actually read, and the 📰 in the tab strip gets looked at. The
         // Hub's fonts have holes in them and a tofu box passes every non-visual test
         // there is: right layout, right string, rectangular pixels.
         {
@@ -2394,7 +2394,7 @@ mod tests {
         }
 
         // And the About tab, which is where "is this Hub current" gets answered. Needs a
-        // release NEWER than this build carrying a HUB artifact, or the honest answer is
+        // release newer than this build carrying a HUB artifact, or the honest answer is
         // "up to date" and the card under test never draws.
         let (mut app, _tmp) = build("0.21.0");
         if let ManifestState::Loaded(m) = &mut app.manifest {
@@ -2539,7 +2539,7 @@ mod tests {
         let (app, _t) = app_with(&[("99.1.0", vec!["engine"])]);
         assert_eq!(app.hub_update_available().map(|r| r.version), None);
 
-        // Newest-first, so the engine-only one is hit first: the search has to step PAST it
+        // Newest-first, so the engine-only one is hit first: the search has to step past it
         // rather than stop there, or a real Hub fix underneath never gets offered.
         let (app, _t) =
             app_with(&[("99.1.0", vec!["engine"]), ("99.0.0", vec!["engine", "hub"])]);

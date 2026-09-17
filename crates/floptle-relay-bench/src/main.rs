@@ -28,7 +28,7 @@
 //! the older shape). Anything more spent here is noise in a
 //! relay measurement.
 //!
-//! ⚠ **A ceiling is read off a CLEAN step only.** The first run of this tool
+//! ⚠ **A ceiling is read off a clean step only.** The first run of this tool
 //! printed its highest ceiling on the step where the relay was failing: the
 //! senders were stalled on echoes that never came, so the rate fell, so the
 //! per-CCU cost fell, so `0.8 × link / cost` went up. Any step with a packet
@@ -214,7 +214,7 @@ fn run(args: &Args) -> Result<(), String> {
             match RelayClient::join(&args.relay, &code) {
                 Ok(cl) => clients.push(cl),
                 // ⚠ At 400 CCU the first failure here was `Too many open
-                // files` on the DRIVING box (ulimit 1024), which reads like
+                // files` on the driving box (ulimit 1024), which reads like
                 // a relay fault and is not one. Say which side it is.
                 Err(e) => {
                     return Err(format!(
@@ -372,7 +372,7 @@ fn report(args: &Args, elapsed: Duration, n: &Counts, rtts: &mut [f32]) -> Strin
     let mut out = String::new();
     let secs = elapsed.as_secs_f64().max(0.001);
     let payload_bits = (args.payload as f64) * 8.0;
-    // What the relay sent on, counted where it ARRIVED: the host's copy of
+    // What the relay sent on, counted where it arrived: the host's copy of
     // every ping, and every echo and fan-out a client received. Egress is the
     // half that is metered and the half a relay multiplies — with fan-out, a
     // lobby of eight turns one ping into eight packets out.
@@ -557,7 +557,7 @@ mod tests {
     /// so `ingress == egress` to the byte in every sample and `--lobby-size`
     /// changed the lobby count and nothing else. With fan-out, a lobby of
     /// eight turns each ping into eight packets out — and the report's egress
-    /// is counted where packets ARRIVED, so a fan-out the relay dropped is
+    /// is counted where packets arrived, so a fan-out the relay dropped is
     /// not in it.
     #[test]
     fn egress_is_counted_at_the_receivers_and_grows_with_the_lobby() {

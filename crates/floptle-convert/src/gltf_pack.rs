@@ -117,7 +117,7 @@ fn point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// The matrix a NORMAL is transformed by: the inverse transpose of the upper
+/// The matrix a normal is transformed by: the inverse transpose of the upper
 /// 3×3.
 ///
 /// Not the matrix positions use. Under non-uniform scale the two differ — a
@@ -213,7 +213,7 @@ fn walk(
             if let Some(ns) = reader.read_normals() {
                 // **Transformed, never negated.** Reflecting a surface reflects
                 // its outward normal too, so the transformed normal is already
-                // right; it is the WINDING that a mirror inverts, and swapping
+                // right; it is the winding that a mirror inverts, and swapping
                 // two corners below is the whole of the correction. Negating as
                 // well undoes it, and leaves the normals disagreeing with the
                 // faces they belong to.

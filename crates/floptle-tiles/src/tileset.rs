@@ -75,7 +75,7 @@ impl TileSide {
     }
 
     /// The half as a rect in the unit tile, `(x, y, w, h)` from the tile's
-    /// BOTTOM-LEFT.
+    /// Bottom-left.
     fn rect(self) -> (f32, f32, f32, f32) {
         match self {
             TileSide::Bottom => (0.0, 0.0, 1.0, 0.5),
@@ -87,7 +87,7 @@ impl TileSide {
 }
 
 /// The collider a tile actually contributes, in the unit tile from the
-/// BOTTOM-LEFT and before the square's own orientation is applied.
+/// Bottom-left and before the square's own orientation is applied.
 ///
 /// Every caller goes through [`TileCollision::shape`] rather than asking for a
 /// rect, and that is deliberate: while there was a `rect()` accessor, a case it
@@ -119,7 +119,7 @@ pub enum TileCollision {
     /// and a level is not accidentally solid everywhere.
     #[default]
     None,
-    /// The whole square. These are the ones that MERGE — a run of them becomes
+    /// The whole square. These are the ones that merge — a run of them becomes
     /// one box (see [`crate::collide`]).
     Full,
     /// Half the square, named in the art's own orientation. A rotated tile
@@ -127,10 +127,10 @@ pub enum TileCollision {
     /// rather than a rect: "the top half" survives a quarter-turn, `y = 0.5`
     /// does not.
     Half(TileSide),
-    /// A hand-set rect in the unit tile, from the BOTTOM-LEFT. For a ledge, a
+    /// A hand-set rect in the unit tile, from the bottom-left. For a ledge, a
     /// pipe, a fence post — the cases where the art is not half of anything.
     Custom { x: f32, y: f32, w: f32, h: f32 },
-    /// A hand-drawn outline in the unit tile, from the BOTTOM-LEFT, in
+    /// A hand-drawn outline in the unit tile, from the bottom-left, in
     /// authoring order. Three points or more; fewer is not a shape and is
     /// treated as no collider rather than as a degenerate one.
     ///
@@ -980,7 +980,7 @@ mod tests {
         assert!(!old.has_cell(16), "and nothing past its end");
     }
 
-    /// Emptiness is per PAGE. `index < cells()` is wrong in both directions
+    /// Emptiness is per page. `index < cells()` is wrong in both directions
     /// under paging: a page-1 cell is a large number that would read as past the
     /// end, and the gap above a page's real cells would read as present.
     #[test]

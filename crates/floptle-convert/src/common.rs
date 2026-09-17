@@ -111,7 +111,7 @@ impl Scene {
     ///
     /// The tidy pass is here rather than in each reader on purpose: "does this
     /// have normals, are its indices in range, is it empty" are questions about
-    /// the OUTPUT format's requirements, and answering them per reader is how
+    /// the output format's requirements, and answering them per reader is how
     /// one format ships broken while the other four are fine.
     pub fn into_glb(mut self) -> Result<(Vec<u8>, Report), ConvertError> {
         let mut nodes: Vec<WriteNode> = Vec::new();

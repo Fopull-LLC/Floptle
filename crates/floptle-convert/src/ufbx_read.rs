@@ -215,7 +215,7 @@ fn unit_scale(scene: &ufbx::Scene, report: &mut Report) -> f64 {
     1.0
 }
 
-/// The matrix a NORMAL is transformed by: the inverse transpose of the upper
+/// The matrix a normal is transformed by: the inverse transpose of the upper
 /// 3×3.
 ///
 /// Not the matrix positions use. Under non-uniform scale the two differ, and a
@@ -382,7 +382,7 @@ fn build_part(
                 if mesh.vertex_normal.exists {
                     // **Transformed, never negated.** Reflecting a surface
                     // reflects its outward normal too, so the transformed
-                    // normal is already right; it is the WINDING a mirror
+                    // normal is already right; it is the winding a mirror
                     // inverts, and reordering the corners above is the whole of
                     // the correction. Negating as well undoes it and leaves
                     // every normal disagreeing with its own face.

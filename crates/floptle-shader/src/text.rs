@@ -738,7 +738,7 @@ fn print_expr(ir: &ShaderIr, id: ExprId, parent_prec: u8) -> String {
                 BinOp::Add | BinOp::Sub => 1,
                 BinOp::Mul | BinOp::Div => 2,
             };
-            // The right operand of - and / needs parens at EQUAL precedence
+            // The right operand of - and / needs parens at equal precedence
             // (a - (b - c) != a - b - c), so it's printed one level tighter.
             let s = format!(
                 "{} {} {}",

@@ -364,7 +364,7 @@ fn resolve_axis2(
             };
             let rx = raw.value(S::Pad { id, ctrl: PadControl::Axis(*x) }, slot);
             let ry = raw.value(S::Pad { id, ctrl: PadControl::Axis(*y) }, slot);
-            // RADIAL deadzone — a per-axis one would let the diagonals leak
+            // Radial deadzone — a per-axis one would let the diagonals leak
             // drift through and would square off the stick's circle.
             let mag = (rx * rx + ry * ry).sqrt();
             if mag <= *deadzone {
@@ -404,7 +404,7 @@ fn resolve_axis2(
                 // real machines run in.
                 vx /= dt.max(MIN_RATE_DT);
                 vy /= dt.max(MIN_RATE_DT);
-                // Job two: the hitch guard. A cap on the RATE, which is what
+                // Job two: the hitch guard. A cap on the rate, which is what
                 // "must not fling the camera" actually means, set far above any
                 // hand — a violent flick is a few thousand pixels a second. Real
                 // input at a real frame time cannot reach it; only a
@@ -594,7 +594,7 @@ mod tests {
         );
     }
 
-    /// An UNSCOPED `Any` keeps its old meaning exactly — every existing map
+    /// An unscoped `Any` keeps its old meaning exactly — every existing map
     /// depends on it, and the fix must not change single-player behaviour.
     #[test]
     fn an_unscoped_any_stick_is_unchanged() {
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn the_stick_on_a_gated_axis_stays_live() {
-        // The gate must apply to the MOUSE binding only — a pad has no button
+        // The gate must apply to the mouse binding only — a pad has no button
         // to hold, and a stick recentres itself anyway.
         let map = look_map();
         let mut rt = ActionRuntime::new();
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn a_rate_axis_is_not_clamped_to_one() {
-        // Look is a turn RATE, not a direction — clamping it to the unit disk
+        // Look is a turn rate, not a direction — clamping it to the unit disk
         // would cap how fast a flick can turn you.
         let map = look_map();
         let mut rt = ActionRuntime::new();

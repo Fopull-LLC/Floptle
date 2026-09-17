@@ -398,7 +398,7 @@ pub struct Crowd {
     neighbours: Vec<Neighbour>,
     /// Plan-space buckets over `neighbours` (indices), rebuilt each step —
     /// avoidance and separation ask "who is near me", and answering that with
-    /// the whole crowd is quadratic in the ARMY, the same silent-quadratic
+    /// the whole crowd is quadratic in the army, the same silent-quadratic
     /// shape [`crate::index`] exists to kill one layer down.
     grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
     /// The fattest agent this step, so a grid query knows how far "near" reaches.
@@ -424,7 +424,7 @@ struct Neighbour {
     vel: [f32; 3],
     radius: f32,
     priority: f32,
-    /// Where this one has ARRIVED, if it has — what makes arrival contagious
+    /// Where this one has arrived, if it has — what makes arrival contagious
     /// (see `advance`): the last of sixty units sent to one spot can never
     /// stand on the spot itself, because fifty-nine friends already do.
     arrived_target: Option<[f32; 3]>,
@@ -836,7 +836,7 @@ impl Crowd {
         // How far ahead to fear a collision. Mid-route, two seconds. On the
         // last leg it shrinks with the distance left, or a unit approaching a
         // settled crowd freezes at its own fear radius and can never make the
-        // CONTACT that counts as arriving — separation owns the last metre.
+        // Contact that counts as arriving — separation owns the last metre.
         let final_leg = agent.path.len() <= 1;
         let horizon = if final_leg {
             ((left / agent.params.speed.max(0.1)) * 0.9).clamp(0.25, 2.0)

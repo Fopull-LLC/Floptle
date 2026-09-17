@@ -746,7 +746,7 @@ mod tests {
 
     /// The scaling guard. Carving is only worth having if its cost follows the
     /// size of the hole rather than the size of the level — the same shape as
-    /// the crate's other guards, a growth RATIO rather than a duration, so it
+    /// the crate's other guards, a growth ratio rather than a duration, so it
     /// says the same thing on a slow machine as on a fast one.
     #[test]
     fn carving_cost_follows_the_hole_and_not_the_level() {

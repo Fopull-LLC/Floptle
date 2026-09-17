@@ -167,7 +167,7 @@ enum Op {
     LessEq,
     /// `^1.2.3` — at least this, below the next breaking release.
     Caret,
-    /// `~1.2.3` — at least this, below the next MINOR.
+    /// `~1.2.3` — at least this, below the next minor.
     Tilde,
 }
 
@@ -310,7 +310,7 @@ impl FromStr for VersionReq {
             } else if let Some(r) = piece.strip_prefix('=') {
                 (Op::Exact, r)
             } else {
-                // A bare version is a CARET, the same as Cargo. Documented in
+                // A bare version is a caret, the same as Cargo. Documented in
                 // docs/packages.md so nobody has to guess.
                 (Op::Caret, piece)
             };
@@ -376,7 +376,7 @@ mod tests {
 
         assert!(req.matches_engine(&stable), "a release engine must load it");
         assert!(req.matches_engine(&beta), "and so must the beta that leads to it");
-        // The package-resolution rule is UNCHANGED: that is where semver's
+        // The package-resolution rule is unchanged: that is where semver's
         // caution belongs, and the two must not be quietly merged.
         assert!(!req.matches(&beta), "package matching still refuses a pre-release");
 

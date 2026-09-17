@@ -135,7 +135,7 @@ pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
 /// This exists so a developer never has to type a `tar` line: "export, then
 /// run this command off our website, then upload" has a middle step that
 /// assumes a shell and gets `-C` wrong.
-/// The archive is written with the directory's CONTENTS at
+/// The archive is written with the directory's contents at
 /// the top level, which is the shape the fleet agent unpacks and the control
 /// plane's index walk reads.
 #[cfg(not(target_arch = "wasm32"))]

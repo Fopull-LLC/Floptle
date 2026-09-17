@@ -145,7 +145,7 @@ impl ApplicationHandler for Runner {
         self.mesh_ids = vec![cube_id, sphere_id];
 
         // Import every model under assets/models/. A large model (a map/level) is
-        // rendered FULL-SCALE as a walkable environment — floor dropped onto the
+        // rendered full-scale as a walkable environment — floor dropped onto the
         // ground plane, the camera pulled back and its speed scaled so you can fly
         // through it. Small models become props you can fly up to. Each model's
         // per-material parts register separately so their textures bind correctly.

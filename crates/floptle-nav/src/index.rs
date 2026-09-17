@@ -150,7 +150,7 @@ fn bucket_of(
 ) -> (usize, usize) {
     let bx = ((p[0] - origin[0]) / bucket).floor();
     let bz = ((p[1] - origin[1]) / bucket).floor();
-    // `clamp` sends ±∞ to the matching EDGE bucket — which is what makes an
+    // `clamp` sends ±∞ to the matching edge bucket — which is what makes an
     // unbounded query (`nearest` with `max_distance = math.huge` from Lua) span
     // the whole grid instead of collapsing into the corner bucket. NaN falls
     // out of the cast as 0, which is as good an answer as any for a NaN point.

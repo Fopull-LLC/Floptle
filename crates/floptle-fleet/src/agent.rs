@@ -622,7 +622,7 @@ mod tests {
 
         // …and it survives serialization, because the POST body is the only
         // part of this the control plane ever sees. `port` is
-        // asserted ABSENT rather than zero: a control plane that read a
+        // asserted absent rather than zero: a control plane that read a
         // missing port as 0 would publish `quic://host:0`.
         let body = r.to_json();
         let d = &body["deployments"][0];
@@ -674,7 +674,7 @@ mod tests {
         assert!(State::Stopped.is_terminal());
     }
 
-    /// **A unit whose text changed is RESTARTED, not merely started.**
+    /// **A unit whose text changed is restarted, not merely started.**
     ///
     /// `systemctl enable --now` on a unit that is already active does nothing:
     /// `--now` means "start it if it is not running", and it was running. So
@@ -799,7 +799,7 @@ mod tests {
     /// ⚠ **The engine's own player ceiling reaches the report**
     /// — asserted through `cycle`, the function production calls.
     ///
-    /// The card asked for "a guard that fails when the field is DROPPED rather
+    /// The card asked for "a guard that fails when the field is dropped rather
     /// than only when it is inconsistent", and that distinction earned itself
     /// immediately: a self-contained wire test that builds a `DeploymentStatus`
     /// by hand stays green while `status_of` — the only thing that fills one in

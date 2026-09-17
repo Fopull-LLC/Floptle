@@ -16,7 +16,7 @@
 //!
 //! ## Coordinates
 //!
-//! `(x, y)` is 0-based from the TOP-LEFT, matching `data`'s row-major order and
+//! `(x, y)` is 0-based from the top-left, matching `data`'s row-major order and
 //! `tm:set` in Lua. Every function takes signed coordinates and treats
 //! out-of-range as a no-op rather than wrapping or panicking — a rectangle
 //! dragged off the edge of the map should clip, which is what a person means by
@@ -95,7 +95,7 @@ impl<'a> TileGrid<'a> {
         hit
     }
 
-    /// Paint the OUTLINE of a rectangle between two corners.
+    /// Paint the outline of a rectangle between two corners.
     pub fn stroke_rect(&mut self, a: (i32, i32), b: (i32, i32), packed: u32) -> bool {
         let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
         let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
@@ -272,7 +272,7 @@ impl<'a> TileGrid<'a> {
         mask
     }
 
-    /// Recompute the autotiled squares in a rectangle GROWN by one.
+    /// Recompute the autotiled squares in a rectangle grown by one.
     ///
     /// The one-ring is not an optimisation, it is the correctness condition:
     /// painting a square changes what its neighbours should draw, so a retile that
@@ -280,7 +280,7 @@ impl<'a> TileGrid<'a> {
     /// exactly one square wide around every stroke.
     ///
     /// Squares whose group has nothing authored for their neighbourhood are left
-    /// ALONE (see [`Autotiler::resolve`]) — a half-drawn group makes holes in what
+    /// Alone (see [`Autotiler::resolve`]) — a half-drawn group makes holes in what
     /// you paint, never erases what was already there.
     pub fn retile(
         &mut self,
@@ -392,7 +392,7 @@ impl Stamp {
         Self::from_page(0, sheet_cols, px, py, w, h)
     }
 
-    /// The same rectangle, of a named PAGE of a multi-sheet tileset.
+    /// The same rectangle, of a named page of a multi-sheet tileset.
     /// Page 0 is the first sheet, so `from_sheet` is this with
     /// the page every pre-paging index already had.
     pub fn from_page(page: u32, sheet_cols: u32, px: u32, py: u32, w: u32, h: u32) -> Self {
@@ -417,7 +417,7 @@ impl Stamp {
 
     /// This stamp turned a quarter-turn clockwise.
     ///
-    /// Two things turn: the LAYOUT (a 3×1 horizontal run becomes 1×3 vertical) and
+    /// Two things turn: the layout (a 3×1 horizontal run becomes 1×3 vertical) and
     /// each square's own orientation. Turning only the layout is the bug that
     /// makes a rotated stamp of a pipe corner draw pipes pointing the wrong way —
     /// and it is invisible until the art is directional, which is exactly when a
@@ -621,7 +621,7 @@ mod tests {
         let mut d = vec![3u32; 16];
         let mut g = TileGrid::new(4, 4, &mut d);
         assert!(!g.flood_fill(0, 0, 3), "filling 3 with 3 changes nothing");
-        // …including when only the ORIENTATION differs, because a fill matches on
+        // …including when only the orientation differs, because a fill matches on
         // the cell. Otherwise it would loop forever re-orienting the same region.
         let turned = tile_pack(3, TileXform::new(1, false));
         assert!(!g.flood_fill(0, 0, turned));
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(g.get(1, 0), Some(EMPTY_TILE), "…and without it, the hole is placed");
     }
 
-    /// A stamp turned a quarter-turn must turn its LAYOUT and each square's own
+    /// A stamp turned a quarter-turn must turn its layout and each square's own
     /// orientation. Only the first is the bug that makes rotated pipe corners
     /// point the wrong way.
     #[test]

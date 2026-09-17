@@ -14,7 +14,7 @@
 //!
 //! 1. **1-Lipschitz.** |∇d| ≤ 1: `d` never grows faster than distance itself can. Sphere
 //!    tracing, gradient normals, SDF AO and sun shadows are all *wrong* without it — the
-//!    dense field's `grow()` broke this by SUMMING two distance terms (measured |∇d| up
+//!    dense field's `grow()` broke this by summing two distance terms (measured |∇d| up
 //!    to 12) and the symptom was blotchy AO and speckle, not a crash. Every write path
 //!    here is gated by [`ChunkField::assert_lipschitz`] in tests.
 //! 2. **Border transparency.** Readers address *global voxel indices* and never know
@@ -51,7 +51,7 @@ pub const CHUNK: i32 = 32;
 const CHUNK_U: usize = CHUNK as usize;
 const CHUNK_VOXELS: usize = CHUNK_U * CHUNK_U * CHUNK_U;
 
-/// Narrow-band half-width, in voxels. Distances are stored clamped to ±(BAND × voxel).
+/// Narrow-band half-width, in voxels. Distances are stored clamped to ±(band × voxel).
 /// 4 gives the mesher and gradient stencils plenty of room either side of the surface.
 pub const BAND_VOXELS: f32 = 4.0;
 
@@ -241,7 +241,7 @@ impl ChunkField {
         }
     }
 
-    /// The stored distance at a GLOBAL voxel index. Absent chunks read as open air.
+    /// The stored distance at a global voxel index. Absent chunks read as open air.
     /// This is the only voxel accessor; aprons and cross-chunk gradients come free (T3).
     #[inline]
     pub fn voxel_at(&self, i: [i32; 3]) -> f32 {
@@ -354,7 +354,7 @@ impl ChunkField {
     /// The projection is the standard one: a distance field obeys
     /// `|d(a)| ≤ |d(b)| + h` for neighbours `a`,`b` one voxel `h` apart. Clamping each
     /// magnitude down to its neighbours' minimum + h, a few sweeps, converges to a
-    /// 1-Lipschitz field. It only ever REDUCES |d| and never changes a sign, so the zero
+    /// 1-Lipschitz field. It only ever reduces |d| and never changes a sign, so the zero
     /// crossing — the surface the mesher extracts — stays put.
     fn renormalize(&mut self, coords: &[[i32; 3]]) {
         let h = self.voxel;
@@ -375,7 +375,7 @@ impl ChunkField {
         region.dedup();
         region.retain(|c| matches!(self.chunks.get(c), Some(Chunk::Data(_))));
 
-        // The constraint is on the SIGNED field: adjacent voxels one `h` apart can
+        // The constraint is on the signed field: adjacent voxels one `h` apart can
         // differ by at most `h`, which is exactly |∇d| ≤ 1. (Constraining |d| instead
         // is a weaker, different condition and barely moved the needle: 5.4% → 4.9%.)
         // Clamping each voxel into the interval its neighbours allow is the standard
@@ -458,7 +458,7 @@ impl ChunkField {
     }
 
     /// Overwrite the given chunks with `src`'s (cloning present ones, removing
-    /// absent ones) — the MIRROR primitive: after an edit lands on an authority
+    /// absent ones) — the mirror primitive: after an edit lands on an authority
     /// field, copying the touched chunks into a collider's working copy makes the
     /// two agree *byte-for-byte* by construction, instead of trusting a re-run of
     /// the same op to converge (any drift there is a player standing on air).
@@ -558,7 +558,7 @@ impl ChunkField {
         // explodes (measured 5.4% of band voxels bad, worst 4.36, and no amount of
         // post-hoc projection repairs a field the write path keeps breaking).
         //
-        // Union/subtract an analytic BALL instead. min/max — and smin/smax — of two
+        // Union/subtract an analytic ball instead. min/max — and smin/smax — of two
         // 1-Lipschitz fields is 1-Lipschitz, so the invariant holds by construction
         // rather than by repair. This is also how SDF sculpting is normally done, and it
         // makes a dab idempotent: holding the brush still does not dig to infinity.
@@ -581,7 +581,7 @@ impl ChunkField {
                     let cur = self.voxel_at([ix, iy, iz]);
                     let next = match brush {
                         Brush::Raise => crate::smin(cur, ball, k),
-                        // Subtract: intersect with the ball's COMPLEMENT (whose SDF is
+                        // Subtract: intersect with the ball's complement (whose SDF is
                         // -ball): max(cur, -ball) = -min(-cur, ball). Getting the ball's
                         // sign wrong here computes max(cur, ball) instead — which keeps
                         // the ball and carves away everything else in the write box, a
@@ -779,7 +779,7 @@ impl ChunkField {
                 for ix in lo.x.floor() as i32..=hi.x.ceil() as i32 {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
                     let d = box_sdf(p, bcenter, bhalf);
-                    // Skip far AIR only — never far SOLID. Skipping deep solid leaves the
+                    // Skip far AIR only — never far solid. Skipping deep solid leaves the
                     // interior at the chunk's materialization default (+band = air): a
                     // hollow shell with a phantom inner surface, exactly the bug
                     // `resample_dense` documents. Deep-solid writes are free after
@@ -832,7 +832,7 @@ impl ChunkField {
 
     /// Fill a region from an **analytic SDF** — the procedural-generation primitive
     /// (planetoids, cave systems, any shape math can describe). `sdf` is sampled at
-    /// every voxel of `[min, max]` (padded by the band); values are UNIONED with
+    /// every voxel of `[min, max]` (padded by the band); values are unioned with
     /// what's there (`min`), colours come from `color` where the sdf wrote. Deep
     /// solid collapses to interior sentinels via `compact`, so a filled planet costs
     /// its surface, not its volume. The SDF should be ≈1-Lipschitz like every field
@@ -860,7 +860,7 @@ impl ChunkField {
     }
 
     /// [`Self::fill_with`] with full control of the voxel color: RGB tint bytes plus
-    /// the ALPHA byte, which is the 1-based terrain palette slot (0 and 255 both mean
+    /// the alpha byte, which is the 1-based terrain palette slot (0 and 255 both mean
     /// untextured). This is how procedural generators author *materials* — strata,
     /// biomes, glowing cave veins — not just tints.
     pub fn fill_with_rgba(
@@ -1010,7 +1010,7 @@ impl ChunkField {
                 }
                 return Some(ro + rd * b);
             }
-            // Step a FRACTION of the reported distance. Sphere tracing assumes
+            // Step a fraction of the reported distance. Sphere tracing assumes
             // |∇d| ≤ 1; `fill_slab` and the CSG Raise/Lower hold that exactly, but the
             // Smooth/Flatten blends can still leave ~2-5 locally (see
             // `brush_writes_keep_the_field_1_lipschitz`), and a full-length step there
@@ -1046,14 +1046,14 @@ impl ChunkField {
             ((lo.y + 2.0 * half.y) / voxel).ceil() as i32,
             ((lo.z + 2.0 * half.z) / voxel).ceil() as i32,
         ];
-        // Full import SKIPS air (a fresh chunk is already `Uniform(+band)` air) so the
+        // Full import skips air (a fresh chunk is already `Uniform(+band)` air) so the
         // field stays sparse — only the surface band is materialized.
         f.resample_dense(baked, ilo, ihi, false);
         f
     }
 
     /// Re-sample the dense field over a world-space AABB, rewriting only the voxels inside
-    /// it — the REGIONAL counterpart of [`from_dense`], for live editing. A brush dab moves
+    /// it — the regional counterpart of [`from_dense`], for live editing. A brush dab moves
     /// a small box of the dense authority (which stays the source of truth for physics/atlas
     /// /save); this re-derives only the chunks overlapping that box so the render mesh keeps
     /// up without paying a full-field resample per dab. Returns the touched chunk coords
@@ -1131,10 +1131,10 @@ impl ChunkField {
                 for ix in ilo[0]..=ihi[0] {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * voxel;
                     let (dv, col) = sample(p);
-                    // Skip far-from-surface AIR only — never far-from-surface SOLID. A fresh
+                    // Skip far-from-surface AIR only — never far-from-surface solid. A fresh
                     // chunk starts as `Uniform(+band)` air, so skipping air writes what's
-                    // already there; skipping deep SOLID (`dv <= -band`) left rock reading as
-                    // air and the import became a hollow SHELL (a spurious inner surface a
+                    // already there; skipping deep solid (`dv <= -band`) left rock reading as
+                    // air and the import became a hollow shell (a spurious inner surface a
                     // band below the real one — meshed vertices sat -0.935 units inside the
                     // dense field). Deep-solid voxels cost nothing: `compact` collapses a
                     // saturated chunk to a `Uniform(-band)` sentinel. (Clamping against the
@@ -1348,7 +1348,7 @@ impl ChunkField {
     ///
     /// The field may mutate between steps: each chunk encodes atomically from
     /// its state at its step (a chunk dug to air since `begin_save` is simply
-    /// skipped), so the finished blob is always a VALID field — at worst a
+    /// skipped), so the finished blob is always a valid field — at worst a
     /// torn snapshot mixing edit generations. Callers detect that (edit stamp)
     /// and keep such a field dirty for the next checkpoint.
     pub fn begin_save(&self) -> FieldSaver {
@@ -1527,7 +1527,7 @@ impl ChunkField {
         let (lo, hi) = (lo - Vec3::splat(pad), hi + Vec3::splat(pad));
         let ext = hi - lo;
         let vp = (ext.max_element() / max_dim.max(2) as f32).max(self.voxel);
-        // Voxel CENTERS at (i+0.5)/n across the box — the convention `Terrain::sample`,
+        // Voxel centers at (i+0.5)/n across the box — the convention `Terrain::sample`,
         // the atlas upload, and the GPU field shader all share.
         let dims = [
             ((ext.x / vp).ceil() as u32).max(2),
@@ -1787,7 +1787,7 @@ mod tests {
     /// The incremental saver is `to_bytes`, just spread across calls: tiny
     /// per-step budgets must produce the byte-identical blob (autosaves stream
     /// through it every few frames — any drift silently corrupts save slots).
-    /// And a field edited MID-SAVE must still finish into a parseable blob:
+    /// And a field edited mid-save must still finish into a parseable blob:
     /// that's the whole contract that lets checkpoints run under live digging.
     #[test]
     fn incremental_save_matches_to_bytes_and_survives_midsave_edits() {
@@ -1809,7 +1809,7 @@ mod tests {
     }
 
     /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:
-    /// `fill_slab` was writing a PLANE clipped to a box, so the slab's rim jumped from
+    /// `fill_slab` was writing a plane clipped to a box, so the slab's rim jumped from
     /// -band to +band across one voxel (worst 4.36, 4.9% bad) — before any brush ran. A
     /// real box SDF took that to 1.04 / 0.0%. Keep it: it tells you which path regressed.
     #[test]
@@ -1833,7 +1833,7 @@ mod tests {
     }
 
     /// the invariant. |∇d| ≤ 1 is what sphere tracing, gradient normals, SDF AO and sun
-    /// shadows all assume. The dense field's `grow()` broke it by SUMMING two distance
+    /// shadows all assume. The dense field's `grow()` broke it by summing two distance
     /// terms and shipped 11.1% of near-surface voxels bad, worst |∇d| = 12.00 — the
     /// symptom was blotchy AO, not a crash. Every write path here must hold the line.
     #[test]
@@ -1851,7 +1851,7 @@ mod tests {
         //
         //   fill_slab (box SDF)  1.04 / 0.0%   exact
         //   Raise/Lower (CSG)    ~3.3 / 0.1%   smin/smax of true SDFs, near-exact
-        //   Smooth, Flatten      ~4.9 / 1.8%   spatially-weighted BLENDS — not SDF ops
+        //   Smooth, Flatten      ~4.9 / 1.8%   spatially-weighted blends — not SDF ops
         //
         // Smooth averages its neighbours, so where those are saturated at ±band it can
         // land near 0 beside a ±band neighbour: a configuration a true SDF cannot hold
@@ -1872,7 +1872,7 @@ mod tests {
         );
     }
 
-    /// Lower must carve the BALL and nothing else. The shipped bug computed
+    /// Lower must carve the ball and nothing else. The shipped bug computed
     /// `max(cur, ball)` instead of `max(cur, -ball)` — keep-the-ball-carve-the-box —
     /// so every dig blasted a write-box-sized square crater ("massive squares",
     /// a Solar playtest). The dab: radius 1.3, strength 0.6 — the dig_tool defaults.
@@ -1891,7 +1891,7 @@ mod tests {
             f.d(center - Vec3::Y * (r_eff * 0.5)) > 0.0,
             "just below the dig center should be carved"
         );
-        // WELL outside the ball but inside the brush's write box (radius + band + 1
+        // Well outside the ball but inside the brush's write box (radius + band + 1
         // voxel ≈ 5 units): the surface must be untouched. This is the assertion the
         // inverted CSG fails — it read +band (open air) everywhere here.
         for x in [-4.0f32, 4.0] {
@@ -2027,7 +2027,7 @@ mod tests {
         assert!(checked > 25, "migration test only landed {checked} rays");
         assert!(worst < 1.5, "migrated surface drifts from the original by {worst:.2} units");
 
-        // ...and the ground must be SOLID all the way down, not a shell.
+        // ...and the ground must be solid all the way down, not a shell.
         //
         // The raycast above cannot see this: it comes from above and stops at the first
         // surface, which was always the right one. Underneath it, the import was leaving
@@ -2052,7 +2052,7 @@ mod tests {
         // not asserting "sparse < dense" here, because on a TOY field it isn't true and
         // saying so would be a lie: a 32³ chunk is 256 KB, so a 48-unit test terrain
         // rounds up to a few chunks and can cost more than the dense grid it came from.
-        // Sparsity is a SCALE property — it wins when the volume grows and the surface
+        // Sparsity is a scale property — it wins when the volume grows and the surface
         // doesn't (a 433×406×460-unit field is 192 MB dense; only its band is worth
         // storing). What must hold at every scale is an absolute ceiling.
         assert!(
@@ -2075,7 +2075,7 @@ mod tests {
         );
     }
 
-    /// The sculpt fast-path: after the DENSE authority changes under a dab, a REGIONAL
+    /// The sculpt fast-path: after the dense authority changes under a dab, a regional
     /// refresh must move the ChunkField's surface to match — without a full re-import.
     /// This is what makes editing a big terrain in the editor stay smooth (P2d).
     #[test]
@@ -2089,7 +2089,7 @@ mod tests {
             .expect("flat ground is hit");
         assert!(before.y.abs() < 1.0, "flat surface should be near y=0, got {:.2}", before.y);
 
-        // Raise a bump in the DENSE authority (the editor's real sculpt), like a stroke.
+        // Raise a bump in the dense authority (the editor's real sculpt), like a stroke.
         for _ in 0..8 {
             t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 5.0, 1.0, BrushProfile::default());
         }
@@ -2271,7 +2271,7 @@ mod tests {
 mod yield_tests {
     use super::*;
 
-    /// The measurement has to be ADDITIVE: sum the reports over a shaft and you
+    /// The measurement has to be additive: sum the reports over a shaft and you
     /// get the volume that actually left the field. A mining game that pays out
     /// per dab needs a careful shaft and a sloppy cavern to differ by the truth,
     /// not by the dab count.
@@ -2331,7 +2331,7 @@ mod yield_tests {
             |_| [0.5, 0.5, 0.5],
         );
         f.fill_texture(4);
-        // A seam of a different material, NARROWER than the dig that follows,
+        // A seam of a different material, narrower than the dig that follows,
         // so the report has to distinguish the two materials rather than just
         // naming whichever one it met first.
         f.paint_texture(Vec3::new(0.0, 19.0, 0.0), 1.0, 9);

@@ -156,7 +156,7 @@ pub struct CloudPolicy {
     bytes_interval: (u64, u64),
     /// Payload carried per lobby since the last usage flush: `(in, out)`.
     ///
-    /// Per LOBBY rather than per key, because a lobby is what the relay knows
+    /// Per lobby rather than per key, because a lobby is what the relay knows
     /// while it forwards — the key is looked up once at flush time, from the
     /// same `of_lobby` map the occupancy counts use, so the two halves of a
     /// sample can never disagree about which key a lobby belonged to.
@@ -192,7 +192,7 @@ pub struct CloudPolicy {
     /// taking the one message that matters with it.
     at_cap: HashSet<String>,
     /// At-cap messages waiting to be pushed to the lobby's host, drained by the
-    /// relay each step. `say()` reaches the OPERATOR's journal on this box; the
+    /// relay each step. `say()` reaches the operator's journal on this box; the
     /// developer is somewhere else entirely, and this is how they hear.
     host_notices: Vec<(String, String)>,
     /// Deprecated keys already warned about, so a popular game on a rotated key
@@ -683,7 +683,7 @@ impl RelayPolicy for CloudPolicy {
                 self.host_notices.push((code.to_string(), notice));
             }
 
-            // **What the JOINER sees names nothing they can act on.** They are
+            // **What the joiner sees names nothing they can act on.** They are
             // a friend of the developer holding a lobby code: they are not the
             // customer, they cannot upgrade anything, and a sentence about
             // plans and prices is noise to them and embarrassing for the
@@ -879,7 +879,7 @@ impl RelayPolicy for CloudPolicy {
             // A key with traffic or refusals but no live lobby still gets a row
             // — a game that filled up and emptied again inside one interval is
             // exactly the game whose numbers matter most.
-            // ⚠ Orphan bytes belong to a lobby that has GONE, so `of_lobby` no
+            // ⚠ Orphan bytes belong to a lobby that has gone, so `of_lobby` no
             // longer maps it — the same reason `closed_keys` exists. Fold it
             // there, or the one signal that says "somebody is shouting into a
             // dead lobby" is dropped exactly when it fires.
@@ -1271,7 +1271,7 @@ mod tests {
         (p, fake)
     }
 
-    /// ⚠ **A join for a SLEEPING server is held, never refused**.
+    /// ⚠ **A join for a sleeping server is held, never refused**.
     ///
     /// `Refuse` means *this will never succeed* — that is its whole purpose.
     /// A player holding six characters their friend wrote down would be told
@@ -1290,7 +1290,7 @@ mod tests {
         assert_eq!(fake.wakes.lock().unwrap().as_slice(), ["U5FEFJ"], "nothing was woken");
     }
 
-    /// ⚠ **A server the DEVELOPER stopped is refused, and that is honest.**
+    /// ⚠ **A server the developer stopped is refused, and that is honest.**
     ///
     /// `stopped` and `sleeping` are opposite facts. Sleeping is the platform
     /// saving money on a server its owner still expects to work; stopped is a
@@ -1584,7 +1584,7 @@ mod tests {
             "two from one address, one from another, busiest first"
         );
 
-        // The host of UCCCCC blips and comes back from somewhere else; one
+        // The host of uccccc blips and comes back from somewhere else; one
         // lobby closes. The next sample says where things are now.
         p.lobby_host_lost("UCCCCC");
         p.lobby_host_returned("UCCCCC", Some(a));
@@ -1699,7 +1699,7 @@ mod tests {
             "the host was told once per refused join: {again}"
         );
 
-        // Six refusals were still COUNTED, which is what the control plane
+        // Six refusals were still counted, which is what the control plane
         // meters.
         assert_eq!(p.refused.get(KEY).copied(), Some(6));
     }

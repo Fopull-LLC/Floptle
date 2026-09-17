@@ -52,7 +52,7 @@ impl Editor {
     /// Frame-time smoothing: snap the measured dt to the nearest whole multiple
     /// of the display's refresh period when it's close. Under vsync (Fifo) a
     /// frame's true screen time is a whole number of refresh periods — the
-    /// Cpu-side measurement just adds 1–3 ms of scheduler noise on top, and
+    /// CPU-side measurement just adds 1–3 ms of scheduler noise on top, and
     /// feeding that noise into the fixed-step accumulator moves everything the
     /// interpolation renders by `velocity × noise` every frame (the moving-
     /// jitter that came and went with window mode / load). The residual error
@@ -543,7 +543,7 @@ impl Editor {
                 self.rebuild_sim();
             }
         }
-        // Gpu-load any models a script swapped via `node.model` (the Matter is
+        // GPU-load any models a script swapped via `node.model` (the Matter is
         // already updated by run; re-importing here means the new mesh renders
         // this frame).
         self.load_script_swapped_models();
@@ -1089,7 +1089,7 @@ impl Editor {
         self.apply_app_requests();
     }
 
-    /// Gpu-load models a script swapped via `node.model` so they render this
+    /// GPU-load models a script swapped via `node.model` so they render this
     /// frame.
     ///
     /// This is [`Editor::import_model`], once per changed node, and nothing

@@ -354,7 +354,7 @@ pub fn edge_loop(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
     out.into_iter().collect()
 }
 
-/// The edge RING through `edge`: the parallel edges a strip of quads is
+/// The edge ring through `edge`: the parallel edges a strip of quads is
 /// crossed by, stepping across each quad to the edge opposite the one we came
 /// in on.
 ///
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(path, vec![vid(0, 0), vid(0, 1), vid(0, 2), vid(0, 3), vid(0, 4)]);
     }
 
-    /// The route is the CHEAPEST one, not the first one found: a diagonal pick
+    /// The route is the cheapest one, not the first one found: a diagonal pick
     /// takes 8 steps across a 4x4 grid however it staircases, and must start and
     /// end exactly where it was told to.
     #[test]
@@ -589,13 +589,13 @@ mod tests {
 // you select a seam around a shape, or a strip of faces along a limb, without
 // clicking each one — and it works in all three sub-object modes.
 //
-// Cost is the EUCLIDEAN distance between neighbouring element centres, not a hop
+// Cost is the Euclidean distance between neighbouring element centres, not a hop
 // count. On an even grid the two agree; on anything irregular, hop count happily
 // routes the long way round through a dense patch of small faces because it can
 // do it in fewer steps, which is never what the eye expects.
 
 /// Dijkstra over a graph given as `neighbours(node) -> [(node, centre)]`, from
-/// `start` to `goal`, returning the nodes on the path INCLUSIVE of both ends.
+/// `start` to `goal`, returning the nodes on the path inclusive of both ends.
 /// Empty when no route exists (separate shells) — the caller falls back to a
 /// plain pick, which is what a user who clicked across a gap meant anyway.
 fn dijkstra<N, F, C>(start: N, goal: N, centre: C, mut neighbours: F) -> Vec<N>
@@ -676,7 +676,7 @@ pub fn path_verts(mesh: &MapMesh, from: u32, to: u32) -> Vec<u32> {
     )
 }
 
-/// Every face on the cheapest route from `from` to `to` across shared EDGES —
+/// Every face on the cheapest route from `from` to `to` across shared edges —
 /// a strip of faces, the way you would walk them.
 pub fn path_faces(mesh: &MapMesh, from: u32, to: u32) -> Vec<u32> {
     let n = mesh.faces.len() as u32;

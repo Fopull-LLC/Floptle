@@ -291,7 +291,7 @@ shader sunsetStreaks {
 
 const STORM_NIGHT: &str = r#"// Storm night — a churning storm deck with real lightning. Each strike picks
 // a random moment AND a random direction (valueNoise seeded by the cycle
-// number is the poor man's random), double-flashes, and lights the THIN
+// number is the poor man's random), double-flashes, and lights the thin
 // parts of the clouds from behind — the way a real storm silhouettes itself.
 shader stormNight {
   stage sky
@@ -526,7 +526,7 @@ const INK_OUTLINE: &str = r#"// Ink Outline — the comic-book look, drawn over 
 //
 // Nothing in the scene has to change: the lines come from what the camera
 // already knows. `sceneDepth` says how far away each pixel is, `sceneNormal`
-// says which way it faces, and an edge is where either one BREAKS.
+// says which way it faces, and an edge is where either one breaks.
 //
 // This is also the worked example for writing your own — `stage post` shaders
 // read the frame at any pixel, not just their own, which is what makes an edge
@@ -535,10 +535,10 @@ shader inkOutline {
   stage post
   uniform inkColor: color = #14100E
   uniform thickness: float = 1 range(0.5, 4)
-  // How eagerly a SILHOUETTE draws — where the surface in front stops and
+  // How eagerly a silhouette draws — where the surface in front stops and
   // something much further away begins.
   uniform silhouette: float = 8 range(0, 40)
-  // How eagerly a CREASE draws — where one flat face folds into another at the
+  // How eagerly a crease draws — where one flat face folds into another at the
   // same distance. Depth alone can barely see these; the normals can.
   uniform crease: float = 1 range(0, 4)
   // 0 is a hard aliased line, 1 fades it in like a brush.
@@ -556,7 +556,7 @@ shader inkOutline {
   let du = sceneDepth(uv - vec2(0, px.y))
   let dd = sceneDepth(uv + vec2(0, px.y))
 
-  // The BEND in depth, not the difference. `dl + dr - 2*d0` is zero across any
+  // The bend in depth, not the difference. `dl + dr - 2*d0` is zero across any
   // flat surface however steeply it is tilted away from the camera — which is
   // the whole trick. A plain difference would paint a floor seen at a grazing
   // angle solid black, because a distant floor's depth changes fast per pixel
@@ -565,7 +565,7 @@ shader inkOutline {
   // depth) makes every silhouette against it enormous.
   let bend = (abs(dl + dr - d0 * 2) + abs(du + dd - d0 * 2)) / max(d0, 0.01)
 
-  // Where the surface FOLDS. Four dot products against the neighbours' normals:
+  // Where the surface folds. Four dot products against the neighbours' normals:
   // 0 on a flat wall, 1 per right-angle turn, and gentle on a curve so a sphere
   // doesn't fill in with ink.
   let n0 = sceneNormal()
@@ -578,7 +578,7 @@ shader inkOutline {
   let edge = saturate(bend * silhouette + fold * crease * 0.5)
   let ink = smoothstep(0.5 - softness * 0.5, 0.5 + softness * 0.5 + 0.001, edge)
 
-  // `inkColor`'s ALPHA is how black the line goes — pull it down for a sketch.
+  // `inkColor`'s alpha is how black the line goes — pull it down for a sketch.
   output color = vec4(mix(sceneColor().rgb, inkColor.rgb, ink * inkColor.a), 1)
 }
 "#;
@@ -588,7 +588,7 @@ const CRT_SCANLINES: &str = r#"// CRT Scanlines — the small one. Read this fir
 //
 // A post shader gets the finished frame and returns a new colour for each pixel.
 // `uv` is 0..1 across the screen, `sceneColor()` is the pixel it lands on, and
-// `sceneColor(somewhere else)` is any OTHER pixel — which is how you blur, warp
+// `sceneColor(somewhere else)` is any other pixel — which is how you blur, warp
 // or outline. Add it under the PostProcess node's screen shaders.
 shader crtScanlines {
   stage post

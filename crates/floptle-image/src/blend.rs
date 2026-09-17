@@ -275,7 +275,7 @@ mod tests {
         assert!((lum(out) - lum(s)).abs() < 1e-3, "Luminosity must take source luminosity");
     }
 
-    /// Every mode must produce FINITE channel maths for the awkward inputs
+    /// Every mode must produce finite channel maths for the awkward inputs
     /// (fully transparent backdrop, zero and full channels). A NaN here would
     /// clamp silently to 0 and show up as a black speck nobody could explain.
     #[test]

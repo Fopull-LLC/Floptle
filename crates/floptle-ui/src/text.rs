@@ -163,7 +163,7 @@ pub fn wrap_lines(text: &str, max_width: f32, advance: &dyn Fn(&str) -> f32) -> 
 /// colours simply creep along it.
 ///
 /// Recovering the mapping is exact rather than approximate because
-/// [`wrap_lines`] only ever DROPS whitespace and never reorders or inserts: a
+/// [`wrap_lines`] only ever drops whitespace and never reorders or inserts: a
 /// two-pointer walk that skips source whitespace re-finds every character.
 /// `None` marks a character the layout inserted, which is only ever the
 /// ellipsis.

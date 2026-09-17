@@ -84,7 +84,7 @@ pub fn add_flow_rig(
     // The bone chain (parent → child, straight down). Node index bookkeeping.
     // The chain root is parented under the target object's own node (pushed at
     // `bone_base + n` below — forward references are fine, glTF children arrays
-    // are index-based): skinned vertices follow JOINTS, so hanging the chain off
+    // are index-based): skinned vertices follow joints, so hanging the chain off
     // the object means "parent the hair under the head" carries the chain — and
     // the hair — along with it. The object's node is identity (its rest is baked
     // into the vertices), so the chain's model-space placement is unchanged.

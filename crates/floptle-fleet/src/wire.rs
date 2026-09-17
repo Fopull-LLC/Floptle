@@ -37,7 +37,7 @@ pub struct Deployment {
     pub build_id: String,
     /// **Signed, and it expires in sixty minutes.** Fetched fresh from
     /// `/desired` every cycle and never stored, which is also why the bundle
-    /// cache is keyed on the DIGEST rather than on this.
+    /// cache is keyed on the digest rather than on this.
     pub build_url: String,
     /// The digest the downloaded bytes must have before anything unpacks or
     /// runs them.
@@ -217,13 +217,13 @@ impl Report {
 
 /// What this machine says about itself, alongside what its deployments are doing.
 ///
-/// ⚠ **Every measurement is optional, and an unmeasurable one is OMITTED rather
+/// ⚠ **Every measurement is optional, and an unmeasurable one is omitted rather
 /// than sent as zero**. The control plane reads `mem_free_mb`
 /// now, and treats a box that reports little free memory as full regardless of
 /// how many slots its declaration still shows — so a `/proc/meminfo` this agent
 /// could not read, sent as `0`, is a healthy box declaring itself out of memory.
 /// That does not merely stop a placement: a region whose only box looks full is
-/// a region the control plane prices a new MACHINE for. "Did not measure" and
+/// a region the control plane prices a new machine for. "Did not measure" and
 /// "measured none left" are opposite facts and only one of them should cost
 /// money.
 ///
@@ -259,7 +259,7 @@ pub struct DeploymentStatus {
     /// **What this deployment actually costs in memory**, from systemd's own
     /// cgroup accounting.
     ///
-    /// `servers_per_box` is arithmetic on DECLARED quotas — six Studio slots at
+    /// `servers_per_box` is arithmetic on declared quotas — six Studio slots at
     /// 1536 MB inside 11.9 GB — and had never been checked against a running
     /// server. A measured idle one is ~21 MB. Whether a loaded one is 200 MB or
     /// 1500 MB is the difference between a box holding roughly 40 and holding
@@ -277,7 +277,7 @@ pub struct DeploymentStatus {
     /// file all along and the agent parsed the file without carrying this one
     /// field, so the control plane stored null while the box knew the answer.
     ///
-    /// It exists so the two ceilings can be COMPARED. The control plane sets a
+    /// It exists so the two ceilings can be compared. The control plane sets a
     /// cap from the account's plan and the engine enforces one from
     /// `--max-players`; when they disagree a developer meets whichever is lower
     /// with nothing to say which. They agree today — this is a monitor going in
@@ -293,7 +293,7 @@ pub struct DeploymentStatus {
     /// `MemoryPeak`.
     ///
     /// This is the number that sizes a slot: an average tells you what a server
-    /// idles at, and a box is sized by what its servers PEAK at. Peak "since
+    /// idles at, and a box is sized by what its servers peak at. Peak "since
     /// the last report" would have been identical to `mem_mb` — the agent
     /// reports every cycle — so the useful window is the unit's whole life,
     /// which systemd already keeps at no cost.
@@ -385,7 +385,7 @@ impl DeploymentStatus {
 /// Every field is optional: the file is written on a timer, so the agent will
 /// routinely read it in the window before the first write, and a half-written
 /// one is a normal event rather than an error. It is written temp-file-and-rename
-/// on the server's side, so a torn read is not possible — an ABSENT one is.
+/// on the server's side, so a torn read is not possible — an absent one is.
 #[derive(Debug, Default, Deserialize)]
 pub struct ServerStatus {
     #[serde(default)]
@@ -675,7 +675,7 @@ mod tests {
         );
     }
 
-    /// ⚠ **A measurement that failed is ABSENT, never `0`**.
+    /// ⚠ **A measurement that failed is absent, never `0`**.
     ///
     /// The control plane reads `mem_free_mb` now and treats a box with little
     /// free memory as full — so a healthy machine whose `/proc/meminfo` this

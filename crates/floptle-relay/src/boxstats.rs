@@ -8,7 +8,7 @@
 //!
 //! The four fields the fleet agent sends are sent here under the same names and
 //! the same rule, so the control plane consumes both with one code path:
-//! ⚠ **a measurement that could not be taken is OMITTED, never sent as zero.**
+//! ⚠ **a measurement that could not be taken is omitted, never sent as zero.**
 //! "No free memory" and "did not measure" are opposite facts, and only one of
 //! them should stop anything.
 //!

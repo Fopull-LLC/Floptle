@@ -145,7 +145,7 @@ pub fn first(focusables: &[(u32, [f32; 4])]) -> Option<u32> {
     focusables.first().map(|(id, _)| *id)
 }
 
-/// Wrap around: the element furthest in the OPPOSITE direction, used when a
+/// Wrap around: the element furthest in the opposite direction, used when a
 /// press runs off the end of a list and the layer wraps.
 pub fn wrap(from: [f32; 4], candidates: &[(u32, [f32; 4])], dir: Dir4) -> Option<u32> {
     let (a, s) = dir.axis_sign();

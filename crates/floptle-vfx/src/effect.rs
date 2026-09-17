@@ -64,7 +64,7 @@ pub enum RenderMode {
     /// [`Track::beam_end`], subdivided into [`Track::segments`] quads (lasers,
     /// energy beams, tethers). The track ignores emission/particles entirely;
     /// width and color come from its `size` / `color` properties sampled at the
-    /// EFFECT's normalized time. `None` texture = plain tinted ribbon.
+    /// Effect's normalized time. `None` texture = plain tinted ribbon.
     Beam { texture: Option<String> },
 }
 
@@ -115,7 +115,7 @@ pub enum EmitShape {
 }
 
 /// A steady force added to a track's particles' velocity each step. Directions and
-/// centres are in the track's SIMULATION space — emitter-local for `Space::Local`,
+/// centres are in the track's simulation space — emitter-local for `Space::Local`,
 /// anchor-relative for `Space::World` — so a `Point`/`Vortex` centre stays put
 /// relative to the emitter and the whole thing is floating-origin-safe.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -183,7 +183,7 @@ impl Default for Emit {
 }
 
 /// A ranged emission on the timeline — the draggable clip, and the unit of "one
-/// emission". Its LENGTH is the lifetime of the particles it releases: each particle
+/// emission". Its length is the lifetime of the particles it releases: each particle
 /// lives `end - start` seconds (± `lifetime_jitter`). A clip either streams
 /// ([`Emit::Rate`], particles born across the whole span) or fires burst pulses
 /// ([`Emit::Burst`]); multiple clips on a track = emit, stop, emit again. This is why
@@ -205,7 +205,7 @@ impl Clip {
     }
 }
 
-/// What an automation lane modulates. Lanes curve over EFFECT time and shape what a
+/// What an automation lane modulates. Lanes curve over effect time and shape what a
 /// particle is *born* as; life curves shape how it *ages* (proposal §2, the one rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneTarget {
@@ -227,7 +227,7 @@ pub enum LaneTarget {
 }
 
 /// A DAW-style automation lane: one curve over effect time targeting a birth
-/// parameter. Keys are authored in SECONDS along the timeline.
+/// parameter. Keys are authored in seconds along the timeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lane {
     pub target: LaneTarget,
@@ -618,7 +618,7 @@ impl Track {
             }
         }
         // Fold the emission-scaling lanes first so the derived pool is sized for their
-        // PEAK multiplier (a Rate/Count swell above 1× would otherwise overflow and drop
+        // Peak multiplier (a Rate/Count swell above 1× would otherwise overflow and drop
         // spawns silently).
         let lane_rate = fold_lanes1(&self.automation, LaneTarget::Rate, lifetime);
         let lane_count = fold_lanes1(&self.automation, LaneTarget::Count, lifetime);

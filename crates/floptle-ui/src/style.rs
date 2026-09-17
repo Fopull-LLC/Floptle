@@ -627,7 +627,7 @@ pub struct StyleRuntime {
     /// The player asked for reduced motion, so transitions land immediately.
     ///
     /// Set here rather than passed to [`apply_styles`] because it belongs to the
-    /// session, not to a frame — and because SNAPPING is a property of the
+    /// session, not to a frame — and because snapping is a property of the
     /// transition, not of `dt`. Passing `dt = 0` instead would freeze every
     /// element at whatever value it happened to hold, so a hover would stop
     /// changing at all rather than changing instantly.
@@ -678,7 +678,7 @@ impl StyleRuntime {
 
     /// Advance `id` toward `target`, returning what to draw this frame.
     ///
-    /// A state change restarts the transition from the current ANIMATED VALUE,
+    /// A state change restarts the transition from the current animated value,
     /// not from the old state's target — so un-hovering halfway through a hover
     /// eases back from where it actually is instead of snapping to full hover
     /// and then leaving.

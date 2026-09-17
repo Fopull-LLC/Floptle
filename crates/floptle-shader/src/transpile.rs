@@ -225,7 +225,7 @@ pub(crate) enum EmitCtx {
     /// Sky shaders: `dir` = the ray direction, uniforms ride the globals'
     /// `sky_uniforms` array (there is at most one sky shader in a scene).
     Sky,
-    /// A sky shader inside a PREVIEW module: the tile's dome normal stands in
+    /// A sky shader inside a preview module: the tile's dome normal stands in
     /// for the ray direction, and uniforms read the preview's `P` param block
     /// (`sky_uniforms` doesn't exist there).
     SkyPreview,
@@ -376,7 +376,7 @@ impl<'a> Writer<'a> {
                 }
                 (_, Input::Time) => "G.params.x".into(),
                 (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
-                // Sky shaders read the ray DIRECTION (`dir`, the fn's parameter).
+                // Sky shaders read the ray direction (`dir`, the fn's parameter).
                 (EmitCtx::Sky, Input::SkyDir) => "dir".into(),
                 // In a preview tile the dome normal is the stand-in ray.
                 (EmitCtx::SkyPreview, Input::SkyDir) => "normalize(in.normal)".into(),
@@ -386,7 +386,7 @@ impl<'a> Writer<'a> {
                         e.span,
                     ));
                 }
-                // Sdf shaders author in shape-LOCAL space (the node's transform
+                // Sdf shaders author in shape-local space (the node's transform
                 // is applied by shape_local; distances scale back after).
                 (EmitCtx::Sdf { .. }, Input::WorldPos) => "q".into(),
                 (EmitCtx::Sdf { .. }, _) => {
@@ -487,7 +487,7 @@ impl<'a> Writer<'a> {
                 }
                 "backdrop" => {
                     // Default → the scene directly behind this pixel; an arg is a
-                    // screen-uv OFFSET (refraction / distortion).
+                    // screen-uv offset (refraction / distortion).
                     match &call.args[0] {
                         ResolvedArg::Default(_) => Ok(
                             "textureSample(flsl_backdrop, flsl_backdrop_samp, flsl_screen_uv(in))"
@@ -654,7 +654,7 @@ fn wgsl_num(n: f64) -> String {
     }
 }
 
-/// An Sdf-stage shader compiled for one scene slot (0..4): a distance function
+/// An SDF-stage shader compiled for one scene slot (0..4): a distance function
 /// for the shared field module and a color function for the raymarch surface
 /// pass. The node's transform/scale/bounding radius and the shader's uniform
 /// values ride the raymarch globals (`shape_pos/rot/aux/uniforms` arrays), so
@@ -673,7 +673,7 @@ pub struct CompiledSdf {
     pub col_fn: String,
 }
 
-/// Transpile a checked Sdf-stage shader for scene slot `slot`.
+/// Transpile a checked SDF-stage shader for scene slot `slot`.
 pub fn transpile_sdf(ir: &ShaderIr, ck: &Checked, slot: usize) -> Result<CompiledSdf, TranspileError> {
     if ir.stage != Some(Stage::Sdf) {
         return Err(TranspileError::new("not an sdf shader", Span::default()));
@@ -781,7 +781,7 @@ pub fn transpile_sky(ir: &ShaderIr, ck: &Checked) -> Result<CompiledSky, Transpi
     Ok(CompiledSky { name: ir.name.clone(), uniforms: ir.uniforms.clone(), sky_fn: w.out })
 }
 
-/// A compiled Ui-stage shader: a `fs_flsl_ui` entry point over the UI pass's
+/// A compiled UI-stage shader: a `fs_flsl_ui` entry point over the UI pass's
 /// `VsOut` + a group(2) params UBO. Concatenate as `ui.wgsl + SUPPORT + chunk`.
 #[derive(Clone, Debug)]
 pub struct CompiledUi {
@@ -817,7 +817,7 @@ impl CompiledUi {
     }
 }
 
-/// Transpile a checked Ui-stage shader into its WGSL chunk.
+/// Transpile a checked UI-stage shader into its WGSL chunk.
 pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, TranspileError> {
     if ir.stage != Some(Stage::Ui) {
         return Err(TranspileError::new("not a ui shader", Span::default()));
@@ -853,7 +853,7 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     w.line("@group(3) @binding(1) var flsl_backdrop_samp: sampler;".into(), None);
     w.line(String::new(), None);
     // `uv` spans 0..1 across the element's rect, derived from the rect geometry
-    // (the instance's uv_rect belongs to IMAGE atlas coords, not the shader).
+    // (the instance's uv_rect belongs to image atlas coords, not the shader).
     w.line("fn flsl_uv(in: VsOut) -> vec2<f32> {".into(), None);
     w.line("    return in.local / max(in.half_size, vec2<f32>(0.0001)) * 0.5 + vec2<f32>(0.5);".into(), None);
     w.line("}".into(), None);
@@ -996,7 +996,7 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
     w.line("}".into(), None);
     w.line(String::new(), None);
 
-    // The entry point. Alpha is forced to 1: a post pass REPLACES the pixel (it
+    // The entry point. Alpha is forced to 1: a post pass replaces the pixel (it
     // writes into the chain's next scratch target, not over the old one), so a
     // shader that forgot about alpha would otherwise hand the rest of the chain
     // a transparent frame and every later pass would read it as black.
@@ -1025,7 +1025,7 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
 pub const POST_PRELUDE: &str = include_str!("post_prelude.wgsl");
 
 /// Field-symbol stand-ins the post module must append before the shared stdlib
-/// SUPPORT, for the same reason the UI pass needs [`UI_FIELD_SHIM`]: the
+/// Support, for the same reason the UI pass needs [`UI_FIELD_SHIM`]: the
 /// support's engine-hook wrapper reads `G.ao_params`/`sdf_ao`, and a full-screen
 /// pass has no field bound. The hooks read as "off".
 pub const POST_FIELD_SHIM: &str = r#"
@@ -1041,7 +1041,7 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 #[derive(Clone, Debug)]
 pub struct WgslDiag {
     pub message: String,
-    /// 0-based line within the CHUNK (None = the error is in the prelude or
+    /// 0-based line within the chunk (None = the error is in the prelude or
     /// support — an engine bug, not the artist's).
     pub chunk_line: Option<u32>,
 }
@@ -1207,7 +1207,7 @@ fn hash21(p: vec2<f32>) -> f32 { return 0.0; }
 "#;
 
 /// Field-symbol stand-ins the UI module must append before the shared stdlib
-/// SUPPORT: the support's engine-hook wrapper reads `G.ao_params`/`sdf_ao`,
+/// Support: the support's engine-hook wrapper reads `G.ao_params`/`sdf_ao`,
 /// which only exist in the raster/raymarch passes. In the UI pass the field
 /// is absent, so the hooks read as "off". The renderer concatenates
 /// `ui.wgsl + UI_FIELD_SHIM + SUPPORT + chunk`; tests do the same.

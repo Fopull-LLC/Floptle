@@ -8,7 +8,7 @@
 //! heaving surface lifts you instead of swallowing you.
 //!
 //! The design was vetted by an adversarial panel: the visible crust is a fractal,
-//! but the COLLISION field is an explicitly-designed smooth, solid planetoid
+//! but the collision field is an explicitly-designed smooth, solid planetoid
 //! (core sphere + blended hills), which is genuinely walkable and never empty.
 //!
 //! Controls: WASD move (camera-relative, on the surface), Space jump, Shift
@@ -30,10 +30,10 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
-// ---- the map is a morphing, POROUS rounded MENGER SPONGE (LOCK-STEP with descent.wgsl).
+// ---- the map is a morphing, porous rounded Menger sponge (lock-step with descent.wgsl).
 // Measured walkable and delvable: ~88% open (tunnels + chambers you go inside),
 // ~17deg surface-normal rotation per step, |grad|~0.71. "Down" is -grad f (toward
-// the nearest wall), and you SHRINK as you descend so sub-tunnels open up forever.
+// the nearest wall), and you shrink as you descend so sub-tunnels open up forever.
 const MBS: f32 = 45.0; // scale the sponge up to a COLOSSAL ~45-radius fractal planet
 const WMORPH: f32 = 0.05; // slow rotation-morph rate of the sponge
 // a moon you spawn on, with the fractal planet on the horizon to jump down to
@@ -48,7 +48,7 @@ const DIVE_MAX: f32 = 7.0; // descent floor — past here iters cap (4+7=11) and
 // rebase, which the rem_euclid Menger can't do cleanly (measured).
 const AUTO_DIVE_RATE: f32 = 1.4; // octaves/sec auto-descent at full gate (open void)
 // Clearance-gated, self-regulating: zoom fast in a big open void, but as you fall
-// toward a wall the clearance drops and the gate closes so you actually LAND;
+// toward a wall the clearance drops and the gate closes so you actually land;
 // walk off into the next void and it re-opens. Units are capsule-radii.
 const AUTO_DIVE_NEAR: f32 = 8.0; // below this clearance: no auto-descent (you can land)
 const AUTO_DIVE_FAR: f32 = 40.0; // above this clearance: full-rate auto-descent
@@ -93,7 +93,7 @@ const EYE: f32 = 0.15;
 const GRAPPLE_MAX: f32 = 75.0;
 const REEL_SPEED: f32 = 14.0; // rope shorten rate while holding (reel in)
 const GRAPPLE_HIT: f32 = CAP_R * 1.0;
-// jetpack / air control — strong (easily beats gravity) and UNLIMITED (no fuel)
+// jetpack / air control — strong (easily beats gravity) and unlimited (no fuel)
 const JETPACK_UP: f32 = 42.0; // upward thrust (Space held in air) — net +35 vs G_RISE
 const JETPACK_ACCEL: f32 = 40.0; // horizontal air thrust (WASD in air)
 const AIR_MAX: f32 = 16.0; // max horizontal air speed from the jetpack
@@ -105,7 +105,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-// The INFINITE-DESCENT level is held thread-locally so every f_c call sees it
+// The infinite-descent level is held thread-locally so every f_c call sees it
 // without threading a parameter through the whole controller. step()/render()
 // set it before doing any field queries.
 thread_local!(static DIVE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) });
@@ -117,7 +117,7 @@ fn cur_dive() -> f32 {
 }
 const DIVE_ITER_CAP: i32 = 11; // max menger levels (perf + f32 precision limit)
 
-/// Player scale = 2^(-dive): you SHRINK as you descend so finer sub-tunnels become
+/// Player scale = 2^(-dive): you shrink as you descend so finer sub-tunnels become
 /// walkable. Read by grad/gravity for the right eps, and by step/camera to scale.
 fn cur_scale() -> f32 {
     (-cur_dive() * std::f32::consts::LN_2).exp()
@@ -139,7 +139,7 @@ fn roty(p: Vec3, a: f32) -> Vec3 {
     Vec3::new(c * p.x - s * p.z, p.y, s * p.x + c * p.z)
 }
 
-/// ROUNDED Menger sponge: a porous fractal of tunnels + chambers you go inside.
+/// Rounded Menger sponge: a porous fractal of tunnels + chambers you go inside.
 /// Smooth (smin/smax) carves => organic walls, not boxy. `iters` grows with the
 /// dive to unfold finer sub-tunnels. Signed: f<0 inside the solid walls.
 fn menger(p0: Vec3, iters: i32) -> f32 {
@@ -171,7 +171,7 @@ fn f_c(p: Vec3, t: f32) -> f32 {
     world.min(moon)
 }
 
-/// Surface velocity along the normal via a TIME-only central difference of f_c.
+/// Surface velocity along the normal via a time-only central difference of f_c.
 fn df_dt(p: Vec3, t: f32) -> f32 {
     let h = 0.01;
     (f_c(p, t + h) - f_c(p, t - h)) / (2.0 * h)
@@ -327,7 +327,7 @@ impl Character {
         self.f_player = f_c(self.pos, time);
     }
 
-    /// Generous, ceiling-safe ground test for jumping: only the LOWER half of the
+    /// Generous, ceiling-safe ground test for jumping: only the lower half of the
     /// capsule counts, and the contact must face up (so you can't jump off a
     /// ceiling strut when walking under a bridge).
     fn can_jump(&self, time: f32) -> bool {
@@ -352,13 +352,13 @@ impl Character {
 
         let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
 
-        // INFINITE DESCENT. dive ↑ => you SHRINK (scale s) and the Menger unfolds
+        // Infinite descent. dive ↑ => you shrink (scale s) and the Menger unfolds
         // another iteration of finer sub-tunnels, so the world scales up around you
         // — an infinite zoom into the porous fractal. Three drivers:
-        //   • hold C : deliberate dive (also UN-STICKS you from the surface so you
+        //   • hold C : deliberate dive (also un-sticks you from the surface so you
         //              sink into the opening instead of riding the receding wall)
         //   • hold X : ascend back out
-        //   • FREE-FALL through A VOID : auto-descend, so jumping into a hole opens
+        //   • free-fall through A void : auto-descend, so jumping into a hole opens
         //              it up and you keep falling deeper, recursively. This is the
         //              "jump into a hole and the world scales around you" effect.
         let s_prev = cur_scale(); // scale BEFORE this frame's dive update (for vel rescale)
@@ -366,9 +366,9 @@ impl Character {
         let diving = c.descend > 0.0 && inside;
         if inside {
             self.dive = (self.dive + c.descend * DESCEND_RATE * dt).clamp(0.0, DIVE_MAX);
-            // AUTO-DESCEND (self-regulating): the deeper into open space you are, the
+            // Auto-descend (self-regulating): the deeper into open space you are, the
             // faster the world zooms up around you — but as you fall toward a wall the
-            // clearance drops and the gate closes so you LAND instead of floating past
+            // clearance drops and the gate closes so you land instead of floating past
             // it forever. Walk/fall off into the next void and it re-opens => the
             // "land, then keep falling into the detail" loop. X ascends back out.
             if !self.grounded && !diving {
@@ -389,8 +389,8 @@ impl Character {
         let s = cur_scale(); // player shrink factor: scale all lengths/speeds by it
         let cap_r = CAP_R * s;
         let cap_hh = CAP_HH * s;
-        // CRITICAL: when the dive scale changes, rescale velocity by the same ratio
-        // so your momentum stays constant in PLAYER-RELATIVE units. Without this,
+        // Critical: when the dive scale changes, rescale velocity by the same ratio
+        // so your momentum stays constant in player-relative units. Without this,
         // old absolute velocity dwarfs the (now s-scaled) thrust/gravity as you
         // shrink, and you coast in one direction forever with no control authority.
         if s_prev > 1e-20 && (s - s_prev).abs() > 0.0 {
@@ -434,7 +434,7 @@ impl Character {
         for _ in 0..n {
             let up = self.up_smooth;
 
-            // (1) SURFACE-VELOCITY CARRY (time-FD df/dt of the slow morph)
+            // (1) surface-velocity carry (time-FD df/dt of the slow morph)
             let gn = grad(self.pos, time, EPS_N);
             let gm = gn.length();
             if gm > G_MIN {
@@ -453,7 +453,7 @@ impl Character {
                 self.v_surface = 0.0;
             }
 
-            // (2) GRAVITY (asymmetric arc; jetpack floats it; weak near the moon)
+            // (2) gravity (asymmetric arc; jetpack floats it; weak near the moon)
             let gdir = gravity_down(self.pos, time);
             let vup = self.vel.dot(up);
             let mut g_mag = if self.grounded {
@@ -470,7 +470,7 @@ impl Character {
             }
             self.vel += gdir * g_mag * s * sub;
 
-            // (3) MOVEMENT: walk on the ground; JETPACK in the air
+            // (3) movement: walk on the ground; jetpack in the air
             if self.grounded {
                 if c.wish.length_squared() > 1e-6 {
                     if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
@@ -489,7 +489,7 @@ impl Character {
                     self.vel = vn + vt * (-FRIC * sub).exp();
                 }
             } else {
-                // JETPACK (unlimited): WASD air thrust (speed-capped) + Space up-thrust
+                // Jetpack (unlimited): WASD air thrust (speed-capped) + Space up-thrust
                 if c.wish.length_squared() > 1e-6
                     && let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
                         self.vel += wt * JETPACK_ACCEL * s * sub;
@@ -511,11 +511,11 @@ impl Character {
                 }
             }
 
-            // (4) INTEGRATE
+            // (4) integrate
             self.pos += self.vel * sub;
 
-            // (4b) GRAPPLE SWING — reel the rope in, and when it's taut hold to
-            // length + remove outward velocity => you SWING on it like a pendulum.
+            // (4b) grapple swing — reel the rope in, and when it's taut hold to
+            // length + remove outward velocity => you swing on it like a pendulum.
             if g_attached {
                 g_rest = (g_rest - REEL_SPEED * s * sub).max(2.0 * s);
                 let to = g_anchor - self.pos;
@@ -532,7 +532,7 @@ impl Character {
                 }
             }
 
-            // (5) DEPENETRATION — 5 spheres, position-only, clamped
+            // (5) depenetration — 5 spheres, position-only, clamped
             let max_shove = V_SHOVE_MAX * s * sub;
             let mut correction = Vec3::ZERO;
             let mut deepest_f = f32::INFINITY;
@@ -561,13 +561,13 @@ impl Character {
             }
             self.pos += correction / 5.0;
 
-            // (6) SLIDE
+            // (6) slide
             if deepest_f < cap_r + 0.02 * s {
                 let into = self.vel.dot(contact_n).min(0.0);
                 self.vel -= contact_n * into;
             }
 
-            // (7) GROUNDED (strict, debounced) + ground stick
+            // (7) grounded (strict, debounced) + ground stick
             let lo = self.pos - up * cap_hh;
             let f_lo = f_c(lo, time);
             let n_lo = grad(lo, time, EPS_N).try_normalize().unwrap_or(up);
@@ -593,7 +593,7 @@ impl Character {
             // up target: auto-correct to the surface normal only while grounded
             // (so you can walk up walls). In the AIR your orientation is fully your
             // own — gravity never snaps the camera back — and you steer it with
-            // Ctrl+mouse (free-orient) or just keep whatever you had. RATE-LIMITED
+            // Ctrl+mouse (free-orient) or just keep whatever you had. rate-limited
             // before the slerp so a small mass can't flip it.
             if self.grounded && !c.free_orient {
                 let limited = rate_limit_dir(self.prev_up_target, n_lo, MAX_UP_RATE * sub);
@@ -649,7 +649,7 @@ impl Character {
                 if !c.grapple_held {
                     self.grapple = Grapple::Idle; // release keeps momentum (slingshot)
                 } else {
-                    // stick the anchor to the SHIFTING surface; detach if it
+                    // stick the anchor to the shifting surface; detach if it
                     // morphs away.
                     let f = f_c(*anchor, time);
                     if f.abs() > 3.0 * s {
@@ -1046,7 +1046,7 @@ impl State {
         );
     }
 
-    /// Tangent-plane basis from a PARALLEL-TRANSPORTED persistent forward (no
+    /// Tangent-plane basis from a parallel-transported persistent forward (no
     /// discrete axis switch => no ~90deg snaps). Returns (up, fwd_t, right_t).
     fn tangent_basis(&self) -> (Vec3, Vec3, Vec3) {
         let up = self.cc.up_smooth;
@@ -1070,7 +1070,7 @@ impl State {
     fn update(&mut self, dt: f32, time: f32) {
         set_dive(self.cc.dive); // so aim_dir/camera query the field at the right depth
         let sens = 0.0025;
-        // CTRL + mouse while airborne = roll/pitch your whole frame (wingsuit).
+        // Ctrl + mouse while airborne = roll/pitch your whole frame (wingsuit).
         let free_orient = self.input.ctrl && !self.cc.noclip && !self.cc.grounded;
         if free_orient {
             let up = self.cc.up_smooth;
@@ -1205,7 +1205,7 @@ impl State {
     }
 
     /// Grapple aim = raycast the screen-center crosshair (camera forward) and aim
-    /// from the player toward the hit, so THIRD-PERSON aim matches the reticle.
+    /// from the player toward the hit, so third-person aim matches the reticle.
     fn aim_dir(&self, time: f32) -> Vec3 {
         let sc = cur_scale();
         let (cam_pos, cam_fwd, _up) = self.camera_pose(time);

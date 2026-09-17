@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn bumpers_and_triggers_are_not_swapped() {
-        // gilrs's `LeftTrigger` is the BUMPER and `LeftTrigger2` is the analog
+        // gilrs's `LeftTrigger` is the bumper and `LeftTrigger2` is the analog
         // trigger. Inverting these is invisible until someone plays the game.
         assert_eq!(to_gilrs_button(PadButton::LeftBumper), gilrs::Button::LeftTrigger);
         assert_eq!(to_gilrs_button(PadButton::LeftTrigger), gilrs::Button::LeftTrigger2);

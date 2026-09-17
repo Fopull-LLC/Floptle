@@ -147,7 +147,7 @@ pub fn bake_reporting(
     // `id: 4294967295`, and a link a person named "drop 1" collides with a
     // generated one whatever the ids do. Either way two links answer to one
     // handle, `nav.link` toggles whichever it finds first, and the level has a
-    // door that opens something else. Renaming and renumbering the GENERATED
+    // door that opens something else. Renaming and renumbering the generated
     // one is right: the placed one is somebody's decision.
     let mut used_ids: std::collections::HashSet<u32> = all.iter().map(|l| l.id).collect();
     let mut used_names: std::collections::HashSet<String> =

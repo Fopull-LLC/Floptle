@@ -129,7 +129,7 @@ impl NavMesh {
             y_max: centre[1] + half[1],
         };
 
-        // Splice into the BAKE, not into whatever the obstacles have made of it:
+        // Splice into the bake, not into whatever the obstacles have made of it:
         // a rebake is a new measurement of the level and becomes the thing
         // carves are re-derived from. `recarve` at the end puts them back.
         let base = self.baked.take().map(|b| *b).unwrap_or_else(|| crate::carve::Baked {
@@ -438,7 +438,7 @@ mod tests {
         floor.extend(quad(0.0, 4.0, 4.0, 12.0, 0.0));
         floor.extend(quad(20.0, 24.0, 4.0, 12.0, 0.0));
         let mut mesh = bake(&floor, &settings()).expect("the ring bakes");
-        // Both ends on the NEAR side, so the demolished middle is on the only
+        // Both ends on the near side, so the demolished middle is on the only
         // straight route between them.
         let from = [2.0, 0.0, 2.0];
         let to = [22.0, 0.0, 2.0];
@@ -447,7 +447,7 @@ mod tests {
         // The near side of the ring is demolished: a region with nothing in it.
         let empty = bake(&quad(100.0, 108.0, 100.0, 108.0, 0.0), &settings()).expect("bakes");
         // Tall enough in z to take the whole near side with it. A bake
-        // rasterises OUTWARD, so a box drawn exactly on the floor's nominal
+        // rasterises outward, so a box drawn exactly on the floor's nominal
         // edge leaves a half-cell strip of ground behind — and a half-cell
         // strip is a corridor.
         mesh.splice([12.0, 0.0, 2.0], [8.0, 4.0, 8.0], &empty).expect("it splices");
@@ -493,7 +493,7 @@ mod tests {
     /// Two wings with nothing between them, joined by re-measuring the gap.
     ///
     /// The case `resplit_regions` cannot do, and the reason regions are worked
-    /// out by flooding rather than by splitting: a splice MERGES islands as
+    /// out by flooding rather than by splitting: a splice merges islands as
     /// readily as it breaks them.
     #[test]
     fn splicing_a_bridge_in_merges_the_islands_it_joins() {

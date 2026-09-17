@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(fin, vec![1]);
     }
 
-    /// A remote player's microphone has to be an ORDINARY sound: spatialised,
+    /// A remote player's microphone has to be an ordinary sound: spatialised,
     /// routed through a mixer track, pannable. If it needed its own playback
     /// path, none of the mixer's effects would reach it and "make the killer's
     /// voice a monster with the effects you already have" would be a rewrite.

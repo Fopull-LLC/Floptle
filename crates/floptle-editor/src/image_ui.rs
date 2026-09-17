@@ -3,7 +3,7 @@
 //!
 //! Layout is fixed and boring on purpose — a tool column that never resizes
 //! itself, a right panel you can drag but that never moves on its own, and the
-//! canvas in the middle. The house UX bar (`UI-stability-feedback`) applies in
+//! canvas in the middle. The house UX bar (the UI-stability rule) applies in
 //! full here: nothing re-centres, nothing re-sizes, popups are a constant size.
 
 use egui::{Color32, RichText};

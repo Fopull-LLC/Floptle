@@ -167,7 +167,7 @@ impl Key {
     }
 
     /// The first key whose script name matches — the inverse of
-    /// [`Key::script_name`] for the unambiguous majority, and the LEFT variant
+    /// [`Key::script_name`] for the unambiguous majority, and the left variant
     /// for collapsed modifiers (`"shift"` → `ShiftLeft`). Case-insensitive so
     /// a hand-edited RON or a script string can say `"Space"` or `"space"`.
     pub fn from_script_name(name: &str) -> Option<Key> {
@@ -448,7 +448,7 @@ impl Device {
     /// The glyph a binding chip leads with.
     ///
     /// These have to survive the editor's font stack, which bundles only a
-    /// SUBSET of the emoji block — a glyph it lacks renders as a tofu square.
+    /// Subset of the emoji block — a glyph it lacks renders as a tofu square.
     /// `🎮` is one of the missing ones, so a pad shows as an analog stick.
     /// `floptle-editor`'s `icons` module has a test that catches regressions
     /// here; keep the two in step.
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn script_names_round_trip() {
         // Every key resolves from its own script name. Collapsed modifiers land
-        // on the LEFT variant by design, so assert on the NAME, not the variant.
+        // on the left variant by design, so assert on the name, not the variant.
         for &k in Key::ALL {
             let back = Key::from_script_name(k.script_name()).expect("name resolves");
             assert_eq!(back.script_name(), k.script_name(), "{k:?}");

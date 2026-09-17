@@ -253,7 +253,7 @@ pub struct EffectInstance {
     /// `advance`/`advance_at` never inherits stale motion. Newborns on World tracks
     /// add `inherit_velocity * this` at birth.
     pending_emit_vel: Vec3,
-    /// Script override for every Beam track's endpoint (effect-LOCAL offset), set
+    /// Script override for every Beam track's endpoint (effect-local offset), set
     /// via [`Self::set_beam_end`]. `None` = each track's authored `beam_end`.
     beam_end_override: Option<Vec3>,
 }
@@ -289,7 +289,7 @@ impl EffectInstance {
         }
     }
 
-    /// Override every Beam track's endpoint for this instance — an effect-LOCAL
+    /// Override every Beam track's endpoint for this instance — an effect-local
     /// offset from the origin (the `setBeamEnd` script path; the host converts a
     /// world point to local before calling). `None`-able only by a fresh instance.
     pub fn set_beam_end(&mut self, local: Vec3) {
@@ -566,7 +566,7 @@ impl EffectInstance {
                 }
                 let mut vel = p.vel_life[i].truncate();
                 vel = vel * damp + g;
-                // Force fields accelerate the CARRIED velocity (kinematic tracks below
+                // Force fields accelerate the carried velocity (kinematic tracks below
                 // only replace the base term, so forces survive the re-sample).
                 if !ct.forces.is_empty() {
                     let pos = p.pos_age[i].truncate();

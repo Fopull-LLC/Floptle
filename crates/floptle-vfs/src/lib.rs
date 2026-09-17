@@ -117,7 +117,7 @@ pub fn contain(root: &Path, rel: &str) -> Option<PathBuf> {
 /// the current directory and `.`/`..` are folded — so a relative project root
 /// (`assets`) and an absolute reference into it compare as the same tree.
 /// A path that climbs out through `..` and back in is judged by where it
-/// lands. Symlinks are not followed: this asks where a path POINTS, not what
+/// lands. Symlinks are not followed: this asks where a path points, not what
 /// is at the other end, and it must answer for a file that is not there.
 pub fn is_within(root: &Path, candidate: &Path) -> bool {
     normalize(candidate).starts_with(normalize(root))
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(contain(root, ""), Some(PathBuf::from("/proj")));
     }
 
-    /// `is_within` judges where a path LANDS, whatever route it took.
+    /// `is_within` judges where a path lands, whatever route it took.
     #[test]
     fn is_within_folds_dots_and_compares_absolute_trees() {
         let root = Path::new("/proj");

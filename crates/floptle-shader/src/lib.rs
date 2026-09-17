@@ -72,7 +72,7 @@ pub fn compile_fragment(src: &str) -> Result<CompiledFragment, String> {
     })
 }
 
-/// Parse + type-check + transpile a Ui-stage `.flsl`, for a game-UI element's
+/// Parse + type-check + transpile a UI-stage `.flsl`, for a game-UI element's
 /// custom face. Human-readable `line:col`-prefixed errors; a non-ui shader is
 /// rejected with a hint.
 pub fn compile_ui(src: &str) -> Result<transpile::CompiledUi, String> {
@@ -169,7 +169,7 @@ pub fn check_source(src: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse + type-check an Sdf-stage `.flsl` source, returning the pieces the
+/// Parse + type-check an SDF-stage `.flsl` source, returning the pieces the
 /// editor caches (per-slot transpilation happens later, when the scene's
 /// Field Shape slots are assigned). Human-readable `line:col`-prefixed errors.
 pub fn check_sdf(src: &str) -> Result<(ShaderIr, ir::Checked), String> {
@@ -231,7 +231,7 @@ shader plasma {
 //@layout { warped: (120, 80), n: (320, 80), hue: (520, 96) }
 "#;
 
-    /// A Ui-stage shader compiles, its chunk validates against the UI pass's
+    /// A UI-stage shader compiles, its chunk validates against the UI pass's
     /// seam contract, params pack in slot order, and round-trips through print.
     #[test]
     fn ui_stage_compiles_and_validates() {
@@ -292,7 +292,7 @@ shader dial {
         transpile::validate(&prelude, &compiled.chunk)
             .unwrap_or_else(|e| panic!("naga rejects: {} in:\n{}", e.message, compiled.chunk));
         assert!(compiled.chunk.contains("atan2("), "atan2 did not reach the WGSL");
-        // `mod` is FLOORED, not WGSL's `%` — `%` truncates toward zero and so
+        // `mod` is floored, not WGSL's `%` — `%` truncates toward zero and so
         // returns a negative remainder for negative x, which is half of every
         // angle atan2 hands back.
         assert!(compiled.chunk.contains("flsl_mod1("), "mod must use the floored support fn");
@@ -318,7 +318,7 @@ shader dial {
         }
     }
 
-    /// A Ui-stage shader can sample the ELEMENT'S own image via `baseTexture`
+    /// A UI-stage shader can sample the element'S own image via `baseTexture`
     /// (bound at group(1) like a material texture) — both with an explicit uv and
     /// with the default rect UV — and the result validates against the UI seam.
     #[test]

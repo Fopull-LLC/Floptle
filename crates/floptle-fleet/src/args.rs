@@ -258,7 +258,7 @@ mod tests {
     /// The relay's version of this guard was wrong on its first writing and the
     /// lesson transferred: a plain `HELP.contains(flag)` passes on `--token`
     /// because `--token-file` is mentioned in its row, and every short flag is
-    /// a prefix of a longer one. So this matches the FLAG COLUMN — the text
+    /// a prefix of a longer one. So this matches the flag column — the text
     /// before the two-space gutter — and nothing else.
     #[test]
     fn every_flag_the_parser_takes_is_in_the_help_table() {
@@ -305,7 +305,7 @@ mod tests {
     ///
     /// This is the exact difference W uses to tell a current binary from the
     /// one already on a box: `floptle-server --help` on the July build was read
-    /// as a PORT. A fleet agent that did the same would be indistinguishable
+    /// as a port. A fleet agent that did the same would be indistinguishable
     /// from a stale one.
     #[test]
     fn help_is_a_help_request() {

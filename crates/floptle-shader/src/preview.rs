@@ -5,7 +5,7 @@
 //! One shader edit = one generated WGSL module: every preview tile lives in a
 //! grid atlas and a single fullscreen pass computes the shader's `let`s once
 //! per pixel, then selects the hovered tile's value. Every tile value is
-//! hoisted UNCONDITIONALLY before the `switch` so texture sampling stays in
+//! hoisted unconditionally before the `switch` so texture sampling stays in
 //! uniform control flow (naga's uniformity analysis rejects `textureSample`
 //! inside a position-dependent branch).
 //!
@@ -51,7 +51,7 @@ pub enum PreviewTarget {
 /// A compiled preview module + everything the host needs to drive it.
 #[derive(Clone, Debug)]
 pub struct CompiledPreview {
-    /// A COMPLETE standalone WGSL module: `vs_pv` + `fs_pv` entry points.
+    /// A complete standalone WGSL module: `vs_pv` + `fs_pv` entry points.
     pub wgsl: String,
     pub stage: Stage,
     /// Uniforms in param-slot order (fragment: `P.u{i}`; sdf: the
@@ -442,9 +442,9 @@ fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, 
 /// A post pass has nothing of its own to look at — it is a transform of whatever
 /// the camera drew — so the preview supplies a scene: a sphere at 4 units in
 /// front of a wall at 9, against sky beyond the tile's disc. That gives every
-/// feature a post shader hunts for, all in one tile: a hard depth STEP at the
-/// ball's silhouette, a smooth depth RAMP across the wall (an edge detect must
-/// not fire there), a normal CREASE where they meet, and colour to grade.
+/// feature a post shader hunts for, all in one tile: a hard depth step at the
+/// ball's silhouette, a smooth depth ramp across the wall (an edge detect must
+/// not fire there), a normal crease where they meet, and colour to grade.
 ///
 /// The names below are exactly the ones [`crate::transpile::POST_PRELUDE`]
 /// declares — that is the contract, and it is what lets the real emitter run
@@ -480,7 +480,7 @@ fn flsl_post_depth(uv: vec2<f32>) -> f32 {
         return PV_BALL_Z - sqrt(b) * 1.4;
     }
     // The wall recedes with height, so a depth-difference edge detect has a
-    // gradient to correctly IGNORE.
+    // gradient to correctly ignore.
     if (uv.y < 0.94 && uv.x > 0.06 && uv.x < 0.94) {
         return PV_WALL_Z - uv.y * 3.0;
     }
@@ -596,7 +596,7 @@ fn fs_pv(pin: PvVsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Sdf-stage tile shader: each tile is a z = 0 cross-section, ±1.6 units.
+/// SDF-stage tile shader: each tile is a z = 0 cross-section, ±1.6 units.
 const SDF_MAIN: &str = r#"
 @fragment
 fn fs_pv(pin: PvVsOut) -> @location(0) vec4<f32> {
@@ -645,7 +645,7 @@ mod tests {
     }
 
     /// A graph can outgrow the tile budget, but the tiles it drops must be
-    /// anonymous subexpressions — the OUTPUT and every named `let` always
+    /// anonymous subexpressions — the output and every named `let` always
     /// preview (the sky examples run ~100 nodes; the first sight of them was
     /// a graph whose output tile was silently over budget).
     #[test]

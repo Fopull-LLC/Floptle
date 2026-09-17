@@ -100,7 +100,7 @@ pub fn nearest_cut_point(mesh: &MapMesh, face: u32, p: Vec3, vert_snap: f32) -> 
     best.map(|(_, c)| c)
 }
 
-/// Where the ray `ro + t*rd` meets `face`'s PLANE — unbounded, so it answers
+/// Where the ray `ro + t*rd` meets `face`'s plane — unbounded, so it answers
 /// even when the cursor is off the face or another face is in front of it.
 ///
 /// This is how the knife aims once a cut is under way: the face is already
@@ -241,7 +241,7 @@ fn materialize(mesh: &mut MapMesh, p: CutPoint) -> Result<u32, String> {
 }
 
 /// What one cut produced: the two halves, and the corners the cut ran between
-/// (which is what lets the editor CHAIN — the next cut starts where this one
+/// (which is what lets the editor chain — the next cut starts where this one
 /// ended, so a groove can be walked across several faces).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KnifeCut {
@@ -489,7 +489,7 @@ mod tests {
         assert!(knife_refusal(&base, 99, CutPoint::Vert(0), CutPoint::Vert(2)).is_none());
     }
 
-    /// The knife aims at a face's PLANE, not at whatever the ray hits first.
+    /// The knife aims at a face's plane, not at whatever the ray hits first.
     ///
     /// Once the first point is placed the face is decided, so the second point
     /// has to be solved against that face even when the cursor has drifted past

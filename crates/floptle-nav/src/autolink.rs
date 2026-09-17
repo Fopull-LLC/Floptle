@@ -245,7 +245,7 @@ fn probe(
                 if drop <= 0.0 || -dy > drop || gap > drop_span {
                     continue;
                 }
-                // A drop has to be a FALL, and a fall needs the way down to be
+                // A drop has to be a fall, and a fall needs the way down to be
                 // open. See `floored`.
                 if floored(field, grid, i, dx, dz, k, from.y, grid.cells[j].y, step) {
                     continue;

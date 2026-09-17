@@ -17,7 +17,7 @@ pub use fetch::{is_github_host, set_executable};
 pub use fetch::{download, fetch_manifest, pack_tar_gz, unpack, verify_sha256};
 pub use manifest::{Artifact, Manifest, PreId, ReleaseInfo, version_key};
 
-/// The manifest that lists installable engine versions. Lives on the PUBLIC
+/// The manifest that lists installable engine versions. Lives on the public
 /// releases repo — anyone can fetch it and download bundles, no token needed
 /// (the engine source stays private; only distribution is public). Swappable
 /// to another host without code changes (docs/updating-the-hub.md §3.4).

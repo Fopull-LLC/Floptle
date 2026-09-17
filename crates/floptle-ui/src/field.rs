@@ -73,7 +73,7 @@ impl Cursor {
 ///
 /// Lives here, in the unit-free half, because two places need the same answer
 /// and they work in different units: the renderer applies it in physical
-/// pixels, and the editor SUBTRACTS it in design units to turn a click x back
+/// pixels, and the editor subtracts it in design units to turn a click x back
 /// into a character index. When only one of them knew about it, clicking into a
 /// scrolled value put the caret several characters from the pointer — which
 /// reads as the mouse being offset, not as a text bug.
@@ -125,7 +125,7 @@ pub fn caret_at(
     best.0
 }
 
-/// Apply one edit. Returns true when the VALUE changed (caret-only moves
+/// Apply one edit. Returns true when the value changed (caret-only moves
 /// return false, so `changed` doesn't fire for pressing Left).
 ///
 /// `extend` is the shift key: it keeps the anchor where it is so a movement
@@ -146,7 +146,7 @@ pub fn apply(value: &mut String, cur: &mut Cursor, op: &Edit, extend: bool, spec
             let mut next: String = value.chars().take(sel_a).collect();
             next.push_str(&filtered);
             next.extend(value.chars().skip(sel_b));
-            // The cap is applied to the RESULT, not to the keystroke: pasting
+            // The cap is applied to the result, not to the keystroke: pasting
             // a long string into a short field fills it rather than being
             // refused, which is what every field anyone has used does.
             let mut kept = filtered.chars().count();
@@ -413,7 +413,7 @@ mod tests {
         // Scrolled to the end: the run's tail sits against the right edge and
         // stops — it never keeps sliding into empty space.
         assert!((s(9_999.0) - -(300.0 - 100.0 + 4.0)).abs() < 1e-4);
-        // A value that FITS never scrolls, however far right the caret is.
+        // A value that fits never scrolls, however far right the caret is.
         assert_eq!(scroll_shift(9_999.0, 40.0, 10.0, 100.0, 2.0), 0.0);
     }
 

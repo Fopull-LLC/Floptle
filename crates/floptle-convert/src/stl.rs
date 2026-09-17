@@ -36,7 +36,7 @@ pub fn read(src: &Path) -> Result<Scene, ConvertError> {
     }
 
     // **The file's own normals are not used.** STL stores one
-    // normal per FACE, and this vertex list is shared between faces — so there
+    // normal per face, and this vertex list is shared between faces — so there
     // is no per-vertex normal to write, and half of real STL files have zeroed
     // or wrong face normals anyway. `ensure_normals` computes them from the
     // geometry, which is both correct and what every STL viewer already does.

@@ -47,7 +47,7 @@ pub trait Achievements {
     /// real achievement — a mistyped id is the single most common
     /// Steamworks-backend misconfiguration.
     fn achievement_unlocked(&self, id: &str) -> Option<bool>;
-    /// Unlocks `id` LOCALLY — cheap, in-memory. Reaches the backend's server
+    /// Unlocks `id` locally — cheap, in-memory. Reaches the backend's server
     /// (and triggers its native unlock notification) on the next automatic
     /// batch or an explicit [`flush`](Self::flush). `Err`'s message is
     /// actionable — a mistyped id says so, rather than a bare failure.
@@ -66,11 +66,11 @@ pub trait Achievements {
     /// Reads an integer stat. `None` before stats are ready or if `name`
     /// isn't a real stat.
     fn stat_int(&self, name: &str) -> Option<i32>;
-    /// Writes an integer stat LOCALLY — same batching as achievement writes.
+    /// Writes an integer stat locally — same batching as achievement writes.
     fn set_stat_int(&self, name: &str, value: i32) -> Result<(), String>;
     /// Reads a float stat.
     fn stat_float(&self, name: &str) -> Option<f32>;
-    /// Writes a float stat LOCALLY.
+    /// Writes a float stat locally.
     fn set_stat_float(&self, name: &str, value: f32) -> Result<(), String>;
 
     /// Sends every pending achievement/stat write to the backend now, rather

@@ -394,7 +394,7 @@ impl Editor {
     }
 }
 
-/// One Sdf-stage `.flsl` file's parse/check state (Field Shapes — proposal §7).
+/// One SDF-stage `.flsl` file's parse/check state (Field Shapes — proposal §7).
 pub(crate) struct SdfEntry {
     mtime: Option<SystemTime>,
     /// Parse + check result: per-slot transpilation happens at splice time,
@@ -561,7 +561,7 @@ impl Editor {
         self.flsl_shape_slots = slots;
     }
 
-    /// Compile (or hot-reload) one Sdf-stage `.flsl` by material path.
+    /// Compile (or hot-reload) one SDF-stage `.flsl` by material path.
     fn ensure_sdf_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);

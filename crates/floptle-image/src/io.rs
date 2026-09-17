@@ -7,7 +7,7 @@
 //!
 //! The container is shaped like `.tpaint` (magic + version + header + PNG-
 //! compressed payloads) for the same reason: layers are mostly flat and PNG
-//! shrinks them by an order of magnitude. A version from the FUTURE is
+//! shrinks them by an order of magnitude. A version from the future is
 //! **refused, not scrambled**; a version from the past is read with the fields
 //! it had, because adding a field must never cost anybody their art.
 
@@ -119,7 +119,7 @@ pub fn encode_png(px: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 }
 
 /// Decode any supported image bytes to `(pixels, w, h)`. Format is guessed from
-/// the CONTENT, never the extension — the house rule (`floptle_assets::decode`).
+/// the content, never the extension — the house rule (`floptle_assets::decode`).
 pub fn decode_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
@@ -160,7 +160,7 @@ fn decode_mask(bytes: &[u8]) -> Option<Mask> {
 pub fn encode(img: &Image) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(MAGIC);
-    // Write the OLDEST layout that can carry this document. A file that uses
+    // Write the oldest layout that can carry this document. A file that uses
     // nothing new stays readable by an older build, so adding a field costs
     // forward compatibility only for the documents that actually use it.
     let version = if img.sheet.is_some() { V_SHEET } else { MIN_VERSION };
