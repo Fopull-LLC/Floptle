@@ -1756,5192 +1756,9 @@ impl EditorTabViewer<'_> {
         // "before" here so the change can be found by comparison afterwards —
         // an immediate-mode panel leaves no other record of what it touched.
         let multi = multi_edit::Snapshot::take(self.world, self.selection);
-        // The whole selection, copied out before `self` is split below, for the
-        // few controls that route their change through `cmd` instead of writing
-        // a component the multi-edit diff could find afterwards. The layer
-        // picker is one: it has to rebuild the live sim, so it cannot just poke
-        // the component and let the diff carry it.
-        let sel_all: Vec<floptle_core::Entity> = self.selection.to_vec();
-        let cmd = &mut *self.cmd;
-        let world = &mut *self.world;
-        // Read before `self` is split up below.
-        let playing = self.playing;
-        let bone_names = self.bone_names;
-        // Snapshot the selected object/bone before `world` reborrows `self` — the
-        // Objects & Rig lists highlight it and route clicks through `cmd.select_bone`.
-        let cur_bone = *self.bone_selection;
         match primary {
-            Some(e) if world.get::<Light>(e).is_some() => {
-                // What ELSE is lighting this scene — counted before the `Light`
-                // borrow, because the answer needs the whole world.
-                //
-                // "I set intensity to 0 and I can still see" is a fair thing to
-                // expect and a fair thing to be confused by: `intensity` scales
-                // the KEY light only, and four other things put photons on the
-                // screen. None of them is discoverable from this panel, so the
-                // panel now names them.
-                let point_lights = world
-                    .query::<Matter>()
-                    .filter(|(pe, m)| {
-                        matches!(m, Matter::PointLight { intensity, .. } if *intensity > 0.0)
-                            && !floptle_core::is_disabled(world, *pe)
-                    })
-                    .count();
-                let unlit_mats =
-                    world.query::<Material>().filter(|(_, m)| m.unlit).count();
-                let emissive_mats = world
-                    .query::<Material>()
-                    .filter(|(_, m)| m.emissive != [0.0; 3] && m.emissive_strength > 0.0)
-                    .count();
-                if let Some(l) = world.get_mut::<Light>(e) {
-                    ui.label("Lighting node");
-                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.stars, "stars mode ☀")
-                        .on_hover_text(
-                            "the directional light turns OFF and every Celestial Body with \
-                             luminosity > 0 becomes a real light source — light radiates \
-                             from each star with inverse-square falloff, terminators wrap \
-                             planets, far sides go dark, and multiple stars just work \
-                             (up to 4 reach the shaders).",
-                        )
-                        .changed();
-                    if l.stars {
-                        ui.small("light comes from Celestial Bodies with luminosity > 0");
-                    } else {
-                        ui.label("direction");
-                        ui.horizontal_wrapped(|ui| {
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
-                        });
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("light");
-                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
-                        ui.label("ambient");
-                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
-                    });
-                    // The 2D half, next to its 3D twin so the pair is obvious.
-                    // Without a row here the only way to find out that a flat
-                    // scene's base brightness is a field on the Lighting node
-                    // was to be told.
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("2D base light");
-                        cmd.inspector_changed |=
-                            ui.color_edit_button_rgb(&mut l.ambient_2d).changed();
-                        ui.small(if l.ambient_2d == [1.0, 1.0, 1.0] {
-                            "full — 2D lights only add"
-                        } else {
-                            "turned down — 2D lights carve into it"
-                        });
-                    })
-                    .response
-                    .on_hover_text(
-                        "What every tilemap and sprite batch is lit by before any 2D light \
-                         reaches it. White means placing a light can only make things \
-                         brighter. Turn it down for a dark room a torch cuts a circle out \
-                         of.\n\nThis is the 2D one; `ambient` above is the 3D fill under \
-                         the key light.",
-                    );
-                    cmd.inspector_changed |=
-                        crate::responsive::slider(ui, egui::Slider::new(&mut l.intensity, 0.0..=8.0), "intensity")
-                            .on_hover_text(
-                                "brightness of the KEY (directional) light only. It is not a \
-                                 master dimmer — ambient, 2D base light, point lights, emissive \
-                                 and unlit materials are all separate.",
-                            )
-                            .changed();
-
-                    // Turned the key light off and the scene is still lit. Say
-                    // what by, and offer the one thing the person doing this
-                    // almost always wants: actual darkness.
-                    if l.intensity <= 0.0 && !l.stars {
-                        let ambient_on = l.ambient != [0.0; 3];
-                        let base_2d_on = l.ambient_2d != [0.0; 3];
-                        let mut sources: Vec<String> = Vec::new();
-                        if ambient_on {
-                            sources.push("3D ambient".into());
-                        }
-                        if base_2d_on {
-                            sources.push("the 2D base light".into());
-                        }
-                        if point_lights > 0 {
-                            sources.push(format!(
-                                "{point_lights} point light{}",
-                                if point_lights == 1 { "" } else { "s" }
-                            ));
-                        }
-                        if emissive_mats > 0 {
-                            sources.push(format!("{emissive_mats} emissive material(s)"));
-                        }
-                        if unlit_mats > 0 {
-                            sources.push(format!(
-                                "{unlit_mats} UNLIT material(s) — unlit ignores light entirely"
-                            ));
-                        }
-                        ui.add_space(2.0);
-                        if sources.is_empty() {
-                            ui.small("key light off, nothing else lights this scene — it is black.");
-                        } else {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 200, 80),
-                                "the key light is off and the scene is still lit",
-                            );
-                            ui.small(format!("still lighting it: {}.", sources.join(", ")));
-                            if (ambient_on || base_2d_on)
-                                && ui
-                                    .button("🌑  Black it out")
-                                    .on_hover_text(
-                                        "zero the 3D ambient and the 2D base light — the two \
-                                         fills this panel owns. Point lights, emissive and unlit \
-                                         materials are per-node and stay as they are.",
-                                    )
-                                    .clicked()
-                            {
-                                l.ambient = [0.0; 3];
-                                l.ambient_2d = [0.0; 3];
-                                cmd.inspector_changed = true;
-                            }
-                        }
-                    }
-
-                    ui.separator();
-                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadows, "sun shadows")
-                        .on_hover_text(
-                            "march the SDF field toward the sun — analytically soft shadows, \
-                             no shadow maps. Terrain and blobs cast on everything; meshes cast \
-                             via their collider shapes and receive like everything else.",
-                        )
-                        .changed();
-                    ui.add_enabled_ui(l.shadows, |ui| {
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0), "softness")
-                            .on_hover_text("0 = razor-hard edge (retro), 1 = dreamy-soft penumbra")
-                            .changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0), "strength")
-                            .on_hover_text("how dark full shadow gets — ambient light still fills, so 1.0 isn't pitch black")
-                            .changed();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("tint");
-                            cmd.inspector_changed |= ui
-                                .color_edit_button_rgb(&mut l.shadow_tint)
-                                .on_hover_text("shadows darken toward this color — black is neutral; try purple dusk or sepia")
-                                .changed();
-                            ui.label("quantize");
-                            let qlabel = match l.shadow_quantize {
-                                0 => "smooth".to_string(),
-                                n => format!("{n} bands"),
-                            };
-                            egui::ComboBox::from_id_salt("shadow_quantize")
-                                .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selected_text(qlabel)
-                                .show_ui(ui, |ui| {
-                                    cmd.inspector_changed |=
-                                        ui.selectable_value(&mut l.shadow_quantize, 0, "smooth").clicked();
-                                    for nb in 2..=4u32 {
-                                        cmd.inspector_changed |= ui
-                                            .selectable_value(&mut l.shadow_quantize, nb, format!("{nb} bands"))
-                                            .clicked();
-                                    }
-                                });
-                        });
-                        ui.add_enabled_ui(l.shadow_quantize >= 2, |ui| {
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadow_dither, "dither the penumbra")
-                                .on_hover_text("Bayer-pattern the quantized penumbra — the PS1 shadow edge; pairs with retro mode")
-                                .changed();
-                        });
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_distance, 10.0..=1000.0)
-                                    .logarithmic(true),
-                                    "distance")
-                            .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
-                            .changed();
-                        // Contact shadows: the short-range half, from the depth
-                        // buffer rather than from the field.
-                        ui.separator();
-                        cmd.inspector_changed |= crate::responsive::check(ui, &mut l.contact_shadows, "contact shadows")
-                            .on_hover_text(
-                                "the small dark line where things touch. A moving mesh casts through its \
-                                 COLLIDER, so a character's shadow is a capsule's — this shadows from the \
-                                 real silhouette of whatever is on screen instead. Short range: it is the \
-                                 shadow under a foot, in a seam, behind a bolt.",
-                            )
-                            .changed();
-                        ui.add_enabled_ui(l.contact_shadows, |ui| {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_length, 0.02..=3.0).suffix("m"), "reach")
-                                .on_hover_text("how far it traces. Too far and distant geometry starts smearing shadows over things in front of it")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_strength, 0.0..=1.0), "strength")
-                                .changed();
-                            let mut steps = l.contact_steps as i32;
-                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=32), "steps")
-                                .on_hover_text("samples along the trace — raise it if the shadow looks striped")
-                                .changed()
-                            {
-                                l.contact_steps = steps as u32;
-                                cmd.inspector_changed = true;
-                            }
-                            ui.small("only shadows what is ON SCREEN — nothing off the edge of the frame casts one");
-                        });
-                        // Reflections of the scene. Sits with the shadow knobs
-                        // rather than with fog because it is the same kind of
-                        // thing: a scene-wide switch that costs a march, reads
-                        // the depth buffer, and only sees what is on screen.
-                        ui.separator();
-                        cmd.inspector_changed |= crate::responsive::check(ui, &mut l.reflections, "reflections (screen space)")
-                            .on_hover_text(
-                                "reflective surfaces show the SCENE, not only the sky — a floor shows the \
-                                 room standing on it. Every physical material with some reflectivity picks \
-                                 this up at once; how much and how sharply is each material's roughness \
-                                 and reflections. Only what is ON SCREEN can be reflected: anything behind \
-                                 the camera or hidden behind something nearer falls back to the sky.",
-                            )
-                            .changed();
-                        ui.add_enabled_ui(l.reflections, |ui| {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_distance, 1.0..=200.0)
-                                        .logarithmic(true)
-                                        
-                                        .suffix("m"), "reach")
-                                .on_hover_text("how far a reflected ray travels before giving up. A puddle showing a building across the street needs more of this than a floor showing the table on it")
-                                .changed();
-                            let mut steps = l.reflection_steps as i32;
-                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 8..=64), "steps")
-                                .on_hover_text("samples along that ray — raise it with the reach, or reflections start missing thin things")
-                                .changed()
-                            {
-                                l.reflection_steps = steps as u32;
-                                cmd.inspector_changed = true;
-                            }
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_thickness, 0.02..=5.0)
-                                        .logarithmic(true)
-                                        
-                                        .suffix("m"), "thickness")
-                                .on_hover_text("how solid things are assumed to be. Too little and reflections come out speckled with holes; too much and railings and leaves smear over what is really behind them")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_clamp, 0.0..=64.0),
-                                        "brightness cap")
-                                .on_hover_text(
-                                    "the most one reflected bounce may carry. Two mirrors facing \
-                                     each other re-reflect each other every frame and a polished \
-                                     metal loses almost nothing per pass, so without a ceiling the \
-                                     pair climbs into a white blob. Ordinary highlights sit well \
-                                     under this. 0 removes the ceiling.",
-                                )
-                                .changed();
-                            ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
-                        });
-                        ui.small("off screen, a reflection falls back to the SKY — place a ◍ Reflection Probe to give a room something else to show");
-                        // Glass, in the same place as reflections and for the
-                        // same reason: it is what a surface shows of the scene
-                        // when the light goes through it rather than off it, and
-                        // it is a scene-wide cost rather than a material one.
-                        ui.separator();
-                        let mut layers = l.refraction_layers as i32;
-                        if crate::responsive::slider(ui, egui::Slider::new(
-                                    &mut layers,
-                                    1..=floptle_core::Light::MAX_REFRACTION_LAYERS as i32,
-                                ),
-                                "glass layers")
-                            .on_hover_text(
-                                "how many depths of see-through surface can be looked through at \
-                                 once. At 1 only the nearest pane shows what is behind it, so a \
-                                 fish tank has to be one box; raising it lets a window have a \
-                                 bottle standing behind it. Each layer costs one more pass, and \
-                                 only when something see-through is in view",
-                            )
-                            .changed()
-                        {
-                            l.refraction_layers = layers as u32;
-                            cmd.inspector_changed = true;
-                        }
-                    });
-                    // Fog — distance haze (depth ramp) or real marched media (volumetric).
-                    ui.separator();
-                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog, "fog")
-                        .on_hover_text("fade the scene into a color — cheap depth ramp or a marched volumetric layer; the skybox stays crisp")
-                        .changed();
-                    ui.add_enabled_ui(l.fog, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("mode");
-                            egui::ComboBox::from_id_salt("fog_mode")
-                                .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selected_text(if l.fog_volumetric { "volumetric" } else { "depth" })
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(!l.fog_volumetric, "depth").clicked() && l.fog_volumetric {
-                                        l.fog_volumetric = false;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if ui
-                                        .selectable_label(l.fog_volumetric, "volumetric")
-                                        .on_hover_text("a height-bounded layer of drifting mist marched per pixel — hills poke out of ground fog, patches roll by")
-                                        .clicked()
-                                        && !l.fog_volumetric
-                                    {
-                                        l.fog_volumetric = true;
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("color");
-                            cmd.inspector_changed |= ui
-                                .color_edit_button_rgb(&mut l.fog_color)
-                                .on_hover_text("match the horizon / background so no seam shows at the skybox")
-                                .changed();
-                        });
-                        if l.fog_volumetric {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("density");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_density).speed(0.001).range(0.0..=2.0))
-                                    .on_hover_text("media thickness per world unit — how fast things vanish into it")
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("layer top");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_height).speed(0.1).suffix("m"))
-                                    .on_hover_text("world height the fog fills up to")
-                                    .changed();
-                                ui.label("softness");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_falloff).speed(0.1).range(0.01..=1000.0).suffix("m"))
-                                    .on_hover_text("how gradually the layer thins out above its top")
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("noise");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_noise, 0.0..=1.0), "")
-                                    .on_hover_text("break the media into drifting patches (0 = uniform)")
-                                    .changed();
-                                ui.label("scale");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_noise_scale).speed(0.5).range(0.5..=1000.0).suffix("m"))
-                                    .on_hover_text("wisp size in world units")
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("max distance");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_end).speed(1.0).range(1.0..=10000.0).suffix("m"))
-                                    .on_hover_text("how far a ray that hits nothing keeps marching fog — a perf fence for sky pixels (an upward ray already stops where the layer ends)")
-                                    .changed();
-                            });
-                            // Light injection: the media lit by the scene rather
-                            // than painted a flat colour.
-                            ui.separator();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_light, 0.0..=3.0), "lit by the scene")
-                                .on_hover_text(
-                                    "0 = the flat fog colour; 1 = the media lit by the sun, the point lights and the baked bounce; \
-                                     past 1 exaggerates. The fog colour becomes what the media is MADE of rather than what it looks like.",
-                                )
-                                .changed();
-                            ui.add_enabled_ui(l.fog_light > 0.0, |ui| {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_anisotropy, -0.9..=0.9), "forward scatter")
-                                    .on_hover_text(
-                                        "which way the media throws light. Positive blooms toward the sun (look into it and the air glows); \
-                                         0 is an even haze; negative bounces it back at you. A mote of fog has no facing — this is what \
-                                         does the job a surface normal does everywhere else.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_shafts, "shafts (shadows in the fog)")
-                                    .on_hover_text(
-                                        "march the sun shadow at every fog step, so shadowed air stays dark and beams appear through \
-                                         windows and branches. This is the entire cost of lit fog — turn it off and the media is lit \
-                                         but never occluded.",
-                                    )
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("quality");
-                                let mut steps = l.fog_steps as i32;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=64), "steps")
-                                    .on_hover_text("samples along each pixel's ray — raise it until the fog stops looking stepped, then stop")
-                                    .changed()
-                                {
-                                    l.fog_steps = steps as u32;
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            if l.fog_shafts && l.fog_light > 0.0 && !l.shadows {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(220, 170, 90),
-                                    "shafts need shadows on (above) — the fog is lit but nothing occludes it",
-                                );
-                            }
-                        } else {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("start");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_start).speed(0.5).range(0.0..=10000.0).suffix("m"))
-                                    .changed();
-                                ui.label("end");
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
-                                    .changed();
-                            });
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_sky, 0.0..=1.0), "takes the sky")
-                                .on_hover_text(
-                                    "how much of the fog the SKY takes at the horizon. This is what makes a fog \
-                                     colour darker than the background read as fog at all: tint only the \
-                                     surfaces and distant hills turn to silhouette against air that never \
-                                     moved. Weighted toward the horizon, so straight up your skybox \
-                                     survives. 0 is the old surfaces-only look.",
-                                )
-                                .changed();
-                        }
-                        // Dither: hide 8-bit banding on long, slow fog ramps.
-                        ui.horizontal_wrapped(|ui| {
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_dither, "dither")
-                                .on_hover_text("break up color banding across the fog gradient (matches the retro pixel grid)")
-                                .changed();
-                            ui.add_enabled_ui(l.fog_dither, |ui| {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_dither_strength, 0.0..=1.0), "amount")
-                                    .changed();
-                            });
-                        });
-                    });
-                }
-            }
-            Some(e) if world.get::<Transform>(e).is_some() => {
-                // The on/off switch, where every other editor puts it: on the
-                // name row, one click, always visible. It was reachable only
-                // from a right-click menu, which is fine for something you do
-                // once and wrong for something you do while trying things out —
-                // and a node you cannot see the state of is a node you forget is
-                // off. The checkbox reads the node's own flag; if an ancestor is
-                // what switched it off, the line under it says so, because
-                // ticking this one would then change nothing visible.
-                let off_self = world.get::<floptle_core::Disabled>(e).is_some();
-                let off_inherited = !off_self && floptle_core::is_disabled(world, e);
-                ui.horizontal_wrapped(|ui| {
-                    let mut on = !off_self;
-                    if crate::responsive::check(ui, &mut on, "")
-                        .on_hover_text(
-                            "enabled — a switched-off node doesn't draw, doesn't collide, its \
-                             scripts don't run, it can't be the active camera, and find() skips \
-                             it. Everything under it goes with it.",
-                        )
-                        .changed()
-                    {
-                        // The whole selection, so switching six things off is one
-                        // gesture — and the target state is decided here, once,
-                        // rather than each node flipping its own way.
-                        let targets: Vec<floptle_core::Entity> = if self.selection.contains(&e) {
-                            self.selection.clone()
-                        } else {
-                            vec![e]
-                        };
-                        cmd.set_enabled = Some((targets, on));
-                    }
-                    ui.label("name");
-                    if let Some(n) = world.get_mut::<Name>(e) {
-                        cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
-                    }
-                    // The selection lock. On the name row because that row is
-                    // the one line naming what would be lost, and because it is
-                    // drawn for the selected node — which is what guarantees the
-                    // switch is on screen whenever the lock is on.
-                    //
-                    // The state is the alpha: opaque = held, faded = free. One
-                    // thing to look at, no second label saying which.
-                    let locked = self.selection_locked;
-                    let tint = {
-                        let c = ui.visuals().text_color();
-                        if locked { c } else { c.gamma_multiply(0.35) }
-                    };
-                    let lock = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(crate::icons::LOCK).color(tint),
-                            )
-                            .frame(locked),
-                        )
-                        .on_hover_text(if locked {
-                            "selection locked — clicking in the Scene or the Hierarchy \
-                             leaves it alone, so you can look around while editing this \
-                             node. Click to release."
-                        } else {
-                            "lock the selection — the Inspector, Hierarchy and Scene keep \
-                             these nodes however you click, so you can read another node's \
-                             values without losing this one. Click to hold."
-                        });
-                    if lock.clicked() {
-                        cmd.toggle_selection_lock = true;
-                    }
-                });
-                if off_inherited {
-                    ui.small(
-                        egui::RichText::new(
-                            "⚠ switched off by a parent — turning this one on changes nothing \
-                             until the parent is on",
-                        )
-                        .color(egui::Color32::from_rgb(255, 200, 80)),
-                    );
-                }
-                // ===== Layer + tags — identity every node carries. =====
-                // Layer: the node's collision/query layer (project-defined names,
-                // Project Settings → Layers). Tags: free-form chips scripts find
-                // with `findTagged` / compare with `node:hasTag`.
-                ui.horizontal_wrapped(|ui| {
-                    // "collision layer", not "layer". A node has two things
-                    // called a layer — this one, which answers "does this hit
-                    // that", and the sorting layer below, which answers "which
-                    // draws in front" — and they are deliberately independent: a
-                    // background collides with nothing and still sorts, a player
-                    // collides with everything and sorts separately. Two controls
-                    // both labelled "layer" is how that independence gets read as
-                    // a duplicate, and then as a bug.
-                    ui.label("collision layer")
-                        .on_hover_text(
-                            "what this collides with and what a raycast can hit. NOT the \
-                             sorting layer below — that one is about drawing, and the two \
-                             are set independently on purpose.",
-                        );
-                    let layer_of = |w: &floptle_core::World, e| {
-                        w.get::<floptle_core::Layer>(e)
-                            .map(|l| l.0.clone())
-                            .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string())
-                    };
-                    let cur = layer_of(world, e);
-                    // Every selected node, not just the one whose dropdown this
-                    // is (the panel's stated promise, which this control was not
-                    // keeping).
-                    let targets: Vec<floptle_core::Entity> =
-                        if sel_all.contains(&e) { sel_all.clone() } else { vec![e] };
-                    // Do the selected nodes AGREE about their layer? If they do
-                    // not, the combo must not claim they do — showing the
-                    // primary's layer over a mixed selection is a readout that
-                    // is wrong about four nodes out of five.
-                    let mixed = targets.iter().any(|&t| layer_of(world, t) != cur);
-                    let known = self.layer_names.contains(&cur);
-                    let shown = if mixed {
-                        format!("— mixed ({}) —", targets.len())
-                    } else if known {
-                        cur.clone()
-                    } else {
-                        format!("⚠ {cur}")
-                    };
-                    egui::ComboBox::from_id_salt("node_layer")
-                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                        .selected_text(shown)
-                        .show_ui(ui, |ui| {
-                            for name in self.layer_names {
-                                // Ticked only when the whole selection is on it.
-                                let ticked = !mixed && *name == cur;
-                                // A mixed selection may be UNIFIED onto the
-                                // layer the primary already has — that is a real
-                                // edit and the obvious way to ask for it. Only a
-                                // selection that already agrees can be a no-op.
-                                if ui.selectable_label(ticked, name).clicked() && !ticked {
-                                    cmd.set_layer = Some(crate::SetLayer {
-                                        targets: targets.clone(),
-                                        layer: name.clone(),
-                                    });
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "collision/query layer — the Project Settings matrix decides \
-                             which layers collide; raycasts can filter by them",
-                        );
-                    if !known {
-                        ui.small("not in Project Settings — acts as Default")
-                            .on_hover_text("define it in Project Settings → Layers, or pick another");
-                    }
-                });
-                // What draws in front of what, for a flat scene.
-                //
-                // Offered on anything flat, whether or not the project has named
-                // a second sorting layer. Gating it on a second layer hid the
-                // whole of Y-sorting from every new project — and Y-sorting is
-                // the one thing here that needs no layers at all: a top-down
-                // game with a single layer is the ordinary case, and it was the
-                // case that could not reach the control. A 3D scene still sees
-                // none of this.
-                let flat = matches!(
-                    world.get::<Matter>(e),
-                    Some(Matter::Tilemap { .. })
-                        | Some(Matter::SpriteBatch { .. })
-                        | Some(Matter::Sprite { .. })
-                );
-                let sorts = flat
-                    || self.sorting_names.len() > 1
-                    || world.get::<floptle_core::Sorting>(e).is_some();
-                if sorts {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("sorting layer")
-                            .on_hover_text(
-                                "which stack this draws in — later layers draw in front of \
-                                 earlier ones. Nothing to do with the collision layer above.",
-                            );
-                        let cur = world
-                            .get::<floptle_core::Sorting>(e)
-                            .cloned()
-                            .unwrap_or_default();
-                        let name = if cur.layer.trim().is_empty() {
-                            floptle_core::DEFAULT_SORTING_LAYER.to_string()
-                        } else {
-                            cur.layer.clone()
-                        };
-                        let known = self.sorting_names.contains(&name);
-                        egui::ComboBox::from_id_salt("node_sorting")
-                            .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                            .selected_text(if known { name.clone() } else { format!("⚠ {name}") })
-                            .show_ui(ui, |ui| {
-                                for n in self.sorting_names {
-                                    if ui.selectable_label(*n == name, n).clicked() && *n != name {
-                                        cmd.set_sorting = Some((e, n.clone(), cur.order));
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "which sorting layer this draws in — later layers draw in \
-                                 front. Project Settings names them.",
-                            );
-                        // How the place within the layer is decided. Offered
-                        // beside the layer rather than hidden behind it, because
-                        // "by Y" is the answer for a whole genre and a developer
-                        // who does not know it exists will write it in Lua.
-                        let mut mode = cur.mode;
-                        for m in floptle_core::SortMode::ALL {
-                            let hover = match m {
-                                floptle_core::SortMode::Order => {
-                                    "you say the position, with the number beside this"
-                                }
-                                floptle_core::SortMode::Y => {
-                                    "lower on the screen draws in front — a character below \
-                                     a table is in front of it and one above is behind, with \
-                                     nobody authoring a number. The full sort is sorting \
-                                     layer, then order, then Y: this only decides between \
-                                     nodes that are level on both of the others."
-                                }
-                            };
-                            if ui
-                                .selectable_label(mode == m, m.label())
-                                .on_hover_text(hover)
-                                .clicked()
-                                && mode != m
-                            {
-                                mode = m;
-                                cmd.set_sort_mode = Some((e, m));
-                            }
-                        }
-                        // `order` stays live under both modes. Y is a tiebreak
-                        // inside an order, not a replacement for it, and hiding
-                        // the field would teach the wrong model — the one where
-                        // turning Y-sorting on throws away the layering you
-                        // already authored.
-                        let mut order = cur.order;
-                        if ui
-                            .add(egui::DragValue::new(&mut order).speed(1).prefix("order "))
-                            .on_hover_text(if mode == floptle_core::SortMode::Y {
-                                "within the layer: higher draws in front. Y only decides \
-                                 between nodes on the SAME order, so a shadow on order -1 \
-                                 stays under a Y-sorted crowd."
-                            } else {
-                                "within the layer: higher draws in front"
-                            })
-                            .changed()
-                        {
-                            cmd.set_sorting = Some((e, name.clone(), order));
-                        }
-                        if mode == floptle_core::SortMode::Y {
-                            crate::responsive::para(
-                                ui,
-                                egui::RichText::new("ties on this order go to whichever is lower")
-                                    .weak()
-                                    .small(),
-                            );
-                        }
-                        if !known {
-                            ui.small("not in Project Settings — draws in front")
-                                .on_hover_text(
-                                    "A layer that no longer exists sorts LAST, so the node is \
-                                     visible and obviously wrong rather than hidden behind \
-                                     the background.",
-                                );
-                        }
-                    });
-                }
-                // Parallax, beside sorting because they are the two things a
-                // flat scene says about a layer as a whole. Offered on the same
-                // condition, for the same reason.
-                if sorts || world.get::<floptle_core::Parallax>(e).is_some() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("parallax");
-                        let cur = world.get::<floptle_core::Parallax>(e).copied().unwrap_or_default();
-                        let mut next = cur;
-                        let mut changed = false;
-                        for (i, axis) in ["x ", "y "].iter().enumerate() {
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut next.factor[i])
-                                        .speed(0.01)
-                                        .range(0.0..=4.0)
-                                        .prefix(*axis),
-                                )
-                                .on_hover_text(
-                                    "how much of the camera's movement this layer keeps. \
-                                     1 moves with the world (no parallax), 0 is pinned to \
-                                     the camera as if infinitely far away, 0.3 is distant \
-                                     hills. Nothing actually moves — it is an offset on the \
-                                     drawn transform, so the collider stays put.",
-                                )
-                                .changed();
-                        }
-                        if changed {
-                            cmd.set_parallax = Some((e, next));
-                        }
-                        if !cur.is_identity() {
-                            crate::responsive::para(
-                                ui,
-                                egui::RichText::new("drawn offset only — nothing moves")
-                                    .weak()
-                                    .small(),
-                            );
-                        }
-                    });
-                }
-                lighting_2d_row(ui, world, e, self.sorting_names, cmd);
-                camera_2d_section(ui, world, e, cmd);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("tags");
-                    let mut remove: Option<String> = None;
-                    if let Some(tags) = world.get::<floptle_core::Tags>(e) {
-                        for t in &tags.0 {
-                            if ui
-                                .small_button(format!("{t} ✖"))
-                                .on_hover_text("remove this tag")
-                                .clicked()
-                            {
-                                remove = Some(t.clone());
-                            }
-                        }
-                    }
-                    let field = egui::TextEdit::singleline(self.tag_edit)
-                        .hint_text("add tag…")
-                        .desired_width(90.0);
-                    let resp = ui.add(field);
-                    let commit = (resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        || ui.small_button("➕").on_hover_text("add the tag").clicked();
-                    if commit && !self.tag_edit.trim().is_empty() {
-                        let tag = self.tag_edit.trim().to_string();
-                        self.tag_edit.clear();
-                        let tags = match world.get_mut::<floptle_core::Tags>(e) {
-                            Some(t) => t,
-                            None => {
-                                world.insert(e, floptle_core::Tags::default());
-                                world.get_mut::<floptle_core::Tags>(e).unwrap()
-                            }
-                        };
-                        if !tags.has(&tag) {
-                            tags.0.push(tag);
-                            cmd.inspector_changed = true;
-                        }
-                        resp.request_focus(); // keep typing tags
-                    }
-                    if let Some(tag) = remove
-                        && let Some(tags) = world.get_mut::<floptle_core::Tags>(e)
-                    {
-                        tags.0.retain(|t| *t != tag);
-                        if tags.0.is_empty() {
-                            world.remove::<floptle_core::Tags>(e);
-                        }
-                        cmd.inspector_changed = true;
-                    }
-                });
-                // The component clipboard (read-only); copy/paste route through `cmd`.
-                let clip = self.component_clip.as_ref();
-
-                // ===== Type — the node's primary kind (mutually exclusive). =====
-                {
-                    let (icon, label, is_terrain) = match world.get::<Matter>(e) {
-                        Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
-                        None => ("◎", "Type", false),
-                    };
-                    let (copy, paste, _) = component_header(
-                        ui,
-                        &format!("{icon} {label}"),
-                        !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
-                        false,
-                    );
-                    if copy && !is_terrain
-                        && let Some(m) = world.get::<Matter>(e) {
-                            cmd.copy_component = Some(ComponentClip::Matter(m.clone()));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                }
-                ui.indent("type_props", |ui| {
-                    // The Sprite editor needs its node's Material, and the
-                    // Matter borrow below is mutable — so this is read first.
-                    let sprite_facts = {
-                        let mat = world.get::<Material>(e);
-                        (mat.map(|m| m.sheet()), mat.is_some_and(|m| m.texture.is_some()))
-                    };
-                    if let Some(m) = world.get_mut::<Matter>(e) {
-                        match m {
-                            Matter::Primitive { shape, color } => {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("shape");
-                                    egui::ComboBox::from_id_salt("shape")
-                                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                        .selected_text(format!("{shape:?}"))
-                                        .show_ui(ui, |ui| {
-                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
-                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
-                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
-                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Plane, "Plane").clicked();
-                                        });
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("color");
-                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                    ui.small("(base color — add a Material below for emissive, specular, …)");
-                                });
-                            }
-                            Matter::Blob { scale } => {
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
-                                    .changed();
-                            }
-                            // 2D. The grid is edited from
-                            // Lua — a room is re-dressed per floor — so the
-                            // Inspector states the shape and the one thing that
-                            // is easy to get wrong: the sheet is the MATERIAL's.
-                            Matter::Tilemap { cols, rows, tile, data, tileset } => {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("grid");
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(cols).speed(1.0).prefix("cols ").range(0..=1024))
-                                        .changed();
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(rows).speed(1.0).prefix("rows ").range(0..=1024))
-                                        .changed();
-                                });
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(tile).speed(0.01).prefix("tile ").range(0.001..=64.0))
-                                    .on_hover_text("world size of one tile's edge")
-                                    .changed();
-                                let want = (*cols as usize) * (*rows as usize);
-                                let placed = data
-                                    .iter()
-                                    .filter(|&&p| p != floptle_core::EMPTY_TILE)
-                                    .count();
-                                ui.small(format!("{placed} of {want} squares placed"));
-                                if data.len() != want && ui.button("resize to fit").clicked() {
-                                    data.resize(want, floptle_core::EMPTY_TILE);
-                                    cmd.inspector_changed = true;
-                                }
-                                // The tileset — what says whether these tiles collide,
-                                // what they are tagged, and how they autotile. Read-only
-                                // here on purpose: attaching one is a ◫ Tiles operation
-                                // (it needs the sheet's dimensions to make sense of), and
-                                // a free-text path field is a way to typo a level solid.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("tileset");
-                                    if tileset.is_empty() {
-                                        // Named as the two FEATURES somebody would
-                                        // go looking for, and coloured, because
-                                        // this was reported twice as the engine
-                                        // not having either of them.
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(255, 200, 80),
-                                            "none",
-                                        );
-                                    } else {
-                                        ui.small(
-                                            floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
-                                        );
-                                    }
-                                    if ui.small_button("◫ Tiles").clicked() {
-                                        cmd.focus_tiles = true;
-                                    }
-                                });
-                                if tileset.is_empty() {
-                                    ui.small(
-                                        "Without one, these tiles collide with nothing and \
-                                         cannot autotile — both are per-tile facts and live \
-                                         in a tileset. Make one in ◫ Tiles; it takes its \
-                                         sheet from this node's Material.",
-                                    );
-                                }
-                                ui.small(
-                                    "the sheet comes from this node's Material (texture + \
-                                     sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \
-                                     it from a script: node:setTilemap{...} then tm:set(x, y, cell).",
-                                );
-                            }
-                            Matter::SpriteBatch { size } => {
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(size).speed(0.01).prefix("sprite size ").range(0.001..=64.0))
-                                    .on_hover_text("world edge of one sprite, before its own scale")
-                                    .changed();
-                                ui.small(
-                                    "sprites are written per frame from a script — \
-                                     node:sprites() then b:clear() and b:draw(...). Each one \
-                                     carries its own cell AND tint, which a shared Material \
-                                     cannot give it.",
-                                );
-                            }
-                            Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
-                                // `ppu` measures the texture, so with no texture
-                                // there is nothing to measure and the sprite
-                                // falls back to `size` — a field this mode hides.
-                                // Silently, that is a headline control that does
-                                // nothing on a node somebody just created.
-                                // (Read before the Matter borrow — see `sprite_facts`.)
-                                let (sheet, has_tex) = sprite_facts;
-                                if !has_tex {
-                                    crate::responsive::para(
-                                        ui,
-                                        egui::RichText::new(
-                                            "no texture yet — give this node a Material with one, and the sheet's cols/rows in its import settings",
-                                        )
-                                        .weak()
-                                        .small(),
-                                    );
-                                }
-                                // Size, two ways, and only one of them live at a
-                                // time — a pixels-per-unit sprite takes its size
-                                // from the image, so leaving the world-size field
-                                // editable beside it would offer a number that
-                                // does nothing.
-                                let mut by_px = *ppu > 0.0;
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("size from");
-                                    for (on, label, hover) in [
-                                        (true, "pixels", "the image decides: a 32x32 cell at 32 pixels per unit is one unit across. The number a pixel artist already has."),
-                                        (false, "world units", "you decide: an edge length, whatever the image is."),
-                                    ] {
-                                        if ui
-                                            .selectable_label(by_px == on, label)
-                                            .on_hover_text(hover)
-                                            .clicked()
-                                            && by_px != on
-                                        {
-                                            by_px = on;
-                                            // Leaving a remembered `ppu` behind
-                                            // would make "world units" silently
-                                            // revert next time it was touched.
-                                            *ppu = if on { 32.0 } else { 0.0 };
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                                if by_px {
-                                    cmd.inspector_changed |= ui
-                                        .add(
-                                            egui::DragValue::new(ppu)
-                                                .speed(1.0)
-                                                .range(1.0..=1024.0)
-                                                .prefix("pixels per unit "),
-                                        )
-                                        .on_hover_text(
-                                            "measured against ONE CELL of the sheet, not the \
-                                             whole image — so slicing a sheet finer does not \
-                                             resize every sprite on it",
-                                        )
-                                        .changed();
-                                } else {
-                                    cmd.inspector_changed |= ui
-                                        .add(
-                                            egui::DragValue::new(size)
-                                                .speed(0.01)
-                                                .range(0.001..=1024.0)
-                                                .prefix("size "),
-                                        )
-                                        .on_hover_text("world edge length")
-                                        .changed();
-                                }
-                                let cells = sheet.map(|(c, r)| c.max(1) * r.max(1)).unwrap_or(1);
-                                // Labelled, because it was a bare number box
-                                // under "pixels per unit" — and the Material
-                                // section below has a whole grid of cells that
-                                // looks far more like the control. They are the
-                                // same value; this one is the number.
-                                cmd.inspector_changed |= ui
-                                    .add(
-                                        egui::DragValue::new(cell)
-                                            .speed(1)
-                                            .prefix("cell ")
-                                            .range(0..=cells.saturating_sub(1)),
-                                    )
-                                    .on_hover_text(if cells > 1 {
-                                        "which cell of the Material's sheet, row-major from the \
-                                         top-left"
-                                    } else {
-                                        "this Material's texture is not sliced into a sheet, so \
-                                         there is only one cell — set cols/rows in the texture's \
-                                         import settings"
-                                    })
-                                    .changed();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("flip");
-                                    cmd.inspector_changed |=
-                                        crate::responsive::check(ui, flip_x, "x").changed();
-                                    cmd.inspector_changed |=
-                                        crate::responsive::check(ui, flip_y, "y").changed();
-                                    crate::responsive::para(
-                                        ui,
-                                        egui::RichText::new("mirrors the picture, not the node")
-                                            .weak()
-                                            .small(),
-                                    );
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("pivot");
-                                    for (i, axis) in ["x ", "y "].iter().enumerate() {
-                                        cmd.inspector_changed |= ui
-                                            .add(
-                                                egui::DragValue::new(&mut pivot[i])
-                                                    .speed(0.01)
-                                                    .range(-2.0..=3.0)
-                                                    .prefix(*axis),
-                                            )
-                                            .on_hover_text(
-                                                "where the node's origin sits in the sprite, \
-                                                 0..1 from the bottom-left; 0.5, 0.5 is the \
-                                                 centre. Outside 0..1 is allowed and puts the \
-                                                 origin off the picture entirely, which is \
-                                                 occasionally what a hand-drawn rig wants.",
-                                            )
-                                            .changed();
-                                    }
-                                    if ui
-                                        .small_button("feet")
-                                        .on_hover_text(
-                                            "0.5, 0 — the origin at the bottom of the sprite. \
-                                             What a Y-sorted character wants: sorting reads \
-                                             the node's Y, and a centred origin sorts by a \
-                                             point floating at the character's waist.",
-                                        )
-                                        .clicked()
-                                    {
-                                        *pivot = [0.5, 0.0];
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                            }
-                            Matter::FieldShape { radius } => {
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(radius).speed(0.02).prefix("bounds radius ").range(0.05..=200.0))
-                                    .on_hover_text(
-                                        "the shape must fit inside this sphere (local units) — \
-                                         the march, shadows and culling all key off it",
-                                    )
-                                    .changed();
-                                ui.small(
-                                    "an sdf-stage .flsl (Material → Shader) IS this node's geometry — \
-                                     raymarched into the scene field. Visual only (no collision yet).",
-                                );
-                            }
-                            Matter::MapMesh { id } => {
-                                ui.label(format!("map mesh #{id}"));
-                                ui.small(
-                                    "editable blockout geometry — use the ▦ Model tool (key 8) \
-                                     to edit faces/edges/verts, extrude, and assign per-face \
-                                     materials; the Map tab has the shape ops",
-                                );
-                            }
-                            Matter::Mesh { asset_path } => {
-                                ui.label("imported mesh");
-                                // Swap the model freely — pick any model in the project.
-                                let tree = self.asset_tree;
-                                let file_label = |p: &str| {
-                                    Path::new(p)
-                                        .file_name()
-                                        .map(|s| s.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| p.to_string())
-                                };
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("model");
-                                    if let Some(Some(p)) = crate::ui_widgets::asset_picker(
-                                        ui,
-                                        egui::Id::new("mesh-model"),
-                                        self.project_root,
-                                        &file_label(asset_path),
-                                        None,
-                                        tree,
-                                        is_model,
-                                        180.0,
-                                    )
-                                        && *asset_path != p {
-                                            *asset_path = p.clone();
-                                            cmd.import_model = Some(p.clone());
-                                            cmd.inspector_changed = true;
-                                        }
-                                });
-                                ui.small(asset_path.as_str());
-                                if ui
-                                    .button("⏏ Extract textures")
-                                    .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
-                                    .clicked()
-                                {
-                                    cmd.extract_textures = Some(asset_path.clone());
-                                }
-                            }
-                            Matter::Empty => {
-                                ui.label("group / empty");
-                                ui.small("a folder — organizes child nodes; has a transform but no geometry");
-                            }
-                            Matter::Terrain { collision, .. } => {
-                                ui.label("editable terrain");
-                                ui.small("a sculptable SDF field — move it with the transform below");
-                                if ui.button("Δ Open Terrain tools").clicked() {
-                                    cmd.focus_terrain = true;
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("collide with");
-                                    use floptle_core::TerrainCollision as TC;
-                                    let name = |c: TC| match c {
-                                        TC::Drawn => "the drawn surface",
-                                        TC::Field => "the field",
-                                    };
-                                    egui::ComboBox::from_id_salt("terrain_collision")
-                                        .width(crate::responsive::fit_here(ui, 220.0))
-                                        .wrap_mode(egui::TextWrapMode::Truncate)
-                                        .selected_text(name(*collision))
-                                        .show_ui(ui, |ui| {
-                                            cmd.inspector_changed |= ui
-                                                .selectable_value(collision, TC::Drawn, name(TC::Drawn))
-                                                .on_hover_text(
-                                                    "Physics collides with the triangles you see — \
-                                                     what the terrain is drawn as. Ground you can \
-                                                     see under your feet is under your feet, at any \
-                                                     voxel size.",
-                                                )
-                                                .clicked();
-                                            cmd.inspector_changed |= ui
-                                                .selectable_value(collision, TC::Field, name(TC::Field))
-                                                .on_hover_text(
-                                                    "Physics collides with the voxel field itself: \
-                                                     smoother than the picture, and up to a fraction \
-                                                     of a voxel away from it — inside bulges, outside \
-                                                     hollows. Cheaper, and never meshes anything, so a \
-                                                     server that draws nothing may prefer it.",
-                                                )
-                                                .clicked();
-                                        });
-                                });
-                                ui.small("takes effect on the next Play");
-                            }
-                            Matter::Camera {
-                                fov_y,
-                                active,
-                                target,
-                                cull_mask,
-                                target_w,
-                                target_h,
-                                target_hz,
-                                ortho,
-                                ortho_height,
-                            } => {
-                                ui.label("camera");
-                                ui.small("a viewpoint — play mode renders from the active camera");
-                                // Live preview of what this camera sees.
-                                if let Some(tex) = self.cam_preview {
-                                    let w = ui.available_width().min(300.0);
-                                    let size = egui::vec2(w, w * 9.0 / 16.0);
-                                    ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
-                                    ui.small("preview — what this camera sees");
-                                }
-                                // Perspective or orthographic. The two knobs are
-                                // exclusive and only the live one is shown —
-                                // greying out the other would still invite
-                                // dragging a number that does nothing.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("projection").on_hover_text(
-                                        "orthographic draws everything at the same scale at \
-                                         every distance — what a 2D, isometric or strategy \
-                                         camera wants. Perspective is the 3D default.",
-                                    );
-                                    for (label, want) in
-                                        [("perspective", false), ("orthographic", true)]
-                                    {
-                                        if ui.selectable_label(*ortho == want, label).clicked()
-                                            && *ortho != want
-                                        {
-                                            *ortho = want;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                                if *ortho {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("height").on_hover_text(
-                                            "how many world units the view covers top to \
-                                             bottom. With 1-unit tiles this is how many tiles \
-                                             tall the shot is; the width follows the aspect.",
-                                        );
-                                        let mut h = *ortho_height;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut h)
-                                                    .speed(0.1)
-                                                    .range(0.1..=1000.0)
-                                                    .suffix(" units"),
-                                            )
-                                            .changed()
-                                        {
-                                            *ortho_height = Matter::clamp_ortho_height(h);
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                } else {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("field of view");
-                                        let mut deg = fov_y.to_degrees();
-                                        if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
-                                            *fov_y = deg.to_radians();
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                }
-                                // A1: render-target name — a live texture any material
-                                // or UI image can wear as `rt:<name>`.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("target").on_hover_text(
-                                        "render this camera into a live texture every frame; \
-                                         use it as texture \"rt:<name>\" on a material or UI \
-                                         image — cockpit screens, monitors, mirrors",
-                                    );
-                                    if ui.text_edit_singleline(target).changed() {
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                                if !target.is_empty() {
-                                    ui.small(format!("live texture: rt:{target}"));
-                                    // Size + refresh rate: a minimap is not worth a
-                                    // full-rate 480×270.
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("size").on_hover_text(
-                                            "the target texture's pixel size — smaller is \
-                                             cheaper, and a screen a few metres away does \
-                                             not need many",
-                                        );
-                                        let mut w = *target_w as i32;
-                                        let mut h = *target_h as i32;
-                                        let lo = Matter::TARGET_MIN as i32;
-                                        let hi = Matter::TARGET_MAX as i32;
-                                        let cw = ui.add(egui::DragValue::new(&mut w).range(lo..=hi));
-                                        ui.label("×");
-                                        let ch = ui.add(egui::DragValue::new(&mut h).range(lo..=hi));
-                                        if cw.changed() || ch.changed() {
-                                            *target_w = w as u32;
-                                            *target_h = h as u32;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("refresh").on_hover_text(
-                                            "how often the target redraws, in Hz. 0 = every \
-                                             frame. A 10 Hz minimap costs a sixth of a 60 Hz one.",
-                                        );
-                                        let mut hz = *target_hz;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut hz)
-                                                    .range(0.0..=240.0)
-                                                    .speed(0.5),
-                                            )
-                                            .changed()
-                                        {
-                                            *target_hz = hz.max(0.0);
-                                            cmd.inspector_changed = true;
-                                        }
-                                        ui.small(if *target_hz <= 0.0 {
-                                            "every frame".to_string()
-                                        } else {
-                                            format!("{:.0} Hz", *target_hz)
-                                        });
-                                    });
-                                }
-                                // Per-layer cull checkboxes (bit i = project layer i).
-                                let label = if *cull_mask == u32::MAX {
-                                    "renders: all layers".to_string()
-                                } else {
-                                    format!(
-                                        "renders: {}/{} layers",
-                                        cull_mask.count_ones().min(self.layer_names.len() as u32),
-                                        self.layer_names.len()
-                                    )
-                                };
-                                ui.menu_button(label, |ui| {
-                                    for (i, name) in self.layer_names.iter().enumerate() {
-                                        let mut on = (*cull_mask >> i) & 1 == 1;
-                                        if crate::responsive::check(ui, &mut on, name).changed() {
-                                            *cull_mask ^= 1 << i;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                    if ui.small_button("all").clicked() {
-                                        *cull_mask = u32::MAX;
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                                if *active {
-                                    ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
-                                } else if ui.button("⌖ Make active camera").clicked() {
-                                    cmd.set_active_camera = Some(e);
-                                }
-                                if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
-                                    cmd.camera_from_view = Some(e);
-                                }
-                            }
-                            Matter::PointLight {
-                                color,
-                                intensity,
-                                range,
-                                shape,
-                                shadows,
-                                spot_angle,
-                                spot_softness,
-                            } => {
-                                use floptle_core::LightShape as LS;
-                                let aimed = floptle_core::is_spot(*spot_angle);
-                                ui.label(if aimed { "spot light" } else { "light" });
-                                ui.small("position and facing come from the transform below");
-                                // **Where this scene stands against the cap**.
-                                // Naming the sixteen is the
-                                // easy half and it is the half that does not
-                                // help: "twelve, plus whatever the room has" is
-                                // exactly the arithmetic that crosses it, and a
-                                // number that only appears in the notes is one
-                                // nobody reads at the moment it matters. The
-                                // live count is the half that does.
-                                {
-                                    let (msg, warn) = light_slot_line(self.light_counts);
-                                    let r = if warn {
-                                        ui.colored_label(egui::Color32::from_rgb(220, 170, 90), msg)
-                                    } else {
-                                        ui.small(msg)
-                                    };
-                                    r.on_hover_text(
-                                        "sixteen lights reach the shader at once, across the \
-                                         whole scene — 3D and 2D together. Past that the ones \
-                                         contributing most at the camera win and the rest are \
-                                         simply not drawn, which reads as \"my seventeenth \
-                                         torch does nothing\".\n\nA light at intensity 0 gives \
-                                         its slot back, which is how you pool them. The same \
-                                         two numbers are perf.counts().lights and \
-                                         .lightsDropped.",
-                                    );
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("color");
-                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                });
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
-                                cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
-                                    .on_hover_text(
-                                        "stop this lamp at the walls between it and what it lights, instead \
-                                         of shining through them. Per lamp, because it costs a march per lit \
-                                         pixel and most lights in a level have nothing to be blocked by. \
-                                         Shadows from what is ON SCREEN: a wall casts while it is in frame \
-                                         and stops when you look away from it. Quality and darkness are on \
-                                         the Lighting node.",
-                                    )
-                                    .changed();
-                                // AIMING it. Above the emitter section because
-                                // it is the bigger question — "does this lamp
-                                // light the room or one thing in it" changes
-                                // what every control under it means.
-                                ui.separator();
-                                let mut on = aimed;
-                                if crate::responsive::check(ui, &mut on, "aim it (spot)")
-                                    .on_hover_text(
-                                        "cone down the node's forward, the same axis a camera looks \
-                                         down — rotate the node to aim it. Off means the lamp lights \
-                                         everything around it, which is what it has always done.",
-                                    )
-                                    .changed()
-                                {
-                                    // Turning it off parks the angle at omni and
-                                    // keeps the softness, so switching a spot off
-                                    // and on again gives back the same cone
-                                    // rather than the default one.
-                                    *spot_angle =
-                                        if on { 45.0 } else { floptle_core::OMNI_ANGLE };
-                                    cmd.inspector_changed = true;
-                                }
-                                if on {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
-                                                spot_angle,
-                                                floptle_core::MIN_SPOT_ANGLE
-                                                    ..=floptle_core::OMNI_ANGLE - 0.5,
-                                            )
-                                            
-                                            .suffix("°"), "cone")
-                                        .on_hover_text(
-                                            "the FULL angle, the number on a real fixture — 45° is a \
-                                             45° cone, not a 90° one",
-                                        )
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0), "edge")
-                                        .on_hover_text(
-                                            "how much of the cone is falloff. 0 is a hard circle; 1 \
-                                             fades from the middle out. A fraction of the cone, so \
-                                             widening the beam keeps the edge you gave it.",
-                                        )
-                                        .changed();
-                                }
-
-                                // The EMITTER. Switching shape keeps whatever
-                                // size the old one had where the two agree, so
-                                // trying rect against disk is one click and not
-                                // a re-measure.
-                                ui.separator();
-                                let old = *shape;
-                                let size = old.extent().max(0.25);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("emits from");
-                                    let mut pick = |ui: &mut egui::Ui, label: &str, on: bool, make: LS| {
-                                        if ui.selectable_label(on, label).clicked() && !on {
-                                            *shape = make;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    };
-                                    pick(ui, "point", matches!(old, LS::Point), LS::Point);
-                                    pick(ui, "sphere", matches!(old, LS::Sphere { .. }), LS::Sphere { radius: size });
-                                    pick(
-                                        ui,
-                                        "rect",
-                                        matches!(old, LS::Rect { .. }),
-                                        LS::Rect { width: size * 2.0, height: size * 2.0, two_sided: false },
-                                    );
-                                    pick(ui, "disk", matches!(old, LS::Disk { .. }), LS::Disk { radius: size, two_sided: false });
-                                    pick(ui, "tube", matches!(old, LS::Tube { .. }), LS::Tube { length: size * 4.0, radius: size * 0.25 });
-                                });
-                                let drag = |ui: &mut egui::Ui, label: &str, v: &mut f32| -> bool {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(label);
-                                        ui.add(egui::DragValue::new(v).speed(0.05).range(0.001..=200.0).suffix("m"))
-                                            .changed()
-                                    })
-                                    .inner
-                                };
-                                match shape {
-                                    LS::Point => {
-                                        ui.small(
-                                            "a dimensionless point — a hard highlight and a hard shadow edge, \
-                                             which is right for a bare bulb and wrong for a window",
-                                        );
-                                    }
-                                    LS::Sphere { radius } => {
-                                        cmd.inspector_changed |= drag(ui, "radius", radius);
-                                        ui.small("a bulb with size: the highlight becomes a disc and the terminator softens");
-                                    }
-                                    LS::Rect { width, height, two_sided } => {
-                                        cmd.inspector_changed |= drag(ui, "width", width);
-                                        cmd.inspector_changed |= drag(ui, "height", height);
-                                        cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways")
-                                            .on_hover_text("off = a window, on = a floating panel that glows from both faces")
-                                            .changed();
-                                        ui.small("faces the node's forward — rotate the node to aim it");
-                                    }
-                                    LS::Disk { radius, two_sided } => {
-                                        cmd.inspector_changed |= drag(ui, "radius", radius);
-                                        cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways").changed();
-                                        ui.small("faces the node's forward — rotate the node to aim it");
-                                    }
-                                    LS::Tube { length, radius } => {
-                                        cmd.inspector_changed |= drag(ui, "length", length);
-                                        cmd.inspector_changed |= drag(ui, "thickness", radius);
-                                        ui.small("lies along the node's local X, and streaks its highlight along itself");
-                                    }
-                                }
-                            }
-                            Matter::GravityVolume { mode, strength, radius } => {
-                                use floptle_core::GravityMode;
-                                ui.label("gravity volume");
-                                ui.small("level physics gravity — Down (normal) or Radial (planet)");
-                                ui.horizontal_wrapped(|ui| {
-                                    let mut radial = *mode == GravityMode::Radial;
-                                    if ui.selectable_label(!radial, "⬇ Down").clicked() {
-                                        radial = false;
-                                    }
-                                    if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
-                                        radial = true;
-                                    }
-                                    let new =
-                                        if radial { GravityMode::Radial } else { GravityMode::Down };
-                                    if new != *mode {
-                                        *mode = new;
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(strength, 0.0..=60.0), "strength").changed();
-                                if *mode == GravityMode::Radial {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 0.5..=500.0), "well radius")
-                                        .changed();
-                                }
-                            }
-                            Matter::WaterVolume {
-                                kind,
-                                radius,
-                                half_extents,
-                                density,
-                                drag,
-                                angular_drag,
-                                frozen,
-                                tint,
-                                visibility,
-                            } => {
-                                use floptle_core::WaterKind;
-                                ui.label("water volume");
-                                ui.small(
-                                    "buoyancy, drag and an underwater look. A Sea is a sphere \
-                                     about this node (a planet's ocean); a Pool is an oriented \
-                                     box — rotate the node and the surface tilts with it.",
-                                );
-                                ui.horizontal_wrapped(|ui| {
-                                    for k in WaterKind::ALL {
-                                        if ui.selectable_label(*kind == k, k.label()).clicked()
-                                            && *kind != k
-                                        {
-                                            *kind = k;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                                match kind {
-                                    WaterKind::Sea => {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 1.0..=100_000.0)
-                                                    .logarithmic(true),
-                                                    "sea radius")
-                                            .changed();
-                                    }
-                                    WaterKind::Pool => {
-                                        for (i, label) in ["half X", "half Y (depth)", "half Z"]
-                                            .iter()
-                                            .enumerate()
-                                        {
-                                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
-                                                        &mut half_extents[i],
-                                                        0.1..=1000.0,
-                                                    )
-                                                    .logarithmic(true),
-                                                    label)
-                                                .changed();
-                                        }
-                                    }
-                                }
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
-                                            "density kg/m³")
-                                    .on_hover_text(
-                                        "1000 = fresh water. What decides whether a given hull \
-                                         floats is this against the hull's own density, so a \
-                                         denser sea carries heavier craft.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0), "drag").changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
-                                    .changed();
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("underwater tint");
-                                    cmd.inspector_changed |=
-                                        ui.color_edit_button_rgb(tint).changed();
-                                });
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(visibility, 1.0..=500.0)
-                                            .logarithmic(true),
-                                            "visibility m")
-                                    .on_hover_text(
-                                        "How far you can see from inside. Replaces the scene's \
-                                         own fog while the camera is under, so meshes, terrain \
-                                         and particles go murky together.",
-                                    )
-                                    .changed();
-                                ui.separator();
-                                cmd.inspector_changed |= crate::responsive::check(ui, frozen, "frozen")
-                                    .on_hover_text(
-                                        "A frozen sea is not a fluid: no buoyancy, no drag, no \
-                                         underwater state. Add a Collidable surface and it \
-                                         becomes walkable ground. A script can thaw it.",
-                                    )
-                                    .changed();
-                            }
-                            Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
-                                ui.label("skybox");
-                                ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
-                                // A Sky-stage .flsl overrides the solid/texture look with a
-                                // procedural sky (per-ray-direction color). Clear it to fall
-                                // back to the solid/texture controls below.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("shader");
-                                    let cur = shader.clone().unwrap_or_default();
-                                    let slabel = if cur.is_empty() {
-                                        "(none — built-in sky)".to_string()
-                                    } else {
-                                        Path::new(&cur).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(cur.clone())
-                                    };
-                                    if let Some(pick) = crate::ui_widgets::asset_picker(
-                                        ui,
-                                        egui::Id::new("sky-shader"),
-                                        self.project_root,
-                                        &slabel,
-                                        None,
-                                        self.asset_tree,
-                                        crate::assets::is_shader,
-                                        180.0,
-                                    ) {
-                                        // A different sky shader has different knobs — the old
-                                        // overrides would misfill by name, so drop them (same
-                                        // as the Material path clears params on shader change).
-                                        if *shader != pick {
-                                            shader_params.clear();
-                                        }
-                                        *shader = pick;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if let Some(path) = shader.clone()
-                                        && ui
-                                            .button("◈")
-                                            .on_hover_text("edit this shader in the ◈ Shaders graph")
-                                            .clicked()
-                                    {
-                                        cmd.open_shader_graph = Some(path);
-                                    }
-                                    if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
-                                        *shader = None;
-                                        shader_params.clear();
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                                if shader.is_some() {
-                                    ui.small("a `stage sky` .flsl computes the sky from `skyDir`.");
-                                    // Knob rows from the compiled sky shader's uniform schema —
-                                    // same widgets as a Material's shader params. Edits write
-                                    // into `shader_params`; the raymarch reads them next frame.
-                                    if self.sky_uniforms.is_empty() {
-                                        ui.small("(its knobs appear here once it compiles — check the Console if not)");
-                                    } else {
-                                        crate::responsive::grid(ui, "sky_shader_rows", |ui| {
-                                                if shader_uniform_rows(ui, self.sky_uniforms, shader_params) {
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            });
-                                        if ui
-                                            .button("Reset knobs")
-                                            .on_hover_text("back to the shader's own defaults")
-                                            .clicked()
-                                        {
-                                            shader_params.clear();
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                }
-                                let mut textured = texture.is_some();
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
-                                        *texture = None;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
-                                        let mut tl = Vec::new();
-                                        collect_texture_paths(self.asset_tree, &mut tl);
-                                        *texture = Some(tl.first().cloned().unwrap_or_default());
-                                        cmd.inspector_changed = true;
-                                    }
-                                });
-                                textured = texture.is_some();
-                                if !textured {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("color");
-                                        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                    });
-                                } else {
-                                    let tree = self.asset_tree;
-                                    let cur = texture.clone().unwrap_or_default();
-                                    let label = |p: &str| {
-                                        Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
-                                    };
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("texture");
-                                        if let Some(Some(p)) = crate::ui_widgets::asset_picker(
-                                            ui,
-                                            egui::Id::new("sky-tex"),
-                                            self.project_root,
-                                            &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
-                                            None,
-                                            tree,
-                                            is_texture,
-                                            180.0,
-                                        ) {
-                                            *texture = Some(p);
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                    ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("tint");
-                                        cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
-                                    });
-                                }
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true), "size (radius)")
-                                    .changed();
-                            }
-                            Matter::NavMesh {
-                                id: _,
-                                half_extents,
-                                auto_bounds,
-                                layers,
-                                agent_radius,
-                                agent_height,
-                                max_slope,
-                                step_height,
-                                cell_size,
-                                enabled,
-                                auto_rebake,
-                                max_drop,
-                                max_jump,
-                                min_region_area,
-                            } => {
-                                let nav = self.nav.clone();
-                                if crate::responsive::check(ui, enabled, "characters can path on this").changed() {
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(
-                                    "Where characters can walk. Bakes what they would collide \
-                                     with — narrow it by layer, or drop one object with the \
-                                     Navmesh Exclude switch on it.",
-                                );
-                                ui.separator();
-
-                                // ---- what gets baked ----------------------------
-                                let label = if layers.is_empty() {
-                                    "layers: everything".to_string()
-                                } else {
-                                    format!("layers: {}", layers.join(", "))
-                                };
-                                ui.menu_button(label, |ui| {
-                                    for name in self.layer_names.iter() {
-                                        let mut on = layers.iter().any(|l| l == name);
-                                        if crate::responsive::check(ui, &mut on, name).changed() {
-                                            if on {
-                                                layers.push(name.clone());
-                                            } else {
-                                                layers.retain(|l| l != name);
-                                            }
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                    if ui.small_button("everything").clicked() {
-                                        layers.clear();
-                                        cmd.inspector_changed = true;
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Which layers count as level geometry. Nothing ticked means \
-                                     every layer.",
-                                );
-                                ui.small(format!(
-                                    "{} object{} would be baked",
-                                    nav.sources,
-                                    if nav.sources == 1 { "" } else { "s" }
-                                ));
-                                if nav.sources == 0 {
-                                    ui.small(
-                                        "— nothing matches. A navmesh bakes what a character \
-                                         would collide with, so level geometry needs the \
-                                         collidable switch on it.",
-                                    );
-                                }
-
-                                // ---- the box ------------------------------------
-                                ui.separator();
-                                if crate::responsive::check(ui, auto_bounds, "fit the box to what it finds")
-                                    .on_hover_text(
-                                        "Work the volume out from the geometry instead of \
-                                         sizing it by hand. A box that is too small clips the \
-                                         level, and nothing about the result says which.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-                                if !*auto_bounds {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("size");
-                                        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                            let mut full = half_extents[i] * 2.0;
-                                            let r = ui.add(
-                                                egui::DragValue::new(&mut full)
-                                                    .speed(0.25)
-                                                    .range(0.5..=100000.0)
-                                                    .prefix(format!("{axis} ")),
-                                            );
-                                            if r.changed() {
-                                                half_extents[i] = full * 0.5;
-                                                cmd.inspector_changed = true;
-                                            }
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text(
-                                        "The volume's full size in world units, before the \
-                                         node's scale. Move the node to move the box.",
-                                    );
-                                }
-
-                                // ---- the character ------------------------------
-                                ui.separator();
-                                ui.small("the character this is for");
-                                let mut touched = false;
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0),
-                                            "radius")
-                                    .on_hover_text(
-                                        "How wide it is. Ground closer than this to a wall or a \
-                                         drop is not walkable, so a path can be walked by \
-                                         something with a body rather than by a point.",
-                                    )
-                                    .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0),
-                                            "height")
-                                    .on_hover_text(
-                                        "How tall it is. Ground with less headroom than this is \
-                                         not walkable.",
-                                    )
-                                    .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(max_slope, 0.0..=89.0)
-                                            .suffix("°"),
-                                            "max slope")
-                                    .on_hover_text("The steepest floor it will walk up.")
-                                    .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0),
-                                            "step height")
-                                    .on_hover_text(
-                                        "The tallest lip it steps over rather than walks around. \
-                                         This is what makes a staircase one place and a ledge \
-                                         two.",
-                                    )
-                                    .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(cell_size, 0.02..=2.0)
-                                            .logarithmic(true),
-                                            "cell size")
-                                    .on_hover_text(
-                                        "How finely the level is sampled. The one performance \
-                                         knob: halving it quadruples the bake.",
-                                    )
-                                    .changed();
-                                if touched {
-                                    cmd.inspector_changed = true;
-                                }
-
-                                // ---- what joins it up, and what it drops --------
-                                //
-                                // A navmesh is a surface, and a surface stops at
-                                // every ledge. The first two turn the stopping
-                                // points back into a level a character can cross —
-                                // the difference between "the AI is stuck on a
-                                // kerb" and an AI. The third throws away the ground
-                                // that was never worth stopping at.
-                                ui.add_space(4.0);
-                                ui.small("how the ledges are joined up");
-                                let mut joined = false;
-                                joined |= crate::responsive::slider(ui, egui::Slider::new(max_drop, 0.0..=10.0),
-                                            "drop height")
-                                    .on_hover_text(
-                                        "The tallest ledge it steps off deliberately. Anything \
-                                         between the step height above and this gets a one-way \
-                                         link off the edge, so a route can take it rather than \
-                                         treating a knee-high lip as a wall.\n\n0 switches drop \
-                                         links off.",
-                                    )
-                                    .changed();
-                                joined |= crate::responsive::slider(ui, egui::Slider::new(max_jump, 0.0..=10.0),
-                                            "jump distance")
-                                    .on_hover_text(
-                                        "The widest gap it will jump, measured between the two \
-                                         edges of the walkable surface — the distance you can \
-                                         see in the overlay, which is wider than the hole in the \
-                                         floor by the radius at each side. Gets a two-way \
-                                         link.\n\n0 switches jump links off.",
-                                    )
-                                    .changed();
-                                joined |= crate::responsive::slider(ui, egui::Slider::new(min_region_area, 0.0..=20.0)
-                                            .suffix(" m²"),
-                                            "smallest patch")
-                                    .on_hover_text(
-                                        "Walkable ground in a patch smaller than this is \
-                                         thrown away. A level bakes hundreds of specks — a \
-                                         window sill, the top of a crate — and each one is an \
-                                         island nothing can reach and somewhere a character can \
-                                         be put by mistake. The biggest patch is never thrown \
-                                         away.",
-                                    )
-                                    .changed();
-                                if joined {
-                                    cmd.inspector_changed = true;
-                                }
-                                if *max_drop <= 0.0 && *max_jump <= 0.0 {
-                                    ui.small(
-                                        egui::RichText::new(
-                                            "both off — every ledge in the level is a wall, \
-                                             and the only ways across are the Nav Link nodes \
-                                             you place by hand.",
-                                        )
-                                        .color(egui::Color32::from_rgb(230, 180, 90)),
-                                    );
-                                }
-                                // The one setting that quietly does something other
-                                // than what it says, named with the number to use.
-                                if let Some(advice) = nav.advice.as_deref() {
-                                    ui.add_space(2.0);
-                                    ui.small(egui::RichText::new(advice).color(
-                                        egui::Color32::from_rgb(230, 180, 90),
-                                    ));
-                                }
-
-                                // ---- the bake -----------------------------------
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui
-                                        .button("⬚  Bake")
-                                        .on_hover_text(
-                                            "Work out where this character can walk. Saved next \
-                                             to the scene as a .fnav.",
-                                        )
-                                        .clicked()
-                                    {
-                                        cmd.nav_bake = true;
-                                    }
-                                    if nav.polys > 0
-                                        && ui
-                                            .button("🗑  Clear")
-                                            .on_hover_text("Throw the bake away.")
-                                            .clicked()
-                                    {
-                                        cmd.nav_clear = true;
-                                    }
-                                });
-                                if crate::responsive::check(ui, auto_rebake, "bake again when the level changes")
-                                    .on_hover_text(
-                                        "Off is right for a finished level: the bake is a file \
-                                         saved beside the scene and loaded with it, so it never \
-                                         needs doing twice.\n\nOn, the volume watches what it \
-                                         would bake, waits for it to stop moving, and bakes on \
-                                         another thread — so the editor keeps its frame rate, \
-                                         and a game that puts buildings down while it runs gets \
-                                         a navmesh that knows about them.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-                                if nav.baking {
-                                    ui.small("baking…");
-                                }
-                                if nav.polys == 0 {
-                                    ui.small("no bake yet — nothing can path here.");
-                                    ui.small(
-                                        "A bake is saved beside the scene and loaded with it, so \
-                                         this is a one-off — not something to do again each time \
-                                         you open the project.",
-                                    );
-                                } else {
-                                    ui.small(format!(
-                                        "baked: {} polygons over {:.0} m², from {} triangles in \
-                                         {:.2}s",
-                                        nav.polys, nav.area, nav.triangles, nav.seconds
-                                    ));
-                                    // Where it lives. A bake is a file, it is
-                                    // loaded with the scene, and saying so is
-                                    // the difference between trusting that and
-                                    // pressing Bake every time out of habit.
-                                    match nav.file.as_deref() {
-                                        Some(f) => {
-                                            ui.small(format!("saved in {f} — it loads with the scene"));
-                                        }
-                                        None => {
-                                            ui.small(
-                                                egui::RichText::new(
-                                                    "not saved to disk — this bake will be gone \
-                                                     when the scene is closed",
-                                                )
-                                                .color(egui::Color32::from_rgb(230, 180, 90)),
-                                            );
-                                        }
-                                    }
-                                    // What actually joins the level up. Said before
-                                    // the island count, because it is the answer to
-                                    // the question the island count raises.
-                                    let made = nav.drops + nav.jumps;
-                                    if made > 0 {
-                                        ui.small(format!(
-                                            "{made} way{} across found: {} drop{}, {} jump{}",
-                                            if made == 1 { "" } else { "s" },
-                                            nav.drops,
-                                            if nav.drops == 1 { "" } else { "s" },
-                                            nav.jumps,
-                                            if nav.jumps == 1 { "" } else { "s" },
-                                        ));
-                                    } else if *max_drop > 0.0 || *max_jump > 0.0 {
-                                        ui.small(
-                                            "no drops or jumps found — every ledge in this bake \
-                                             is either taller than the drop height or wider than \
-                                             the jump distance.",
-                                        );
-                                    }
-                                    if nav.placed_links > 0 {
-                                        ui.small(format!(
-                                            "{} nav link{} placed by hand",
-                                            nav.placed_links,
-                                            if nav.placed_links == 1 { "" } else { "s" }
-                                        ));
-                                    }
-                                    if nav.lost_links > 0 {
-                                        ui.small(
-                                            egui::RichText::new(format!(
-                                                "{} link{} could not find the ground at one end \
-                                                 and do nothing — the Console names them",
-                                                nav.lost_links,
-                                                if nav.lost_links == 1 { "" } else { "s" }
-                                            ))
-                                            .color(egui::Color32::from_rgb(230, 180, 90)),
-                                        );
-                                    }
-                                    if nav.capped {
-                                        ui.small(
-                                            egui::RichText::new(
-                                                "the level hit the ceiling on generated links. \
-                                                 A coarser cell size, or a smaller drop height, \
-                                                 will find the ones that matter instead of every \
-                                                 one there is.",
-                                            )
-                                            .color(egui::Color32::from_rgb(230, 180, 90)),
-                                        );
-                                    }
-                                    // More than one island is worth seeing rather than
-                                    // finding out about when a character will not go
-                                    // somewhere: it is usually a door nobody fits
-                                    // through. The SHARE is what makes the number
-                                    // actionable — "494 areas" says nothing, "the
-                                    // biggest holds 3% of the floor" says the bake
-                                    // is shattered and points at the settings.
-                                    if nav.regions > 1 {
-                                        let share = nav.biggest_share * 100.0;
-                                        let line = format!(
-                                            "{} separate areas — a character cannot walk between \
-                                             them. The largest holds {share:.0}% of the walkable \
-                                             ground.",
-                                            nav.regions
-                                        );
-                                        if nav.biggest_share < 0.5 {
-                                            ui.small(
-                                                egui::RichText::new(line)
-                                                    .color(egui::Color32::from_rgb(230, 180, 90)),
-                                            );
-                                            ui.small(
-                                                "A bake in this many pieces is usually a cell \
-                                                 size too coarse next to the agent radius, or a \
-                                                 drop height too low for the level's ledges.",
-                                            );
-                                        } else {
-                                            ui.small(line);
-                                        }
-                                    }
-                                    if nav.stale {
-                                        ui.small(
-                                            egui::RichText::new(
-                                                "the settings have changed since this was baked",
-                                            )
-                                            .color(egui::Color32::from_rgb(230, 180, 90)),
-                                        );
-                                    }
-                                    // The box was smaller than the level. Said
-                                    // here as well as in the Console, because
-                                    // this is the panel somebody opens when a
-                                    // character will not walk somewhere, and a
-                                    // bake of one corner of the map looks
-                                    // exactly like a bake of the map.
-                                    if let Some(missed) = nav.coverage.as_deref() {
-                                        ui.add_space(2.0);
-                                        ui.small(
-                                            egui::RichText::new(missed)
-                                                .color(egui::Color32::from_rgb(230, 180, 90)),
-                                        );
-                                    }
-                                }
-                            }
-                            Matter::NavLink {
-                                id: _,
-                                to,
-                                bidirectional,
-                                cost,
-                                area,
-                                duration,
-                                enabled,
-                            } => {
-                                if crate::responsive::check(ui, enabled, "this way is open").changed() {
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(
-                                    "A way across that is not walking: a ladder, a jump down, a \
-                                     vault, a door. This node is one end; the offset below is \
-                                     the other. Both ends have to land on the navmesh.",
-                                );
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("far end");
-                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                        cmd.inspector_changed |= ui
-                                            .add(
-                                                egui::DragValue::new(&mut to[i])
-                                                    .speed(0.1)
-                                                    .prefix(format!("{axis} ")),
-                                            )
-                                            .changed();
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Where it comes out, measured in this node's own space — so \
-                                     a link inside a prefab turns and scales with the prefab.",
-                                );
-                                if crate::responsive::check(ui, bidirectional, "can be crossed both ways")
-                                    .on_hover_text(
-                                        "A ladder can. A jump down cannot, and making one \
-                                         two-way is a character walking up a cliff.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=100.0)
-                                            .logarithmic(true),
-                                            "cost")
-                                    .on_hover_text(
-                                        "What crossing costs the router, in metres of ordinary \
-                                         walking. Raise it to make this a last resort; lower it \
-                                         to make it a shortcut.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(duration, 0.0..=10.0)
-                                            .suffix(" s"),
-                                            "crossing takes")
-                                    .on_hover_text(
-                                        "How long an agent spends on it. 0 means at walking \
-                                         speed, which is right for a vault and wrong for a lift.",
-                                    )
-                                    .changed();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("area");
-                                    cmd.inspector_changed |=
-                                        ui.text_edit_singleline(area).changed();
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Optional. Name a nav area and one exclusion can rule out \
-                                     every link like this — every jump in the level, say — \
-                                     rather than one per link.",
-                                );
-                                ui.separator();
-                                ui.small(
-                                    "In a script: agent.link is this link's name while it is \
-                                     being crossed, and agent.linkProgress runs 0 to 1 — which \
-                                     is what a climb animation is driven by. nav.link(name, \
-                                     false) shuts it.",
-                                );
-                            }
-                            Matter::NavArea { half_extents, area, cost, blocks, enabled } => {
-                                if crate::responsive::check(ui, enabled, "this volume counts").changed() {
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(
-                                    "Changes what the ground inside it means — either it costs \
-                                     more to cross, or it is not walkable at all.",
-                                );
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("size");
-                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                        let mut full = half_extents[i] * 2.0;
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut full)
-                                                    .speed(0.25)
-                                                    .range(0.1..=100000.0)
-                                                    .prefix(format!("{axis} ")),
-                                            )
-                                            .changed()
-                                        {
-                                            half_extents[i] = full * 0.5;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                                if crate::responsive::check(ui, blocks, "carve this out of the navmesh")
-                                    .on_hover_text(
-                                        "Nothing walks here, whatever it thinks of the ground. \
-                                         The answer to \"keep out of this room\" that does not \
-                                         involve an invisible wall nobody remembers building.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-                                if !*blocks {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("area");
-                                        cmd.inspector_changed |=
-                                            ui.text_edit_singleline(area).changed();
-                                    })
-                                    .response
-                                    .on_hover_text(
-                                        "What this ground is called — water, mud, road, danger. \
-                                         The name is what scripts ask for, so two volumes with \
-                                         the same name are the same kind of ground.",
-                                    );
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=50.0)
-                                                .logarithmic(true),
-                                                "costs")
-                                        .on_hover_text(
-                                            "How expensive a metre of it is next to ordinary \
-                                             ground. Above 1 is walked round when there is a way \
-                                             round; below 1 is sought out, which is how a road \
-                                             works.",
-                                        )
-                                        .changed();
-                                    ui.small(
-                                        "One character can disagree: nav.agent(node, { filter = \
-                                         { avoid = {\"water\"}, cost = { mud = 0.5 } } }).",
-                                    );
-                                }
-                                ui.separator();
-                                ui.small(
-                                    "Bake the navmesh again after moving this — a volume is \
-                                     read when the bake runs, not while the game is playing.",
-                                );
-                            }
-                            Matter::LightProbes {
-                                half_extents,
-                                spacing,
-                                enabled,
-                                intensity,
-                                bounces,
-                                quality,
-                                leak,
-                                normal_bias,
-                                exclude_layers,
-                            } => {
-                                let gi = self.gi;
-                                if crate::responsive::check(ui, enabled, "light this scene").changed() {
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-                                ui.small(
-                                    "Baked bounce light. Inside this box the scene's flat ambient \
-                                     is replaced by what the surfaces around it actually reflect.",
-                                );
-                                ui.separator();
-
-                                // ---- the box ------------------------------------
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("size");
-                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                        let mut full = half_extents[i] * 2.0;
-                                        let r = ui.add(
-                                            egui::DragValue::new(&mut full)
-                                                .speed(0.25)
-                                                .range(0.5..=4000.0)
-                                                .prefix(format!("{axis} ")),
-                                        );
-                                        if r.changed() {
-                                            half_extents[i] = full * 0.5;
-                                            cmd.inspector_changed = true;
-                                            cmd.gi_changed = true;
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "The volume's full size in world units, before the node's \
-                                     scale. Move the node to move the box.",
-                                );
-                                if crate::responsive::slider(ui, egui::Slider::new(spacing, 0.25..=16.0)
-                                            .logarithmic(true),
-                                            "probe spacing")
-                                    .on_hover_text(
-                                        "World units between probes. This is the resolution of \
-                                         the bounce: it cannot represent a shadow sharper than \
-                                         one cell.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-                                let planned = gi.planned_count();
-                                ui.small(format!(
-                                    "{}×{}×{} = {planned} probes  ·  {} renders per bounce",
-                                    gi.planned[0],
-                                    gi.planned[1],
-                                    gi.planned[2],
-                                    planned * 6
-                                ));
-
-                                // ---- the bake -----------------------------------
-                                ui.separator();
-                                if gi.baking {
-                                    ui.add(
-                                        egui::ProgressBar::new(gi.progress).text(format!(
-                                            "baking — bounce {}/{}  ·  {:.0}s",
-                                            gi.bounce, gi.bounces, gi.seconds
-                                        )),
-                                    );
-                                    if ui.button("✖  Cancel").clicked() {
-                                        cmd.gi_cancel = true;
-                                    }
-                                } else {
-                                    ui.horizontal_wrapped(|ui| {
-                                        if ui
-                                            .button("☀  Bake")
-                                            .on_hover_text(
-                                                "Render the scene from every probe and keep the \
-                                                 light. Saved next to the scene as a .fgi.",
-                                            )
-                                            .clicked()
-                                        {
-                                            cmd.gi_bake = true;
-                                        }
-                                        if gi.baked_probes > 0
-                                            && ui
-                                                .button("🗑  Clear")
-                                                .on_hover_text("Throw the bake away.")
-                                                .clicked()
-                                        {
-                                            cmd.gi_clear = true;
-                                        }
-                                    });
-                                    if gi.baked_probes == 0 {
-                                        ui.small("no bake yet — this volume lights nothing.");
-                                    } else {
-                                        ui.small(format!(
-                                            "baked: {} probes, {} bounce{}",
-                                            gi.baked_probes,
-                                            gi.baked_bounces,
-                                            if gi.baked_bounces == 1 { "" } else { "s" }
-                                        ));
-                                    }
-                                    // Said plainly rather than by going dark: a
-                                    // volume you just resized is still lit by the
-                                    // old data, and that is a choice, not a bug.
-                                    if gi.stale {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(220, 180, 90),
-                                            "⚠ the box changed since this was baked — \
-                                             still using the old light",
-                                        );
-                                    }
-                                }
-
-                                // ---- how it is baked ----------------------------
-                                ui.separator();
-                                let mut b = *bounces;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4), "bounces")
-                                    .on_hover_text(
-                                        "1 is light coming off surfaces once — the difference \
-                                         between a black corner and a lit one. Each extra bounce \
-                                         re-renders every probe.",
-                                    )
-                                    .changed()
-                                {
-                                    *bounces = b;
-                                    cmd.inspector_changed = true;
-                                }
-                                let mut q = *quality;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut q, 8..=64)
-                                            .step_by(8.0),
-                                            "bake detail")
-                                    .on_hover_text(
-                                        "Pixels per cube face. Higher resolves small bright \
-                                         things — a lamp, a window — and does not change how \
-                                         bright the result is.",
-                                    )
-                                    .changed()
-                                {
-                                    *quality = q;
-                                    cmd.inspector_changed = true;
-                                }
-                                let names: Vec<String> = self.layer_names.to_vec();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("skip layers");
-                                    egui::ComboBox::from_id_salt("gi_skip")
-                                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                        .selected_text(if exclude_layers.is_empty() {
-                                            "none".to_string()
-                                        } else {
-                                            exclude_layers.join(", ")
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            for n in &names {
-                                                let mut on = exclude_layers.contains(n);
-                                                if crate::responsive::check(ui, &mut on, n).changed() {
-                                                    if on {
-                                                        exclude_layers.push(n.clone());
-                                                    } else {
-                                                        exclude_layers.retain(|x| x != n);
-                                                    }
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Anything that moves — a character, a door, a lift — should \
-                                     not be baked into the light it happens to be standing in.",
-                                );
-
-                                // ---- how it is applied --------------------------
-                                ui.separator();
-                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "intensity")
-                                    .on_hover_text(
-                                        "1 is the light as measured. Past that is a look, not a \
-                                         mistake. Changing this does not need a re-bake.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-                                if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0), "leak rejection")
-                                    .on_hover_text(
-                                        "Throws away probes buried in geometry, so the lit room \
-                                         next door stops glowing through the wall. Costs some \
-                                         bounce in tight spaces. 0 = off.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-                                if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0),
-                                            "surface offset")
-                                    .on_hover_text(
-                                        "How far a surface steps along its own normal before \
-                                         looking the light up, in cells. Too little leaks at \
-                                         corners; too much drags light around them.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-
-                                // ---- looking at it ------------------------------
-                                ui.separator();
-                                let mut show_only = gi.show_only;
-                                if crate::responsive::check(ui, &mut show_only, "show only the bounce")
-                                    .on_hover_text(
-                                        "Every direct light off, so what is left on screen is \
-                                         exactly what was baked. The fastest way to tell a dark \
-                                         bake from a dark scene.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.gi_show_only = Some(show_only);
-                                }
-                                let mut show_probes = gi.show_probes;
-                                if crate::responsive::check(ui, &mut show_probes, "show the probes")
-                                    .on_hover_text(
-                                        "Draw each probe in the colour it baked. A grid that is \
-                                         too coarse, or a row of probes buried in the floor, is \
-                                         invisible in the final picture and obvious here.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.gi_show_probes = Some(show_probes);
-                                }
-                            }
-                            Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
-                                if crate::responsive::check(ui, enabled, "reflect this room").changed() {
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(
-                                    "What reflective surfaces inside this box show when what \
-                                     they are reflecting is not on screen. Without one they show \
-                                     the sky — daylight, indoors, through the ceiling.",
-                                );
-                                ui.separator();
-
-                                // ---- the box ------------------------------------
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("size");
-                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                        let mut full = half_extents[i] * 2.0;
-                                        let r = ui.add(
-                                            egui::DragValue::new(&mut full)
-                                                .speed(0.25)
-                                                .range(0.5..=4000.0)
-                                                .prefix(format!("{axis} ")),
-                                        );
-                                        if r.changed() {
-                                            half_extents[i] = full * 0.5;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "The room, in world units. This decides which surfaces the \
-                                     probe covers AND where the reflection lands: sized to the \
-                                     walls, a reflected wall sits on the wall instead of \
-                                     sliding as the camera moves.",
-                                );
-                                if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0), "edge fade")
-                                    .on_hover_text(
-                                        "How far outside the box the room's reflection gives way \
-                                         to the sky, in world units. A doorway wants a metre or \
-                                         two so walking out does not switch in one step.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "strength")
-                                    .on_hover_text(
-                                        "How much of the capture to apply. 1 is what was \
-                                         measured; this is the artistic knob for a room that \
-                                         reads too busy or too dim in the reflections.",
-                                    )
-                                    .changed()
-                                {
-                                    cmd.inspector_changed = true;
-                                }
-
-                                // ---- the capture --------------------------------
-                                ui.separator();
-                                ui.small(
-                                    "Captured when the scene loads and whenever the probe is \
-                                     moved or resized. Nothing is saved to disk, so a capture \
-                                     cannot go stale in a file.",
-                                );
-                                if ui
-                                    .button("recapture")
-                                    .on_hover_text(
-                                        "Take it again now — after relighting the room, or \
-                                         moving the furniture in it.",
-                                    )
-                                    .clicked()
-                                {
-                                    cmd.recapture_probes = true;
-                                }
-                            }
-                            Matter::PostProcess {
-                                tonemap,
-                                enabled,
-                                bloom,
-                                bloom_threshold,
-                                bloom_intensity,
-                                vignette,
-                                vignette_strength,
-                                vignette_radius,
-                                ao,
-                                ao_strength,
-                                ao_radius,
-                                posterize_bands,
-                                posterize_dither,
-                                posterize_chroma,
-                                exposure,
-                                contrast,
-                                saturation,
-                                temperature,
-                                tint,
-                                lift,
-                                grade_gamma,
-                                gain,
-                                aberration,
-                                distortion,
-                                sharpen,
-                                denoise,
-                                grain,
-                                grain_size,
-                                dof_focus,
-                                dof_range,
-                                dof_near_range,
-                                dof_max_blur,
-                                dof_blades,
-                                dof_blade_rotation,
-                                dof_highlight,
-                                dof_quality,
-                                motion_blur,
-                                motion_samples,
-                                dof_show_focus,
-                                dof_focus_node,
-                                screen_shaders,
-                            } => {
-                                use floptle_core::AoMode;
-                                ui.label("post processing");
-                                ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
-                                cmd.inspector_changed |= crate::responsive::check(ui, enabled, "enabled")
-                                    .on_hover_text("master switch for the whole chain")
-                                    .changed();
-                                ui.add_enabled_ui(*enabled, |ui| {
-                                    ui.separator();
-                                    ui.label("Ambient occlusion");
-                                    ui.horizontal_wrapped(|ui| {
-                                        let mut m = *ao;
-                                        if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
-                                            m = AoMode::Off;
-                                        }
-                                        if ui
-                                            .selectable_label(m == AoMode::ScreenSpace, "Screen space")
-                                            .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
-                                            .clicked()
-                                        {
-                                            m = AoMode::ScreenSpace;
-                                        }
-                                        if ui
-                                            .selectable_label(m == AoMode::Sdf, "SDF (true)")
-                                            .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
-                                            .clicked()
-                                        {
-                                            m = AoMode::Sdf;
-                                        }
-                                        if m != *ao {
-                                            *ao = m;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                    if *ao != AoMode::Off {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
-                                            .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
-                                            .changed();
-                                    }
-                                    ui.separator();
-                                    cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
-                                    if *bloom {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
-                                            .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
-                                            .changed();
-                                    }
-                                    cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
-                                    if *vignette {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
-                                            .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
-                                            .changed();
-                                    }
-                                    // Posterize — crush the ART to a limited palette. It runs
-                                    // before the 2D light rather than at the end of the frame,
-                                    // which is why the tooltip says palette.
-                                    ui.separator();
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("Posterize")
-                                            .on_hover_text(
-                                                "reduce your ART to a fixed number of levels per channel — a \
-                                                 limited-palette / banded retro look. It quantises the palette \
-                                                 only: 2D lights, the vignette, bloom and ambient occlusion are \
-                                                 applied on top and stay smooth.",
-                                            );
-                                        let plabel = match *posterize_bands {
-                                            0 | 1 => "off".to_string(),
-                                            n => format!("{n} levels"),
-                                        };
-                                        egui::ComboBox::from_id_salt("posterize_bands")
-                                            .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                            .selected_text(plabel)
-                                            .show_ui(ui, |ui| {
-                                                cmd.inspector_changed |=
-                                                    ui.selectable_value(posterize_bands, 0, "off").clicked();
-                                                for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
-                                                    cmd.inspector_changed |= ui
-                                                        .selectable_value(posterize_bands, nb, format!("{nb} levels"))
-                                                        .clicked();
-                                                }
-                                            });
-                                    });
-                                    ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
-                                        cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
-                                            .on_hover_text(
-                                                "ordered dither, so a gradient in your ART stipples between two \
-                                                 levels instead of hard-stepping — a painted sky, a soft-edged \
-                                                 sprite. It has no effect on lighting.",
-                                            )
-                                            .changed();
-                                        cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
-                                            .on_hover_text(
-                                                "off — the default — steps each colour channel on its own, which is a real \
-                                                 look and what every project built before now is made of. It is often not \
-                                                 what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
-                                                 boundary at a different value, so it steps through colours nobody chose. \
-                                                 On, the step happens once to brightness and the colour rides along — a grey \
-                                                 pixel comes out identical either way.",
-                                            )
-                                            .changed();
-                                    });
-                                });
-
-                                // ---- the look chain -------------------------
-                                //
-                                // One collapsing section per effect, each with
-                                // its own reset, because a grade you cannot get
-                                // back to neutral is a grade you stop touching.
-                                // Every heading says what off is, so "is this
-                                // doing anything" is answerable at a glance.
-                                let acc = egui::Color32::from_rgb(255, 200, 80);
-
-                                // Tonemap first, and on its own, because it is
-                                // not one effect among the others: it is how the
-                                // scene's light reaches the display at all. The
-                                // grade below it is working in the range this
-                                // choice defines.
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("tonemap").on_hover_text(
-                                        "The scene is lit in real, unbounded light — a lamp can \
-                                         be ten times brighter than white. A screen stops at \
-                                         white. This chooses how to get from one to the other.\n\n\
-                                         Doing nothing is a choice too: each colour channel \
-                                         clips on its own, so a very bright colour slides toward \
-                                         white through whatever hue clips last. That is why \
-                                         blown highlights can go strange colours.",
-                                    );
-                                    let names = [
-                                        ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
-                                        ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
-                                        ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
-                                        ("AgX", "AgX — bright colours whiten the way film does, instead of \
-                                                 hitting a flat ceiling of their own hue"),
-                                    ];
-                                    let cur = (*tonemap as usize).min(3);
-                                    egui::ComboBox::from_id_salt("pp_tonemap")
-                                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                        .selected_text(names[cur].0)
-                                        .width(160.0)
-                                        .show_ui(ui, |ui| {
-                                            for (i, (short, long)) in names.iter().enumerate() {
-                                                if ui
-                                                    .selectable_label(cur == i, *short)
-                                                    .on_hover_text(*long)
-                                                    .clicked()
-                                                {
-                                                    *tonemap = i as u32;
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                });
-                                if *tonemap == 0 {
-                                    ui.small(
-                                        egui::RichText::new(
-                                            "anything brighter than white is clipped — try AgX \
-                                             if bright lights look like flat blocks of colour",
-                                        )
-                                        .small()
-                                        .color(ui.visuals().weak_text_color()),
-                                    );
-                                }
-
-                                // ---- the scene's own screen shaders ---------
-                                //
-                                // Placed after the tonemap and before the grade
-                                // because that is where they run, and a panel
-                                // that lists effects in an order the frame does
-                                // not follow is a panel that teaches the wrong
-                                // thing.
-                                ui.separator();
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("screen shaders");
-                                    ui.small(
-                                        egui::RichText::new(format!(
-                                            "{} pass{}",
-                                            screen_shaders.len(),
-                                            if screen_shaders.len() == 1 { "" } else { "es" }
-                                        ))
-                                        .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
-                                ui.small(
-                                    "full-screen passes you wrote — a `stage post` .flsl gets the \
-                                     finished frame plus its depth and normals, and returns a new \
-                                     colour. They run in this order, over the picture, before the \
-                                     grade and the lens below.",
-                                );
-                                {
-                                    let mut remove: Option<usize> = None;
-                                    let mut swap: Option<(usize, usize)> = None;
-                                    let n = screen_shaders.len();
-                                    for (i, pass) in screen_shaders.iter_mut().enumerate() {
-                                        let name = Path::new(&pass.shader)
-                                            .file_name()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| pass.shader.clone());
-                                        let entry = self.post_flsl_cache.get(&pass.shader);
-                                        let err = entry.and_then(|e| e.error.as_deref());
-                                        crate::responsive::group(ui, |ui| {
-                                            ui.horizontal_wrapped(|ui| {
-                                                cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
-                                                    .on_hover_text(
-                                                        "off keeps the pass and its settings \
-                                                         without running it",
-                                                    )
-                                                    .changed();
-                                                ui.label(egui::RichText::new(&name).strong());
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(egui::Align::Center),
-                                                    |ui| {
-                                                        if ui
-                                                            .button("✖")
-                                                            .on_hover_text("remove this pass")
-                                                            .clicked()
-                                                        {
-                                                            remove = Some(i);
-                                                        }
-                                                        // Straight to the graph, the
-                                                        // same door a Material's
-                                                        // shader row opens — a pass
-                                                        // you can add and tune but
-                                                        // not open is a pass you
-                                                        // hunt for in the Assets
-                                                        // panel every time.
-                                                        if ui
-                                                            .button("◈")
-                                                            .on_hover_text("edit this shader in the ◈ Shaders graph")
-                                                            .clicked()
-                                                        {
-                                                            cmd.open_shader_graph =
-                                                                Some(pass.shader.clone());
-                                                        }
-                                                        if ui
-                                                            .add_enabled(
-                                                                i + 1 < n,
-                                                                egui::Button::new("▼"),
-                                                            )
-                                                            .on_hover_text("run later")
-                                                            .clicked()
-                                                        {
-                                                            swap = Some((i, i + 1));
-                                                        }
-                                                        if ui
-                                                            .add_enabled(i > 0, egui::Button::new("▲"))
-                                                            .on_hover_text("run earlier")
-                                                            .clicked()
-                                                        {
-                                                            swap = Some((i, i - 1));
-                                                        }
-                                                    },
-                                                );
-                                            });
-                                            match (err, entry.and_then(|e| e.compiled.as_ref())) {
-                                                (Some(msg), _) => {
-                                                    ui.small(
-                                                        egui::RichText::new(format!("◈ {msg}"))
-                                                            .color(egui::Color32::from_rgb(
-                                                                255, 120, 110,
-                                                            )),
-                                                    );
-                                                }
-                                                (None, None) => {
-                                                    ui.small("(compiling — its knobs appear here)");
-                                                }
-                                                (None, Some(_)) => {}
-                                            }
-                                            // Knobs from the compiled shader's own schema. Shown
-                                            // even when the newest edit failed, because they are
-                                            // still driving the last good pipeline.
-                                            if let Some((compiled, _)) =
-                                                entry.and_then(|e| e.compiled.as_ref())
-                                                && !compiled.uniforms.is_empty()
-                                            {
-                                                crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
-                                                        if shader_uniform_rows(
-                                                            ui,
-                                                            &compiled.uniforms,
-                                                            &mut pass.params,
-                                                        ) {
-                                                            cmd.inspector_changed = true;
-                                                        }
-                                                    });
-                                                if !pass.params.is_empty()
-                                                    && ui
-                                                        .button("Reset knobs")
-                                                        .on_hover_text(
-                                                            "back to the shader's own defaults",
-                                                        )
-                                                        .clicked()
-                                                {
-                                                    pass.params.clear();
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                    }
-                                    if let Some((a, b)) = swap {
-                                        screen_shaders.swap(a, b);
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if let Some(i) = remove {
-                                        screen_shaders.remove(i);
-                                        cmd.inspector_changed = true;
-                                    }
-                                    ui.horizontal_wrapped(|ui| {
-                                        if let Some(pick) = crate::ui_widgets::asset_picker(
-                                            ui,
-                                            egui::Id::new("pp-add-screen-shader"),
-                                            self.project_root,
-                                            "+ Add screen shader",
-                                            None,
-                                            self.asset_tree,
-                                            crate::assets::is_shader,
-                                            200.0,
-                                        ) && let Some(path) = pick
-                                        {
-                                            screen_shaders
-                                                .push(floptle_core::ScreenShader::new(path));
-                                            cmd.inspector_changed = true;
-                                        }
-                                        ui.small(
-                                            egui::RichText::new(
-                                                "try shaders/examples/inkOutline.flsl",
-                                            )
-                                            .color(ui.visuals().weak_text_color()),
-                                        );
-                                    });
-                                }
-
-                                ui.separator();
-                                ui.label("colour grade");
-                                {
-                                    let neutral = *exposure == 0.0
-                                        && *contrast == 1.0
-                                        && *saturation == 1.0
-                                        && *temperature == 0.0
-                                        && *tint == 0.0
-                                        && *lift == 0.0
-                                        && *grade_gamma == 1.0
-                                        && *gain == 1.0;
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.small(if neutral {
-                                            "neutral — no pass runs"
-                                        } else {
-                                            "grading"
-                                        });
-                                        if !neutral && ui.small_button("reset").clicked() {
-                                            *exposure = 0.0;
-                                            *contrast = 1.0;
-                                            *saturation = 1.0;
-                                            *temperature = 0.0;
-                                            *tint = 0.0;
-                                            *lift = 0.0;
-                                            *grade_gamma = 1.0;
-                                            *gain = 1.0;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
-                                        .on_hover_text(
-                                            "in STOPS: +1 is twice the light. The unit a camera and a \
-                                             renderer already share — it keeps meaning the same thing \
-                                             when the scene's brightness changes.",
-                                        )
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
-                                        .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
-                                        .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
-                                        .on_hover_text("cool (−) ↔ warm (+)")
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
-                                        .on_hover_text(
-                                            "green (−) ↔ magenta (+) — the axis temperature can't reach, \
-                                             and the one that fixes a scene that has gone subtly sickly",
-                                        )
-                                        .changed();
-                                    ui.small("shadows / midtones / highlights");
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
-                                        .on_hover_text("raise or crush the black floor — a lifted black is the film look")
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
-                                        .on_hover_text("bend the midtones without moving black or white")
-                                        .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
-                                        .on_hover_text("scale the highlights")
-                                        .changed();
-                                }
-
-                                ui.separator();
-                                ui.label("lens");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
-                                    .on_hover_text(
-                                        "red and blue drift apart toward the edges, the way real glass \
-                                         disperses. 0 = off.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
-                                    .on_hover_text(
-                                        "positive barrels (fisheye), negative pincushions. The corners go \
-                                         BLACK rather than smearing the edge pixel outward — a bent frame \
-                                         genuinely has no picture out there.",
-                                    )
-                                    .changed();
-                                if *aberration == 0.0 && *distortion == 0.0 {
-                                    ui.small("both at 0 — no lens pass runs");
-                                }
-
-                                ui.separator();
-                                ui.label("detail");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
-                                    .on_hover_text(
-                                        "unsharp mask, clamped to the local neighbourhood so edges get \
-                                         crisper without growing a bright halo. 0 = off.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
-                                    .on_hover_text(
-                                        "bilateral: averages within a flat region and refuses to average \
-                                         across an edge, which is the difference between removing noise \
-                                         and removing detail. Runs FIRST in the chain, on the raw frame. \
-                                         0 = off.",
-                                    )
-                                    .changed();
-                                if *sharpen > 0.0 && *denoise > 0.0 {
-                                    ui.small("denoise runs first, then sharpen — the useful order");
-                                }
-
-                                ui.separator();
-                                ui.label("film grain");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
-                                    .on_hover_text(
-                                        "multiplicative and strongest in the MIDTONES, the way emulsion \
-                                         responds — additive grain lifts every shadow into grey mud, \
-                                         which is the tell of a cheap filter. Applied last, so nothing \
-                                         downstream turns it into crawling static. 0 = off.",
-                                    )
-                                    .changed();
-                                ui.add_enabled_ui(*grain > 0.0, |ui| {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
-                                        .on_hover_text(
-                                            "grain cell in pixels. 1 is per-pixel — which under a retro \
-                                             upscale is invisible, then suddenly a flat shimmer. 2–4 is \
-                                             what reads as film.",
-                                        )
-                                        .changed();
-                                });
-
-                                ui.separator();
-                                ui.label("depth of field");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
-                                            .logarithmic(true),
-                                            "focus distance")
-                                    .on_hover_text("world units from the camera that are sharp. 0 = off.")
-                                    .changed();
-                                // Focus on a node instead of a number: the focus
-                                // distance becomes the camera's distance to it,
-                                // every frame. This is what a rack focus is made
-                                // of, and by hand it means a script measuring a
-                                // distance the engine already knows.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("follow");
-                                    let cur = dof_focus_node.clone();
-                                    let label = if cur.is_empty() {
-                                        "(a fixed distance)".to_string()
-                                    } else {
-                                        cur.clone()
-                                    };
-                                    egui::ComboBox::from_id_salt("pp_dof_follow")
-                                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                        .selected_text(label)
-                                        .width(170.0)
-                                        .show_ui(ui, |ui| {
-                                            if ui
-                                                .selectable_label(cur.is_empty(), "(a fixed distance)")
-                                                .clicked()
-                                                && !cur.is_empty()
-                                            {
-                                                dof_focus_node.clear();
-                                                cmd.inspector_changed = true;
-                                            }
-                                            for (_, name) in self.entity_names {
-                                                if ui.selectable_label(cur == *name, name).clicked()
-                                                    && cur != *name
-                                                {
-                                                    *dof_focus_node = name.clone();
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                })
-                                .response
-                                .on_hover_text(
-                                    "keep this node in focus — the focus distance becomes the \
-                                     camera's distance to it, measured every frame and per \
-                                     viewport, so the Scene view shows its own focus while you \
-                                     fly around. A name that matches nothing falls back to the \
-                                     slider above rather than to zero.",
-                                );
-                                if !dof_focus_node.is_empty()
-                                    && !self.entity_names.iter().any(|(_, n)| n == dof_focus_node)
-                                {
-                                    ui.colored_label(
-                                        acc,
-                                        format!(
-                                            "⚠ no node named \"{dof_focus_node}\" in this scene — \
-                                             using the focus distance above"
-                                        ),
-                                    );
-                                }
-                                ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
-                                        .on_hover_text("how far BEYOND the focus distance stays sharp")
-                                        .changed();
-                                    let mut near = *dof_near_range;
-                                    let auto = near <= 0.0;
-                                    if auto {
-                                        near = *dof_range * 0.5;
-                                    }
-                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
-                                        .on_hover_text(
-                                            "how far IN FRONT of it stays sharp. A lens goes soft \
-                                             on the near side much sooner than on the far side, \
-                                             which is why these are two numbers: a portrait wants \
-                                             the foreground gone and the background readable.",
-                                        );
-                                    if r.changed() {
-                                        *dof_near_range = near;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if auto {
-                                        ui.small(
-                                            egui::RichText::new("near range is following the far one (half of it)")
-                                                .color(ui.visuals().weak_text_color()),
-                                        );
-                                    } else if ui
-                                        .small_button("link to far range")
-                                        .on_hover_text("back to half the far range")
-                                        .clicked()
-                                    {
-                                        *dof_near_range = 0.0;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
-                                        .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
-                                        .changed();
-
-                                    ui.add_space(3.0);
-                                    ui.small("the iris");
-                                    let mut blades = *dof_blades as f32;
-                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
-                                                .step_by(1.0),
-                                                "blades")
-                                        .on_hover_text(
-                                            "0 is a round iris. 3 and up gives the polygonal bokeh \
-                                             of a real lens — six is the classic hexagon.",
-                                        );
-                                    if r.changed() {
-                                        *dof_blades = blades.max(0.0) as u32;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    if *dof_blades >= 3 {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
-                                                    "blade angle°")
-                                            .on_hover_text("turn the polygon")
-                                            .changed();
-                                    }
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
-                                        .on_hover_text(
-                                            "how much brighter-than-white pixels dominate the \
-                                             blur. 0 averages them away into grey; turn it up and \
-                                             a specular glint spreads into a visible disc. It \
-                                             reads the scene's real light, so it needs something \
-                                             genuinely brighter than white to work on.",
-                                        )
-                                        .changed();
-                                    let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
-                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
-                                        .on_hover_text(
-                                            "taps in the blur. More is smoother bokeh and costs \
-                                             linearly more; fewer is the chunky look, on purpose.",
-                                        );
-                                    if r.changed() {
-                                        *dof_quality = q.round().clamp(4.0, 64.0) as u32;
-                                        cmd.inspector_changed = true;
-                                    }
-                                    cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
-                                        .on_hover_text(
-                                            "a tuning view: cool where the near side is going \
-                                             soft, warm where the far side is, the picture itself \
-                                             where it is sharp. Which half of the band a pixel is \
-                                             on is the one thing you cannot read off a blurred \
-                                             frame.",
-                                        )
-                                        .changed();
-                                });
-                                if *dof_show_focus {
-                                    ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
-                                }
-                                if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
-                                    && *dof_max_blur <= 0.0
-                                {
-                                    ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
-                                }
-
-                                // ---- motion blur --------------------------------
-                                ui.separator();
-                                ui.strong("≈ Motion blur");
-                                ui.small("shows in the Game view");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
-                                    .on_hover_text(
-                                        "How much of the frame's camera motion is smeared. 0 is off. \
-                                         0.5 is the 180° shutter a film camera has and is the one \
-                                         that reads as footage; 1 leaves the shutter open for the \
-                                         whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
-                                         motion — a pan, a whip, a dolly, a roll. Something crossing \
-                                         a locked-off shot stays sharp.\n\nThe Scene view is left \
-                                         alone deliberately: you have to be able to place things \
-                                         while the camera is moving.",
-                                    )
-                                    .changed();
-                                if *motion_blur > 0.0 {
-                                    let mut taps =
-                                        if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
-                                    if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
-                                        .on_hover_text(
-                                            "Taps along the streak. Too few and a fast pan bands \
-                                             into separate copies of the picture.",
-                                        )
-                                        .changed()
-                                    {
-                                        *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
-                                        cmd.inspector_changed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-                // Visibility (geometry nodes) — hide the node's visual without deleting it.
-                if matches!(
-                    world.get::<Matter>(e),
-                    Some(Matter::Mesh { .. } | Matter::Primitive { .. } | Matter::Blob { .. })
-                ) {
-                    ui.indent("visible_toggle", |ui| {
-                        let mut vis =
-                            world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
-                        if crate::responsive::check(ui, &mut vis, "👁 visible")
-                            .on_hover_text("uncheck to hide this node's geometry (scripts: node.visible = true/false)")
-                            .changed()
-                        {
-                            cmd.set_visible = Some((e, vis));
-                            cmd.inspector_changed = true;
-                        }
-                    });
-                }
-
-                // ===== Transform (always present) =====
-                ui.separator();
-                // Stop reverts the world, so a transform typed
-                // here while playing is thrown away — `push_history` no-ops
-                // during Play, which also means it is not undoable and never
-                // marks the scene unsaved. Nothing used to say so.
-                //
-                // The way out already existed and was simply never pointed at:
-                // the header's … menu copies the transform, and the component
-                // clipboard survives Stop — so "nudge it while watching, then
-                // keep the value" is Copy values → Stop → Paste values. Saying
-                // that here is worth more than a warning would be, because it
-                // ends with the user keeping their work.
-                if playing {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 150, 140),
-                        "▶ discarded on Stop — … Copy values, Stop, then Paste to keep it",
-                    )
-                    .on_hover_text(
-                        "Play reverts the whole world when you Stop. The … menu on \
-                         this header copies the Transform to the component clipboard, \
-                         which survives Stop — paste it onto the same node afterwards \
-                         and it is a real, undoable, saveable edit.",
-                    );
-                }
-                {
-                    let (copy, paste, reset) = transform_header(
-                        ui,
-                        matches!(clip, Some(ComponentClip::Transform(_))),
-                    );
-                    if copy
-                        && let Some(t) = world.get::<Transform>(e) {
-                            cmd.copy_component = Some(ComponentClip::Transform(*t));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                    if reset {
-                        cmd.reset_transform = Some(e);
-                    }
-                }
-                ui.indent("xform_props", |ui| {
-                    if let Some(t) = world.get_mut::<Transform>(e) {
-                        ui.label("translation");
-                        ui.horizontal_wrapped(|ui| {
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
-                        });
-                        ui.label("rotation (deg)");
-                        let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
-                        let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
-                        let mut rot_changed = false;
-                        ui.horizontal_wrapped(|ui| {
-                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
-                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
-                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
-                        });
-                        if rot_changed {
-                            t.rotation = Quat::from_euler(
-                                EulerRot::YXZ,
-                                deg[0].to_radians(),
-                                deg[1].to_radians(),
-                                deg[2].to_radians(),
-                            );
-                            cmd.inspector_changed = true;
-                        }
-                        ui.label("scale");
-                        ui.horizontal_wrapped(|ui| {
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
-                        });
-                    }
-                });
-
-                // ===== Material (only when the node has one) =====
-                if world.get::<Material>(e).is_some() {
-                    ui.separator();
-                    let (copy, paste, remove) = component_header(
-                        ui,
-                        "◑ Material",
-                        matches!(clip, Some(ComponentClip::Material(_))),
-                        true,
-                    );
-                    if copy
-                        && let Some(mat) = world.get::<Material>(e) {
-                            cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                    if remove {
-                        cmd.remove_material = Some(e);
-                    }
-                    ui.indent("material_props", |ui| {
-                        // **On a ▫ Sprite the node owns the cell, not the
-                        // material.** The picker below edits `Material::cell`,
-                        // which a Sprite node's draw does not read — so clicking
-                        // a frame in the grid changed a number and nothing on
-                        // screen, which is indistinguishable from spritesheets
-                        // being broken. Seed the picker from the node before it
-                        // is drawn and push any change back after, so the one
-                        // control people reach for is the one that draws.
-                        let sprite_cell = match world.get::<Matter>(e) {
-                            Some(Matter::Sprite { cell, .. }) => Some(*cell),
-                            _ => None,
-                        };
-                        if let (Some(c), Some(mat)) = (sprite_cell, world.get_mut::<Material>(e))
-                            && mat.cell != c
-                        {
-                            mat.cell = c;
-                        }
-                        let mut picked_cell = None;
-                        if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
-                            picked_cell = Some(mat.cell);
-                            cmd.inspector_changed |= res.changed;
-                            cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
-                            if res.remove {
-                                cmd.remove_material = Some(e);
-                            }
-                            if let Some(name) = res.save_as {
-                                cmd.save_material =
-                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                            }
-                            if ui.button("⛶ Open in Material Editor").clicked() {
-                                *self.show_material_editor = true;
-                            }
-                        }
-                        // …and back onto the node, which is what draws.
-                        if let (Some(before), Some(after)) = (sprite_cell, picked_cell)
-                            && before != after
-                            && let Some(Matter::Sprite { cell, .. }) = world.get_mut::<Matter>(e)
-                        {
-                            *cell = after;
-                            cmd.inspector_changed = true;
-                        }
-                    });
-                }
-
-                // ===== The model's own materials =====
-                //
-                // An imported model arrives with a material per part, and until
-                // now the only way to see them was to select the model in the
-                // Assets panel (read-only) and the only way to edit one was to
-                // expand the model in the Hierarchy and find the right
-                // sub-object. So "give this model a normal map" or "make this
-                // model jitter" had no obvious door, and the obvious-looking one
-                // — adding a Material to the node — used to flatten every part
-                // to a single colour.
-                //
-                // Both are answered here: the whole list, on the node, editable,
-                // with the model-wide button beside it.
-                if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e).cloned()
-                    && let Some(parts) = self.mesh_registry.get(&asset_path).map(|a| {
-                        // Collected up front: the rows below need `world` mutably,
-                        // and the asset is borrowed out of the registry.
-                        a.part_meta
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, m)| {
-                                a.override_key(i).map(|k| {
-                                    (k.to_string(), m.material.clone(), m.base_color, m.textured)
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    && !parts.is_empty()
-                {
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.strong("◑ Model materials");
-                        if parts.iter().any(|(_, _, _, textured)| *textured)
-                            && ui
-                                .small_button("⬇ extract textures")
-                                .on_hover_text(
-                                    "write this model's own images out as PNG files beside \
-                                     it, so you can point a material at one, paint over it, \
-                                     or use it as a base layer.\n\nA .glb keeps its images \
-                                     inside itself; until they are files, nothing else can \
-                                     reach them.",
-                                )
-                                .clicked()
-                        {
-                            cmd.extract_model_textures = Some(asset_path.clone());
-                        }
-                    });
-                    ui.small(
-                        "what this model was imported with. Overriding one changes it for \
-                         this node only — the model file is never touched. A Material on \
-                         the node replaces ALL of these at once; a Tint multiplies over \
-                         them and keeps them.",
-                    );
-                    // **◐ Tint** — the easy "same model, but red". Right here,
-                    // beside the list it multiplies over, because this is where
-                    // somebody is standing when they want it.
-                    {
-                        let cur = world
-                            .get::<floptle_core::Tint>(e)
-                            .copied()
-                            .unwrap_or_default();
-                        let mut rgba =
-                            [cur.color[0], cur.color[1], cur.color[2], cur.alpha];
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("◐ tint")
-                                .on_hover_text(
-                                    "multiplied over everything this node draws — its own \
-                                     textures and each part's own colour are kept. White \
-                                     is no tint.\n\nFor a hit flash, a team colour, a \
-                                     ghosted preview, a body fading out.",
-                                );
-                            // Written straight into the world and marked
-                            // `inspector_changed`, like every other property row
-                            // here — that is what coalesces a drag into one undo
-                            // step. Going through a command would call `record()`
-                            // per changed frame, so dragging the swatch for a
-                            // second would push sixty snapshots of the scene and
-                            // need sixty undos to get back.
-                            let mut set = None;
-                            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                                set = Some(rgba);
-                            }
-                            if !cur.is_identity()
-                                && ui
-                                    .small_button("🗑")
-                                    .on_hover_text("no tint")
-                                    .clicked()
-                            {
-                                set = Some([1.0, 1.0, 1.0, 1.0]);
-                            }
-                            if let Some(v) = set {
-                                let t = floptle_core::Tint {
-                                    color: [v[0], v[1], v[2]],
-                                    alpha: v[3],
-                                    // The additive lanes are edited on their own
-                                    // rows below; the swatch owns the multiply
-                                    // half and nothing else.
-                                    ..cur
-                                };
-                                // White at full opacity, no rim and the room's
-                                // own ambient is no tint: the node goes back to
-                                // carrying none rather than one that does
-                                // nothing.
-                                if t.is_identity() {
-                                    world.remove::<floptle_core::Tint>(e);
-                                } else {
-                                    world.insert(e, t);
-                                }
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        // **The two lanes that add light.** A multiply can only
-                        // take light away, which is why a team colour on a
-                        // mid-toned model reads as a slightly warm grey and why
-                        // this component kept losing the job to a Material. See
-                        // `floptle_core::Tint`.
-                        {
-                            let mut next = cur;
-                            let mut rim = [cur.rim[0], cur.rim[1], cur.rim[2], 1.0];
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("◐ rim").on_hover_text(
-                                    "an ADDITIVE fresnel edge in its own colour, over \
-                                     whatever this node already draws.\n\nIt adds light, \
-                                     so it reads on a dark costume and a bright one — \
-                                     which is what actually tells two team-coloured \
-                                     models apart in motion. Strength 0 is no rim, and \
-                                     leaves the node's own material's rim alone.",
-                                );
-                                if ui.color_edit_button_rgba_unmultiplied(&mut rim).changed() {
-                                    next.rim = [rim[0], rim[1], rim[2]];
-                                    // Picking a colour for a rim nobody has
-                                    // turned on means turning it on: a swatch
-                                    // that visibly does nothing is a control
-                                    // that looks broken.
-                                    if next.rim_strength == 0.0 {
-                                        next.rim_strength = 1.0;
-                                    }
-                                }
-                                ui.add(
-                                    egui::DragValue::new(&mut next.rim_strength)
-                                        .speed(0.02)
-                                        .range(0.0..=8.0)
-                                        .prefix("×"),
-                                );
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("◐ ambient").on_hover_text(
-                                    "multiplies this node's share of the scene's ambient \
-                                     light. 1 is the room's own.\n\nAbove 1 lifts the \
-                                     model out of the room's shadow — what a Material \
-                                     carrying nothing but `ambient` was always for, \
-                                     without costing the model its textures.",
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut next.ambient)
-                                        .speed(0.02)
-                                        .range(0.0..=8.0)
-                                        .prefix("×"),
-                                );
-                            });
-                            if next != cur {
-                                if next.is_identity() {
-                                    world.remove::<floptle_core::Tint>(e);
-                                } else {
-                                    world.insert(e, next);
-                                }
-                                cmd.inspector_changed = true;
-                            }
-                        }
-                    }
-                    if world.get::<Material>(e).is_none() {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .button("◑ Add Material (whole model)")
-                                .on_hover_text(
-                                    "make the WHOLE model one material — \"this thing is \
-                                     made of ice\", \"…of gold\".\n\nIt REPLACES what the \
-                                     model was imported with, every part of it, textures \
-                                     included: a material with no texture draws untextured. \
-                                     To change one part instead, use the list below.",
-                                )
-                                .clicked()
-                            {
-                                cmd.add_material = Some(e);
-                            }
-                        });
-                    }
-                    // One row per sub-object, because that is what an override is
-                    // keyed by. A flattened prop's object name is its material
-                    // name, so the two read the same there.
-                    // Which part is SELECTED right now — the object picked in the
-                    // viewport or in Objects & Rig. When that changes, this list
-                    // follows it: the selected part's editor opens and the rest
-                    // shut. A model with a dozen parts otherwise makes you scroll
-                    // past eleven open material editors to reach the one you are
-                    // looking at, which is the opposite of what clicking it meant.
-                    //
-                    // Forced only on the frame the selection changes (`open(None)`
-                    // every other frame), so opening a second part to compare, or
-                    // closing the one you are on, still works and still sticks.
-                    let sel_part: Option<String> = cur_bone
-                        .filter(|(m, _)| *m == e)
-                        .and_then(|(_, i)| bone_names.get(&e).and_then(|n| n.get(i)))
-                        .filter(|n| n.is_object)
-                        .map(|n| n.name.clone());
-                    let sel_changed = {
-                        let id = egui::Id::new(("mat_focus", e));
-                        ui.data_mut(|d| {
-                            let prev: Option<Option<String>> = d.get_temp(id);
-                            let moved = prev.as_ref() != Some(&sel_part);
-                            if moved {
-                                d.insert_temp(id, sel_part.clone());
-                            }
-                            // Never on the first frame this node is inspected:
-                            // there is no selection to have moved to yet, and
-                            // slamming every part shut on arrival would look like
-                            // the panel losing its place.
-                            moved && prev.is_some()
-                        })
-                    };
-                    let mut dedup: std::collections::BTreeSet<String> = Default::default();
-                    for (key, mat_name, base_color, textured) in parts {
-                        if !dedup.insert(key.clone()) {
-                            continue;
-                        }
-                        let overridden = world
-                            .get::<floptle_core::ObjectMaterials>(e)
-                            .is_some_and(|om| om.0.contains_key(&key));
-                        let mut clear = false;
-                        let mut make = false;
-                        ui.horizontal_wrapped(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                            ui.painter().rect_filled(
-                                rect,
-                                2.0,
-                                egui::Color32::from_rgb(
-                                    (base_color[0] * 255.0) as u8,
-                                    (base_color[1] * 255.0) as u8,
-                                    (base_color[2] * 255.0) as u8,
-                                ),
-                            );
-                            ui.label(&key);
-                            if mat_name != key {
-                                ui.weak(format!("· {mat_name}"));
-                            }
-                            if textured {
-                                ui.small("🖼");
-                            }
-                            if overridden {
-                                clear = ui
-                                    .small_button("🗑")
-                                    .on_hover_text("back to the model's own look")
-                                    .clicked();
-                            } else {
-                                make = ui
-                                    .small_button("override")
-                                    .on_hover_text("give this part its own material")
-                                    .clicked();
-                            }
-                        });
-                        if make {
-                            // Seeded with what the part already looks like — its
-                            // imported colour and its texture, extracted from
-                            // the model on the spot if it has one. An override
-                            // is a whole material, so without the texture
-                            // "override this part" would mean "make this part
-                            // blank", and the picture it was wearing lives
-                            // inside the `.glb` where nothing can point at it.
-                            cmd.override_object_material =
-                                Some((e, key.clone(), asset_path.clone()));
-                            cmd.inspector_changed = true;
-                        }
-                        if overridden {
-                            egui::CollapsingHeader::new(crate::responsive::header_text(ui, "edit"))
-                                .id_salt(("model_mat", e, &key))
-                                .open(sel_changed.then(|| sel_part.as_deref() == Some(key.as_str())))
-                                .default_open(crate::responsive::start_open(false))
-                                .show(ui, |ui| {
-                                    let mut save_as = None;
-                                    if let Some(mat) = world
-                                        .get_mut::<floptle_core::ObjectMaterials>(e)
-                                        .and_then(|om| om.0.get_mut(&key))
-                                    {
-                                        let res = material_props_ui(
-                                            ui,
-                                            mat,
-                                            self.materials,
-                                            self.asset_tree,
-                                            self.project_root,
-                                            self.mat_name_buf,
-                                            self.flsl_cache,
-                                            self.sdf_cache,
-                                            self.texture_settings,
-                                        );
-                                        cmd.inspector_changed |= res.changed;
-                                        cmd.open_shader_graph =
-                                            res.open_shader.or(cmd.open_shader_graph.take());
-                                        clear |= res.remove;
-                                        if let Some(name) = res.save_as {
-                                            save_as = Some((
-                                                name,
-                                                floptle_scene::MaterialDoc::from_material(mat),
-                                            ));
-                                        }
-                                    }
-                                    if save_as.is_some() {
-                                        cmd.save_material = save_as;
-                                    }
-                                });
-                        }
-                        if clear
-                            && let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(e)
-                        {
-                            om.0.remove(&key);
-                            if om.0.is_empty() {
-                                world.remove::<floptle_core::ObjectMaterials>(e);
-                            }
-                            cmd.inspector_changed = true;
-                        }
-                    }
-                }
-
-                // ===== Particle System (only when the node has one) =====
-                if world.get::<floptle_core::ParticleSystem>(e).is_some() {
-                    ui.separator();
-                    let (copy, paste, remove) = component_header(
-                        ui,
-                        "✨ Particle System",
-                        matches!(clip, Some(ComponentClip::Particles(_))),
-                        true,
-                    );
-                    if copy
-                        && let Some(ps) = world.get::<floptle_core::ParticleSystem>(e) {
-                            cmd.copy_component = Some(ComponentClip::Particles(ps.clone()));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                    if remove {
-                        cmd.remove_particles = Some(e);
-                    }
-                    let effect_keys: Vec<String> =
-                        self.vfx.effects.iter().map(|(k, _)| k.clone()).collect();
-                    ui.indent("particles_props", |ui| {
-                        if let Some(ps) = world.get_mut::<floptle_core::ParticleSystem>(e) {
-                            egui::ComboBox::from_label("Effect")
-                                .selected_text(if ps.asset.is_empty() {
-                                    "(none)".to_string()
-                                } else {
-                                    ps.asset.clone()
-                                })
-                                .show_ui(ui, |ui| {
-                                    for k in &effect_keys {
-                                        if ui
-                                            .selectable_label(*k == ps.asset, k)
-                                            .clicked()
-                                        {
-                                            ps.asset = k.clone();
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut ps.play_on_start, "Play on start")
-                                .on_hover_text(
-                                    "Start emitting the moment Play begins \
-                                     (off = a script triggers it)",
-                                )
-                                .changed();
-                            let edit_key =
-                                (!ps.asset.is_empty()).then(|| ps.asset.clone());
-                            if let Some(k) = edit_key
-                                && ui.button("✏ Edit effect").clicked()
-                            {
-                                cmd.open_particle_editor = Some(k);
-                            }
-                        }
-                    });
-                }
-
-                // ===== Audio Source (only when the node has one) =====
-                if world.get::<floptle_audio::AudioSource>(e).is_some() {
-                    ui.separator();
-                    let (copy, paste, remove) = component_header(
-                        ui,
-                        "♪ Audio Source",
-                        matches!(clip, Some(ComponentClip::Audio(_))),
-                        true,
-                    );
-                    if copy
-                        && let Some(a) = world.get::<floptle_audio::AudioSource>(e) {
-                            cmd.copy_component = Some(ComponentClip::Audio(a.clone()));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                    if remove {
-                        cmd.remove_audio = Some(e);
-                    }
-                    // Clip candidates: browse the audio files as a foldered tree;
-                    // the picked full path is stored as a project-relative key.
-                    let tree = self.asset_tree;
-                    let root = self.project_root;
-                    let track_names: Vec<String> =
-                        std::iter::once(floptle_audio::MASTER.to_string())
-                            .chain(self.project.mixer.tracks.iter().map(|t| t.name.clone()))
-                            .collect();
-                    ui.indent("audio_props", |ui| {
-                        if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(e) {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Clip");
-                                let sel =
-                                    if src.clip.is_empty() { "(none)" } else { src.clip.as_str() };
-                                if let Some(pick) = crate::ui_widgets::asset_picker(
-                                    ui,
-                                    egui::Id::new(("audio_clip_pick", e)),
-                                    self.project_root,
-                                    sel,
-                                    Some("(none)"),
-                                    tree,
-                                    crate::assets::is_audio,
-                                    200.0,
-                                ) {
-                                    src.clip = pick
-                                        .map(|p| {
-                                            crate::assets::asset_rel_path(&p, root).replace('\\', "/")
-                                        })
-                                        .unwrap_or_default();
-                                    cmd.inspector_changed = true;
-                                }
-                                if !src.clip.is_empty()
-                                    && ui
-                                        .button("▶")
-                                        .on_hover_text("Preview the clip (flat, through Master)")
-                                        .clicked()
-                                {
-                                    cmd.preview_audio = Some(src.clip.clone());
-                                }
-                            });
-                            let p = &mut src.params;
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.volume, 0.0..=2.0), "Volume")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pitch, 0.25..=4.0).logarithmic(true), "Pitch")
-                                .changed();
-                            egui::ComboBox::from_label("Spatial")
-                                .selected_text(p.mode.name())
-                                .show_ui(ui, |ui| {
-                                    for m in [
-                                        floptle_audio::SpatialMode::Spatial,
-                                        floptle_audio::SpatialMode::Distance,
-                                        floptle_audio::SpatialMode::Flat,
-                                    ] {
-                                        if ui.selectable_label(p.mode == m, m.name()).clicked() {
-                                            p.mode = m;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                            match p.mode {
-                                floptle_audio::SpatialMode::Flat => {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pan, -1.0..=1.0), "Pan")
-                                        .changed();
-                                }
-                                _ => {
-                                    egui::ComboBox::from_label("Falloff")
-                                        .selected_text(p.falloff.name())
-                                        .show_ui(ui, |ui| {
-                                            for f in [
-                                                floptle_audio::Falloff::Inverse,
-                                                floptle_audio::Falloff::Linear,
-                                                floptle_audio::Falloff::Exponential,
-                                            ] {
-                                                if ui
-                                                    .selectable_label(p.falloff == f, f.name())
-                                                    .clicked()
-                                                {
-                                                    p.falloff = f;
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("Distance");
-                                        cmd.inspector_changed |= ui
-                                            .add(
-                                                egui::DragValue::new(&mut p.min_distance)
-                                                    .speed(0.1)
-                                                    .range(0.01..=10_000.0)
-                                                    .prefix("min "),
-                                            )
-                                            .changed();
-                                        cmd.inspector_changed |= ui
-                                            .add(
-                                                egui::DragValue::new(&mut p.max_distance)
-                                                    .speed(0.5)
-                                                    .range(0.02..=100_000.0)
-                                                    .prefix("max "),
-                                            )
-                                            .on_hover_text(
-                                                "Full volume inside min; silent past max",
-                                            )
-                                            .changed();
-                                    });
-                                }
-                            }
-                            egui::ComboBox::from_label("Mixer track")
-                                .selected_text(if p.track.is_empty() {
-                                    floptle_audio::MASTER
-                                } else {
-                                    p.track.as_str()
-                                })
-                                .show_ui(ui, |ui| {
-                                    for t in &track_names {
-                                        let cur = if p.track.is_empty() {
-                                            floptle_audio::MASTER
-                                        } else {
-                                            p.track.as_str()
-                                        };
-                                        if ui.selectable_label(cur == t, t).clicked() {
-                                            p.track = if t == floptle_audio::MASTER {
-                                                String::new()
-                                            } else {
-                                                t.clone()
-                                            };
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                            egui::ComboBox::from_label("On end")
-                                .selected_text(p.end.name())
-                                .show_ui(ui, |ui| {
-                                    for (b, hint) in [
-                                        (floptle_audio::EndBehavior::Stop, "The node stays; replayable from scripts"),
-                                        (floptle_audio::EndBehavior::Destroy, "Despawn the node when the sound finishes"),
-                                        (floptle_audio::EndBehavior::Loop, "Restart seamlessly forever"),
-                                    ] {
-                                        if ui
-                                            .selectable_label(p.end == b, b.name())
-                                            .on_hover_text(hint)
-                                            .clicked()
-                                        {
-                                            p.end = b;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut src.play_on_start, "Play on start")
-                                .on_hover_text(
-                                    "Start playing the moment Play begins \
-                                     (off = a script triggers it via node:sound():play())",
-                                )
-                                .changed();
-                        }
-                    });
-                }
-
-                // ===== Rigidbody (only when the node has one) =====
-                if world.get::<floptle_core::RigidBody>(e).is_some() {
-                    ui.separator();
-                    let (copy, paste, remove) = component_header(
-                        ui,
-                        "♦ Rigidbody",
-                        matches!(clip, Some(ComponentClip::RigidBody(_))),
-                        true,
-                    );
-                    if copy
-                        && let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
-                            cmd.copy_component = Some(ComponentClip::RigidBody(*rb));
-                        }
-                    if paste {
-                        cmd.paste_component = Some(e);
-                    }
-                    if remove {
-                        cmd.remove_rigidbody = Some(e);
-                    }
-                    ui.indent("rb_props", |ui| {
-                        if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
-                            use floptle_core::{BodyKind, BodyMode};
-                            // The one dropdown that replaces hand-freezing axes +
-                            // disabling gravity. Structural (a Static body is a
-                            // baked collider, not a body) — rebuild the live sim.
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("mode");
-                                let label = match rb.mode {
-                                    BodyMode::Dynamic => "Dynamic",
-                                    BodyMode::Kinematic => "Kinematic",
-                                    BodyMode::Static => "Static",
-                                };
-                                egui::ComboBox::from_id_salt("rb-mode")
-                                    .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selected_text(label)
-                                    .show_ui(ui, |ui| {
-                                        let mut changed = false;
-                                        changed |= ui
-                                            .selectable_value(&mut rb.mode, BodyMode::Dynamic, "Dynamic")
-                                            .on_hover_text("fully simulated: gravity, collisions, gets pushed around")
-                                            .changed();
-                                        changed |= ui
-                                            .selectable_value(&mut rb.mode, BodyMode::Kinematic, "Kinematic")
-                                            .on_hover_text("transform-driven: never falls or gets pushed — scripts/animation move it, and dynamic bodies collide WITH it (moving platforms, elevators). Near-zero per-tick cost")
-                                            .changed();
-                                        changed |= ui
-                                            .selectable_value(&mut rb.mode, BodyMode::Static, "Static")
-                                            .on_hover_text("baked immovable collider in this shape — no body at all, ZERO per-tick cost (walls, floors, props)")
-                                            .changed();
-                                        if changed {
-                                            cmd.inspector_changed = true;
-                                            cmd.rebuild_physics = true;
-                                        }
-                                    });
-                                match rb.mode {
-                                    BodyMode::Dynamic => {}
-                                    BodyMode::Kinematic => {
-                                        ui.small("moves via its transform; pushes dynamic bodies");
-                                    }
-                                    BodyMode::Static => {
-                                        ui.small("baked collider — cheapest way to be solid");
-                                    }
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("shape");
-                                egui::ComboBox::from_id_salt("rb-shape")
-                                    .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selected_text(match rb.kind {
-                                        BodyKind::Sphere => "Sphere",
-                                        BodyKind::Capsule => "Capsule",
-                                        BodyKind::Box => "Box",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        cmd.inspector_changed |=
-                                            ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
-                                        cmd.inspector_changed |=
-                                            ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
-                                        cmd.inspector_changed |=
-                                            ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
-                                    });
-                            });
-                            if rb.kind == BodyKind::Box {
-                                ui.label("half-extents");
-                                ui.horizontal_wrapped(|ui| {
-                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                        cmd.inspector_changed |= ui
-                                            .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
-                                            .changed();
-                                    }
-                                });
-                            } else {
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0), "radius").changed();
-                                if rb.kind == BodyKind::Capsule {
-                                    cmd.inspector_changed |=
-                                        crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0), "height").changed();
-                                }
-                            }
-                            // Bounce/friction/gravity/locks only matter on a
-                            // SIMULATED body — grey them out otherwise so the
-                            // mode dropdown reads as the one switch it is.
-                            let dynamic = rb.mode == BodyMode::Dynamic;
-                            ui.add_enabled_ui(dynamic, |ui| {
-                                let asm = crate::responsive::check(ui, &mut rb.assembly, "assembly (compound of children)")
-                                    .on_hover_text(
-                                        "This node roots ONE 6-DOF rigid body built from every \
-                                         descendant node that has a RigidBody: each becomes an \
-                                         oriented shape at its offset, weighted by its mass (this \
-                                         node's own shape fields are ignored). Multi-part \
-                                         vehicles, decoupling rockets, breakable structures — \
-                                         drive it from Lua with assembly.forceAt / .split.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= asm;
-                                cmd.rebuild_physics |= asm;
-                                if rb.assembly {
-                                    ui.small("children with RigidBody = this vessel's parts");
-                                }
-                                cmd.inspector_changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut rb.mass)
-                                            .speed(0.05)
-                                            .range(0.001..=100000.0)
-                                            .prefix("mass "),
-                                    )
-                                    .on_hover_text(
-                                        "This shape's mass share inside an assembly compound \
-                                         (composed mass / center of mass / inertia). Plain \
-                                         bodies ignore it.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.restitution, 0.0..=1.0), "bounce").changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.friction, 0.0..=2.0), "friction")
-                                    .on_hover_text(
-                                        "Grip, as a coefficient. A ramp holds this body while \
-                                         tan(its angle) ≤ friction — so 0 is ice, 0.3 lets go \
-                                         at about 17°, 1 holds exactly 45°, and a surface \
-                                         grippier than that goes above 1 (rubber on rubber is \
-                                         around 1.5).\n\nIt opposes motion rather than \
-                                         capping it: a shoved crate slides and then stops.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.slope_limit, 0.0..=90.0),
-                                            "slope limit °")
-                                    .on_hover_text(
-                                        "The steepest surface this body can stand on. Past it \
-                                         the body is not grounded, the surface reads as \
-                                         node.wallNormal instead of node.groundNormal, and it \
-                                         stops holding the body up — so a character slides off \
-                                         a cliff face however grippy its boots are.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.gravity, "affected by gravity")
-                                    .on_hover_text("off = floats (still collides; a script can still move it)")
-                                    .changed();
-                                // 2D first, and above the axis toggles, because
-                                // it is the answer to the question the axis
-                                // toggles make you ask. Working out that a 2D
-                                // object means "freeze pos z, freeze rot x and
-                                // y" is a thing you should have to do once, in
-                                // the engine, not once per node.
-                                cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.two_d, "2D — keep it in the XY plane")
-                                    .on_hover_text(
-                                        "One switch for a 2D game: the body keeps its depth, \
-                                         never drifts out of the layer, and still spins the \
-                                         one way a flat object spins. It collides with the \
-                                         same world a 3D body does — a tilemap's colliders, \
-                                         a slope you drew, anything Collidable. Adds to the \
-                                         freezes below rather than replacing them.",
-                                    )
-                                    .changed();
-                                let two_d = rb.two_d;
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("freeze pos");
-                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                        // Z is held by 2D: show it on and say so
-                                        // rather than letting the box look
-                                        // unticked while the solver freezes it.
-                                        let forced = two_d && i == 2;
-                                        let mut v = rb.lock_pos[i] || forced;
-                                        let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
-                                        if r.clicked() && !forced {
-                                            v = !v;
-                                            rb.lock_pos[i] = v;
-                                            cmd.inspector_changed = true;
-                                        }
-                                        if forced {
-                                            r.on_hover_text("held by 2D");
-                                        }
-                                    }
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("freeze rot");
-                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                        let forced = two_d && i < 2;
-                                        let mut v = rb.lock_rot[i] || forced;
-                                        let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
-                                        if r.clicked() && !forced {
-                                            v = !v;
-                                            rb.lock_rot[i] = v;
-                                            cmd.inspector_changed = true;
-                                        }
-                                        if forced {
-                                            r.on_hover_text("held by 2D");
-                                        }
-                                    }
-                                });
-                                cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.align_up, "align to gravity")
-                                    .on_hover_text(
-                                        "Tilt this node so its up follows −gravity — a \
-                                         character on a radial-gravity planet stands on it \
-                                         (and its camera/children inherit the tilt). \
-                                         Overrides freeze rot.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.pushbox_only, "pushbox only")
-                                    .on_hover_text(
-                                        "The solver never resolves this body's contacts — it \
-                                         integrates its velocity and nothing else: no gravity, \
-                                         no depenetration, no ground detection. It stays fully \
-                                         visible to raycasts and overlap queries, so it's a box \
-                                         you can HIT, not a box physics moves.\n\n\
-                                         This is the supported profile for ROLLBACK netcode. \
-                                         The contact solver is the part least likely to agree \
-                                         bit-for-bit between two machines, and a fighting game \
-                                         replaces it with integer frame data anyway. Your script \
-                                         owns gravity, the floor and pushout — and should move \
-                                         the body through node.tickX/tickY/tickZ, not node.x.",
-                                    )
-                                    .changed();
-                            });
-                        }
-                    });
-                    // Trigger: the body becomes a sensor — it never blocks or gets
-                    // blocked (and rays skip it), but overlap fires the trigger
-                    // hooks. Moving pickups, sweeping zones, pass-through projectiles.
-                    let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
-                    if crate::responsive::check(ui, &mut trig, "trigger")
-                        .on_hover_text(
-                            "events only, no blocking: the body passes through everything \
-                             and nothing pushes back, but overlap fires onTriggerEnter / \
-                             onTriggerStay / onTriggerExit on both nodes' scripts. A \
-                             Dynamic trigger still falls — use Kinematic (or gravity off) \
-                             for pickups and zones that stay put",
-                        )
-                        .changed()
-                    {
-                        cmd.set_trigger = Some((e, trig));
-                    }
-                    // The body shape doubles as the node's sun-shadow proxy (see the
-                    // Lighting node) — casting is the default; the component only
-                    // exists to record an opt-out.
-                    let mut casts =
-                        world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
-                    if crate::responsive::check(ui, &mut casts, "casts shadows")
-                        .on_hover_text("this body shape stands in for the mesh in the sun-shadow march — untick to stop this node casting")
-                        .changed()
-                    {
-                        if casts {
-                            world.remove::<floptle_core::CastShadow>(e);
-                        } else {
-                            world.insert(e, floptle_core::CastShadow(false));
-                        }
-                        cmd.inspector_changed = true;
-                    }
-                }
-
-                // ===== Celestial Body (on-rails orbit; only when the node has one) =====
-                if world.get::<floptle_core::CelestialBody>(e).is_some() {
-                    ui.separator();
-                    let (_, _, remove) = component_header(ui, "☉ Celestial Body", false, true);
-                    if remove {
-                        cmd.remove_celestial = Some(e);
-                    }
-                    ui.indent("cb_props", |ui| {
-                        if let Some(cb) = world.get_mut::<floptle_core::CelestialBody>(e) {
-                            let drag = |ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64, hover: &str| -> bool {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(label);
-                                    ui.add(egui::DragValue::new(v).speed(speed))
-                                        .on_hover_text(hover)
-                                        .changed()
-                                })
-                                .inner
-                            };
-                            let mut ch = false;
-                            ch |= drag(ui, "µ (GM)", &mut cb.mu, 1000.0, "gravitational parameter — surface gravity = µ / radius²");
-                            ch |= drag(ui, "radius", &mut cb.body_radius, 1.0, "physical surface radius (altitude readouts, impostors)");
-                            ch |= drag(ui, "SOI", &mut cb.soi, 10.0, "sphere-of-influence radius; 0 = auto (Laplace) from the parent");
-                            ch |= drag(ui, "occluder", &mut cb.occluder_radius, 1.0, "occlusion culling: radius of the solid core geometry never pierces — terrain chunks fully behind it skip their draws. Keep BELOW the deepest cave/dig; 0 = off");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("parent");
-                                ch |= ui
-                                    .text_edit_singleline(&mut cb.parent)
-                                    .on_hover_text("NAME of the parent body's node; empty = system root (stays put)")
-                                    .changed();
-                            });
-                            ui.small("orbit around the parent (radians, semi-major in units):");
-                            ch |= drag(ui, "semi-major a", &mut cb.a, 1.0, "orbit size; NEGATIVE = hyperbolic escape");
-                            ch |= drag(ui, "eccentricity e", &mut cb.e, 0.005, "0 = circle, <1 ellipse, >1 hyperbola");
-                            ch |= drag(ui, "inclination i", &mut cb.i, 0.01, "tilt from the XZ plane (radians)");
-                            ch |= drag(ui, "node Ω", &mut cb.lan, 0.01, "longitude of the ascending node (radians)");
-                            ch |= drag(ui, "periapsis ω", &mut cb.arg_pe, 0.01, "argument of periapsis (radians)");
-                            ch |= drag(ui, "phase M₀", &mut cb.m0, 0.01, "mean anomaly at t = 0 — where on the orbit it starts");
-                            ui.small("atmosphere (S8; height 0 = airless):");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("sky color");
-                                ch |= ui
-                                    .color_edit_button_rgb(&mut cb.atmo_color)
-                                    .on_hover_text("the sky seen from inside the atmosphere")
-                                    .changed();
-                            });
-                            ch |= drag(ui, "atmo height", &mut cb.atmo_height, 1.0, "shell height above the surface; the sky fades to space across it");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("density");
-                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0), "")
-                                    .on_hover_text("how opaque the sky gets at full depth")
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("clouds");
-                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.clouds, 0.0..=1.0), "")
-                                    .on_hover_text("cloud coverage in the atmosphere (0 = clear)")
-                                    .changed();
-                            });
-                            ui.small("star (Lighting `stars mode` uses these as the lights):");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("luminosity");
-                                ch |= ui
-                                    .add(egui::DragValue::new(&mut cb.luminosity).speed(0.5))
-                                    .on_hover_text(
-                                        "0 = not a star. Irradiance at distance d = luminosity × 1e6 / d² \
-                                         — ~36 fully lights a planet 6000 units away.",
-                                    )
-                                    .changed();
-                                ui.label("color");
-                                ch |= ui.color_edit_button_rgb(&mut cb.star_color).changed();
-                            });
-                            if ch {
-                                cmd.inspector_changed = true;
-                            }
-                        }
-                    });
-                }
-
-                // ===== Game UI (layer/element; only when the node has one) =====
-                {
-                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings, self.ui_flsl_cache, self.ui_styles) {
-                        cmd.inspector_changed = true;
-                    }
-                }
-
-                // ===== Networked (replication; only when the node has one) =====
-                // The authored half of the netcode (docs/multiplayer.md §4.2): which
-                // props sync and whether the owner-client predicts it. Owner/NetId are
-                // session state, assigned at runtime — not edited here.
-                if world.get::<floptle_core::Replicated>(e).is_some() {
-                    ui.separator();
-                    let remove = component_header_no_copy(ui, "🌐 Networked", true);
-                    if remove {
-                        world.remove::<floptle_core::Replicated>(e);
-                        cmd.inspector_changed = true;
-                    }
-                    ui.indent("net_props", |ui| {
-                        if let Some(rep) = world.get_mut::<floptle_core::Replicated>(e) {
-                            use floptle_core::ReplicationMode;
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("mode");
-                                egui::ComboBox::from_id_salt("net-mode")
-                                    .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selected_text(match rep.mode {
-                                        ReplicationMode::Authority => "Server authority",
-                                        ReplicationMode::Predicted => "Predicted (owner)",
-                                        ReplicationMode::Rollback => "Rollback (all peers)",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        cmd.inspector_changed |= ui
-                                            .selectable_value(
-                                                &mut rep.mode,
-                                                ReplicationMode::Authority,
-                                                "Server authority",
-                                            )
-                                            .on_hover_text("the server simulates it; clients render interpolated snapshots — the default, cheat-proof mode")
-                                            .changed();
-                                        cmd.inspector_changed |= ui
-                                            .selectable_value(
-                                                &mut rep.mode,
-                                                ReplicationMode::Predicted,
-                                                "Predicted (owner)",
-                                            )
-                                            .on_hover_text("the owning player's client ALSO simulates it locally, ahead of the server (their own avatar) — the server still has the final word")
-                                            .changed();
-                                        cmd.inspector_changed |= ui
-                                            .selectable_value(
-                                                &mut rep.mode,
-                                                ReplicationMode::Rollback,
-                                                "Rollback (all peers)",
-                                            )
-                                            .on_hover_text("EVERY peer simulates this node every tick from the shared input set and re-simulates on a mispredict — for a fighting game, where the opponent's exact state matters on every frame. Its scripts need snapshot()/restore().")
-                                            .changed();
-                                    });
-                            });
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.transform, "sync transform")
-                                .on_hover_text("replicate position/rotation to clients")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.physics, "sync physics")
-                                .on_hover_text("replicate velocity too — better extrapolation, required to predict a rigidbody")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.animator, "sync animator")
-                                .on_hover_text(
-                                    "replicate the Animation Controller's playback (which state + \
-                                     where in it, per layer) — a few bytes per TRANSITION; every \
-                                     machine samples the pose locally. Off = client-sided: each \
-                                     client drives this node's animator itself",
-                                )
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.interp, "interpolate")
-                                .on_hover_text("smooth remote copies between snapshots (off = snap, for teleporty things)")
-                                .changed();
-                            if rep.interp {
-                                let mut d = rep.interp_delay as i32;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut d, 0..=30), "interp delay (ticks)")
-                                    .on_hover_text("how far behind the server remote copies render — 6 ticks ≈ 100 ms. Lower = tighter tracking (stutters under jitter/loss); higher = smoother on bad links")
-                                    .changed()
-                                {
-                                    rep.interp_delay = d as u8;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                            cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.always_relevant, "always relevant")
-                                .on_hover_text(
-                                    "never interest-culled: replicated to every client wherever \
-                                     they are. For the few things every player must agree on \
-                                     from anywhere — the match clock, the objective, the boss. \
-                                     Does nothing unless the host turned interest management on \
-                                     with net.host{ interest = <metres> }",
-                                )
-                                .changed();
-                        }
-                    });
-                    ui.small("only nodes with this component replicate — everything else stays local. Sessions start via Lua: net.host{} / net.join(...)");
-                }
-
-                // ===== Collider (static collision; only when the node has one) =====
-                // Auto-shaped from the node's geometry (Cube → box, Sphere → sphere,
-                // Capsule → capsule, Mesh → its triangles). A legacy MeshCollider counts.
-                {
-                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
-                        || world.get::<floptle_core::MeshCollider>(e).is_some();
-                    // A tilemap you PAINTED SOLID and cannot stand on. The
-                    // warning existed, and it was printed to the Console at Play
-                    // — which is the one moment you are looking at the game and
-                    // not at the editor, and by then "I fall through the floor"
-                    // already reads as a physics bug. Say it here, next to the
-                    // collider section it is about, with the fix on it.
-                    //
-                    // Still not automatic: a solid tileset implying `Collidable`
-                    // would silently switch collision on in every project that
-                    // ever painted one, including the parallax backgrounds.
-                    if !has_collidable
-                        && world.get::<floptle_core::RigidBody>(e).is_none()
-                        && let Some(Matter::Tilemap { data, tileset, .. }) = world.get::<Matter>(e)
-                        && !tileset.is_empty()
-                        && let Some(set) = self.tiles.get(tileset)
-                        && floptle_tiles::solid_count(data, set) > 0
-                    {
-                        let n = floptle_tiles::solid_count(data, set);
-                        ui.separator();
-                        ui.colored_label(
-                            egui::Color32::from_rgb(255, 200, 80),
-                            format!("⚠ {n} solid squares, but nothing collides with this layer"),
-                        );
-                        ui.small(
-                            "This tilemap's tileset marks squares solid, and the layer has no \
-                             collider — so bodies fall straight through the floor you painted. \
-                             Tilemaps are not collidable by default because most projects have \
-                             background layers painted from the same sheet.",
-                        );
-                        if ui
-                            .button("▦  Make this layer solid")
-                            .on_hover_text("adds a Collidable component — the squares your tileset calls solid become real geometry on Play")
-                            .clicked()
-                        {
-                            cmd.set_collidable = Some((e, true));
-                        }
-                    }
-                    if has_collidable {
-                        let kind = match world.get::<Matter>(e) {
-                            Some(Matter::Mesh { .. }) => "triangle mesh",
-                            Some(Matter::Primitive { shape, .. }) => match shape {
-                                floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
-                                floptle_core::Shape::Sphere => "sphere",
-                                floptle_core::Shape::Capsule => "capsule",
-                            },
-                            _ => "mesh",
-                        };
-                        ui.separator();
-                        let remove = component_header_no_copy(ui, "▦ Collider", true);
-                        ui.small(format!(
-                            "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
-                        ));
-                        if world.get::<floptle_core::RigidBody>(e).is_some() {
-                            ui.small("⚠ This node also has a Rigidbody, so its body owns the physics and this static Collider is ignored — the trigger checkbox lives on the Rigidbody above. To make it a solid obstacle, set the Rigidbody's mode to Static (a baked collider in the body's shape) — or remove the Rigidbody to use this geometry-shaped collider instead.");
-                        } else {
-                            // The collider doubles as the node's sun-shadow caster:
-                            // primitives stand in as analytic proxy shapes, and a
-                            // Collidable MESH is baked into a shadow-only occluder
-                            // volume (its true silhouette — interiors go dark).
-                            let mut casts = world
-                                .get::<floptle_core::CastShadow>(e)
-                                .map(|c| c.0)
-                                .unwrap_or(true);
-                            if crate::responsive::check(ui, &mut casts, "casts shadows")
-                                .on_hover_text("this collider stands in for the node in the sun-shadow march (primitives as proxy shapes, meshes as a baked occluder volume) — untick to stop this node casting")
-                                .changed()
-                            {
-                                if casts {
-                                    world.remove::<floptle_core::CastShadow>(e);
-                                } else {
-                                    world.insert(e, floptle_core::CastShadow(false));
-                                }
-                                cmd.inspector_changed = true;
-                            }
-                            // Trigger: bodies pass through, overlap fires the
-                            // onTriggerEnter/Stay/Exit hooks — portals, pickup
-                            // zones, checkpoints.
-                            let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
-                            if crate::responsive::check(ui, &mut trig, "trigger")
-                                .on_hover_text(
-                                    "events only, no blocking: bodies (and rays) pass through, \
-                                     but overlap fires onTriggerEnter / onTriggerStay / \
-                                     onTriggerExit on both nodes' scripts",
-                                )
-                                .changed()
-                            {
-                                cmd.set_trigger = Some((e, trig));
-                            }
-                        }
-                        if remove {
-                            cmd.set_collidable = Some((e, false));
-                            cmd.inspector_changed = true;
-                        }
-                    }
-                }
-
-                // ===== Navmesh Exclude =====
-                // A marker with nothing to configure, so the whole component is
-                // its own explanation and a remove button.
-                if world.get::<floptle_core::NavMeshExclude>(e).is_some() {
-                    ui.separator();
-                    if component_header_no_copy(ui, "⬚ Navmesh Exclude", true) {
-                        cmd.set_nav_exclude = Some((e, false));
-                        cmd.inspector_changed = true;
-                    }
-                    ui.small(
-                        "kept out of every navmesh bake. Characters will not path over this \
-                         node, whatever it collides with.",
-                    );
-                }
-
-                // ===== Scripts =====
-                ui.separator();
-                // Always-available drop target: drag a script here to attach it.
-                {
-                    let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
-                        egui::Frame::group(ui.style()),
-                        |ui| {
-                            ui.set_min_height(18.0);
-                            ui.small("⚙  drop a script here to attach (or use ➕ Add Component)");
-                        },
-                    );
-                    if let Some(p) = dropped
-                        && is_script(&p.path) {
-                            cmd.drop_script_on = Some((p.path.clone(), e));
-                        }
-                }
-                if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
-                    // Menu first (right-to-left) so it stays pinned on-screen —
-                    // see component_header.
-                    ui.horizontal_wrapped(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if matches!(clip, Some(ComponentClip::Script(_))) {
-                                ui.menu_button("…", |ui| {
-                                    if ui.button("📋  Paste script").clicked() {
-                                        cmd.paste_component = Some(e);
-                                        ui.close();
-                                    }
-                                })
-                                .response
-                                .on_hover_text("adds the copied script, or updates a matching one");
-                            }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.strong("⚙ Scripts");
-                            });
-                        });
-                    });
-                    let mut remove: Option<usize> = None;
-                    let mut copy_idx: Option<usize> = None;
-                    // Candidates for reference params, filtered by declared kind:
-                    // noderef → any named node; scriptref(k) → nodes carrying that
-                    // script; componentref(c) → nodes carrying that component.
-                    let mut node_names: Vec<String> =
-                        world.query::<floptle_core::Name>().map(|(_, n)| n.0.clone()).collect();
-                    node_names.sort();
-                    node_names.dedup();
-                    let mut script_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-                    for (oe, sc) in world.query::<Scripts>() {
-                        if let Some(n) = world.get::<floptle_core::Name>(oe) {
-                            for si in &sc.0 {
-                                script_nodes.entry(si.kind.clone()).or_default().push(n.0.clone());
-                            }
-                        }
-                    }
-                    for v in script_nodes.values_mut() {
-                        v.sort();
-                        v.dedup();
-                    }
-                    let mut comp_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-                    for kind in self.ref_kinds.values() {
-                        if let floptle_script::RefKind::Component(c) = kind
-                            && !comp_nodes.contains_key(c)
-                        {
-                            let mut v: Vec<String> = world
-                                .query::<floptle_core::Name>()
-                                .filter(|(oe, _)| node_has_component(world, *oe, c))
-                                .map(|(_, n)| n.0.clone())
-                                .collect();
-                            v.sort();
-                            v.dedup();
-                            comp_nodes.insert(c.clone(), v);
-                        }
-                    }
-                    // Entity → name, for dropped hierarchy nodes.
-                    let name_of: std::collections::HashMap<floptle_core::Entity, String> = world
-                        .query::<floptle_core::Name>()
-                        .map(|(oe, n)| (oe, n.0.clone()))
-                        .collect();
-                    ui.indent("script_list", |ui| {
-                        if let Some(scr) = world.get_mut::<Scripts>(e) {
-                            for (i, inst) in scr.0.iter_mut().enumerate() {
-                                // Menu first (right-to-left) so a long script
-                                // name truncates instead of pushing the … menu
-                                // off-screen — see component_header.
-                                ui.horizontal_wrapped(|ui| {
-                                    cmd.inspector_changed |= crate::responsive::check(ui, &mut inst.enabled, "").changed();
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.menu_button("…", |ui| {
-                                            if ui.button("⎘  Copy values").clicked() {
-                                                copy_idx = Some(i);
-                                                ui.close();
-                                            }
-                                            if ui.button("🖊  Edit script").clicked() {
-                                                let p = self
-                                                    .project_root
-                                                    .join("scripts")
-                                                    .join(format!("{}.lua", inst.kind));
-                                                cmd.open_script_pref = Some(p.to_string_lossy().to_string());
-                                                ui.close();
-                                            }
-                                            ui.separator();
-                                            if ui.button("🗑  Remove").clicked() {
-                                                remove = Some(i);
-                                                ui.close();
-                                            }
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&inst.kind).strong(),
-                                                    )
-                                                    .truncate(),
-                                                );
-                                            },
-                                        );
-                                    });
-                                });
-                                // Everything this script declares — editor
-                                // buttons, then its tunables in DECLARATION
-                                // order, grouped under `--@header` sections and
-                                // drawn as the widget each one's annotations ask
-                                // for. See `script_meta`.
-                                cmd.inspector_changed |= script_tunables_ui(
-                                    ui,
-                                    inst,
-                                    ScriptRowCtx {
-                                        meta: self.script_meta.get(self.project_root, &inst.kind),
-                                        ref_kinds: self.ref_kinds,
-                                        node_names: &node_names,
-                                        script_nodes: &script_nodes,
-                                        comp_nodes: &comp_nodes,
-                                        name_of: &name_of,
-                                        salt: (e.index(), i),
-                                    },
-                                    &mut cmd.run_editor_action,
-                                    e,
-                                );
-                                ui.add_space(4.0);
-                            }
-                            if let Some(i) = copy_idx {
-                                cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
-                            }
-                            if let Some(i) = remove {
-                                scr.0.remove(i);
-                                cmd.inspector_changed = true;
-                            }
-                        }
-                    });
-                }
-
-                // ===== Animation Controller (when attached) =====
-                anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
-
-                // ===== ◈ Objects & Rig (this model's sub-objects + bones) =====
-                // Shown on the model node itself: two lists (Objects = mesh sub-objects,
-                // Bones = rig joints) whose entries select the same pose-able skeleton
-                // node the Hierarchy tree does, plus the per-object re-parent dropdown
-                // and the Mirror / flow-rig tools.
-                if let Some(nodes) = bone_names.get(&e) {
-                    ui.separator();
-                    ui.strong("◈ Objects & Rig");
-                    ui.small("every object and bone in this model — click to select, then pose or keyframe it");
-
-                    let sel_idx = cur_bone.filter(|(m, _)| *m == e).map(|(_, i)| i);
-                    let objects: Vec<usize> =
-                        (0..nodes.len()).filter(|&i| nodes[i].is_object).collect();
-                    let bones_only: Vec<usize> =
-                        (0..nodes.len()).filter(|&i| !nodes[i].is_object).collect();
-
-                    // Descendants of `child` (so the "parent under" dropdown never offers
-                    // a cycle): walk parents up from every node and mark those under child.
-                    let is_descendant_of = |node: usize, ancestor: usize| -> bool {
-                        let mut cur = nodes[node].parent;
-                        let mut guard = 0;
-                        while let Some(p) = cur {
-                            if p == ancestor {
-                                return true;
-                            }
-                            cur = nodes[p].parent;
-                            guard += 1;
-                            if guard > 256 {
-                                break;
-                            }
-                        }
-                        false
-                    };
-
-                    let mut list_group = |ui: &mut egui::Ui, title: String, idxs: &[usize], allow_reparent: bool| {
-                        egui::CollapsingHeader::new(title)
-                            .id_salt(("objrig", e, allow_reparent))
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                for &i in idxs {
-                                    let sel = sel_idx == Some(i);
-                                    let icon = if nodes[i].is_object { "◈" } else { "🔗" };
-                                    ui.horizontal_wrapped(|ui| {
-                                        if ui
-                                            .selectable_label(sel, format!("{icon} {}", nodes[i].name))
-                                            .clicked()
-                                        {
-                                            cmd.select_bone = Some((e, i));
-                                        }
-                                        if allow_reparent {
-                                            // "under ▸ <parent>" — reparent this object within
-                                            // the model (persisted to the .rig.ron sidecar).
-                                            let cur_parent = nodes[i].parent.map(|p| nodes[p].name.clone());
-                                            let cur_label = cur_parent.clone().unwrap_or_else(|| "(root)".into());
-                                            egui::ComboBox::from_id_salt(("reparent", e, i))
-                                                .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                                                .selected_text(format!("under {cur_label}"))
-                                                .width(140.0)
-                                                .show_ui(ui, |ui| {
-                                                    if ui.selectable_label(cur_parent.is_none(), "(root)").clicked()
-                                                        && cur_parent.is_some()
-                                                    {
-                                                        cmd.set_object_parent = Some((e, nodes[i].name.clone(), None));
-                                                    }
-                                                    for j in 0..nodes.len() {
-                                                        if j == i || is_descendant_of(j, i) {
-                                                            continue; // no self / cycles
-                                                        }
-                                                        let picked = cur_parent.as_deref() == Some(nodes[j].name.as_str());
-                                                        let jicon = if nodes[j].is_object { "◈" } else { "🔗" };
-                                                        if ui
-                                                            .selectable_label(picked, format!("{jicon} {}", nodes[j].name))
-                                                            .clicked()
-                                                            && !picked
-                                                        {
-                                                            cmd.set_object_parent = Some((
-                                                                e,
-                                                                nodes[i].name.clone(),
-                                                                Some(nodes[j].name.clone()),
-                                                            ));
-                                                        }
-                                                    }
-                                                });
-                                        }
-                                    });
-                                }
-                            });
-                    };
-
-                    if !objects.is_empty() {
-                        list_group(ui, format!("◈ Objects ({})", objects.len()), &objects, true);
-                    }
-                    if !bones_only.is_empty() {
-                        // Bones re-parent too: a flow-rig chain root under "Head"
-                        // makes skinned hair ride the head (skinned verts follow
-                        // JOINTS, so parenting the hair object alone isn't enough).
-                        list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, true);
-                    }
-
-                    // ---- tools ----
-                    ui.add_space(4.0);
-                    if ui
-                        .button("⇋ Apply Mirror → new .glb")
-                        .on_hover_text(
-                            "Complete a Blender model whose Mirror modifier wasn't applied: \
-                             synthesize the missing half, split off-center limbs into an L/R \
-                             pair, weld centerline halves. Writes a new .mirrored.glb beside \
-                             the source (non-destructive).",
-                        )
-                        .clicked()
-                    {
-                        cmd.mirror_model = Some(e);
-                    }
-                    let sel_obj_name = sel_idx
-                        .filter(|&i| nodes[i].is_object)
-                        .map(|i| nodes[i].name.clone());
-                    ui.add_enabled_ui(sel_obj_name.is_some(), |ui| {
-                        if ui
-                            .button("🔗 Rig selected object to flow")
-                            .on_hover_text(
-                                "Generate a soft bone-chain down the selected object and \
-                                 auto-weight it (hair, cloth, antennae). Writes a new rigged \
-                                 .glb beside the source; pose/keyframe the chain to make it \
-                                 bend and flow.",
-                            )
-                            .clicked()
-                            && let Some(name) = sel_obj_name.clone()
-                        {
-                            cmd.add_hair_rig = Some((e, name));
-                        }
-                    });
-                }
-
-                // ===== 🔗 Bone attachment (any descendant of a rigged mesh) =====
-                // An equipped mesh is commonly put below an Empty/socket below the
-                // character first. Walk its ancestors instead of requiring the rigged
-                // Mesh to be its immediate Parent; choosing a bone will normalize the
-                // link to that mesh while preserving the child's world pose.
-                let rig_parent = {
-                    let mut at = e;
-                    let mut found = None;
-                    for _ in 0..64 {
-                        let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(at).copied() else {
-                            break;
-                        };
-                        if bone_names.contains_key(&p) {
-                            found = Some(p);
-                            break;
-                        }
-                        at = p;
-                    }
-                    found
-                };
-                if let Some(mesh) = rig_parent
-                    && let Some(bones) = bone_names.get(&mesh)
-                {
-                    ui.separator();
-                    ui.strong("🔗 Bone attachment");
-                    ui.small("ride an object or bone of this parent model (a weapon on a hand)");
-                    let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
-                    egui::ComboBox::from_id_salt("bone_attach_pick")
-                        .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                        .selected_text(cur.clone().unwrap_or_else(|| "(not attached)".into()))
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(cur.is_none(), "(not attached)").clicked()
-                                && cur.is_some()
-                            {
-                                world.remove::<floptle_core::BoneAttach>(e);
-                                cmd.inspector_changed = true;
-                            }
-                            for node in bones {
-                                let sel = cur.as_deref() == Some(node.name.as_str());
-                                let icon = if node.is_object { "◈" } else { "🔗" };
-                                if ui.selectable_label(sel, format!("{icon} {}", node.name)).clicked() && !sel {
-                                    // Deferred because attaching reparents to the mesh and
-                                    // derives a bone-local offset from the current world pose.
-                                    // That keeps a nested weapon/socket exactly where it was.
-                                    cmd.attach_to_bone = Some((e, mesh, node.name.clone()));
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        });
-                    // Offset editor + detach (only when attached) — position the node on
-                    // the bone relative to it.
-                    if let Some(a) = world.get::<floptle_core::BoneAttach>(e).cloned() {
-                        let mut off = a.offset;
-                        let mut ch = false;
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("pos");
-                            ch |= ui.add(egui::DragValue::new(&mut off.translation.x).speed(0.01).prefix("x ")).changed();
-                            ch |= ui.add(egui::DragValue::new(&mut off.translation.y).speed(0.01).prefix("y ")).changed();
-                            ch |= ui.add(egui::DragValue::new(&mut off.translation.z).speed(0.01).prefix("z ")).changed();
-                        });
-                        let (ey, ex, ez) = off.rotation.to_euler(EulerRot::YXZ);
-                        let mut deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("rot°");
-                            let mut rc = false;
-                            rc |= ui.add(egui::DragValue::new(&mut deg[0]).speed(0.5).prefix("x ")).changed();
-                            rc |= ui.add(egui::DragValue::new(&mut deg[1]).speed(0.5).prefix("y ")).changed();
-                            rc |= ui.add(egui::DragValue::new(&mut deg[2]).speed(0.5).prefix("z ")).changed();
-                            if rc {
-                                off.rotation = Quat::from_euler(
-                                    EulerRot::YXZ,
-                                    deg[1].to_radians(),
-                                    deg[0].to_radians(),
-                                    deg[2].to_radians(),
-                                );
-                                ch = true;
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("scale");
-                            let mut s = off.scale.x;
-                            // Negative allowed (a mirrored attachment); only the
-                            // degenerate |s| < 0.001 band is nudged out.
-                            if ui.add(egui::DragValue::new(&mut s).speed(0.01).range(-100.0..=100.0)).changed() {
-                                if s.abs() < 0.001 {
-                                    s = 0.001f32.copysign(if s == 0.0 { 1.0 } else { s });
-                                }
-                                off.scale = floptle_core::math::Vec3::splat(s);
-                                ch = true;
-                            }
-                            if ui.button("🗑 detach").clicked() {
-                                world.remove::<floptle_core::BoneAttach>(e);
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        if ch {
-                            if let Some(at) = world.get_mut::<floptle_core::BoneAttach>(e) {
-                                at.offset = off;
-                            }
-                            cmd.inspector_changed = true;
-                        }
-                    }
-                }
-
-                // ===== ➕ Add Component (searchable, icon'd) =====
-                ui.separator();
-                ui.add_space(2.0);
-                let add_btn = ui.button("➕  Add Component");
-                let add_popup_id = egui::Popup::default_response_id(&add_btn);
-                // True only on the frame the menu transitions closed → open, so we
-                // focus the search box exactly once (start typing immediately).
-                let add_opening =
-                    add_btn.clicked() && !egui::Popup::is_id_open(ui.ctx(), add_popup_id);
-                // CloseOnClickOutside (not the menu default CloseOnClick) so clicking
-                // the search field doesn't dismiss the menu.
-                egui::Popup::menu(&add_btn)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .width(236.0)
-                    .show(|ui| {
-                    let filter = &mut *self.add_component_filter;
-                    let search = ui.add(
-                        egui::TextEdit::singleline(filter)
-                            .hint_text("🔍 search components…")
-                            .desired_width(212.0),
-                    );
-                    if add_opening {
-                        search.request_focus();
-                    }
-                    let f = filter.trim().to_lowercase();
-                    let hit = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
-
-                    // What the node already has decides what's offered.
-                    let cur = world.get::<Matter>(e);
-                    let is_terrain = matches!(cur, Some(Matter::Terrain { .. }));
-                    let has_mat = world.get::<Material>(e).is_some();
-                    let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
-                    let has_net = world.get::<floptle_core::Replicated>(e).is_some();
-                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
-                        || world.get::<floptle_core::MeshCollider>(e).is_some();
-                    let collider_kind = match cur {
-                        Some(Matter::Mesh { .. }) => Some("triangle mesh"),
-                        Some(Matter::Primitive { shape, .. }) => Some(match shape {
-                            floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
-                            floptle_core::Shape::Sphere => "sphere",
-                            floptle_core::Shape::Capsule => "capsule",
-                        }),
-                        _ => None,
-                    };
-                    let cur_kind = cur.map(matter_kind_label);
-
-                    // One catalog of (category, label, action) — built from current state.
-                    enum Add {
-                        Rb,
-                        Celestial,
-                        Coll,
-                        NavExclude,
-                        Mat,
-                        Net,
-                        Preset(String),
-                        Script(String),
-                        Type(Matter),
-                        AnimCtl(String),
-                        AnimNew,
-                        Particles(String),
-                        ParticlesNew,
-                        Audio,
-                    }
-                    let mut items: Vec<(&str, String, Add)> = Vec::new();
-                    if !has_rb {
-                        items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
-                    }
-                    if world.get::<floptle_core::CelestialBody>(e).is_none() {
-                        items.push(("Physics", "☉  Celestial Body (orbit rails)".into(), Add::Celestial));
-                    }
-                    if !has_net {
-                        items.push(("Networking", "🌐  Networked".into(), Add::Net));
-                    }
-                    if !has_collidable
-                        && let Some(k) = collider_kind {
-                            items.push(("Physics", format!("▦  Collider ({k})"), Add::Coll));
-                        }
-                    if !has_mat {
-                        items.push(("Rendering", "◑  Material".into(), Add::Mat));
-                    }
-                    if world.get::<floptle_core::NavMeshExclude>(e).is_none() {
-                        items.push((
-                            "Physics",
-                            "⬚  Navmesh Exclude".into(),
-                            Add::NavExclude,
-                        ));
-                    }
-                    // Animation Controller: attach an existing controller asset, or
-                    // create a fresh one (opens the graph editor).
-                    if world.get::<floptle_core::AnimController>(e).is_none() {
-                        items.push((
-                            "Animation",
-                            "▶  Animation Controller (new)".into(),
-                            Add::AnimNew,
-                        ));
-                        for (k, _) in self.anim.controllers.iter() {
-                            items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
-                        }
-                    }
-                    if world.get::<floptle_audio::AudioSource>(e).is_none() {
-                        items.push(("Effects", "♪  Audio Source".into(), Add::Audio));
-                    }
-                    // Particle System: attach an existing effect asset, or create a
-                    // starter effect (a small looping fountain to shape from).
-                    if world.get::<floptle_core::ParticleSystem>(e).is_none() {
-                        items.push(("Effects", "✨  Particle System (new)".into(), Add::ParticlesNew));
-                        for (k, _) in self.vfx.effects.iter() {
-                            items.push(("Effects", format!("✨  {k}"), Add::Particles(k.clone())));
-                        }
-                    }
-                    for (name, _) in self.materials {
-                        items.push(("Rendering", format!("◑  {name}  (preset)"), Add::Preset(name.clone())));
-                    }
-                    // Scripts not already attached.
-                    let attached: std::collections::HashSet<String> = world
-                        .get::<Scripts>(e)
-                        .map(|s| s.0.iter().map(|i| i.kind.clone()).collect())
-                        .unwrap_or_default();
-                    let mut script_paths = Vec::new();
-                    collect_script_names(self.asset_tree, &mut script_paths);
-                    for path in script_paths {
-                        let stem = script_name_of(&path);
-                        if !attached.contains(&stem) {
-                            items.push(("Scripts", format!("⚙  {stem}"), Add::Script(path)));
-                        }
-                    }
-                    // Type switch (mutually exclusive). Terrain is special — leave it be.
-                    if !is_terrain {
-                        for (lbl, mt) in type_catalog() {
-                            if cur_kind != Some(matter_kind_label(&mt)) {
-                                items.push(("Type — replaces current", lbl.to_string(), Add::Type(mt)));
-                            }
-                        }
-                        // Each importable model is a Mesh type you can become.
-                        let mut models = Vec::new();
-                        collect_model_paths(self.asset_tree, &mut models);
-                        for p in models {
-                            let name = Path::new(&p)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| p.clone());
-                            let is_cur = matches!(cur, Some(Matter::Mesh { asset_path }) if *asset_path == p);
-                            if !is_cur {
-                                items.push((
-                                    "Mesh — replaces type",
-                                    format!("✳  {name}"),
-                                    Add::Type(Matter::Mesh { asset_path: p }),
-                                ));
-                            }
-                        }
-                    }
-
-                    let mut picked = false;
-                    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                        // Paste the clipboard onto a component the node doesn't have yet.
-                        if let Some(c) = clip {
-                            let can = match c {
-                                ComponentClip::Material(_) => !has_mat,
-                                ComponentClip::RigidBody(_) => !has_rb,
-                                ComponentClip::Particles(_) => {
-                                    world.get::<floptle_core::ParticleSystem>(e).is_none()
-                                }
-                                ComponentClip::Audio(_) => {
-                                    world.get::<floptle_audio::AudioSource>(e).is_none()
-                                }
-                                ComponentClip::Script(_) => true,
-                                ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
-                            };
-                            if can {
-                                let lbl = format!("📋  Paste {}", c.label());
-                                if hit(&lbl) && ui.button(lbl).clicked() {
-                                    cmd.paste_component = Some(e);
-                                    picked = true;
-                                    ui.close();
-                                }
-                            }
-                        }
-                        let mut shown = false;
-                        for cat in [
-                            "Physics",
-                            "Networking",
-                            "Rendering",
-                            "Effects",
-                            "Animation",
-                            "Scripts",
-                            "Type — replaces current",
-                            "Mesh — replaces type",
-                        ] {
-                            if !items.iter().any(|(c, l, _)| *c == cat && hit(l)) {
-                                continue;
-                            }
-                            ui.add_space(4.0);
-                            ui.weak(cat);
-                            for (c, l, a) in &items {
-                                if *c != cat || !hit(l) {
-                                    continue;
-                                }
-                                shown = true;
-                                if ui.button(l).clicked() {
-                                    match a {
-                                        Add::Rb => cmd.add_rigidbody = Some(e),
-                                        Add::Celestial => cmd.add_celestial = Some(e),
-                                        Add::Net => cmd.add_networked = Some(e),
-                                        Add::Coll => cmd.set_collidable = Some((e, true)),
-                                        Add::NavExclude => cmd.set_nav_exclude = Some((e, true)),
-                                        Add::Mat => cmd.add_material = Some(e),
-                                        Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
-                                        Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
-                                        Add::Type(mt) => cmd.set_matter = Some((e, mt.clone())),
-                                        Add::AnimCtl(k) => {
-                                            cmd.set_anim_controller = Some((e, Some(k.clone())))
-                                        }
-                                        Add::AnimNew => cmd.new_anim_controller = Some(Some(e)),
-                                        Add::Particles(k) => {
-                                            cmd.add_particles = Some((e, k.clone()))
-                                        }
-                                        Add::ParticlesNew => cmd.new_particles = Some(e),
-                                        Add::Audio => cmd.add_audio = Some(e),
-                                    }
-                                    picked = true;
-                                    ui.close();
-                                }
-                            }
-                        }
-                        if !shown && !f.is_empty() {
-                            ui.weak("no matching components");
-                        }
-                    });
-                    // Reset the search for next open once something's been added.
-                    if picked {
-                        filter.clear();
-                    }
-                });
-            }
+            Some(e) if self.world.get::<Light>(e).is_some() => self.lighting_node_ui(ui, e),
+            Some(e) if self.world.get::<Transform>(e).is_some() => self.node_inspector_ui(ui, e),
             Some(_) => {
                 ui.label("(no editable properties)");
             }
@@ -6954,45 +1771,7 @@ impl EditorTabViewer<'_> {
 
         // ---- floating Material Editor window (edits the primary selection) ----
         if *self.show_material_editor {
-            let mut open = true;
-            egui::Window::new("◑ Material Editor")
-                .open(&mut open)
-                .default_width(300.0)
-                .show(ui.ctx(), |ui| match self.selection.last().copied() {
-                    Some(e) if world.get::<Matter>(e).is_some() => {
-                        let nm = self
-                            .entity_names
-                            .iter()
-                            .find(|(x, _)| *x == e)
-                            .map(|(_, n)| n.clone())
-                            .unwrap_or_default();
-                        ui.label(format!("editing: {nm}"));
-                        ui.separator();
-                        if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
-                            cmd.inspector_changed |= res.changed;
-                            cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
-                            if res.remove {
-                                cmd.remove_material = Some(e);
-                            }
-                            if let Some(name) = res.save_as {
-                                cmd.save_material =
-                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                            }
-                        } else {
-                            ui.label("This object uses the default look.");
-                            if ui.button("✚ Add material").clicked() {
-                                cmd.add_material = Some(e);
-                            }
-                        }
-                    }
-                    _ => {
-                        ui.label("Select a node to edit its material.");
-                    }
-                });
-            if !open {
-                *self.show_material_editor = false;
-            }
+            self.material_editor_window_ui(ui);
         }
 
         // ---- hand the edit to the rest of the selection ---------------------
@@ -7001,7 +1780,5354 @@ impl EditorTabViewer<'_> {
         // place when the mouse comes up. Costs one comparison per selected node
         // per component when nothing changed.
         if let Some(snap) = multi {
-            snap.apply(world, self.selection);
+            snap.apply(self.world, self.selection);
+        }
+    }
+
+    /// The Lighting node: sun, sky, fog, GI and everything else that puts light on the screen.
+    fn lighting_node_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // What ELSE is lighting this scene — counted before the `Light`
+        // borrow, because the answer needs the whole world.
+        //
+        // "I set intensity to 0 and I can still see" is a fair thing to
+        // expect and a fair thing to be confused by: `intensity` scales
+        // the KEY light only, and four other things put photons on the
+        // screen. None of them is discoverable from this panel, so the
+        // panel now names them.
+        let point_lights = world
+            .query::<Matter>()
+            .filter(|(pe, m)| {
+                matches!(m, Matter::PointLight { intensity, .. } if *intensity > 0.0)
+                    && !floptle_core::is_disabled(world, *pe)
+            })
+            .count();
+        let unlit_mats =
+            world.query::<Material>().filter(|(_, m)| m.unlit).count();
+        let emissive_mats = world
+            .query::<Material>()
+            .filter(|(_, m)| m.emissive != [0.0; 3] && m.emissive_strength > 0.0)
+            .count();
+        if let Some(l) = world.get_mut::<Light>(e) {
+            ui.label("Lighting node");
+            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.stars, "stars mode ☀")
+                .on_hover_text(
+                    "the directional light turns OFF and every Celestial Body with \
+                     luminosity > 0 becomes a real light source — light radiates \
+                     from each star with inverse-square falloff, terminators wrap \
+                     planets, far sides go dark, and multiple stars just work \
+                     (up to 4 reach the shaders).",
+                )
+                .changed();
+            if l.stars {
+                ui.small("light comes from Celestial Bodies with luminosity > 0");
+            } else {
+                ui.label("direction");
+                ui.horizontal_wrapped(|ui| {
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("light");
+                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
+                ui.label("ambient");
+                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
+            });
+            // The 2D half, next to its 3D twin so the pair is obvious.
+            // Without a row here the only way to find out that a flat
+            // scene's base brightness is a field on the Lighting node
+            // was to be told.
+            ui.horizontal_wrapped(|ui| {
+                ui.label("2D base light");
+                cmd.inspector_changed |=
+                    ui.color_edit_button_rgb(&mut l.ambient_2d).changed();
+                ui.small(if l.ambient_2d == [1.0, 1.0, 1.0] {
+                    "full — 2D lights only add"
+                } else {
+                    "turned down — 2D lights carve into it"
+                });
+            })
+            .response
+            .on_hover_text(
+                "What every tilemap and sprite batch is lit by before any 2D light \
+                 reaches it. White means placing a light can only make things \
+                 brighter. Turn it down for a dark room a torch cuts a circle out \
+                 of.\n\nThis is the 2D one; `ambient` above is the 3D fill under \
+                 the key light.",
+            );
+            cmd.inspector_changed |=
+                crate::responsive::slider(ui, egui::Slider::new(&mut l.intensity, 0.0..=8.0), "intensity")
+                    .on_hover_text(
+                        "brightness of the KEY (directional) light only. It is not a \
+                         master dimmer — ambient, 2D base light, point lights, emissive \
+                         and unlit materials are all separate.",
+                    )
+                    .changed();
+
+            // Turned the key light off and the scene is still lit. Say
+            // what by, and offer the one thing the person doing this
+            // almost always wants: actual darkness.
+            if l.intensity <= 0.0 && !l.stars {
+                let ambient_on = l.ambient != [0.0; 3];
+                let base_2d_on = l.ambient_2d != [0.0; 3];
+                let mut sources: Vec<String> = Vec::new();
+                if ambient_on {
+                    sources.push("3D ambient".into());
+                }
+                if base_2d_on {
+                    sources.push("the 2D base light".into());
+                }
+                if point_lights > 0 {
+                    sources.push(format!(
+                        "{point_lights} point light{}",
+                        if point_lights == 1 { "" } else { "s" }
+                    ));
+                }
+                if emissive_mats > 0 {
+                    sources.push(format!("{emissive_mats} emissive material(s)"));
+                }
+                if unlit_mats > 0 {
+                    sources.push(format!(
+                        "{unlit_mats} UNLIT material(s) — unlit ignores light entirely"
+                    ));
+                }
+                ui.add_space(2.0);
+                if sources.is_empty() {
+                    ui.small("key light off, nothing else lights this scene — it is black.");
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 80),
+                        "the key light is off and the scene is still lit",
+                    );
+                    ui.small(format!("still lighting it: {}.", sources.join(", ")));
+                    if (ambient_on || base_2d_on)
+                        && ui
+                            .button("🌑  Black it out")
+                            .on_hover_text(
+                                "zero the 3D ambient and the 2D base light — the two \
+                                 fills this panel owns. Point lights, emissive and unlit \
+                                 materials are per-node and stay as they are.",
+                            )
+                            .clicked()
+                    {
+                        l.ambient = [0.0; 3];
+                        l.ambient_2d = [0.0; 3];
+                        cmd.inspector_changed = true;
+                    }
+                }
+            }
+
+            ui.separator();
+            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadows, "sun shadows")
+                .on_hover_text(
+                    "march the SDF field toward the sun — analytically soft shadows, \
+                     no shadow maps. Terrain and blobs cast on everything; meshes cast \
+                     via their collider shapes and receive like everything else.",
+                )
+                .changed();
+            ui.add_enabled_ui(l.shadows, |ui| {
+                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0), "softness")
+                    .on_hover_text("0 = razor-hard edge (retro), 1 = dreamy-soft penumbra")
+                    .changed();
+                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0), "strength")
+                    .on_hover_text("how dark full shadow gets — ambient light still fills, so 1.0 isn't pitch black")
+                    .changed();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("tint");
+                    cmd.inspector_changed |= ui
+                        .color_edit_button_rgb(&mut l.shadow_tint)
+                        .on_hover_text("shadows darken toward this color — black is neutral; try purple dusk or sepia")
+                        .changed();
+                    ui.label("quantize");
+                    let qlabel = match l.shadow_quantize {
+                        0 => "smooth".to_string(),
+                        n => format!("{n} bands"),
+                    };
+                    egui::ComboBox::from_id_salt("shadow_quantize")
+                        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                        .selected_text(qlabel)
+                        .show_ui(ui, |ui| {
+                            cmd.inspector_changed |=
+                                ui.selectable_value(&mut l.shadow_quantize, 0, "smooth").clicked();
+                            for nb in 2..=4u32 {
+                                cmd.inspector_changed |= ui
+                                    .selectable_value(&mut l.shadow_quantize, nb, format!("{nb} bands"))
+                                    .clicked();
+                            }
+                        });
+                });
+                ui.add_enabled_ui(l.shadow_quantize >= 2, |ui| {
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadow_dither, "dither the penumbra")
+                        .on_hover_text("Bayer-pattern the quantized penumbra — the PS1 shadow edge; pairs with retro mode")
+                        .changed();
+                });
+                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_distance, 10.0..=1000.0)
+                            .logarithmic(true),
+                            "distance")
+                    .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
+                    .changed();
+                // Contact shadows: the short-range half, from the depth
+                // buffer rather than from the field.
+                ui.separator();
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.contact_shadows, "contact shadows")
+                    .on_hover_text(
+                        "the small dark line where things touch. A moving mesh casts through its \
+                         COLLIDER, so a character's shadow is a capsule's — this shadows from the \
+                         real silhouette of whatever is on screen instead. Short range: it is the \
+                         shadow under a foot, in a seam, behind a bolt.",
+                    )
+                    .changed();
+                ui.add_enabled_ui(l.contact_shadows, |ui| {
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_length, 0.02..=3.0).suffix("m"), "reach")
+                        .on_hover_text("how far it traces. Too far and distant geometry starts smearing shadows over things in front of it")
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_strength, 0.0..=1.0), "strength")
+                        .changed();
+                    let mut steps = l.contact_steps as i32;
+                    if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=32), "steps")
+                        .on_hover_text("samples along the trace — raise it if the shadow looks striped")
+                        .changed()
+                    {
+                        l.contact_steps = steps as u32;
+                        cmd.inspector_changed = true;
+                    }
+                    ui.small("only shadows what is ON SCREEN — nothing off the edge of the frame casts one");
+                });
+                // Reflections of the scene. Sits with the shadow knobs
+                // rather than with fog because it is the same kind of
+                // thing: a scene-wide switch that costs a march, reads
+                // the depth buffer, and only sees what is on screen.
+                ui.separator();
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.reflections, "reflections (screen space)")
+                    .on_hover_text(
+                        "reflective surfaces show the SCENE, not only the sky — a floor shows the \
+                         room standing on it. Every physical material with some reflectivity picks \
+                         this up at once; how much and how sharply is each material's roughness \
+                         and reflections. Only what is ON SCREEN can be reflected: anything behind \
+                         the camera or hidden behind something nearer falls back to the sky.",
+                    )
+                    .changed();
+                ui.add_enabled_ui(l.reflections, |ui| {
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_distance, 1.0..=200.0)
+                                .logarithmic(true)
+                                
+                                .suffix("m"), "reach")
+                        .on_hover_text("how far a reflected ray travels before giving up. A puddle showing a building across the street needs more of this than a floor showing the table on it")
+                        .changed();
+                    let mut steps = l.reflection_steps as i32;
+                    if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 8..=64), "steps")
+                        .on_hover_text("samples along that ray — raise it with the reach, or reflections start missing thin things")
+                        .changed()
+                    {
+                        l.reflection_steps = steps as u32;
+                        cmd.inspector_changed = true;
+                    }
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_thickness, 0.02..=5.0)
+                                .logarithmic(true)
+                                
+                                .suffix("m"), "thickness")
+                        .on_hover_text("how solid things are assumed to be. Too little and reflections come out speckled with holes; too much and railings and leaves smear over what is really behind them")
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_clamp, 0.0..=64.0),
+                                "brightness cap")
+                        .on_hover_text(
+                            "the most one reflected bounce may carry. Two mirrors facing \
+                             each other re-reflect each other every frame and a polished \
+                             metal loses almost nothing per pass, so without a ceiling the \
+                             pair climbs into a white blob. Ordinary highlights sit well \
+                             under this. 0 removes the ceiling.",
+                        )
+                        .changed();
+                    ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
+                });
+                ui.small("off screen, a reflection falls back to the SKY — place a ◍ Reflection Probe to give a room something else to show");
+                // Glass, in the same place as reflections and for the
+                // same reason: it is what a surface shows of the scene
+                // when the light goes through it rather than off it, and
+                // it is a scene-wide cost rather than a material one.
+                ui.separator();
+                let mut layers = l.refraction_layers as i32;
+                if crate::responsive::slider(ui, egui::Slider::new(
+                            &mut layers,
+                            1..=floptle_core::Light::MAX_REFRACTION_LAYERS as i32,
+                        ),
+                        "glass layers")
+                    .on_hover_text(
+                        "how many depths of see-through surface can be looked through at \
+                         once. At 1 only the nearest pane shows what is behind it, so a \
+                         fish tank has to be one box; raising it lets a window have a \
+                         bottle standing behind it. Each layer costs one more pass, and \
+                         only when something see-through is in view",
+                    )
+                    .changed()
+                {
+                    l.refraction_layers = layers as u32;
+                    cmd.inspector_changed = true;
+                }
+            });
+            // Fog — distance haze (depth ramp) or real marched media (volumetric).
+            ui.separator();
+            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog, "fog")
+                .on_hover_text("fade the scene into a color — cheap depth ramp or a marched volumetric layer; the skybox stays crisp")
+                .changed();
+            ui.add_enabled_ui(l.fog, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("mode");
+                    egui::ComboBox::from_id_salt("fog_mode")
+                        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                        .selected_text(if l.fog_volumetric { "volumetric" } else { "depth" })
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(!l.fog_volumetric, "depth").clicked() && l.fog_volumetric {
+                                l.fog_volumetric = false;
+                                cmd.inspector_changed = true;
+                            }
+                            if ui
+                                .selectable_label(l.fog_volumetric, "volumetric")
+                                .on_hover_text("a height-bounded layer of drifting mist marched per pixel — hills poke out of ground fog, patches roll by")
+                                .clicked()
+                                && !l.fog_volumetric
+                            {
+                                l.fog_volumetric = true;
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("color");
+                    cmd.inspector_changed |= ui
+                        .color_edit_button_rgb(&mut l.fog_color)
+                        .on_hover_text("match the horizon / background so no seam shows at the skybox")
+                        .changed();
+                });
+                if l.fog_volumetric {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("density");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_density).speed(0.001).range(0.0..=2.0))
+                            .on_hover_text("media thickness per world unit — how fast things vanish into it")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("layer top");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_height).speed(0.1).suffix("m"))
+                            .on_hover_text("world height the fog fills up to")
+                            .changed();
+                        ui.label("softness");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_falloff).speed(0.1).range(0.01..=1000.0).suffix("m"))
+                            .on_hover_text("how gradually the layer thins out above its top")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("noise");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_noise, 0.0..=1.0), "")
+                            .on_hover_text("break the media into drifting patches (0 = uniform)")
+                            .changed();
+                        ui.label("scale");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_noise_scale).speed(0.5).range(0.5..=1000.0).suffix("m"))
+                            .on_hover_text("wisp size in world units")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("max distance");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_end).speed(1.0).range(1.0..=10000.0).suffix("m"))
+                            .on_hover_text("how far a ray that hits nothing keeps marching fog — a perf fence for sky pixels (an upward ray already stops where the layer ends)")
+                            .changed();
+                    });
+                    // Light injection: the media lit by the scene rather
+                    // than painted a flat colour.
+                    ui.separator();
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_light, 0.0..=3.0), "lit by the scene")
+                        .on_hover_text(
+                            "0 = the flat fog colour; 1 = the media lit by the sun, the point lights and the baked bounce; \
+                             past 1 exaggerates. The fog colour becomes what the media is MADE of rather than what it looks like.",
+                        )
+                        .changed();
+                    ui.add_enabled_ui(l.fog_light > 0.0, |ui| {
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_anisotropy, -0.9..=0.9), "forward scatter")
+                            .on_hover_text(
+                                "which way the media throws light. Positive blooms toward the sun (look into it and the air glows); \
+                                 0 is an even haze; negative bounces it back at you. A mote of fog has no facing — this is what \
+                                 does the job a surface normal does everywhere else.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_shafts, "shafts (shadows in the fog)")
+                            .on_hover_text(
+                                "march the sun shadow at every fog step, so shadowed air stays dark and beams appear through \
+                                 windows and branches. This is the entire cost of lit fog — turn it off and the media is lit \
+                                 but never occluded.",
+                            )
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("quality");
+                        let mut steps = l.fog_steps as i32;
+                        if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=64), "steps")
+                            .on_hover_text("samples along each pixel's ray — raise it until the fog stops looking stepped, then stop")
+                            .changed()
+                        {
+                            l.fog_steps = steps as u32;
+                            cmd.inspector_changed = true;
+                        }
+                    });
+                    if l.fog_shafts && l.fog_light > 0.0 && !l.shadows {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 170, 90),
+                            "shafts need shadows on (above) — the fog is lit but nothing occludes it",
+                        );
+                    }
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("start");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_start).speed(0.5).range(0.0..=10000.0).suffix("m"))
+                            .changed();
+                        ui.label("end");
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
+                            .changed();
+                    });
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_sky, 0.0..=1.0), "takes the sky")
+                        .on_hover_text(
+                            "how much of the fog the SKY takes at the horizon. This is what makes a fog \
+                             colour darker than the background read as fog at all: tint only the \
+                             surfaces and distant hills turn to silhouette against air that never \
+                             moved. Weighted toward the horizon, so straight up your skybox \
+                             survives. 0 is the old surfaces-only look.",
+                        )
+                        .changed();
+                }
+                // Dither: hide 8-bit banding on long, slow fog ramps.
+                ui.horizontal_wrapped(|ui| {
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_dither, "dither")
+                        .on_hover_text("break up color banding across the fog gradient (matches the retro pixel grid)")
+                        .changed();
+                    ui.add_enabled_ui(l.fog_dither, |ui| {
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_dither_strength, 0.0..=1.0), "amount")
+                            .changed();
+                    });
+                });
+            });
+        }
+    }
+
+    /// The on/off switch on the name row, and the line that says an ancestor switched the node off.
+    fn node_switch_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // The on/off switch, where every other editor puts it: on the
+        // name row, one click, always visible. It was reachable only
+        // from a right-click menu, which is fine for something you do
+        // once and wrong for something you do while trying things out —
+        // and a node you cannot see the state of is a node you forget is
+        // off. The checkbox reads the node's own flag; if an ancestor is
+        // what switched it off, the line under it says so, because
+        // ticking this one would then change nothing visible.
+        let off_self = world.get::<floptle_core::Disabled>(e).is_some();
+        let off_inherited = !off_self && floptle_core::is_disabled(world, e);
+        ui.horizontal_wrapped(|ui| {
+            let mut on = !off_self;
+            if crate::responsive::check(ui, &mut on, "")
+                .on_hover_text(
+                    "enabled — a switched-off node doesn't draw, doesn't collide, its \
+                     scripts don't run, it can't be the active camera, and find() skips \
+                     it. Everything under it goes with it.",
+                )
+                .changed()
+            {
+                // The whole selection, so switching six things off is one
+                // gesture — and the target state is decided here, once,
+                // rather than each node flipping its own way.
+                let targets: Vec<floptle_core::Entity> = if self.selection.contains(&e) {
+                    self.selection.clone()
+                } else {
+                    vec![e]
+                };
+                cmd.set_enabled = Some((targets, on));
+            }
+            ui.label("name");
+            if let Some(n) = world.get_mut::<Name>(e) {
+                cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
+            }
+            // The selection lock. On the name row because that row is
+            // the one line naming what would be lost, and because it is
+            // drawn for the selected node — which is what guarantees the
+            // switch is on screen whenever the lock is on.
+            //
+            // The state is the alpha: opaque = held, faded = free. One
+            // thing to look at, no second label saying which.
+            let locked = self.selection_locked;
+            let tint = {
+                let c = ui.visuals().text_color();
+                if locked { c } else { c.gamma_multiply(0.35) }
+            };
+            let lock = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(crate::icons::LOCK).color(tint),
+                    )
+                    .frame(locked),
+                )
+                .on_hover_text(if locked {
+                    "selection locked — clicking in the Scene or the Hierarchy \
+                     leaves it alone, so you can look around while editing this \
+                     node. Click to release."
+                } else {
+                    "lock the selection — the Inspector, Hierarchy and Scene keep \
+                     these nodes however you click, so you can read another node's \
+                     values without losing this one. Click to hold."
+                });
+            if lock.clicked() {
+                cmd.toggle_selection_lock = true;
+            }
+        });
+        if off_inherited {
+            ui.small(
+                egui::RichText::new(
+                    "⚠ switched off by a parent — turning this one on changes nothing \
+                     until the parent is on",
+                )
+                .color(egui::Color32::from_rgb(255, 200, 80)),
+            );
+        }
+    }
+
+    /// Layer and tags, and the sorting a flat node carries.
+    fn node_identity_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let sel_all: Vec<floptle_core::Entity> = self.selection.to_vec();
+        // ===== Layer + tags — identity every node carries. =====
+        // Layer: the node's collision/query layer (project-defined names,
+        // Project Settings → Layers). Tags: free-form chips scripts find
+        // with `findTagged` / compare with `node:hasTag`.
+        ui.horizontal_wrapped(|ui| {
+            // "collision layer", not "layer". A node has two things
+            // called a layer — this one, which answers "does this hit
+            // that", and the sorting layer below, which answers "which
+            // draws in front" — and they are deliberately independent: a
+            // background collides with nothing and still sorts, a player
+            // collides with everything and sorts separately. Two controls
+            // both labelled "layer" is how that independence gets read as
+            // a duplicate, and then as a bug.
+            ui.label("collision layer")
+                .on_hover_text(
+                    "what this collides with and what a raycast can hit. NOT the \
+                     sorting layer below — that one is about drawing, and the two \
+                     are set independently on purpose.",
+                );
+            let layer_of = |w: &floptle_core::World, e| {
+                w.get::<floptle_core::Layer>(e)
+                    .map(|l| l.0.clone())
+                    .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string())
+            };
+            let cur = layer_of(world, e);
+            // Every selected node, not just the one whose dropdown this
+            // is (the panel's stated promise, which this control was not
+            // keeping).
+            let targets: Vec<floptle_core::Entity> =
+                if sel_all.contains(&e) { sel_all.clone() } else { vec![e] };
+            // Do the selected nodes AGREE about their layer? If they do
+            // not, the combo must not claim they do — showing the
+            // primary's layer over a mixed selection is a readout that
+            // is wrong about four nodes out of five.
+            let mixed = targets.iter().any(|&t| layer_of(world, t) != cur);
+            let known = self.layer_names.contains(&cur);
+            let shown = if mixed {
+                format!("— mixed ({}) —", targets.len())
+            } else if known {
+                cur.clone()
+            } else {
+                format!("⚠ {cur}")
+            };
+            egui::ComboBox::from_id_salt("node_layer")
+                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for name in self.layer_names {
+                        // Ticked only when the whole selection is on it.
+                        let ticked = !mixed && *name == cur;
+                        // A mixed selection may be UNIFIED onto the
+                        // layer the primary already has — that is a real
+                        // edit and the obvious way to ask for it. Only a
+                        // selection that already agrees can be a no-op.
+                        if ui.selectable_label(ticked, name).clicked() && !ticked {
+                            cmd.set_layer = Some(crate::SetLayer {
+                                targets: targets.clone(),
+                                layer: name.clone(),
+                            });
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "collision/query layer — the Project Settings matrix decides \
+                     which layers collide; raycasts can filter by them",
+                );
+            if !known {
+                ui.small("not in Project Settings — acts as Default")
+                    .on_hover_text("define it in Project Settings → Layers, or pick another");
+            }
+        });
+        // What draws in front of what, for a flat scene.
+        //
+        // Offered on anything flat, whether or not the project has named
+        // a second sorting layer. Gating it on a second layer hid the
+        // whole of Y-sorting from every new project — and Y-sorting is
+        // the one thing here that needs no layers at all: a top-down
+        // game with a single layer is the ordinary case, and it was the
+        // case that could not reach the control. A 3D scene still sees
+        // none of this.
+        let flat = matches!(
+            world.get::<Matter>(e),
+            Some(Matter::Tilemap { .. })
+                | Some(Matter::SpriteBatch { .. })
+                | Some(Matter::Sprite { .. })
+        );
+        let sorts = flat
+            || self.sorting_names.len() > 1
+            || world.get::<floptle_core::Sorting>(e).is_some();
+        if sorts {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("sorting layer")
+                    .on_hover_text(
+                        "which stack this draws in — later layers draw in front of \
+                         earlier ones. Nothing to do with the collision layer above.",
+                    );
+                let cur = world
+                    .get::<floptle_core::Sorting>(e)
+                    .cloned()
+                    .unwrap_or_default();
+                let name = if cur.layer.trim().is_empty() {
+                    floptle_core::DEFAULT_SORTING_LAYER.to_string()
+                } else {
+                    cur.layer.clone()
+                };
+                let known = self.sorting_names.contains(&name);
+                egui::ComboBox::from_id_salt("node_sorting")
+                    .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                    .selected_text(if known { name.clone() } else { format!("⚠ {name}") })
+                    .show_ui(ui, |ui| {
+                        for n in self.sorting_names {
+                            if ui.selectable_label(*n == name, n).clicked() && *n != name {
+                                cmd.set_sorting = Some((e, n.clone(), cur.order));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "which sorting layer this draws in — later layers draw in \
+                         front. Project Settings names them.",
+                    );
+                // How the place within the layer is decided. Offered
+                // beside the layer rather than hidden behind it, because
+                // "by Y" is the answer for a whole genre and a developer
+                // who does not know it exists will write it in Lua.
+                let mut mode = cur.mode;
+                for m in floptle_core::SortMode::ALL {
+                    let hover = match m {
+                        floptle_core::SortMode::Order => {
+                            "you say the position, with the number beside this"
+                        }
+                        floptle_core::SortMode::Y => {
+                            "lower on the screen draws in front — a character below \
+                             a table is in front of it and one above is behind, with \
+                             nobody authoring a number. The full sort is sorting \
+                             layer, then order, then Y: this only decides between \
+                             nodes that are level on both of the others."
+                        }
+                    };
+                    if ui
+                        .selectable_label(mode == m, m.label())
+                        .on_hover_text(hover)
+                        .clicked()
+                        && mode != m
+                    {
+                        mode = m;
+                        cmd.set_sort_mode = Some((e, m));
+                    }
+                }
+                // `order` stays live under both modes. Y is a tiebreak
+                // inside an order, not a replacement for it, and hiding
+                // the field would teach the wrong model — the one where
+                // turning Y-sorting on throws away the layering you
+                // already authored.
+                let mut order = cur.order;
+                if ui
+                    .add(egui::DragValue::new(&mut order).speed(1).prefix("order "))
+                    .on_hover_text(if mode == floptle_core::SortMode::Y {
+                        "within the layer: higher draws in front. Y only decides \
+                         between nodes on the SAME order, so a shadow on order -1 \
+                         stays under a Y-sorted crowd."
+                    } else {
+                        "within the layer: higher draws in front"
+                    })
+                    .changed()
+                {
+                    cmd.set_sorting = Some((e, name.clone(), order));
+                }
+                if mode == floptle_core::SortMode::Y {
+                    crate::responsive::para(
+                        ui,
+                        egui::RichText::new("ties on this order go to whichever is lower")
+                            .weak()
+                            .small(),
+                    );
+                }
+                if !known {
+                    ui.small("not in Project Settings — draws in front")
+                        .on_hover_text(
+                            "A layer that no longer exists sorts LAST, so the node is \
+                             visible and obviously wrong rather than hidden behind \
+                             the background.",
+                        );
+                }
+            });
+        }
+        // Parallax, beside sorting because they are the two things a
+        // flat scene says about a layer as a whole. Offered on the same
+        // condition, for the same reason.
+        if sorts || world.get::<floptle_core::Parallax>(e).is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("parallax");
+                let cur = world.get::<floptle_core::Parallax>(e).copied().unwrap_or_default();
+                let mut next = cur;
+                let mut changed = false;
+                for (i, axis) in ["x ", "y "].iter().enumerate() {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut next.factor[i])
+                                .speed(0.01)
+                                .range(0.0..=4.0)
+                                .prefix(*axis),
+                        )
+                        .on_hover_text(
+                            "how much of the camera's movement this layer keeps. \
+                             1 moves with the world (no parallax), 0 is pinned to \
+                             the camera as if infinitely far away, 0.3 is distant \
+                             hills. Nothing actually moves — it is an offset on the \
+                             drawn transform, so the collider stays put.",
+                        )
+                        .changed();
+                }
+                if changed {
+                    cmd.set_parallax = Some((e, next));
+                }
+                if !cur.is_identity() {
+                    crate::responsive::para(
+                        ui,
+                        egui::RichText::new("drawn offset only — nothing moves")
+                            .weak()
+                            .small(),
+                    );
+                }
+            });
+        }
+        lighting_2d_row(ui, world, e, self.sorting_names, cmd);
+        camera_2d_section(ui, world, e, cmd);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("tags");
+            let mut remove: Option<String> = None;
+            if let Some(tags) = world.get::<floptle_core::Tags>(e) {
+                for t in &tags.0 {
+                    if ui
+                        .small_button(format!("{t} ✖"))
+                        .on_hover_text("remove this tag")
+                        .clicked()
+                    {
+                        remove = Some(t.clone());
+                    }
+                }
+            }
+            let field = egui::TextEdit::singleline(self.tag_edit)
+                .hint_text("add tag…")
+                .desired_width(90.0);
+            let resp = ui.add(field);
+            let commit = (resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                || ui.small_button("➕").on_hover_text("add the tag").clicked();
+            if commit && !self.tag_edit.trim().is_empty() {
+                let tag = self.tag_edit.trim().to_string();
+                self.tag_edit.clear();
+                let tags = match world.get_mut::<floptle_core::Tags>(e) {
+                    Some(t) => t,
+                    None => {
+                        world.insert(e, floptle_core::Tags::default());
+                        world.get_mut::<floptle_core::Tags>(e).unwrap()
+                    }
+                };
+                if !tags.has(&tag) {
+                    tags.0.push(tag);
+                    cmd.inspector_changed = true;
+                }
+                resp.request_focus(); // keep typing tags
+            }
+            if let Some(tag) = remove
+                && let Some(tags) = world.get_mut::<floptle_core::Tags>(e)
+            {
+                tags.0.retain(|t| *t != tag);
+                if tags.0.is_empty() {
+                    world.remove::<floptle_core::Tags>(e);
+                }
+                cmd.inspector_changed = true;
+            }
+        });
+    }
+
+    /// The node's type, and the properties of that type.
+    fn node_type_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // The component clipboard (read-only); copy/paste route through `cmd`.
+        let clip = self.component_clip.as_ref();
+
+        // ===== Type — the node's primary kind (mutually exclusive). =====
+        {
+            let (icon, label, is_terrain) = match world.get::<Matter>(e) {
+                Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
+                None => ("◎", "Type", false),
+            };
+            let (copy, paste, _) = component_header(
+                ui,
+                &format!("{icon} {label}"),
+                !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
+                false,
+            );
+            if copy && !is_terrain
+                && let Some(m) = world.get::<Matter>(e) {
+                    cmd.copy_component = Some(ComponentClip::Matter(m.clone()));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+        }
+        ui.indent("type_props", |ui| {
+            // The Sprite editor needs its node's Material, and the
+            // Matter borrow below is mutable — so this is read first.
+            let sprite_facts = {
+                let mat = world.get::<Material>(e);
+                (mat.map(|m| m.sheet()), mat.is_some_and(|m| m.texture.is_some()))
+            };
+            if let Some(m) = world.get_mut::<Matter>(e) {
+                match m {
+                    Matter::Primitive { shape, color } => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("shape");
+                            egui::ComboBox::from_id_salt("shape")
+                                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selected_text(format!("{shape:?}"))
+                                .show_ui(ui, |ui| {
+                                    cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
+                                    cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                    cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
+                                    cmd.inspector_changed |= ui.selectable_value(shape, Shape::Plane, "Plane").clicked();
+                                });
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("color");
+                            cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                            ui.small("(base color — add a Material below for emissive, specular, …)");
+                        });
+                    }
+                    Matter::Blob { scale } => {
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
+                            .changed();
+                    }
+                    // 2D. The grid is edited from
+                    // Lua — a room is re-dressed per floor — so the
+                    // Inspector states the shape and the one thing that
+                    // is easy to get wrong: the sheet is the MATERIAL's.
+                    Matter::Tilemap { cols, rows, tile, data, tileset } => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("grid");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(cols).speed(1.0).prefix("cols ").range(0..=1024))
+                                .changed();
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(rows).speed(1.0).prefix("rows ").range(0..=1024))
+                                .changed();
+                        });
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(tile).speed(0.01).prefix("tile ").range(0.001..=64.0))
+                            .on_hover_text("world size of one tile's edge")
+                            .changed();
+                        let want = (*cols as usize) * (*rows as usize);
+                        let placed = data
+                            .iter()
+                            .filter(|&&p| p != floptle_core::EMPTY_TILE)
+                            .count();
+                        ui.small(format!("{placed} of {want} squares placed"));
+                        if data.len() != want && ui.button("resize to fit").clicked() {
+                            data.resize(want, floptle_core::EMPTY_TILE);
+                            cmd.inspector_changed = true;
+                        }
+                        // The tileset — what says whether these tiles collide,
+                        // what they are tagged, and how they autotile. Read-only
+                        // here on purpose: attaching one is a ◫ Tiles operation
+                        // (it needs the sheet's dimensions to make sense of), and
+                        // a free-text path field is a way to typo a level solid.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("tileset");
+                            if tileset.is_empty() {
+                                // Named as the two FEATURES somebody would
+                                // go looking for, and coloured, because
+                                // this was reported twice as the engine
+                                // not having either of them.
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 200, 80),
+                                    "none",
+                                );
+                            } else {
+                                ui.small(
+                                    floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
+                                );
+                            }
+                            if ui.small_button("◫ Tiles").clicked() {
+                                cmd.focus_tiles = true;
+                            }
+                        });
+                        if tileset.is_empty() {
+                            ui.small(
+                                "Without one, these tiles collide with nothing and \
+                                 cannot autotile — both are per-tile facts and live \
+                                 in a tileset. Make one in ◫ Tiles; it takes its \
+                                 sheet from this node's Material.",
+                            );
+                        }
+                        ui.small(
+                            "the sheet comes from this node's Material (texture + \
+                             sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \
+                             it from a script: node:setTilemap{...} then tm:set(x, y, cell).",
+                        );
+                    }
+                    Matter::SpriteBatch { size } => {
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(size).speed(0.01).prefix("sprite size ").range(0.001..=64.0))
+                            .on_hover_text("world edge of one sprite, before its own scale")
+                            .changed();
+                        ui.small(
+                            "sprites are written per frame from a script — \
+                             node:sprites() then b:clear() and b:draw(...). Each one \
+                             carries its own cell AND tint, which a shared Material \
+                             cannot give it.",
+                        );
+                    }
+                    Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
+                        // `ppu` measures the texture, so with no texture
+                        // there is nothing to measure and the sprite
+                        // falls back to `size` — a field this mode hides.
+                        // Silently, that is a headline control that does
+                        // nothing on a node somebody just created.
+                        // (Read before the Matter borrow — see `sprite_facts`.)
+                        let (sheet, has_tex) = sprite_facts;
+                        if !has_tex {
+                            crate::responsive::para(
+                                ui,
+                                egui::RichText::new(
+                                    "no texture yet — give this node a Material with one, and the sheet's cols/rows in its import settings",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        }
+                        // Size, two ways, and only one of them live at a
+                        // time — a pixels-per-unit sprite takes its size
+                        // from the image, so leaving the world-size field
+                        // editable beside it would offer a number that
+                        // does nothing.
+                        let mut by_px = *ppu > 0.0;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("size from");
+                            for (on, label, hover) in [
+                                (true, "pixels", "the image decides: a 32x32 cell at 32 pixels per unit is one unit across. The number a pixel artist already has."),
+                                (false, "world units", "you decide: an edge length, whatever the image is."),
+                            ] {
+                                if ui
+                                    .selectable_label(by_px == on, label)
+                                    .on_hover_text(hover)
+                                    .clicked()
+                                    && by_px != on
+                                {
+                                    by_px = on;
+                                    // Leaving a remembered `ppu` behind
+                                    // would make "world units" silently
+                                    // revert next time it was touched.
+                                    *ppu = if on { 32.0 } else { 0.0 };
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                        if by_px {
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::DragValue::new(ppu)
+                                        .speed(1.0)
+                                        .range(1.0..=1024.0)
+                                        .prefix("pixels per unit "),
+                                )
+                                .on_hover_text(
+                                    "measured against ONE CELL of the sheet, not the \
+                                     whole image — so slicing a sheet finer does not \
+                                     resize every sprite on it",
+                                )
+                                .changed();
+                        } else {
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::DragValue::new(size)
+                                        .speed(0.01)
+                                        .range(0.001..=1024.0)
+                                        .prefix("size "),
+                                )
+                                .on_hover_text("world edge length")
+                                .changed();
+                        }
+                        let cells = sheet.map(|(c, r)| c.max(1) * r.max(1)).unwrap_or(1);
+                        // Labelled, because it was a bare number box
+                        // under "pixels per unit" — and the Material
+                        // section below has a whole grid of cells that
+                        // looks far more like the control. They are the
+                        // same value; this one is the number.
+                        cmd.inspector_changed |= ui
+                            .add(
+                                egui::DragValue::new(cell)
+                                    .speed(1)
+                                    .prefix("cell ")
+                                    .range(0..=cells.saturating_sub(1)),
+                            )
+                            .on_hover_text(if cells > 1 {
+                                "which cell of the Material's sheet, row-major from the \
+                                 top-left"
+                            } else {
+                                "this Material's texture is not sliced into a sheet, so \
+                                 there is only one cell — set cols/rows in the texture's \
+                                 import settings"
+                            })
+                            .changed();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("flip");
+                            cmd.inspector_changed |=
+                                crate::responsive::check(ui, flip_x, "x").changed();
+                            cmd.inspector_changed |=
+                                crate::responsive::check(ui, flip_y, "y").changed();
+                            crate::responsive::para(
+                                ui,
+                                egui::RichText::new("mirrors the picture, not the node")
+                                    .weak()
+                                    .small(),
+                            );
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("pivot");
+                            for (i, axis) in ["x ", "y "].iter().enumerate() {
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut pivot[i])
+                                            .speed(0.01)
+                                            .range(-2.0..=3.0)
+                                            .prefix(*axis),
+                                    )
+                                    .on_hover_text(
+                                        "where the node's origin sits in the sprite, \
+                                         0..1 from the bottom-left; 0.5, 0.5 is the \
+                                         centre. Outside 0..1 is allowed and puts the \
+                                         origin off the picture entirely, which is \
+                                         occasionally what a hand-drawn rig wants.",
+                                    )
+                                    .changed();
+                            }
+                            if ui
+                                .small_button("feet")
+                                .on_hover_text(
+                                    "0.5, 0 — the origin at the bottom of the sprite. \
+                                     What a Y-sorted character wants: sorting reads \
+                                     the node's Y, and a centred origin sorts by a \
+                                     point floating at the character's waist.",
+                                )
+                                .clicked()
+                            {
+                                *pivot = [0.5, 0.0];
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                    }
+                    Matter::FieldShape { radius } => {
+                        cmd.inspector_changed |= ui
+                            .add(egui::DragValue::new(radius).speed(0.02).prefix("bounds radius ").range(0.05..=200.0))
+                            .on_hover_text(
+                                "the shape must fit inside this sphere (local units) — \
+                                 the march, shadows and culling all key off it",
+                            )
+                            .changed();
+                        ui.small(
+                            "an sdf-stage .flsl (Material → Shader) IS this node's geometry — \
+                             raymarched into the scene field. Visual only (no collision yet).",
+                        );
+                    }
+                    Matter::MapMesh { id } => {
+                        ui.label(format!("map mesh #{id}"));
+                        ui.small(
+                            "editable blockout geometry — use the ▦ Model tool (key 8) \
+                             to edit faces/edges/verts, extrude, and assign per-face \
+                             materials; the Map tab has the shape ops",
+                        );
+                    }
+                    Matter::Mesh { asset_path } => {
+                        ui.label("imported mesh");
+                        // Swap the model freely — pick any model in the project.
+                        let tree = self.asset_tree;
+                        let file_label = |p: &str| {
+                            Path::new(p)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.to_string())
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("model");
+                            if let Some(Some(p)) = crate::ui_widgets::asset_picker(
+                                ui,
+                                egui::Id::new("mesh-model"),
+                                self.project_root,
+                                &file_label(asset_path),
+                                None,
+                                tree,
+                                is_model,
+                                180.0,
+                            )
+                                && *asset_path != p {
+                                    *asset_path = p.clone();
+                                    cmd.import_model = Some(p.clone());
+                                    cmd.inspector_changed = true;
+                                }
+                        });
+                        ui.small(asset_path.as_str());
+                        if ui
+                            .button("⏏ Extract textures")
+                            .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
+                            .clicked()
+                        {
+                            cmd.extract_textures = Some(asset_path.clone());
+                        }
+                    }
+                    Matter::Empty => {
+                        ui.label("group / empty");
+                        ui.small("a folder — organizes child nodes; has a transform but no geometry");
+                    }
+                    Matter::Terrain { collision, .. } => {
+                        ui.label("editable terrain");
+                        ui.small("a sculptable SDF field — move it with the transform below");
+                        if ui.button("Δ Open Terrain tools").clicked() {
+                            cmd.focus_terrain = true;
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("collide with");
+                            use floptle_core::TerrainCollision as TC;
+                            let name = |c: TC| match c {
+                                TC::Drawn => "the drawn surface",
+                                TC::Field => "the field",
+                            };
+                            egui::ComboBox::from_id_salt("terrain_collision")
+                                .width(crate::responsive::fit_here(ui, 220.0))
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selected_text(name(*collision))
+                                .show_ui(ui, |ui| {
+                                    cmd.inspector_changed |= ui
+                                        .selectable_value(collision, TC::Drawn, name(TC::Drawn))
+                                        .on_hover_text(
+                                            "Physics collides with the triangles you see — \
+                                             what the terrain is drawn as. Ground you can \
+                                             see under your feet is under your feet, at any \
+                                             voxel size.",
+                                        )
+                                        .clicked();
+                                    cmd.inspector_changed |= ui
+                                        .selectable_value(collision, TC::Field, name(TC::Field))
+                                        .on_hover_text(
+                                            "Physics collides with the voxel field itself: \
+                                             smoother than the picture, and up to a fraction \
+                                             of a voxel away from it — inside bulges, outside \
+                                             hollows. Cheaper, and never meshes anything, so a \
+                                             server that draws nothing may prefer it.",
+                                        )
+                                        .clicked();
+                                });
+                        });
+                        ui.small("takes effect on the next Play");
+                    }
+                    Matter::Camera {
+                        fov_y,
+                        active,
+                        target,
+                        cull_mask,
+                        target_w,
+                        target_h,
+                        target_hz,
+                        ortho,
+                        ortho_height,
+                    } => {
+                        ui.label("camera");
+                        ui.small("a viewpoint — play mode renders from the active camera");
+                        // Live preview of what this camera sees.
+                        if let Some(tex) = self.cam_preview {
+                            let w = ui.available_width().min(300.0);
+                            let size = egui::vec2(w, w * 9.0 / 16.0);
+                            ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
+                            ui.small("preview — what this camera sees");
+                        }
+                        // Perspective or orthographic. The two knobs are
+                        // exclusive and only the live one is shown —
+                        // greying out the other would still invite
+                        // dragging a number that does nothing.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("projection").on_hover_text(
+                                "orthographic draws everything at the same scale at \
+                                 every distance — what a 2D, isometric or strategy \
+                                 camera wants. Perspective is the 3D default.",
+                            );
+                            for (label, want) in
+                                [("perspective", false), ("orthographic", true)]
+                            {
+                                if ui.selectable_label(*ortho == want, label).clicked()
+                                    && *ortho != want
+                                {
+                                    *ortho = want;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                        if *ortho {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("height").on_hover_text(
+                                    "how many world units the view covers top to \
+                                     bottom. With 1-unit tiles this is how many tiles \
+                                     tall the shot is; the width follows the aspect.",
+                                );
+                                let mut h = *ortho_height;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut h)
+                                            .speed(0.1)
+                                            .range(0.1..=1000.0)
+                                            .suffix(" units"),
+                                    )
+                                    .changed()
+                                {
+                                    *ortho_height = Matter::clamp_ortho_height(h);
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("field of view");
+                                let mut deg = fov_y.to_degrees();
+                                if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
+                                    *fov_y = deg.to_radians();
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                        }
+                        // A1: render-target name — a live texture any material
+                        // or UI image can wear as `rt:<name>`.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("target").on_hover_text(
+                                "render this camera into a live texture every frame; \
+                                 use it as texture \"rt:<name>\" on a material or UI \
+                                 image — cockpit screens, monitors, mirrors",
+                            );
+                            if ui.text_edit_singleline(target).changed() {
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        if !target.is_empty() {
+                            ui.small(format!("live texture: rt:{target}"));
+                            // Size + refresh rate: a minimap is not worth a
+                            // full-rate 480×270.
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("size").on_hover_text(
+                                    "the target texture's pixel size — smaller is \
+                                     cheaper, and a screen a few metres away does \
+                                     not need many",
+                                );
+                                let mut w = *target_w as i32;
+                                let mut h = *target_h as i32;
+                                let lo = Matter::TARGET_MIN as i32;
+                                let hi = Matter::TARGET_MAX as i32;
+                                let cw = ui.add(egui::DragValue::new(&mut w).range(lo..=hi));
+                                ui.label("×");
+                                let ch = ui.add(egui::DragValue::new(&mut h).range(lo..=hi));
+                                if cw.changed() || ch.changed() {
+                                    *target_w = w as u32;
+                                    *target_h = h as u32;
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("refresh").on_hover_text(
+                                    "how often the target redraws, in Hz. 0 = every \
+                                     frame. A 10 Hz minimap costs a sixth of a 60 Hz one.",
+                                );
+                                let mut hz = *target_hz;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut hz)
+                                            .range(0.0..=240.0)
+                                            .speed(0.5),
+                                    )
+                                    .changed()
+                                {
+                                    *target_hz = hz.max(0.0);
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(if *target_hz <= 0.0 {
+                                    "every frame".to_string()
+                                } else {
+                                    format!("{:.0} Hz", *target_hz)
+                                });
+                            });
+                        }
+                        // Per-layer cull checkboxes (bit i = project layer i).
+                        let label = if *cull_mask == u32::MAX {
+                            "renders: all layers".to_string()
+                        } else {
+                            format!(
+                                "renders: {}/{} layers",
+                                cull_mask.count_ones().min(self.layer_names.len() as u32),
+                                self.layer_names.len()
+                            )
+                        };
+                        ui.menu_button(label, |ui| {
+                            for (i, name) in self.layer_names.iter().enumerate() {
+                                let mut on = (*cull_mask >> i) & 1 == 1;
+                                if crate::responsive::check(ui, &mut on, name).changed() {
+                                    *cull_mask ^= 1 << i;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                            if ui.small_button("all").clicked() {
+                                *cull_mask = u32::MAX;
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        if *active {
+                            ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
+                        } else if ui.button("⌖ Make active camera").clicked() {
+                            cmd.set_active_camera = Some(e);
+                        }
+                        if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
+                            cmd.camera_from_view = Some(e);
+                        }
+                    }
+                    Matter::PointLight {
+                        color,
+                        intensity,
+                        range,
+                        shape,
+                        shadows,
+                        spot_angle,
+                        spot_softness,
+                    } => {
+                        use floptle_core::LightShape as LS;
+                        let aimed = floptle_core::is_spot(*spot_angle);
+                        ui.label(if aimed { "spot light" } else { "light" });
+                        ui.small("position and facing come from the transform below");
+                        // **Where this scene stands against the cap**.
+                        // Naming the sixteen is the
+                        // easy half and it is the half that does not
+                        // help: "twelve, plus whatever the room has" is
+                        // exactly the arithmetic that crosses it, and a
+                        // number that only appears in the notes is one
+                        // nobody reads at the moment it matters. The
+                        // live count is the half that does.
+                        {
+                            let (msg, warn) = light_slot_line(self.light_counts);
+                            let r = if warn {
+                                ui.colored_label(egui::Color32::from_rgb(220, 170, 90), msg)
+                            } else {
+                                ui.small(msg)
+                            };
+                            r.on_hover_text(
+                                "sixteen lights reach the shader at once, across the \
+                                 whole scene — 3D and 2D together. Past that the ones \
+                                 contributing most at the camera win and the rest are \
+                                 simply not drawn, which reads as \"my seventeenth \
+                                 torch does nothing\".\n\nA light at intensity 0 gives \
+                                 its slot back, which is how you pool them. The same \
+                                 two numbers are perf.counts().lights and \
+                                 .lightsDropped.",
+                            );
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("color");
+                            cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                        });
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
+                        cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
+                            .on_hover_text(
+                                "stop this lamp at the walls between it and what it lights, instead \
+                                 of shining through them. Per lamp, because it costs a march per lit \
+                                 pixel and most lights in a level have nothing to be blocked by. \
+                                 Shadows from what is ON SCREEN: a wall casts while it is in frame \
+                                 and stops when you look away from it. Quality and darkness are on \
+                                 the Lighting node.",
+                            )
+                            .changed();
+                        // AIMING it. Above the emitter section because
+                        // it is the bigger question — "does this lamp
+                        // light the room or one thing in it" changes
+                        // what every control under it means.
+                        ui.separator();
+                        let mut on = aimed;
+                        if crate::responsive::check(ui, &mut on, "aim it (spot)")
+                            .on_hover_text(
+                                "cone down the node's forward, the same axis a camera looks \
+                                 down — rotate the node to aim it. Off means the lamp lights \
+                                 everything around it, which is what it has always done.",
+                            )
+                            .changed()
+                        {
+                            // Turning it off parks the angle at omni and
+                            // keeps the softness, so switching a spot off
+                            // and on again gives back the same cone
+                            // rather than the default one.
+                            *spot_angle =
+                                if on { 45.0 } else { floptle_core::OMNI_ANGLE };
+                            cmd.inspector_changed = true;
+                        }
+                        if on {
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
+                                        spot_angle,
+                                        floptle_core::MIN_SPOT_ANGLE
+                                            ..=floptle_core::OMNI_ANGLE - 0.5,
+                                    )
+                                    
+                                    .suffix("°"), "cone")
+                                .on_hover_text(
+                                    "the FULL angle, the number on a real fixture — 45° is a \
+                                     45° cone, not a 90° one",
+                                )
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0), "edge")
+                                .on_hover_text(
+                                    "how much of the cone is falloff. 0 is a hard circle; 1 \
+                                     fades from the middle out. A fraction of the cone, so \
+                                     widening the beam keeps the edge you gave it.",
+                                )
+                                .changed();
+                        }
+
+                        // The EMITTER. Switching shape keeps whatever
+                        // size the old one had where the two agree, so
+                        // trying rect against disk is one click and not
+                        // a re-measure.
+                        ui.separator();
+                        let old = *shape;
+                        let size = old.extent().max(0.25);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("emits from");
+                            let mut pick = |ui: &mut egui::Ui, label: &str, on: bool, make: LS| {
+                                if ui.selectable_label(on, label).clicked() && !on {
+                                    *shape = make;
+                                    cmd.inspector_changed = true;
+                                }
+                            };
+                            pick(ui, "point", matches!(old, LS::Point), LS::Point);
+                            pick(ui, "sphere", matches!(old, LS::Sphere { .. }), LS::Sphere { radius: size });
+                            pick(
+                                ui,
+                                "rect",
+                                matches!(old, LS::Rect { .. }),
+                                LS::Rect { width: size * 2.0, height: size * 2.0, two_sided: false },
+                            );
+                            pick(ui, "disk", matches!(old, LS::Disk { .. }), LS::Disk { radius: size, two_sided: false });
+                            pick(ui, "tube", matches!(old, LS::Tube { .. }), LS::Tube { length: size * 4.0, radius: size * 0.25 });
+                        });
+                        let drag = |ui: &mut egui::Ui, label: &str, v: &mut f32| -> bool {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(label);
+                                ui.add(egui::DragValue::new(v).speed(0.05).range(0.001..=200.0).suffix("m"))
+                                    .changed()
+                            })
+                            .inner
+                        };
+                        match shape {
+                            LS::Point => {
+                                ui.small(
+                                    "a dimensionless point — a hard highlight and a hard shadow edge, \
+                                     which is right for a bare bulb and wrong for a window",
+                                );
+                            }
+                            LS::Sphere { radius } => {
+                                cmd.inspector_changed |= drag(ui, "radius", radius);
+                                ui.small("a bulb with size: the highlight becomes a disc and the terminator softens");
+                            }
+                            LS::Rect { width, height, two_sided } => {
+                                cmd.inspector_changed |= drag(ui, "width", width);
+                                cmd.inspector_changed |= drag(ui, "height", height);
+                                cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways")
+                                    .on_hover_text("off = a window, on = a floating panel that glows from both faces")
+                                    .changed();
+                                ui.small("faces the node's forward — rotate the node to aim it");
+                            }
+                            LS::Disk { radius, two_sided } => {
+                                cmd.inspector_changed |= drag(ui, "radius", radius);
+                                cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways").changed();
+                                ui.small("faces the node's forward — rotate the node to aim it");
+                            }
+                            LS::Tube { length, radius } => {
+                                cmd.inspector_changed |= drag(ui, "length", length);
+                                cmd.inspector_changed |= drag(ui, "thickness", radius);
+                                ui.small("lies along the node's local X, and streaks its highlight along itself");
+                            }
+                        }
+                    }
+                    Matter::GravityVolume { mode, strength, radius } => {
+                        use floptle_core::GravityMode;
+                        ui.label("gravity volume");
+                        ui.small("level physics gravity — Down (normal) or Radial (planet)");
+                        ui.horizontal_wrapped(|ui| {
+                            let mut radial = *mode == GravityMode::Radial;
+                            if ui.selectable_label(!radial, "⬇ Down").clicked() {
+                                radial = false;
+                            }
+                            if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
+                                radial = true;
+                            }
+                            let new =
+                                if radial { GravityMode::Radial } else { GravityMode::Down };
+                            if new != *mode {
+                                *mode = new;
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(strength, 0.0..=60.0), "strength").changed();
+                        if *mode == GravityMode::Radial {
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 0.5..=500.0), "well radius")
+                                .changed();
+                        }
+                    }
+                    Matter::WaterVolume {
+                        kind,
+                        radius,
+                        half_extents,
+                        density,
+                        drag,
+                        angular_drag,
+                        frozen,
+                        tint,
+                        visibility,
+                    } => {
+                        use floptle_core::WaterKind;
+                        ui.label("water volume");
+                        ui.small(
+                            "buoyancy, drag and an underwater look. A Sea is a sphere \
+                             about this node (a planet's ocean); a Pool is an oriented \
+                             box — rotate the node and the surface tilts with it.",
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for k in WaterKind::ALL {
+                                if ui.selectable_label(*kind == k, k.label()).clicked()
+                                    && *kind != k
+                                {
+                                    *kind = k;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                        match kind {
+                            WaterKind::Sea => {
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 1.0..=100_000.0)
+                                            .logarithmic(true),
+                                            "sea radius")
+                                    .changed();
+                            }
+                            WaterKind::Pool => {
+                                for (i, label) in ["half X", "half Y (depth)", "half Z"]
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
+                                                &mut half_extents[i],
+                                                0.1..=1000.0,
+                                            )
+                                            .logarithmic(true),
+                                            label)
+                                        .changed();
+                                }
+                            }
+                        }
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
+                                    "density kg/m³")
+                            .on_hover_text(
+                                "1000 = fresh water. What decides whether a given hull \
+                                 floats is this against the hull's own density, so a \
+                                 denser sea carries heavier craft.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0), "drag").changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
+                            .changed();
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("underwater tint");
+                            cmd.inspector_changed |=
+                                ui.color_edit_button_rgb(tint).changed();
+                        });
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(visibility, 1.0..=500.0)
+                                    .logarithmic(true),
+                                    "visibility m")
+                            .on_hover_text(
+                                "How far you can see from inside. Replaces the scene's \
+                                 own fog while the camera is under, so meshes, terrain \
+                                 and particles go murky together.",
+                            )
+                            .changed();
+                        ui.separator();
+                        cmd.inspector_changed |= crate::responsive::check(ui, frozen, "frozen")
+                            .on_hover_text(
+                                "A frozen sea is not a fluid: no buoyancy, no drag, no \
+                                 underwater state. Add a Collidable surface and it \
+                                 becomes walkable ground. A script can thaw it.",
+                            )
+                            .changed();
+                    }
+                    Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
+                        ui.label("skybox");
+                        ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+                        // A Sky-stage .flsl overrides the solid/texture look with a
+                        // procedural sky (per-ray-direction color). Clear it to fall
+                        // back to the solid/texture controls below.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("shader");
+                            let cur = shader.clone().unwrap_or_default();
+                            let slabel = if cur.is_empty() {
+                                "(none — built-in sky)".to_string()
+                            } else {
+                                Path::new(&cur).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(cur.clone())
+                            };
+                            if let Some(pick) = crate::ui_widgets::asset_picker(
+                                ui,
+                                egui::Id::new("sky-shader"),
+                                self.project_root,
+                                &slabel,
+                                None,
+                                self.asset_tree,
+                                crate::assets::is_shader,
+                                180.0,
+                            ) {
+                                // A different sky shader has different knobs — the old
+                                // overrides would misfill by name, so drop them (same
+                                // as the Material path clears params on shader change).
+                                if *shader != pick {
+                                    shader_params.clear();
+                                }
+                                *shader = pick;
+                                cmd.inspector_changed = true;
+                            }
+                            if let Some(path) = shader.clone()
+                                && ui
+                                    .button("◈")
+                                    .on_hover_text("edit this shader in the ◈ Shaders graph")
+                                    .clicked()
+                            {
+                                cmd.open_shader_graph = Some(path);
+                            }
+                            if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
+                                *shader = None;
+                                shader_params.clear();
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        if shader.is_some() {
+                            ui.small("a `stage sky` .flsl computes the sky from `skyDir`.");
+                            // Knob rows from the compiled sky shader's uniform schema —
+                            // same widgets as a Material's shader params. Edits write
+                            // into `shader_params`; the raymarch reads them next frame.
+                            if self.sky_uniforms.is_empty() {
+                                ui.small("(its knobs appear here once it compiles — check the Console if not)");
+                            } else {
+                                crate::responsive::grid(ui, "sky_shader_rows", |ui| {
+                                        if shader_uniform_rows(ui, self.sky_uniforms, shader_params) {
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                if ui
+                                    .button("Reset knobs")
+                                    .on_hover_text("back to the shader's own defaults")
+                                    .clicked()
+                                {
+                                    shader_params.clear();
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        }
+                        let mut textured = texture.is_some();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
+                                *texture = None;
+                                cmd.inspector_changed = true;
+                            }
+                            if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
+                                let mut tl = Vec::new();
+                                collect_texture_paths(self.asset_tree, &mut tl);
+                                *texture = Some(tl.first().cloned().unwrap_or_default());
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        textured = texture.is_some();
+                        if !textured {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("color");
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                            });
+                        } else {
+                            let tree = self.asset_tree;
+                            let cur = texture.clone().unwrap_or_default();
+                            let label = |p: &str| {
+                                Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+                            };
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("texture");
+                                if let Some(Some(p)) = crate::ui_widgets::asset_picker(
+                                    ui,
+                                    egui::Id::new("sky-tex"),
+                                    self.project_root,
+                                    &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
+                                    None,
+                                    tree,
+                                    is_texture,
+                                    180.0,
+                                ) {
+                                    *texture = Some(p);
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("tint");
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
+                            });
+                        }
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true), "size (radius)")
+                            .changed();
+                    }
+                    Matter::NavMesh {
+                        id: _,
+                        half_extents,
+                        auto_bounds,
+                        layers,
+                        agent_radius,
+                        agent_height,
+                        max_slope,
+                        step_height,
+                        cell_size,
+                        enabled,
+                        auto_rebake,
+                        max_drop,
+                        max_jump,
+                        min_region_area,
+                    } => {
+                        let nav = self.nav.clone();
+                        if crate::responsive::check(ui, enabled, "characters can path on this").changed() {
+                            cmd.inspector_changed = true;
+                        }
+                        ui.small(
+                            "Where characters can walk. Bakes what they would collide \
+                             with — narrow it by layer, or drop one object with the \
+                             Navmesh Exclude switch on it.",
+                        );
+                        ui.separator();
+
+                        // ---- what gets baked ----------------------------
+                        let label = if layers.is_empty() {
+                            "layers: everything".to_string()
+                        } else {
+                            format!("layers: {}", layers.join(", "))
+                        };
+                        ui.menu_button(label, |ui| {
+                            for name in self.layer_names.iter() {
+                                let mut on = layers.iter().any(|l| l == name);
+                                if crate::responsive::check(ui, &mut on, name).changed() {
+                                    if on {
+                                        layers.push(name.clone());
+                                    } else {
+                                        layers.retain(|l| l != name);
+                                    }
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                            if ui.small_button("everything").clicked() {
+                                layers.clear();
+                                cmd.inspector_changed = true;
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Which layers count as level geometry. Nothing ticked means \
+                             every layer.",
+                        );
+                        ui.small(format!(
+                            "{} object{} would be baked",
+                            nav.sources,
+                            if nav.sources == 1 { "" } else { "s" }
+                        ));
+                        if nav.sources == 0 {
+                            ui.small(
+                                "— nothing matches. A navmesh bakes what a character \
+                                 would collide with, so level geometry needs the \
+                                 collidable switch on it.",
+                            );
+                        }
+
+                        // ---- the box ------------------------------------
+                        ui.separator();
+                        if crate::responsive::check(ui, auto_bounds, "fit the box to what it finds")
+                            .on_hover_text(
+                                "Work the volume out from the geometry instead of \
+                                 sizing it by hand. A box that is too small clips the \
+                                 level, and nothing about the result says which.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+                        if !*auto_bounds {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("size");
+                                for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                    let mut full = half_extents[i] * 2.0;
+                                    let r = ui.add(
+                                        egui::DragValue::new(&mut full)
+                                            .speed(0.25)
+                                            .range(0.5..=100000.0)
+                                            .prefix(format!("{axis} ")),
+                                    );
+                                    if r.changed() {
+                                        half_extents[i] = full * 0.5;
+                                        cmd.inspector_changed = true;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "The volume's full size in world units, before the \
+                                 node's scale. Move the node to move the box.",
+                            );
+                        }
+
+                        // ---- the character ------------------------------
+                        ui.separator();
+                        ui.small("the character this is for");
+                        let mut touched = false;
+                        touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0),
+                                    "radius")
+                            .on_hover_text(
+                                "How wide it is. Ground closer than this to a wall or a \
+                                 drop is not walkable, so a path can be walked by \
+                                 something with a body rather than by a point.",
+                            )
+                            .changed();
+                        touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0),
+                                    "height")
+                            .on_hover_text(
+                                "How tall it is. Ground with less headroom than this is \
+                                 not walkable.",
+                            )
+                            .changed();
+                        touched |= crate::responsive::slider(ui, egui::Slider::new(max_slope, 0.0..=89.0)
+                                    .suffix("°"),
+                                    "max slope")
+                            .on_hover_text("The steepest floor it will walk up.")
+                            .changed();
+                        touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0),
+                                    "step height")
+                            .on_hover_text(
+                                "The tallest lip it steps over rather than walks around. \
+                                 This is what makes a staircase one place and a ledge \
+                                 two.",
+                            )
+                            .changed();
+                        touched |= crate::responsive::slider(ui, egui::Slider::new(cell_size, 0.02..=2.0)
+                                    .logarithmic(true),
+                                    "cell size")
+                            .on_hover_text(
+                                "How finely the level is sampled. The one performance \
+                                 knob: halving it quadruples the bake.",
+                            )
+                            .changed();
+                        if touched {
+                            cmd.inspector_changed = true;
+                        }
+
+                        // ---- what joins it up, and what it drops --------
+                        //
+                        // A navmesh is a surface, and a surface stops at
+                        // every ledge. The first two turn the stopping
+                        // points back into a level a character can cross —
+                        // the difference between "the AI is stuck on a
+                        // kerb" and an AI. The third throws away the ground
+                        // that was never worth stopping at.
+                        ui.add_space(4.0);
+                        ui.small("how the ledges are joined up");
+                        let mut joined = false;
+                        joined |= crate::responsive::slider(ui, egui::Slider::new(max_drop, 0.0..=10.0),
+                                    "drop height")
+                            .on_hover_text(
+                                "The tallest ledge it steps off deliberately. Anything \
+                                 between the step height above and this gets a one-way \
+                                 link off the edge, so a route can take it rather than \
+                                 treating a knee-high lip as a wall.\n\n0 switches drop \
+                                 links off.",
+                            )
+                            .changed();
+                        joined |= crate::responsive::slider(ui, egui::Slider::new(max_jump, 0.0..=10.0),
+                                    "jump distance")
+                            .on_hover_text(
+                                "The widest gap it will jump, measured between the two \
+                                 edges of the walkable surface — the distance you can \
+                                 see in the overlay, which is wider than the hole in the \
+                                 floor by the radius at each side. Gets a two-way \
+                                 link.\n\n0 switches jump links off.",
+                            )
+                            .changed();
+                        joined |= crate::responsive::slider(ui, egui::Slider::new(min_region_area, 0.0..=20.0)
+                                    .suffix(" m²"),
+                                    "smallest patch")
+                            .on_hover_text(
+                                "Walkable ground in a patch smaller than this is \
+                                 thrown away. A level bakes hundreds of specks — a \
+                                 window sill, the top of a crate — and each one is an \
+                                 island nothing can reach and somewhere a character can \
+                                 be put by mistake. The biggest patch is never thrown \
+                                 away.",
+                            )
+                            .changed();
+                        if joined {
+                            cmd.inspector_changed = true;
+                        }
+                        if *max_drop <= 0.0 && *max_jump <= 0.0 {
+                            ui.small(
+                                egui::RichText::new(
+                                    "both off — every ledge in the level is a wall, \
+                                     and the only ways across are the Nav Link nodes \
+                                     you place by hand.",
+                                )
+                                .color(egui::Color32::from_rgb(230, 180, 90)),
+                            );
+                        }
+                        // The one setting that quietly does something other
+                        // than what it says, named with the number to use.
+                        if let Some(advice) = nav.advice.as_deref() {
+                            ui.add_space(2.0);
+                            ui.small(egui::RichText::new(advice).color(
+                                egui::Color32::from_rgb(230, 180, 90),
+                            ));
+                        }
+
+                        // ---- the bake -----------------------------------
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .button("⬚  Bake")
+                                .on_hover_text(
+                                    "Work out where this character can walk. Saved next \
+                                     to the scene as a .fnav.",
+                                )
+                                .clicked()
+                            {
+                                cmd.nav_bake = true;
+                            }
+                            if nav.polys > 0
+                                && ui
+                                    .button("🗑  Clear")
+                                    .on_hover_text("Throw the bake away.")
+                                    .clicked()
+                            {
+                                cmd.nav_clear = true;
+                            }
+                        });
+                        if crate::responsive::check(ui, auto_rebake, "bake again when the level changes")
+                            .on_hover_text(
+                                "Off is right for a finished level: the bake is a file \
+                                 saved beside the scene and loaded with it, so it never \
+                                 needs doing twice.\n\nOn, the volume watches what it \
+                                 would bake, waits for it to stop moving, and bakes on \
+                                 another thread — so the editor keeps its frame rate, \
+                                 and a game that puts buildings down while it runs gets \
+                                 a navmesh that knows about them.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+                        if nav.baking {
+                            ui.small("baking…");
+                        }
+                        if nav.polys == 0 {
+                            ui.small("no bake yet — nothing can path here.");
+                            ui.small(
+                                "A bake is saved beside the scene and loaded with it, so \
+                                 this is a one-off — not something to do again each time \
+                                 you open the project.",
+                            );
+                        } else {
+                            ui.small(format!(
+                                "baked: {} polygons over {:.0} m², from {} triangles in \
+                                 {:.2}s",
+                                nav.polys, nav.area, nav.triangles, nav.seconds
+                            ));
+                            // Where it lives. A bake is a file, it is
+                            // loaded with the scene, and saying so is
+                            // the difference between trusting that and
+                            // pressing Bake every time out of habit.
+                            match nav.file.as_deref() {
+                                Some(f) => {
+                                    ui.small(format!("saved in {f} — it loads with the scene"));
+                                }
+                                None => {
+                                    ui.small(
+                                        egui::RichText::new(
+                                            "not saved to disk — this bake will be gone \
+                                             when the scene is closed",
+                                        )
+                                        .color(egui::Color32::from_rgb(230, 180, 90)),
+                                    );
+                                }
+                            }
+                            // What actually joins the level up. Said before
+                            // the island count, because it is the answer to
+                            // the question the island count raises.
+                            let made = nav.drops + nav.jumps;
+                            if made > 0 {
+                                ui.small(format!(
+                                    "{made} way{} across found: {} drop{}, {} jump{}",
+                                    if made == 1 { "" } else { "s" },
+                                    nav.drops,
+                                    if nav.drops == 1 { "" } else { "s" },
+                                    nav.jumps,
+                                    if nav.jumps == 1 { "" } else { "s" },
+                                ));
+                            } else if *max_drop > 0.0 || *max_jump > 0.0 {
+                                ui.small(
+                                    "no drops or jumps found — every ledge in this bake \
+                                     is either taller than the drop height or wider than \
+                                     the jump distance.",
+                                );
+                            }
+                            if nav.placed_links > 0 {
+                                ui.small(format!(
+                                    "{} nav link{} placed by hand",
+                                    nav.placed_links,
+                                    if nav.placed_links == 1 { "" } else { "s" }
+                                ));
+                            }
+                            if nav.lost_links > 0 {
+                                ui.small(
+                                    egui::RichText::new(format!(
+                                        "{} link{} could not find the ground at one end \
+                                         and do nothing — the Console names them",
+                                        nav.lost_links,
+                                        if nav.lost_links == 1 { "" } else { "s" }
+                                    ))
+                                    .color(egui::Color32::from_rgb(230, 180, 90)),
+                                );
+                            }
+                            if nav.capped {
+                                ui.small(
+                                    egui::RichText::new(
+                                        "the level hit the ceiling on generated links. \
+                                         A coarser cell size, or a smaller drop height, \
+                                         will find the ones that matter instead of every \
+                                         one there is.",
+                                    )
+                                    .color(egui::Color32::from_rgb(230, 180, 90)),
+                                );
+                            }
+                            // More than one island is worth seeing rather than
+                            // finding out about when a character will not go
+                            // somewhere: it is usually a door nobody fits
+                            // through. The SHARE is what makes the number
+                            // actionable — "494 areas" says nothing, "the
+                            // biggest holds 3% of the floor" says the bake
+                            // is shattered and points at the settings.
+                            if nav.regions > 1 {
+                                let share = nav.biggest_share * 100.0;
+                                let line = format!(
+                                    "{} separate areas — a character cannot walk between \
+                                     them. The largest holds {share:.0}% of the walkable \
+                                     ground.",
+                                    nav.regions
+                                );
+                                if nav.biggest_share < 0.5 {
+                                    ui.small(
+                                        egui::RichText::new(line)
+                                            .color(egui::Color32::from_rgb(230, 180, 90)),
+                                    );
+                                    ui.small(
+                                        "A bake in this many pieces is usually a cell \
+                                         size too coarse next to the agent radius, or a \
+                                         drop height too low for the level's ledges.",
+                                    );
+                                } else {
+                                    ui.small(line);
+                                }
+                            }
+                            if nav.stale {
+                                ui.small(
+                                    egui::RichText::new(
+                                        "the settings have changed since this was baked",
+                                    )
+                                    .color(egui::Color32::from_rgb(230, 180, 90)),
+                                );
+                            }
+                            // The box was smaller than the level. Said
+                            // here as well as in the Console, because
+                            // this is the panel somebody opens when a
+                            // character will not walk somewhere, and a
+                            // bake of one corner of the map looks
+                            // exactly like a bake of the map.
+                            if let Some(missed) = nav.coverage.as_deref() {
+                                ui.add_space(2.0);
+                                ui.small(
+                                    egui::RichText::new(missed)
+                                        .color(egui::Color32::from_rgb(230, 180, 90)),
+                                );
+                            }
+                        }
+                    }
+                    Matter::NavLink {
+                        id: _,
+                        to,
+                        bidirectional,
+                        cost,
+                        area,
+                        duration,
+                        enabled,
+                    } => {
+                        if crate::responsive::check(ui, enabled, "this way is open").changed() {
+                            cmd.inspector_changed = true;
+                        }
+                        ui.small(
+                            "A way across that is not walking: a ladder, a jump down, a \
+                             vault, a door. This node is one end; the offset below is \
+                             the other. Both ends have to land on the navmesh.",
+                        );
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("far end");
+                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut to[i])
+                                            .speed(0.1)
+                                            .prefix(format!("{axis} ")),
+                                    )
+                                    .changed();
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Where it comes out, measured in this node's own space — so \
+                             a link inside a prefab turns and scales with the prefab.",
+                        );
+                        if crate::responsive::check(ui, bidirectional, "can be crossed both ways")
+                            .on_hover_text(
+                                "A ladder can. A jump down cannot, and making one \
+                                 two-way is a character walking up a cliff.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=100.0)
+                                    .logarithmic(true),
+                                    "cost")
+                            .on_hover_text(
+                                "What crossing costs the router, in metres of ordinary \
+                                 walking. Raise it to make this a last resort; lower it \
+                                 to make it a shortcut.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(duration, 0.0..=10.0)
+                                    .suffix(" s"),
+                                    "crossing takes")
+                            .on_hover_text(
+                                "How long an agent spends on it. 0 means at walking \
+                                 speed, which is right for a vault and wrong for a lift.",
+                            )
+                            .changed();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("area");
+                            cmd.inspector_changed |=
+                                ui.text_edit_singleline(area).changed();
+                        })
+                        .response
+                        .on_hover_text(
+                            "Optional. Name a nav area and one exclusion can rule out \
+                             every link like this — every jump in the level, say — \
+                             rather than one per link.",
+                        );
+                        ui.separator();
+                        ui.small(
+                            "In a script: agent.link is this link's name while it is \
+                             being crossed, and agent.linkProgress runs 0 to 1 — which \
+                             is what a climb animation is driven by. nav.link(name, \
+                             false) shuts it.",
+                        );
+                    }
+                    Matter::NavArea { half_extents, area, cost, blocks, enabled } => {
+                        if crate::responsive::check(ui, enabled, "this volume counts").changed() {
+                            cmd.inspector_changed = true;
+                        }
+                        ui.small(
+                            "Changes what the ground inside it means — either it costs \
+                             more to cross, or it is not walkable at all.",
+                        );
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("size");
+                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                let mut full = half_extents[i] * 2.0;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut full)
+                                            .speed(0.25)
+                                            .range(0.1..=100000.0)
+                                            .prefix(format!("{axis} ")),
+                                    )
+                                    .changed()
+                                {
+                                    half_extents[i] = full * 0.5;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                        if crate::responsive::check(ui, blocks, "carve this out of the navmesh")
+                            .on_hover_text(
+                                "Nothing walks here, whatever it thinks of the ground. \
+                                 The answer to \"keep out of this room\" that does not \
+                                 involve an invisible wall nobody remembers building.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+                        if !*blocks {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("area");
+                                cmd.inspector_changed |=
+                                    ui.text_edit_singleline(area).changed();
+                            })
+                            .response
+                            .on_hover_text(
+                                "What this ground is called — water, mud, road, danger. \
+                                 The name is what scripts ask for, so two volumes with \
+                                 the same name are the same kind of ground.",
+                            );
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=50.0)
+                                        .logarithmic(true),
+                                        "costs")
+                                .on_hover_text(
+                                    "How expensive a metre of it is next to ordinary \
+                                     ground. Above 1 is walked round when there is a way \
+                                     round; below 1 is sought out, which is how a road \
+                                     works.",
+                                )
+                                .changed();
+                            ui.small(
+                                "One character can disagree: nav.agent(node, { filter = \
+                                 { avoid = {\"water\"}, cost = { mud = 0.5 } } }).",
+                            );
+                        }
+                        ui.separator();
+                        ui.small(
+                            "Bake the navmesh again after moving this — a volume is \
+                             read when the bake runs, not while the game is playing.",
+                        );
+                    }
+                    Matter::LightProbes {
+                        half_extents,
+                        spacing,
+                        enabled,
+                        intensity,
+                        bounces,
+                        quality,
+                        leak,
+                        normal_bias,
+                        exclude_layers,
+                    } => {
+                        let gi = self.gi;
+                        if crate::responsive::check(ui, enabled, "light this scene").changed() {
+                            cmd.inspector_changed = true;
+                            cmd.gi_changed = true;
+                        }
+                        ui.small(
+                            "Baked bounce light. Inside this box the scene's flat ambient \
+                             is replaced by what the surfaces around it actually reflect.",
+                        );
+                        ui.separator();
+
+                        // ---- the box ------------------------------------
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("size");
+                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                let mut full = half_extents[i] * 2.0;
+                                let r = ui.add(
+                                    egui::DragValue::new(&mut full)
+                                        .speed(0.25)
+                                        .range(0.5..=4000.0)
+                                        .prefix(format!("{axis} ")),
+                                );
+                                if r.changed() {
+                                    half_extents[i] = full * 0.5;
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The volume's full size in world units, before the node's \
+                             scale. Move the node to move the box.",
+                        );
+                        if crate::responsive::slider(ui, egui::Slider::new(spacing, 0.25..=16.0)
+                                    .logarithmic(true),
+                                    "probe spacing")
+                            .on_hover_text(
+                                "World units between probes. This is the resolution of \
+                                 the bounce: it cannot represent a shadow sharper than \
+                                 one cell.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                            cmd.gi_changed = true;
+                        }
+                        let planned = gi.planned_count();
+                        ui.small(format!(
+                            "{}×{}×{} = {planned} probes  ·  {} renders per bounce",
+                            gi.planned[0],
+                            gi.planned[1],
+                            gi.planned[2],
+                            planned * 6
+                        ));
+
+                        // ---- the bake -----------------------------------
+                        ui.separator();
+                        if gi.baking {
+                            ui.add(
+                                egui::ProgressBar::new(gi.progress).text(format!(
+                                    "baking — bounce {}/{}  ·  {:.0}s",
+                                    gi.bounce, gi.bounces, gi.seconds
+                                )),
+                            );
+                            if ui.button("✖  Cancel").clicked() {
+                                cmd.gi_cancel = true;
+                            }
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .button("☀  Bake")
+                                    .on_hover_text(
+                                        "Render the scene from every probe and keep the \
+                                         light. Saved next to the scene as a .fgi.",
+                                    )
+                                    .clicked()
+                                {
+                                    cmd.gi_bake = true;
+                                }
+                                if gi.baked_probes > 0
+                                    && ui
+                                        .button("🗑  Clear")
+                                        .on_hover_text("Throw the bake away.")
+                                        .clicked()
+                                {
+                                    cmd.gi_clear = true;
+                                }
+                            });
+                            if gi.baked_probes == 0 {
+                                ui.small("no bake yet — this volume lights nothing.");
+                            } else {
+                                ui.small(format!(
+                                    "baked: {} probes, {} bounce{}",
+                                    gi.baked_probes,
+                                    gi.baked_bounces,
+                                    if gi.baked_bounces == 1 { "" } else { "s" }
+                                ));
+                            }
+                            // Said plainly rather than by going dark: a
+                            // volume you just resized is still lit by the
+                            // old data, and that is a choice, not a bug.
+                            if gi.stale {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 180, 90),
+                                    "⚠ the box changed since this was baked — \
+                                     still using the old light",
+                                );
+                            }
+                        }
+
+                        // ---- how it is baked ----------------------------
+                        ui.separator();
+                        let mut b = *bounces;
+                        if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4), "bounces")
+                            .on_hover_text(
+                                "1 is light coming off surfaces once — the difference \
+                                 between a black corner and a lit one. Each extra bounce \
+                                 re-renders every probe.",
+                            )
+                            .changed()
+                        {
+                            *bounces = b;
+                            cmd.inspector_changed = true;
+                        }
+                        let mut q = *quality;
+                        if crate::responsive::slider(ui, egui::Slider::new(&mut q, 8..=64)
+                                    .step_by(8.0),
+                                    "bake detail")
+                            .on_hover_text(
+                                "Pixels per cube face. Higher resolves small bright \
+                                 things — a lamp, a window — and does not change how \
+                                 bright the result is.",
+                            )
+                            .changed()
+                        {
+                            *quality = q;
+                            cmd.inspector_changed = true;
+                        }
+                        let names: Vec<String> = self.layer_names.to_vec();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("skip layers");
+                            egui::ComboBox::from_id_salt("gi_skip")
+                                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selected_text(if exclude_layers.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    exclude_layers.join(", ")
+                                })
+                                .show_ui(ui, |ui| {
+                                    for n in &names {
+                                        let mut on = exclude_layers.contains(n);
+                                        if crate::responsive::check(ui, &mut on, n).changed() {
+                                            if on {
+                                                exclude_layers.push(n.clone());
+                                            } else {
+                                                exclude_layers.retain(|x| x != n);
+                                            }
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                        })
+                        .response
+                        .on_hover_text(
+                            "Anything that moves — a character, a door, a lift — should \
+                             not be baked into the light it happens to be standing in.",
+                        );
+
+                        // ---- how it is applied --------------------------
+                        ui.separator();
+                        if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "intensity")
+                            .on_hover_text(
+                                "1 is the light as measured. Past that is a look, not a \
+                                 mistake. Changing this does not need a re-bake.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                            cmd.gi_changed = true;
+                        }
+                        if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0), "leak rejection")
+                            .on_hover_text(
+                                "Throws away probes buried in geometry, so the lit room \
+                                 next door stops glowing through the wall. Costs some \
+                                 bounce in tight spaces. 0 = off.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                            cmd.gi_changed = true;
+                        }
+                        if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0),
+                                    "surface offset")
+                            .on_hover_text(
+                                "How far a surface steps along its own normal before \
+                                 looking the light up, in cells. Too little leaks at \
+                                 corners; too much drags light around them.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                            cmd.gi_changed = true;
+                        }
+
+                        // ---- looking at it ------------------------------
+                        ui.separator();
+                        let mut show_only = gi.show_only;
+                        if crate::responsive::check(ui, &mut show_only, "show only the bounce")
+                            .on_hover_text(
+                                "Every direct light off, so what is left on screen is \
+                                 exactly what was baked. The fastest way to tell a dark \
+                                 bake from a dark scene.",
+                            )
+                            .changed()
+                        {
+                            cmd.gi_show_only = Some(show_only);
+                        }
+                        let mut show_probes = gi.show_probes;
+                        if crate::responsive::check(ui, &mut show_probes, "show the probes")
+                            .on_hover_text(
+                                "Draw each probe in the colour it baked. A grid that is \
+                                 too coarse, or a row of probes buried in the floor, is \
+                                 invisible in the final picture and obvious here.",
+                            )
+                            .changed()
+                        {
+                            cmd.gi_show_probes = Some(show_probes);
+                        }
+                    }
+                    Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
+                        if crate::responsive::check(ui, enabled, "reflect this room").changed() {
+                            cmd.inspector_changed = true;
+                        }
+                        ui.small(
+                            "What reflective surfaces inside this box show when what \
+                             they are reflecting is not on screen. Without one they show \
+                             the sky — daylight, indoors, through the ceiling.",
+                        );
+                        ui.separator();
+
+                        // ---- the box ------------------------------------
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("size");
+                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                let mut full = half_extents[i] * 2.0;
+                                let r = ui.add(
+                                    egui::DragValue::new(&mut full)
+                                        .speed(0.25)
+                                        .range(0.5..=4000.0)
+                                        .prefix(format!("{axis} ")),
+                                );
+                                if r.changed() {
+                                    half_extents[i] = full * 0.5;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The room, in world units. This decides which surfaces the \
+                             probe covers AND where the reflection lands: sized to the \
+                             walls, a reflected wall sits on the wall instead of \
+                             sliding as the camera moves.",
+                        );
+                        if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0), "edge fade")
+                            .on_hover_text(
+                                "How far outside the box the room's reflection gives way \
+                                 to the sky, in world units. A doorway wants a metre or \
+                                 two so walking out does not switch in one step.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+                        if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "strength")
+                            .on_hover_text(
+                                "How much of the capture to apply. 1 is what was \
+                                 measured; this is the artistic knob for a room that \
+                                 reads too busy or too dim in the reflections.",
+                            )
+                            .changed()
+                        {
+                            cmd.inspector_changed = true;
+                        }
+
+                        // ---- the capture --------------------------------
+                        ui.separator();
+                        ui.small(
+                            "Captured when the scene loads and whenever the probe is \
+                             moved or resized. Nothing is saved to disk, so a capture \
+                             cannot go stale in a file.",
+                        );
+                        if ui
+                            .button("recapture")
+                            .on_hover_text(
+                                "Take it again now — after relighting the room, or \
+                                 moving the furniture in it.",
+                            )
+                            .clicked()
+                        {
+                            cmd.recapture_probes = true;
+                        }
+                    }
+                    Matter::PostProcess {
+                        tonemap,
+                        enabled,
+                        bloom,
+                        bloom_threshold,
+                        bloom_intensity,
+                        vignette,
+                        vignette_strength,
+                        vignette_radius,
+                        ao,
+                        ao_strength,
+                        ao_radius,
+                        posterize_bands,
+                        posterize_dither,
+                        posterize_chroma,
+                        exposure,
+                        contrast,
+                        saturation,
+                        temperature,
+                        tint,
+                        lift,
+                        grade_gamma,
+                        gain,
+                        aberration,
+                        distortion,
+                        sharpen,
+                        denoise,
+                        grain,
+                        grain_size,
+                        dof_focus,
+                        dof_range,
+                        dof_near_range,
+                        dof_max_blur,
+                        dof_blades,
+                        dof_blade_rotation,
+                        dof_highlight,
+                        dof_quality,
+                        motion_blur,
+                        motion_samples,
+                        dof_show_focus,
+                        dof_focus_node,
+                        screen_shaders,
+                    } => {
+                        use floptle_core::AoMode;
+                        ui.label("post processing");
+                        ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
+                        cmd.inspector_changed |= crate::responsive::check(ui, enabled, "enabled")
+                            .on_hover_text("master switch for the whole chain")
+                            .changed();
+                        ui.add_enabled_ui(*enabled, |ui| {
+                            ui.separator();
+                            ui.label("Ambient occlusion");
+                            ui.horizontal_wrapped(|ui| {
+                                let mut m = *ao;
+                                if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
+                                    m = AoMode::Off;
+                                }
+                                if ui
+                                    .selectable_label(m == AoMode::ScreenSpace, "Screen space")
+                                    .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
+                                    .clicked()
+                                {
+                                    m = AoMode::ScreenSpace;
+                                }
+                                if ui
+                                    .selectable_label(m == AoMode::Sdf, "SDF (true)")
+                                    .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
+                                    .clicked()
+                                {
+                                    m = AoMode::Sdf;
+                                }
+                                if m != *ao {
+                                    *ao = m;
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            if *ao != AoMode::Off {
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
+                                    .changed();
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
+                                    .changed();
+                            }
+                            ui.separator();
+                            cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
+                            if *bloom {
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
+                                    .changed();
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
+                                    .changed();
+                            }
+                            cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
+                            if *vignette {
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
+                                    .changed();
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
+                                    .changed();
+                            }
+                            // Posterize — crush the ART to a limited palette. It runs
+                            // before the 2D light rather than at the end of the frame,
+                            // which is why the tooltip says palette.
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Posterize")
+                                    .on_hover_text(
+                                        "reduce your ART to a fixed number of levels per channel — a \
+                                         limited-palette / banded retro look. It quantises the palette \
+                                         only: 2D lights, the vignette, bloom and ambient occlusion are \
+                                         applied on top and stay smooth.",
+                                    );
+                                let plabel = match *posterize_bands {
+                                    0 | 1 => "off".to_string(),
+                                    n => format!("{n} levels"),
+                                };
+                                egui::ComboBox::from_id_salt("posterize_bands")
+                                    .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selected_text(plabel)
+                                    .show_ui(ui, |ui| {
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(posterize_bands, 0, "off").clicked();
+                                        for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
+                                            cmd.inspector_changed |= ui
+                                                .selectable_value(posterize_bands, nb, format!("{nb} levels"))
+                                                .clicked();
+                                        }
+                                    });
+                            });
+                            ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
+                                cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
+                                    .on_hover_text(
+                                        "ordered dither, so a gradient in your ART stipples between two \
+                                         levels instead of hard-stepping — a painted sky, a soft-edged \
+                                         sprite. It has no effect on lighting.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
+                                    .on_hover_text(
+                                        "off — the default — steps each colour channel on its own, which is a real \
+                                         look and what every project built before now is made of. It is often not \
+                                         what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
+                                         boundary at a different value, so it steps through colours nobody chose. \
+                                         On, the step happens once to brightness and the colour rides along — a grey \
+                                         pixel comes out identical either way.",
+                                    )
+                                    .changed();
+                            });
+                        });
+
+                        // ---- the look chain -------------------------
+                        //
+                        // One collapsing section per effect, each with
+                        // its own reset, because a grade you cannot get
+                        // back to neutral is a grade you stop touching.
+                        // Every heading says what off is, so "is this
+                        // doing anything" is answerable at a glance.
+                        let acc = egui::Color32::from_rgb(255, 200, 80);
+
+                        // Tonemap first, and on its own, because it is
+                        // not one effect among the others: it is how the
+                        // scene's light reaches the display at all. The
+                        // grade below it is working in the range this
+                        // choice defines.
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("tonemap").on_hover_text(
+                                "The scene is lit in real, unbounded light — a lamp can \
+                                 be ten times brighter than white. A screen stops at \
+                                 white. This chooses how to get from one to the other.\n\n\
+                                 Doing nothing is a choice too: each colour channel \
+                                 clips on its own, so a very bright colour slides toward \
+                                 white through whatever hue clips last. That is why \
+                                 blown highlights can go strange colours.",
+                            );
+                            let names = [
+                                ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
+                                ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
+                                ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
+                                ("AgX", "AgX — bright colours whiten the way film does, instead of \
+                                         hitting a flat ceiling of their own hue"),
+                            ];
+                            let cur = (*tonemap as usize).min(3);
+                            egui::ComboBox::from_id_salt("pp_tonemap")
+                                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selected_text(names[cur].0)
+                                .width(160.0)
+                                .show_ui(ui, |ui| {
+                                    for (i, (short, long)) in names.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(cur == i, *short)
+                                            .on_hover_text(*long)
+                                            .clicked()
+                                        {
+                                            *tonemap = i as u32;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        if *tonemap == 0 {
+                            ui.small(
+                                egui::RichText::new(
+                                    "anything brighter than white is clipped — try AgX \
+                                     if bright lights look like flat blocks of colour",
+                                )
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+
+                        // ---- the scene's own screen shaders ---------
+                        //
+                        // Placed after the tonemap and before the grade
+                        // because that is where they run, and a panel
+                        // that lists effects in an order the frame does
+                        // not follow is a panel that teaches the wrong
+                        // thing.
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("screen shaders");
+                            ui.small(
+                                egui::RichText::new(format!(
+                                    "{} pass{}",
+                                    screen_shaders.len(),
+                                    if screen_shaders.len() == 1 { "" } else { "es" }
+                                ))
+                                .color(ui.visuals().weak_text_color()),
+                            );
+                        });
+                        ui.small(
+                            "full-screen passes you wrote — a `stage post` .flsl gets the \
+                             finished frame plus its depth and normals, and returns a new \
+                             colour. They run in this order, over the picture, before the \
+                             grade and the lens below.",
+                        );
+                        {
+                            let mut remove: Option<usize> = None;
+                            let mut swap: Option<(usize, usize)> = None;
+                            let n = screen_shaders.len();
+                            for (i, pass) in screen_shaders.iter_mut().enumerate() {
+                                let name = Path::new(&pass.shader)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| pass.shader.clone());
+                                let entry = self.post_flsl_cache.get(&pass.shader);
+                                let err = entry.and_then(|e| e.error.as_deref());
+                                crate::responsive::group(ui, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
+                                            .on_hover_text(
+                                                "off keeps the pass and its settings \
+                                                 without running it",
+                                            )
+                                            .changed();
+                                        ui.label(egui::RichText::new(&name).strong());
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .button("✖")
+                                                    .on_hover_text("remove this pass")
+                                                    .clicked()
+                                                {
+                                                    remove = Some(i);
+                                                }
+                                                // Straight to the graph, the
+                                                // same door a Material's
+                                                // shader row opens — a pass
+                                                // you can add and tune but
+                                                // not open is a pass you
+                                                // hunt for in the Assets
+                                                // panel every time.
+                                                if ui
+                                                    .button("◈")
+                                                    .on_hover_text("edit this shader in the ◈ Shaders graph")
+                                                    .clicked()
+                                                {
+                                                    cmd.open_shader_graph =
+                                                        Some(pass.shader.clone());
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        i + 1 < n,
+                                                        egui::Button::new("▼"),
+                                                    )
+                                                    .on_hover_text("run later")
+                                                    .clicked()
+                                                {
+                                                    swap = Some((i, i + 1));
+                                                }
+                                                if ui
+                                                    .add_enabled(i > 0, egui::Button::new("▲"))
+                                                    .on_hover_text("run earlier")
+                                                    .clicked()
+                                                {
+                                                    swap = Some((i, i - 1));
+                                                }
+                                            },
+                                        );
+                                    });
+                                    match (err, entry.and_then(|e| e.compiled.as_ref())) {
+                                        (Some(msg), _) => {
+                                            ui.small(
+                                                egui::RichText::new(format!("◈ {msg}"))
+                                                    .color(egui::Color32::from_rgb(
+                                                        255, 120, 110,
+                                                    )),
+                                            );
+                                        }
+                                        (None, None) => {
+                                            ui.small("(compiling — its knobs appear here)");
+                                        }
+                                        (None, Some(_)) => {}
+                                    }
+                                    // Knobs from the compiled shader's own schema. Shown
+                                    // even when the newest edit failed, because they are
+                                    // still driving the last good pipeline.
+                                    if let Some((compiled, _)) =
+                                        entry.and_then(|e| e.compiled.as_ref())
+                                        && !compiled.uniforms.is_empty()
+                                    {
+                                        crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
+                                                if shader_uniform_rows(
+                                                    ui,
+                                                    &compiled.uniforms,
+                                                    &mut pass.params,
+                                                ) {
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            });
+                                        if !pass.params.is_empty()
+                                            && ui
+                                                .button("Reset knobs")
+                                                .on_hover_text(
+                                                    "back to the shader's own defaults",
+                                                )
+                                                .clicked()
+                                        {
+                                            pass.params.clear();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            }
+                            if let Some((a, b)) = swap {
+                                screen_shaders.swap(a, b);
+                                cmd.inspector_changed = true;
+                            }
+                            if let Some(i) = remove {
+                                screen_shaders.remove(i);
+                                cmd.inspector_changed = true;
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                if let Some(pick) = crate::ui_widgets::asset_picker(
+                                    ui,
+                                    egui::Id::new("pp-add-screen-shader"),
+                                    self.project_root,
+                                    "+ Add screen shader",
+                                    None,
+                                    self.asset_tree,
+                                    crate::assets::is_shader,
+                                    200.0,
+                                ) && let Some(path) = pick
+                                {
+                                    screen_shaders
+                                        .push(floptle_core::ScreenShader::new(path));
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    egui::RichText::new(
+                                        "try shaders/examples/inkOutline.flsl",
+                                    )
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            });
+                        }
+
+                        ui.separator();
+                        ui.label("colour grade");
+                        {
+                            let neutral = *exposure == 0.0
+                                && *contrast == 1.0
+                                && *saturation == 1.0
+                                && *temperature == 0.0
+                                && *tint == 0.0
+                                && *lift == 0.0
+                                && *grade_gamma == 1.0
+                                && *gain == 1.0;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.small(if neutral {
+                                    "neutral — no pass runs"
+                                } else {
+                                    "grading"
+                                });
+                                if !neutral && ui.small_button("reset").clicked() {
+                                    *exposure = 0.0;
+                                    *contrast = 1.0;
+                                    *saturation = 1.0;
+                                    *temperature = 0.0;
+                                    *tint = 0.0;
+                                    *lift = 0.0;
+                                    *grade_gamma = 1.0;
+                                    *gain = 1.0;
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
+                                .on_hover_text(
+                                    "in STOPS: +1 is twice the light. The unit a camera and a \
+                                     renderer already share — it keeps meaning the same thing \
+                                     when the scene's brightness changes.",
+                                )
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
+                                .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
+                                .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
+                                .on_hover_text("cool (−) ↔ warm (+)")
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
+                                .on_hover_text(
+                                    "green (−) ↔ magenta (+) — the axis temperature can't reach, \
+                                     and the one that fixes a scene that has gone subtly sickly",
+                                )
+                                .changed();
+                            ui.small("shadows / midtones / highlights");
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
+                                .on_hover_text("raise or crush the black floor — a lifted black is the film look")
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
+                                .on_hover_text("bend the midtones without moving black or white")
+                                .changed();
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
+                                .on_hover_text("scale the highlights")
+                                .changed();
+                        }
+
+                        ui.separator();
+                        ui.label("lens");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
+                            .on_hover_text(
+                                "red and blue drift apart toward the edges, the way real glass \
+                                 disperses. 0 = off.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
+                            .on_hover_text(
+                                "positive barrels (fisheye), negative pincushions. The corners go \
+                                 BLACK rather than smearing the edge pixel outward — a bent frame \
+                                 genuinely has no picture out there.",
+                            )
+                            .changed();
+                        if *aberration == 0.0 && *distortion == 0.0 {
+                            ui.small("both at 0 — no lens pass runs");
+                        }
+
+                        ui.separator();
+                        ui.label("detail");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
+                            .on_hover_text(
+                                "unsharp mask, clamped to the local neighbourhood so edges get \
+                                 crisper without growing a bright halo. 0 = off.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
+                            .on_hover_text(
+                                "bilateral: averages within a flat region and refuses to average \
+                                 across an edge, which is the difference between removing noise \
+                                 and removing detail. Runs FIRST in the chain, on the raw frame. \
+                                 0 = off.",
+                            )
+                            .changed();
+                        if *sharpen > 0.0 && *denoise > 0.0 {
+                            ui.small("denoise runs first, then sharpen — the useful order");
+                        }
+
+                        ui.separator();
+                        ui.label("film grain");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
+                            .on_hover_text(
+                                "multiplicative and strongest in the MIDTONES, the way emulsion \
+                                 responds — additive grain lifts every shadow into grey mud, \
+                                 which is the tell of a cheap filter. Applied last, so nothing \
+                                 downstream turns it into crawling static. 0 = off.",
+                            )
+                            .changed();
+                        ui.add_enabled_ui(*grain > 0.0, |ui| {
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
+                                .on_hover_text(
+                                    "grain cell in pixels. 1 is per-pixel — which under a retro \
+                                     upscale is invisible, then suddenly a flat shimmer. 2–4 is \
+                                     what reads as film.",
+                                )
+                                .changed();
+                        });
+
+                        ui.separator();
+                        ui.label("depth of field");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
+                                    .logarithmic(true),
+                                    "focus distance")
+                            .on_hover_text("world units from the camera that are sharp. 0 = off.")
+                            .changed();
+                        // Focus on a node instead of a number: the focus
+                        // distance becomes the camera's distance to it,
+                        // every frame. This is what a rack focus is made
+                        // of, and by hand it means a script measuring a
+                        // distance the engine already knows.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("follow");
+                            let cur = dof_focus_node.clone();
+                            let label = if cur.is_empty() {
+                                "(a fixed distance)".to_string()
+                            } else {
+                                cur.clone()
+                            };
+                            egui::ComboBox::from_id_salt("pp_dof_follow")
+                                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selected_text(label)
+                                .width(170.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(cur.is_empty(), "(a fixed distance)")
+                                        .clicked()
+                                        && !cur.is_empty()
+                                    {
+                                        dof_focus_node.clear();
+                                        cmd.inspector_changed = true;
+                                    }
+                                    for (_, name) in self.entity_names {
+                                        if ui.selectable_label(cur == *name, name).clicked()
+                                            && cur != *name
+                                        {
+                                            *dof_focus_node = name.clone();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                        })
+                        .response
+                        .on_hover_text(
+                            "keep this node in focus — the focus distance becomes the \
+                             camera's distance to it, measured every frame and per \
+                             viewport, so the Scene view shows its own focus while you \
+                             fly around. A name that matches nothing falls back to the \
+                             slider above rather than to zero.",
+                        );
+                        if !dof_focus_node.is_empty()
+                            && !self.entity_names.iter().any(|(_, n)| n == dof_focus_node)
+                        {
+                            ui.colored_label(
+                                acc,
+                                format!(
+                                    "⚠ no node named \"{dof_focus_node}\" in this scene — \
+                                     using the focus distance above"
+                                ),
+                            );
+                        }
+                        ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
+                                .on_hover_text("how far BEYOND the focus distance stays sharp")
+                                .changed();
+                            let mut near = *dof_near_range;
+                            let auto = near <= 0.0;
+                            if auto {
+                                near = *dof_range * 0.5;
+                            }
+                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
+                                .on_hover_text(
+                                    "how far IN FRONT of it stays sharp. A lens goes soft \
+                                     on the near side much sooner than on the far side, \
+                                     which is why these are two numbers: a portrait wants \
+                                     the foreground gone and the background readable.",
+                                );
+                            if r.changed() {
+                                *dof_near_range = near;
+                                cmd.inspector_changed = true;
+                            }
+                            if auto {
+                                ui.small(
+                                    egui::RichText::new("near range is following the far one (half of it)")
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            } else if ui
+                                .small_button("link to far range")
+                                .on_hover_text("back to half the far range")
+                                .clicked()
+                            {
+                                *dof_near_range = 0.0;
+                                cmd.inspector_changed = true;
+                            }
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
+                                .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
+                                .changed();
+
+                            ui.add_space(3.0);
+                            ui.small("the iris");
+                            let mut blades = *dof_blades as f32;
+                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
+                                        .step_by(1.0),
+                                        "blades")
+                                .on_hover_text(
+                                    "0 is a round iris. 3 and up gives the polygonal bokeh \
+                                     of a real lens — six is the classic hexagon.",
+                                );
+                            if r.changed() {
+                                *dof_blades = blades.max(0.0) as u32;
+                                cmd.inspector_changed = true;
+                            }
+                            if *dof_blades >= 3 {
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
+                                            "blade angle°")
+                                    .on_hover_text("turn the polygon")
+                                    .changed();
+                            }
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
+                                .on_hover_text(
+                                    "how much brighter-than-white pixels dominate the \
+                                     blur. 0 averages them away into grey; turn it up and \
+                                     a specular glint spreads into a visible disc. It \
+                                     reads the scene's real light, so it needs something \
+                                     genuinely brighter than white to work on.",
+                                )
+                                .changed();
+                            let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
+                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
+                                .on_hover_text(
+                                    "taps in the blur. More is smoother bokeh and costs \
+                                     linearly more; fewer is the chunky look, on purpose.",
+                                );
+                            if r.changed() {
+                                *dof_quality = q.round().clamp(4.0, 64.0) as u32;
+                                cmd.inspector_changed = true;
+                            }
+                            cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
+                                .on_hover_text(
+                                    "a tuning view: cool where the near side is going \
+                                     soft, warm where the far side is, the picture itself \
+                                     where it is sharp. Which half of the band a pixel is \
+                                     on is the one thing you cannot read off a blurred \
+                                     frame.",
+                                )
+                                .changed();
+                        });
+                        if *dof_show_focus {
+                            ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
+                        }
+                        if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
+                            && *dof_max_blur <= 0.0
+                        {
+                            ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
+                        }
+
+                        // ---- motion blur --------------------------------
+                        ui.separator();
+                        ui.strong("≈ Motion blur");
+                        ui.small("shows in the Game view");
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
+                            .on_hover_text(
+                                "How much of the frame's camera motion is smeared. 0 is off. \
+                                 0.5 is the 180° shutter a film camera has and is the one \
+                                 that reads as footage; 1 leaves the shutter open for the \
+                                 whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
+                                 motion — a pan, a whip, a dolly, a roll. Something crossing \
+                                 a locked-off shot stays sharp.\n\nThe Scene view is left \
+                                 alone deliberately: you have to be able to place things \
+                                 while the camera is moving.",
+                            )
+                            .changed();
+                        if *motion_blur > 0.0 {
+                            let mut taps =
+                                if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
+                            if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
+                                .on_hover_text(
+                                    "Taps along the streak. Too few and a fast pan bands \
+                                     into separate copies of the picture.",
+                                )
+                                .changed()
+                            {
+                                *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        // Visibility (geometry nodes) — hide the node's visual without deleting it.
+        if matches!(
+            world.get::<Matter>(e),
+            Some(Matter::Mesh { .. } | Matter::Primitive { .. } | Matter::Blob { .. })
+        ) {
+            ui.indent("visible_toggle", |ui| {
+                let mut vis =
+                    world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+                if crate::responsive::check(ui, &mut vis, "👁 visible")
+                    .on_hover_text("uncheck to hide this node's geometry (scripts: node.visible = true/false)")
+                    .changed()
+                {
+                    cmd.set_visible = Some((e, vis));
+                    cmd.inspector_changed = true;
+                }
+            });
+        }
+    }
+
+    /// The transform every node has.
+    fn node_transform_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let playing = self.playing;
+        let clip = self.component_clip.as_ref();
+        // ===== Transform (always present) =====
+        ui.separator();
+        // Stop reverts the world, so a transform typed
+        // here while playing is thrown away — `push_history` no-ops
+        // during Play, which also means it is not undoable and never
+        // marks the scene unsaved. Nothing used to say so.
+        //
+        // The way out already existed and was simply never pointed at:
+        // the header's … menu copies the transform, and the component
+        // clipboard survives Stop — so "nudge it while watching, then
+        // keep the value" is Copy values → Stop → Paste values. Saying
+        // that here is worth more than a warning would be, because it
+        // ends with the user keeping their work.
+        if playing {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 150, 140),
+                "▶ discarded on Stop — … Copy values, Stop, then Paste to keep it",
+            )
+            .on_hover_text(
+                "Play reverts the whole world when you Stop. The … menu on \
+                 this header copies the Transform to the component clipboard, \
+                 which survives Stop — paste it onto the same node afterwards \
+                 and it is a real, undoable, saveable edit.",
+            );
+        }
+        {
+            let (copy, paste, reset) = transform_header(
+                ui,
+                matches!(clip, Some(ComponentClip::Transform(_))),
+            );
+            if copy
+                && let Some(t) = world.get::<Transform>(e) {
+                    cmd.copy_component = Some(ComponentClip::Transform(*t));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+            if reset {
+                cmd.reset_transform = Some(e);
+            }
+        }
+        ui.indent("xform_props", |ui| {
+            if let Some(t) = world.get_mut::<Transform>(e) {
+                ui.label("translation");
+                ui.horizontal_wrapped(|ui| {
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
+                });
+                ui.label("rotation (deg)");
+                let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                let mut rot_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                    rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                    rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                });
+                if rot_changed {
+                    t.rotation = Quat::from_euler(
+                        EulerRot::YXZ,
+                        deg[0].to_radians(),
+                        deg[1].to_radians(),
+                        deg[2].to_radians(),
+                    );
+                    cmd.inspector_changed = true;
+                }
+                ui.label("scale");
+                ui.horizontal_wrapped(|ui| {
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                    cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                });
+            }
+        });
+    }
+
+    /// The node's own Material, when it has one.
+    fn node_material_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== Material (only when the node has one) =====
+        if world.get::<Material>(e).is_some() {
+            ui.separator();
+            let (copy, paste, remove) = component_header(
+                ui,
+                "◑ Material",
+                matches!(clip, Some(ComponentClip::Material(_))),
+                true,
+            );
+            if copy
+                && let Some(mat) = world.get::<Material>(e) {
+                    cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+            if remove {
+                cmd.remove_material = Some(e);
+            }
+            ui.indent("material_props", |ui| {
+                // **On a ▫ Sprite the node owns the cell, not the
+                // material.** The picker below edits `Material::cell`,
+                // which a Sprite node's draw does not read — so clicking
+                // a frame in the grid changed a number and nothing on
+                // screen, which is indistinguishable from spritesheets
+                // being broken. Seed the picker from the node before it
+                // is drawn and push any change back after, so the one
+                // control people reach for is the one that draws.
+                let sprite_cell = match world.get::<Matter>(e) {
+                    Some(Matter::Sprite { cell, .. }) => Some(*cell),
+                    _ => None,
+                };
+                if let (Some(c), Some(mat)) = (sprite_cell, world.get_mut::<Material>(e))
+                    && mat.cell != c
+                {
+                    mat.cell = c;
+                }
+                let mut picked_cell = None;
+                if let Some(mat) = world.get_mut::<Material>(e) {
+                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
+                    picked_cell = Some(mat.cell);
+                    cmd.inspector_changed |= res.changed;
+                    cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
+                    if res.remove {
+                        cmd.remove_material = Some(e);
+                    }
+                    if let Some(name) = res.save_as {
+                        cmd.save_material =
+                            Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                    }
+                    if ui.button("⛶ Open in Material Editor").clicked() {
+                        *self.show_material_editor = true;
+                    }
+                }
+                // …and back onto the node, which is what draws.
+                if let (Some(before), Some(after)) = (sprite_cell, picked_cell)
+                    && before != after
+                    && let Some(Matter::Sprite { cell, .. }) = world.get_mut::<Matter>(e)
+                {
+                    *cell = after;
+                    cmd.inspector_changed = true;
+                }
+            });
+        }
+    }
+
+    /// A model's own material slots.
+    fn node_model_materials_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let bone_names = self.bone_names;
+        let cur_bone = *self.bone_selection;
+        // ===== The model's own materials =====
+        //
+        // An imported model arrives with a material per part, and until
+        // now the only way to see them was to select the model in the
+        // Assets panel (read-only) and the only way to edit one was to
+        // expand the model in the Hierarchy and find the right
+        // sub-object. So "give this model a normal map" or "make this
+        // model jitter" had no obvious door, and the obvious-looking one
+        // — adding a Material to the node — used to flatten every part
+        // to a single colour.
+        //
+        // Both are answered here: the whole list, on the node, editable,
+        // with the model-wide button beside it.
+        if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e).cloned()
+            && let Some(parts) = self.mesh_registry.get(&asset_path).map(|a| {
+                // Collected up front: the rows below need `world` mutably,
+                // and the asset is borrowed out of the registry.
+                a.part_meta
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| {
+                        a.override_key(i).map(|k| {
+                            (k.to_string(), m.material.clone(), m.base_color, m.textured)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            && !parts.is_empty()
+        {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("◑ Model materials");
+                if parts.iter().any(|(_, _, _, textured)| *textured)
+                    && ui
+                        .small_button("⬇ extract textures")
+                        .on_hover_text(
+                            "write this model's own images out as PNG files beside \
+                             it, so you can point a material at one, paint over it, \
+                             or use it as a base layer.\n\nA .glb keeps its images \
+                             inside itself; until they are files, nothing else can \
+                             reach them.",
+                        )
+                        .clicked()
+                {
+                    cmd.extract_model_textures = Some(asset_path.clone());
+                }
+            });
+            ui.small(
+                "what this model was imported with. Overriding one changes it for \
+                 this node only — the model file is never touched. A Material on \
+                 the node replaces ALL of these at once; a Tint multiplies over \
+                 them and keeps them.",
+            );
+            // **◐ Tint** — the easy "same model, but red". Right here,
+            // beside the list it multiplies over, because this is where
+            // somebody is standing when they want it.
+            {
+                let cur = world
+                    .get::<floptle_core::Tint>(e)
+                    .copied()
+                    .unwrap_or_default();
+                let mut rgba =
+                    [cur.color[0], cur.color[1], cur.color[2], cur.alpha];
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("◐ tint")
+                        .on_hover_text(
+                            "multiplied over everything this node draws — its own \
+                             textures and each part's own colour are kept. White \
+                             is no tint.\n\nFor a hit flash, a team colour, a \
+                             ghosted preview, a body fading out.",
+                        );
+                    // Written straight into the world and marked
+                    // `inspector_changed`, like every other property row
+                    // here — that is what coalesces a drag into one undo
+                    // step. Going through a command would call `record()`
+                    // per changed frame, so dragging the swatch for a
+                    // second would push sixty snapshots of the scene and
+                    // need sixty undos to get back.
+                    let mut set = None;
+                    if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                        set = Some(rgba);
+                    }
+                    if !cur.is_identity()
+                        && ui
+                            .small_button("🗑")
+                            .on_hover_text("no tint")
+                            .clicked()
+                    {
+                        set = Some([1.0, 1.0, 1.0, 1.0]);
+                    }
+                    if let Some(v) = set {
+                        let t = floptle_core::Tint {
+                            color: [v[0], v[1], v[2]],
+                            alpha: v[3],
+                            // The additive lanes are edited on their own
+                            // rows below; the swatch owns the multiply
+                            // half and nothing else.
+                            ..cur
+                        };
+                        // White at full opacity, no rim and the room's
+                        // own ambient is no tint: the node goes back to
+                        // carrying none rather than one that does
+                        // nothing.
+                        if t.is_identity() {
+                            world.remove::<floptle_core::Tint>(e);
+                        } else {
+                            world.insert(e, t);
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                });
+                // **The two lanes that add light.** A multiply can only
+                // take light away, which is why a team colour on a
+                // mid-toned model reads as a slightly warm grey and why
+                // this component kept losing the job to a Material. See
+                // `floptle_core::Tint`.
+                {
+                    let mut next = cur;
+                    let mut rim = [cur.rim[0], cur.rim[1], cur.rim[2], 1.0];
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("◐ rim").on_hover_text(
+                            "an ADDITIVE fresnel edge in its own colour, over \
+                             whatever this node already draws.\n\nIt adds light, \
+                             so it reads on a dark costume and a bright one — \
+                             which is what actually tells two team-coloured \
+                             models apart in motion. Strength 0 is no rim, and \
+                             leaves the node's own material's rim alone.",
+                        );
+                        if ui.color_edit_button_rgba_unmultiplied(&mut rim).changed() {
+                            next.rim = [rim[0], rim[1], rim[2]];
+                            // Picking a colour for a rim nobody has
+                            // turned on means turning it on: a swatch
+                            // that visibly does nothing is a control
+                            // that looks broken.
+                            if next.rim_strength == 0.0 {
+                                next.rim_strength = 1.0;
+                            }
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut next.rim_strength)
+                                .speed(0.02)
+                                .range(0.0..=8.0)
+                                .prefix("×"),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("◐ ambient").on_hover_text(
+                            "multiplies this node's share of the scene's ambient \
+                             light. 1 is the room's own.\n\nAbove 1 lifts the \
+                             model out of the room's shadow — what a Material \
+                             carrying nothing but `ambient` was always for, \
+                             without costing the model its textures.",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut next.ambient)
+                                .speed(0.02)
+                                .range(0.0..=8.0)
+                                .prefix("×"),
+                        );
+                    });
+                    if next != cur {
+                        if next.is_identity() {
+                            world.remove::<floptle_core::Tint>(e);
+                        } else {
+                            world.insert(e, next);
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                }
+            }
+            if world.get::<Material>(e).is_none() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("◑ Add Material (whole model)")
+                        .on_hover_text(
+                            "make the WHOLE model one material — \"this thing is \
+                             made of ice\", \"…of gold\".\n\nIt REPLACES what the \
+                             model was imported with, every part of it, textures \
+                             included: a material with no texture draws untextured. \
+                             To change one part instead, use the list below.",
+                        )
+                        .clicked()
+                    {
+                        cmd.add_material = Some(e);
+                    }
+                });
+            }
+            // One row per sub-object, because that is what an override is
+            // keyed by. A flattened prop's object name is its material
+            // name, so the two read the same there.
+            // Which part is SELECTED right now — the object picked in the
+            // viewport or in Objects & Rig. When that changes, this list
+            // follows it: the selected part's editor opens and the rest
+            // shut. A model with a dozen parts otherwise makes you scroll
+            // past eleven open material editors to reach the one you are
+            // looking at, which is the opposite of what clicking it meant.
+            //
+            // Forced only on the frame the selection changes (`open(None)`
+            // every other frame), so opening a second part to compare, or
+            // closing the one you are on, still works and still sticks.
+            let sel_part: Option<String> = cur_bone
+                .filter(|(m, _)| *m == e)
+                .and_then(|(_, i)| bone_names.get(&e).and_then(|n| n.get(i)))
+                .filter(|n| n.is_object)
+                .map(|n| n.name.clone());
+            let sel_changed = {
+                let id = egui::Id::new(("mat_focus", e));
+                ui.data_mut(|d| {
+                    let prev: Option<Option<String>> = d.get_temp(id);
+                    let moved = prev.as_ref() != Some(&sel_part);
+                    if moved {
+                        d.insert_temp(id, sel_part.clone());
+                    }
+                    // Never on the first frame this node is inspected:
+                    // there is no selection to have moved to yet, and
+                    // slamming every part shut on arrival would look like
+                    // the panel losing its place.
+                    moved && prev.is_some()
+                })
+            };
+            let mut dedup: std::collections::BTreeSet<String> = Default::default();
+            for (key, mat_name, base_color, textured) in parts {
+                if !dedup.insert(key.clone()) {
+                    continue;
+                }
+                let overridden = world
+                    .get::<floptle_core::ObjectMaterials>(e)
+                    .is_some_and(|om| om.0.contains_key(&key));
+                let mut clear = false;
+                let mut make = false;
+                ui.horizontal_wrapped(|ui| {
+                    let (rect, _) = ui
+                        .allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(
+                            (base_color[0] * 255.0) as u8,
+                            (base_color[1] * 255.0) as u8,
+                            (base_color[2] * 255.0) as u8,
+                        ),
+                    );
+                    ui.label(&key);
+                    if mat_name != key {
+                        ui.weak(format!("· {mat_name}"));
+                    }
+                    if textured {
+                        ui.small("🖼");
+                    }
+                    if overridden {
+                        clear = ui
+                            .small_button("🗑")
+                            .on_hover_text("back to the model's own look")
+                            .clicked();
+                    } else {
+                        make = ui
+                            .small_button("override")
+                            .on_hover_text("give this part its own material")
+                            .clicked();
+                    }
+                });
+                if make {
+                    // Seeded with what the part already looks like — its
+                    // imported colour and its texture, extracted from
+                    // the model on the spot if it has one. An override
+                    // is a whole material, so without the texture
+                    // "override this part" would mean "make this part
+                    // blank", and the picture it was wearing lives
+                    // inside the `.glb` where nothing can point at it.
+                    cmd.override_object_material =
+                        Some((e, key.clone(), asset_path.clone()));
+                    cmd.inspector_changed = true;
+                }
+                if overridden {
+                    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "edit"))
+                        .id_salt(("model_mat", e, &key))
+                        .open(sel_changed.then(|| sel_part.as_deref() == Some(key.as_str())))
+                        .default_open(crate::responsive::start_open(false))
+                        .show(ui, |ui| {
+                            let mut save_as = None;
+                            if let Some(mat) = world
+                                .get_mut::<floptle_core::ObjectMaterials>(e)
+                                .and_then(|om| om.0.get_mut(&key))
+                            {
+                                let res = material_props_ui(
+                                    ui,
+                                    mat,
+                                    self.materials,
+                                    self.asset_tree,
+                                    self.project_root,
+                                    self.mat_name_buf,
+                                    self.flsl_cache,
+                                    self.sdf_cache,
+                                    self.texture_settings,
+                                );
+                                cmd.inspector_changed |= res.changed;
+                                cmd.open_shader_graph =
+                                    res.open_shader.or(cmd.open_shader_graph.take());
+                                clear |= res.remove;
+                                if let Some(name) = res.save_as {
+                                    save_as = Some((
+                                        name,
+                                        floptle_scene::MaterialDoc::from_material(mat),
+                                    ));
+                                }
+                            }
+                            if save_as.is_some() {
+                                cmd.save_material = save_as;
+                            }
+                        });
+                }
+                if clear
+                    && let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(e)
+                {
+                    om.0.remove(&key);
+                    if om.0.is_empty() {
+                        world.remove::<floptle_core::ObjectMaterials>(e);
+                    }
+                    cmd.inspector_changed = true;
+                }
+            }
+        }
+    }
+
+    /// The Particle System component, when the node has one.
+    fn node_particles_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== Particle System (only when the node has one) =====
+        if world.get::<floptle_core::ParticleSystem>(e).is_some() {
+            ui.separator();
+            let (copy, paste, remove) = component_header(
+                ui,
+                "✨ Particle System",
+                matches!(clip, Some(ComponentClip::Particles(_))),
+                true,
+            );
+            if copy
+                && let Some(ps) = world.get::<floptle_core::ParticleSystem>(e) {
+                    cmd.copy_component = Some(ComponentClip::Particles(ps.clone()));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+            if remove {
+                cmd.remove_particles = Some(e);
+            }
+            let effect_keys: Vec<String> =
+                self.vfx.effects.iter().map(|(k, _)| k.clone()).collect();
+            ui.indent("particles_props", |ui| {
+                if let Some(ps) = world.get_mut::<floptle_core::ParticleSystem>(e) {
+                    egui::ComboBox::from_label("Effect")
+                        .selected_text(if ps.asset.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            ps.asset.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for k in &effect_keys {
+                                if ui
+                                    .selectable_label(*k == ps.asset, k)
+                                    .clicked()
+                                {
+                                    ps.asset = k.clone();
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut ps.play_on_start, "Play on start")
+                        .on_hover_text(
+                            "Start emitting the moment Play begins \
+                             (off = a script triggers it)",
+                        )
+                        .changed();
+                    let edit_key =
+                        (!ps.asset.is_empty()).then(|| ps.asset.clone());
+                    if let Some(k) = edit_key
+                        && ui.button("✏ Edit effect").clicked()
+                    {
+                        cmd.open_particle_editor = Some(k);
+                    }
+                }
+            });
+        }
+    }
+
+    /// The Audio Source component, when the node has one.
+    fn node_audio_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== Audio Source (only when the node has one) =====
+        if world.get::<floptle_audio::AudioSource>(e).is_some() {
+            ui.separator();
+            let (copy, paste, remove) = component_header(
+                ui,
+                "♪ Audio Source",
+                matches!(clip, Some(ComponentClip::Audio(_))),
+                true,
+            );
+            if copy
+                && let Some(a) = world.get::<floptle_audio::AudioSource>(e) {
+                    cmd.copy_component = Some(ComponentClip::Audio(a.clone()));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+            if remove {
+                cmd.remove_audio = Some(e);
+            }
+            // Clip candidates: browse the audio files as a foldered tree;
+            // the picked full path is stored as a project-relative key.
+            let tree = self.asset_tree;
+            let root = self.project_root;
+            let track_names: Vec<String> =
+                std::iter::once(floptle_audio::MASTER.to_string())
+                    .chain(self.project.mixer.tracks.iter().map(|t| t.name.clone()))
+                    .collect();
+            ui.indent("audio_props", |ui| {
+                if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(e) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Clip");
+                        let sel =
+                            if src.clip.is_empty() { "(none)" } else { src.clip.as_str() };
+                        if let Some(pick) = crate::ui_widgets::asset_picker(
+                            ui,
+                            egui::Id::new(("audio_clip_pick", e)),
+                            self.project_root,
+                            sel,
+                            Some("(none)"),
+                            tree,
+                            crate::assets::is_audio,
+                            200.0,
+                        ) {
+                            src.clip = pick
+                                .map(|p| {
+                                    crate::assets::asset_rel_path(&p, root).replace('\\', "/")
+                                })
+                                .unwrap_or_default();
+                            cmd.inspector_changed = true;
+                        }
+                        if !src.clip.is_empty()
+                            && ui
+                                .button("▶")
+                                .on_hover_text("Preview the clip (flat, through Master)")
+                                .clicked()
+                        {
+                            cmd.preview_audio = Some(src.clip.clone());
+                        }
+                    });
+                    let p = &mut src.params;
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.volume, 0.0..=2.0), "Volume")
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pitch, 0.25..=4.0).logarithmic(true), "Pitch")
+                        .changed();
+                    egui::ComboBox::from_label("Spatial")
+                        .selected_text(p.mode.name())
+                        .show_ui(ui, |ui| {
+                            for m in [
+                                floptle_audio::SpatialMode::Spatial,
+                                floptle_audio::SpatialMode::Distance,
+                                floptle_audio::SpatialMode::Flat,
+                            ] {
+                                if ui.selectable_label(p.mode == m, m.name()).clicked() {
+                                    p.mode = m;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                    match p.mode {
+                        floptle_audio::SpatialMode::Flat => {
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pan, -1.0..=1.0), "Pan")
+                                .changed();
+                        }
+                        _ => {
+                            egui::ComboBox::from_label("Falloff")
+                                .selected_text(p.falloff.name())
+                                .show_ui(ui, |ui| {
+                                    for f in [
+                                        floptle_audio::Falloff::Inverse,
+                                        floptle_audio::Falloff::Linear,
+                                        floptle_audio::Falloff::Exponential,
+                                    ] {
+                                        if ui
+                                            .selectable_label(p.falloff == f, f.name())
+                                            .clicked()
+                                        {
+                                            p.falloff = f;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Distance");
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut p.min_distance)
+                                            .speed(0.1)
+                                            .range(0.01..=10_000.0)
+                                            .prefix("min "),
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut p.max_distance)
+                                            .speed(0.5)
+                                            .range(0.02..=100_000.0)
+                                            .prefix("max "),
+                                    )
+                                    .on_hover_text(
+                                        "Full volume inside min; silent past max",
+                                    )
+                                    .changed();
+                            });
+                        }
+                    }
+                    egui::ComboBox::from_label("Mixer track")
+                        .selected_text(if p.track.is_empty() {
+                            floptle_audio::MASTER
+                        } else {
+                            p.track.as_str()
+                        })
+                        .show_ui(ui, |ui| {
+                            for t in &track_names {
+                                let cur = if p.track.is_empty() {
+                                    floptle_audio::MASTER
+                                } else {
+                                    p.track.as_str()
+                                };
+                                if ui.selectable_label(cur == t, t).clicked() {
+                                    p.track = if t == floptle_audio::MASTER {
+                                        String::new()
+                                    } else {
+                                        t.clone()
+                                    };
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                    egui::ComboBox::from_label("On end")
+                        .selected_text(p.end.name())
+                        .show_ui(ui, |ui| {
+                            for (b, hint) in [
+                                (floptle_audio::EndBehavior::Stop, "The node stays; replayable from scripts"),
+                                (floptle_audio::EndBehavior::Destroy, "Despawn the node when the sound finishes"),
+                                (floptle_audio::EndBehavior::Loop, "Restart seamlessly forever"),
+                            ] {
+                                if ui
+                                    .selectable_label(p.end == b, b.name())
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    p.end = b;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut src.play_on_start, "Play on start")
+                        .on_hover_text(
+                            "Start playing the moment Play begins \
+                             (off = a script triggers it via node:sound():play())",
+                        )
+                        .changed();
+                }
+            });
+        }
+    }
+
+    /// The Rigidbody component, when the node has one.
+    fn node_rigidbody_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== Rigidbody (only when the node has one) =====
+        if world.get::<floptle_core::RigidBody>(e).is_some() {
+            ui.separator();
+            let (copy, paste, remove) = component_header(
+                ui,
+                "♦ Rigidbody",
+                matches!(clip, Some(ComponentClip::RigidBody(_))),
+                true,
+            );
+            if copy
+                && let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
+                    cmd.copy_component = Some(ComponentClip::RigidBody(*rb));
+                }
+            if paste {
+                cmd.paste_component = Some(e);
+            }
+            if remove {
+                cmd.remove_rigidbody = Some(e);
+            }
+            ui.indent("rb_props", |ui| {
+                if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
+                    use floptle_core::{BodyKind, BodyMode};
+                    // The one dropdown that replaces hand-freezing axes +
+                    // disabling gravity. Structural (a Static body is a
+                    // baked collider, not a body) — rebuild the live sim.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("mode");
+                        let label = match rb.mode {
+                            BodyMode::Dynamic => "Dynamic",
+                            BodyMode::Kinematic => "Kinematic",
+                            BodyMode::Static => "Static",
+                        };
+                        egui::ComboBox::from_id_salt("rb-mode")
+                            .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                let mut changed = false;
+                                changed |= ui
+                                    .selectable_value(&mut rb.mode, BodyMode::Dynamic, "Dynamic")
+                                    .on_hover_text("fully simulated: gravity, collisions, gets pushed around")
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(&mut rb.mode, BodyMode::Kinematic, "Kinematic")
+                                    .on_hover_text("transform-driven: never falls or gets pushed — scripts/animation move it, and dynamic bodies collide WITH it (moving platforms, elevators). Near-zero per-tick cost")
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(&mut rb.mode, BodyMode::Static, "Static")
+                                    .on_hover_text("baked immovable collider in this shape — no body at all, ZERO per-tick cost (walls, floors, props)")
+                                    .changed();
+                                if changed {
+                                    cmd.inspector_changed = true;
+                                    cmd.rebuild_physics = true;
+                                }
+                            });
+                        match rb.mode {
+                            BodyMode::Dynamic => {}
+                            BodyMode::Kinematic => {
+                                ui.small("moves via its transform; pushes dynamic bodies");
+                            }
+                            BodyMode::Static => {
+                                ui.small("baked collider — cheapest way to be solid");
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("shape");
+                        egui::ComboBox::from_id_salt("rb-shape")
+                            .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                            .selected_text(match rb.kind {
+                                BodyKind::Sphere => "Sphere",
+                                BodyKind::Capsule => "Capsule",
+                                BodyKind::Box => "Box",
+                            })
+                            .show_ui(ui, |ui| {
+                                cmd.inspector_changed |=
+                                    ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
+                                cmd.inspector_changed |=
+                                    ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                cmd.inspector_changed |=
+                                    ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
+                            });
+                    });
+                    if rb.kind == BodyKind::Box {
+                        ui.label("half-extents");
+                        ui.horizontal_wrapped(|ui| {
+                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
+                                    .changed();
+                            }
+                        });
+                    } else {
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0), "radius").changed();
+                        if rb.kind == BodyKind::Capsule {
+                            cmd.inspector_changed |=
+                                crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0), "height").changed();
+                        }
+                    }
+                    // Bounce/friction/gravity/locks only matter on a
+                    // SIMULATED body — grey them out otherwise so the
+                    // mode dropdown reads as the one switch it is.
+                    let dynamic = rb.mode == BodyMode::Dynamic;
+                    ui.add_enabled_ui(dynamic, |ui| {
+                        let asm = crate::responsive::check(ui, &mut rb.assembly, "assembly (compound of children)")
+                            .on_hover_text(
+                                "This node roots ONE 6-DOF rigid body built from every \
+                                 descendant node that has a RigidBody: each becomes an \
+                                 oriented shape at its offset, weighted by its mass (this \
+                                 node's own shape fields are ignored). Multi-part \
+                                 vehicles, decoupling rockets, breakable structures — \
+                                 drive it from Lua with assembly.forceAt / .split.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= asm;
+                        cmd.rebuild_physics |= asm;
+                        if rb.assembly {
+                            ui.small("children with RigidBody = this vessel's parts");
+                        }
+                        cmd.inspector_changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut rb.mass)
+                                    .speed(0.05)
+                                    .range(0.001..=100000.0)
+                                    .prefix("mass "),
+                            )
+                            .on_hover_text(
+                                "This shape's mass share inside an assembly compound \
+                                 (composed mass / center of mass / inertia). Plain \
+                                 bodies ignore it.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |=
+                            crate::responsive::slider(ui, egui::Slider::new(&mut rb.restitution, 0.0..=1.0), "bounce").changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.friction, 0.0..=2.0), "friction")
+                            .on_hover_text(
+                                "Grip, as a coefficient. A ramp holds this body while \
+                                 tan(its angle) ≤ friction — so 0 is ice, 0.3 lets go \
+                                 at about 17°, 1 holds exactly 45°, and a surface \
+                                 grippier than that goes above 1 (rubber on rubber is \
+                                 around 1.5).\n\nIt opposes motion rather than \
+                                 capping it: a shoved crate slides and then stops.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.slope_limit, 0.0..=90.0),
+                                    "slope limit °")
+                            .on_hover_text(
+                                "The steepest surface this body can stand on. Past it \
+                                 the body is not grounded, the surface reads as \
+                                 node.wallNormal instead of node.groundNormal, and it \
+                                 stops holding the body up — so a character slides off \
+                                 a cliff face however grippy its boots are.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.gravity, "affected by gravity")
+                            .on_hover_text("off = floats (still collides; a script can still move it)")
+                            .changed();
+                        // 2D first, and above the axis toggles, because
+                        // it is the answer to the question the axis
+                        // toggles make you ask. Working out that a 2D
+                        // object means "freeze pos z, freeze rot x and
+                        // y" is a thing you should have to do once, in
+                        // the engine, not once per node.
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.two_d, "2D — keep it in the XY plane")
+                            .on_hover_text(
+                                "One switch for a 2D game: the body keeps its depth, \
+                                 never drifts out of the layer, and still spins the \
+                                 one way a flat object spins. It collides with the \
+                                 same world a 3D body does — a tilemap's colliders, \
+                                 a slope you drew, anything Collidable. Adds to the \
+                                 freezes below rather than replacing them.",
+                            )
+                            .changed();
+                        let two_d = rb.two_d;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("freeze pos");
+                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                // Z is held by 2D: show it on and say so
+                                // rather than letting the box look
+                                // unticked while the solver freezes it.
+                                let forced = two_d && i == 2;
+                                let mut v = rb.lock_pos[i] || forced;
+                                let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
+                                if r.clicked() && !forced {
+                                    v = !v;
+                                    rb.lock_pos[i] = v;
+                                    cmd.inspector_changed = true;
+                                }
+                                if forced {
+                                    r.on_hover_text("held by 2D");
+                                }
+                            }
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("freeze rot");
+                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                let forced = two_d && i < 2;
+                                let mut v = rb.lock_rot[i] || forced;
+                                let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
+                                if r.clicked() && !forced {
+                                    v = !v;
+                                    rb.lock_rot[i] = v;
+                                    cmd.inspector_changed = true;
+                                }
+                                if forced {
+                                    r.on_hover_text("held by 2D");
+                                }
+                            }
+                        });
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.align_up, "align to gravity")
+                            .on_hover_text(
+                                "Tilt this node so its up follows −gravity — a \
+                                 character on a radial-gravity planet stands on it \
+                                 (and its camera/children inherit the tilt). \
+                                 Overrides freeze rot.",
+                            )
+                            .changed();
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.pushbox_only, "pushbox only")
+                            .on_hover_text(
+                                "The solver never resolves this body's contacts — it \
+                                 integrates its velocity and nothing else: no gravity, \
+                                 no depenetration, no ground detection. It stays fully \
+                                 visible to raycasts and overlap queries, so it's a box \
+                                 you can HIT, not a box physics moves.\n\n\
+                                 This is the supported profile for ROLLBACK netcode. \
+                                 The contact solver is the part least likely to agree \
+                                 bit-for-bit between two machines, and a fighting game \
+                                 replaces it with integer frame data anyway. Your script \
+                                 owns gravity, the floor and pushout — and should move \
+                                 the body through node.tickX/tickY/tickZ, not node.x.",
+                            )
+                            .changed();
+                    });
+                }
+            });
+            // Trigger: the body becomes a sensor — it never blocks or gets
+            // blocked (and rays skip it), but overlap fires the trigger
+            // hooks. Moving pickups, sweeping zones, pass-through projectiles.
+            let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
+            if crate::responsive::check(ui, &mut trig, "trigger")
+                .on_hover_text(
+                    "events only, no blocking: the body passes through everything \
+                     and nothing pushes back, but overlap fires onTriggerEnter / \
+                     onTriggerStay / onTriggerExit on both nodes' scripts. A \
+                     Dynamic trigger still falls — use Kinematic (or gravity off) \
+                     for pickups and zones that stay put",
+                )
+                .changed()
+            {
+                cmd.set_trigger = Some((e, trig));
+            }
+            // The body shape doubles as the node's sun-shadow proxy (see the
+            // Lighting node) — casting is the default; the component only
+            // exists to record an opt-out.
+            let mut casts =
+                world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
+            if crate::responsive::check(ui, &mut casts, "casts shadows")
+                .on_hover_text("this body shape stands in for the mesh in the sun-shadow march — untick to stop this node casting")
+                .changed()
+            {
+                if casts {
+                    world.remove::<floptle_core::CastShadow>(e);
+                } else {
+                    world.insert(e, floptle_core::CastShadow(false));
+                }
+                cmd.inspector_changed = true;
+            }
+        }
+    }
+
+    /// The Celestial Body component, when the node has one.
+    fn node_celestial_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // ===== Celestial Body (on-rails orbit; only when the node has one) =====
+        if world.get::<floptle_core::CelestialBody>(e).is_some() {
+            ui.separator();
+            let (_, _, remove) = component_header(ui, "☉ Celestial Body", false, true);
+            if remove {
+                cmd.remove_celestial = Some(e);
+            }
+            ui.indent("cb_props", |ui| {
+                if let Some(cb) = world.get_mut::<floptle_core::CelestialBody>(e) {
+                    let drag = |ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64, hover: &str| -> bool {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(label);
+                            ui.add(egui::DragValue::new(v).speed(speed))
+                                .on_hover_text(hover)
+                                .changed()
+                        })
+                        .inner
+                    };
+                    let mut ch = false;
+                    ch |= drag(ui, "µ (GM)", &mut cb.mu, 1000.0, "gravitational parameter — surface gravity = µ / radius²");
+                    ch |= drag(ui, "radius", &mut cb.body_radius, 1.0, "physical surface radius (altitude readouts, impostors)");
+                    ch |= drag(ui, "SOI", &mut cb.soi, 10.0, "sphere-of-influence radius; 0 = auto (Laplace) from the parent");
+                    ch |= drag(ui, "occluder", &mut cb.occluder_radius, 1.0, "occlusion culling: radius of the solid core geometry never pierces — terrain chunks fully behind it skip their draws. Keep BELOW the deepest cave/dig; 0 = off");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("parent");
+                        ch |= ui
+                            .text_edit_singleline(&mut cb.parent)
+                            .on_hover_text("NAME of the parent body's node; empty = system root (stays put)")
+                            .changed();
+                    });
+                    ui.small("orbit around the parent (radians, semi-major in units):");
+                    ch |= drag(ui, "semi-major a", &mut cb.a, 1.0, "orbit size; NEGATIVE = hyperbolic escape");
+                    ch |= drag(ui, "eccentricity e", &mut cb.e, 0.005, "0 = circle, <1 ellipse, >1 hyperbola");
+                    ch |= drag(ui, "inclination i", &mut cb.i, 0.01, "tilt from the XZ plane (radians)");
+                    ch |= drag(ui, "node Ω", &mut cb.lan, 0.01, "longitude of the ascending node (radians)");
+                    ch |= drag(ui, "periapsis ω", &mut cb.arg_pe, 0.01, "argument of periapsis (radians)");
+                    ch |= drag(ui, "phase M₀", &mut cb.m0, 0.01, "mean anomaly at t = 0 — where on the orbit it starts");
+                    ui.small("atmosphere (S8; height 0 = airless):");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("sky color");
+                        ch |= ui
+                            .color_edit_button_rgb(&mut cb.atmo_color)
+                            .on_hover_text("the sky seen from inside the atmosphere")
+                            .changed();
+                    });
+                    ch |= drag(ui, "atmo height", &mut cb.atmo_height, 1.0, "shell height above the surface; the sky fades to space across it");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("density");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0), "")
+                            .on_hover_text("how opaque the sky gets at full depth")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("clouds");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.clouds, 0.0..=1.0), "")
+                            .on_hover_text("cloud coverage in the atmosphere (0 = clear)")
+                            .changed();
+                    });
+                    ui.small("star (Lighting `stars mode` uses these as the lights):");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("luminosity");
+                        ch |= ui
+                            .add(egui::DragValue::new(&mut cb.luminosity).speed(0.5))
+                            .on_hover_text(
+                                "0 = not a star. Irradiance at distance d = luminosity × 1e6 / d² \
+                                 — ~36 fully lights a planet 6000 units away.",
+                            )
+                            .changed();
+                        ui.label("color");
+                        ch |= ui.color_edit_button_rgb(&mut cb.star_color).changed();
+                    });
+                    if ch {
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The game-UI layer or element, when the node is one.
+    fn node_ui_element_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // ===== Game UI (layer/element; only when the node has one) =====
+        {
+            if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings, self.ui_flsl_cache, self.ui_styles) {
+                cmd.inspector_changed = true;
+            }
+        }
+    }
+
+    /// Replication, when the node is networked.
+    fn node_networked_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // ===== Networked (replication; only when the node has one) =====
+        // The authored half of the netcode (docs/multiplayer.md §4.2): which
+        // props sync and whether the owner-client predicts it. Owner/NetId are
+        // session state, assigned at runtime — not edited here.
+        if world.get::<floptle_core::Replicated>(e).is_some() {
+            ui.separator();
+            let remove = component_header_no_copy(ui, "🌐 Networked", true);
+            if remove {
+                world.remove::<floptle_core::Replicated>(e);
+                cmd.inspector_changed = true;
+            }
+            ui.indent("net_props", |ui| {
+                if let Some(rep) = world.get_mut::<floptle_core::Replicated>(e) {
+                    use floptle_core::ReplicationMode;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("mode");
+                        egui::ComboBox::from_id_salt("net-mode")
+                            .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                            .selected_text(match rep.mode {
+                                ReplicationMode::Authority => "Server authority",
+                                ReplicationMode::Predicted => "Predicted (owner)",
+                                ReplicationMode::Rollback => "Rollback (all peers)",
+                            })
+                            .show_ui(ui, |ui| {
+                                cmd.inspector_changed |= ui
+                                    .selectable_value(
+                                        &mut rep.mode,
+                                        ReplicationMode::Authority,
+                                        "Server authority",
+                                    )
+                                    .on_hover_text("the server simulates it; clients render interpolated snapshots — the default, cheat-proof mode")
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .selectable_value(
+                                        &mut rep.mode,
+                                        ReplicationMode::Predicted,
+                                        "Predicted (owner)",
+                                    )
+                                    .on_hover_text("the owning player's client ALSO simulates it locally, ahead of the server (their own avatar) — the server still has the final word")
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .selectable_value(
+                                        &mut rep.mode,
+                                        ReplicationMode::Rollback,
+                                        "Rollback (all peers)",
+                                    )
+                                    .on_hover_text("EVERY peer simulates this node every tick from the shared input set and re-simulates on a mispredict — for a fighting game, where the opponent's exact state matters on every frame. Its scripts need snapshot()/restore().")
+                                    .changed();
+                            });
+                    });
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.transform, "sync transform")
+                        .on_hover_text("replicate position/rotation to clients")
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.physics, "sync physics")
+                        .on_hover_text("replicate velocity too — better extrapolation, required to predict a rigidbody")
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.animator, "sync animator")
+                        .on_hover_text(
+                            "replicate the Animation Controller's playback (which state + \
+                             where in it, per layer) — a few bytes per TRANSITION; every \
+                             machine samples the pose locally. Off = client-sided: each \
+                             client drives this node's animator itself",
+                        )
+                        .changed();
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.interp, "interpolate")
+                        .on_hover_text("smooth remote copies between snapshots (off = snap, for teleporty things)")
+                        .changed();
+                    if rep.interp {
+                        let mut d = rep.interp_delay as i32;
+                        if crate::responsive::slider(ui, egui::Slider::new(&mut d, 0..=30), "interp delay (ticks)")
+                            .on_hover_text("how far behind the server remote copies render — 6 ticks ≈ 100 ms. Lower = tighter tracking (stutters under jitter/loss); higher = smoother on bad links")
+                            .changed()
+                        {
+                            rep.interp_delay = d as u8;
+                            cmd.inspector_changed = true;
+                        }
+                    }
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut rep.always_relevant, "always relevant")
+                        .on_hover_text(
+                            "never interest-culled: replicated to every client wherever \
+                             they are. For the few things every player must agree on \
+                             from anywhere — the match clock, the objective, the boss. \
+                             Does nothing unless the host turned interest management on \
+                             with net.host{ interest = <metres> }",
+                        )
+                        .changed();
+                }
+            });
+            ui.small("only nodes with this component replicate — everything else stays local. Sessions start via Lua: net.host{} / net.join(...)");
+        }
+    }
+
+    /// Static collision, when the node has a collider.
+    fn node_collider_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // ===== Collider (static collision; only when the node has one) =====
+        // Auto-shaped from the node's geometry (Cube → box, Sphere → sphere,
+        // Capsule → capsule, Mesh → its triangles). A legacy MeshCollider counts.
+        {
+            let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
+                || world.get::<floptle_core::MeshCollider>(e).is_some();
+            // A tilemap you PAINTED SOLID and cannot stand on. The
+            // warning existed, and it was printed to the Console at Play
+            // — which is the one moment you are looking at the game and
+            // not at the editor, and by then "I fall through the floor"
+            // already reads as a physics bug. Say it here, next to the
+            // collider section it is about, with the fix on it.
+            //
+            // Still not automatic: a solid tileset implying `Collidable`
+            // would silently switch collision on in every project that
+            // ever painted one, including the parallax backgrounds.
+            if !has_collidable
+                && world.get::<floptle_core::RigidBody>(e).is_none()
+                && let Some(Matter::Tilemap { data, tileset, .. }) = world.get::<Matter>(e)
+                && !tileset.is_empty()
+                && let Some(set) = self.tiles.get(tileset)
+                && floptle_tiles::solid_count(data, set) > 0
+            {
+                let n = floptle_tiles::solid_count(data, set);
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 80),
+                    format!("⚠ {n} solid squares, but nothing collides with this layer"),
+                );
+                ui.small(
+                    "This tilemap's tileset marks squares solid, and the layer has no \
+                     collider — so bodies fall straight through the floor you painted. \
+                     Tilemaps are not collidable by default because most projects have \
+                     background layers painted from the same sheet.",
+                );
+                if ui
+                    .button("▦  Make this layer solid")
+                    .on_hover_text("adds a Collidable component — the squares your tileset calls solid become real geometry on Play")
+                    .clicked()
+                {
+                    cmd.set_collidable = Some((e, true));
+                }
+            }
+            if has_collidable {
+                let kind = match world.get::<Matter>(e) {
+                    Some(Matter::Mesh { .. }) => "triangle mesh",
+                    Some(Matter::Primitive { shape, .. }) => match shape {
+                        floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
+                        floptle_core::Shape::Sphere => "sphere",
+                        floptle_core::Shape::Capsule => "capsule",
+                    },
+                    _ => "mesh",
+                };
+                ui.separator();
+                let remove = component_header_no_copy(ui, "▦ Collider", true);
+                ui.small(format!(
+                    "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
+                ));
+                if world.get::<floptle_core::RigidBody>(e).is_some() {
+                    ui.small("⚠ This node also has a Rigidbody, so its body owns the physics and this static Collider is ignored — the trigger checkbox lives on the Rigidbody above. To make it a solid obstacle, set the Rigidbody's mode to Static (a baked collider in the body's shape) — or remove the Rigidbody to use this geometry-shaped collider instead.");
+                } else {
+                    // The collider doubles as the node's sun-shadow caster:
+                    // primitives stand in as analytic proxy shapes, and a
+                    // Collidable MESH is baked into a shadow-only occluder
+                    // volume (its true silhouette — interiors go dark).
+                    let mut casts = world
+                        .get::<floptle_core::CastShadow>(e)
+                        .map(|c| c.0)
+                        .unwrap_or(true);
+                    if crate::responsive::check(ui, &mut casts, "casts shadows")
+                        .on_hover_text("this collider stands in for the node in the sun-shadow march (primitives as proxy shapes, meshes as a baked occluder volume) — untick to stop this node casting")
+                        .changed()
+                    {
+                        if casts {
+                            world.remove::<floptle_core::CastShadow>(e);
+                        } else {
+                            world.insert(e, floptle_core::CastShadow(false));
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                    // Trigger: bodies pass through, overlap fires the
+                    // onTriggerEnter/Stay/Exit hooks — portals, pickup
+                    // zones, checkpoints.
+                    let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
+                    if crate::responsive::check(ui, &mut trig, "trigger")
+                        .on_hover_text(
+                            "events only, no blocking: bodies (and rays) pass through, \
+                             but overlap fires onTriggerEnter / onTriggerStay / \
+                             onTriggerExit on both nodes' scripts",
+                        )
+                        .changed()
+                    {
+                        cmd.set_trigger = Some((e, trig));
+                    }
+                }
+                if remove {
+                    cmd.set_collidable = Some((e, false));
+                    cmd.inspector_changed = true;
+                }
+            }
+        }
+    }
+
+    /// The Navmesh Exclude marker.
+    fn node_navmesh_exclude_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        // ===== Navmesh Exclude =====
+        // A marker with nothing to configure, so the whole component is
+        // its own explanation and a remove button.
+        if world.get::<floptle_core::NavMeshExclude>(e).is_some() {
+            ui.separator();
+            if component_header_no_copy(ui, "⬚ Navmesh Exclude", true) {
+                cmd.set_nav_exclude = Some((e, false));
+                cmd.inspector_changed = true;
+            }
+            ui.small(
+                "kept out of every navmesh bake. Characters will not path over this \
+                 node, whatever it collides with.",
+            );
+        }
+    }
+
+    /// The node's scripts and their parameters.
+    fn node_scripts_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== Scripts =====
+        ui.separator();
+        // Always-available drop target: drag a script here to attach it.
+        {
+            let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
+                egui::Frame::group(ui.style()),
+                |ui| {
+                    ui.set_min_height(18.0);
+                    ui.small("⚙  drop a script here to attach (or use ➕ Add Component)");
+                },
+            );
+            if let Some(p) = dropped
+                && is_script(&p.path) {
+                    cmd.drop_script_on = Some((p.path.clone(), e));
+                }
+        }
+        if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
+            // Menu first (right-to-left) so it stays pinned on-screen —
+            // see component_header.
+            ui.horizontal_wrapped(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if matches!(clip, Some(ComponentClip::Script(_))) {
+                        ui.menu_button("…", |ui| {
+                            if ui.button("📋  Paste script").clicked() {
+                                cmd.paste_component = Some(e);
+                                ui.close();
+                            }
+                        })
+                        .response
+                        .on_hover_text("adds the copied script, or updates a matching one");
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.strong("⚙ Scripts");
+                    });
+                });
+            });
+            let mut remove: Option<usize> = None;
+            let mut copy_idx: Option<usize> = None;
+            // Candidates for reference params, filtered by declared kind:
+            // noderef → any named node; scriptref(k) → nodes carrying that
+            // script; componentref(c) → nodes carrying that component.
+            let mut node_names: Vec<String> =
+                world.query::<floptle_core::Name>().map(|(_, n)| n.0.clone()).collect();
+            node_names.sort();
+            node_names.dedup();
+            let mut script_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (oe, sc) in world.query::<Scripts>() {
+                if let Some(n) = world.get::<floptle_core::Name>(oe) {
+                    for si in &sc.0 {
+                        script_nodes.entry(si.kind.clone()).or_default().push(n.0.clone());
+                    }
+                }
+            }
+            for v in script_nodes.values_mut() {
+                v.sort();
+                v.dedup();
+            }
+            let mut comp_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for kind in self.ref_kinds.values() {
+                if let floptle_script::RefKind::Component(c) = kind
+                    && !comp_nodes.contains_key(c)
+                {
+                    let mut v: Vec<String> = world
+                        .query::<floptle_core::Name>()
+                        .filter(|(oe, _)| node_has_component(world, *oe, c))
+                        .map(|(_, n)| n.0.clone())
+                        .collect();
+                    v.sort();
+                    v.dedup();
+                    comp_nodes.insert(c.clone(), v);
+                }
+            }
+            // Entity → name, for dropped hierarchy nodes.
+            let name_of: std::collections::HashMap<floptle_core::Entity, String> = world
+                .query::<floptle_core::Name>()
+                .map(|(oe, n)| (oe, n.0.clone()))
+                .collect();
+            ui.indent("script_list", |ui| {
+                if let Some(scr) = world.get_mut::<Scripts>(e) {
+                    for (i, inst) in scr.0.iter_mut().enumerate() {
+                        // Menu first (right-to-left) so a long script
+                        // name truncates instead of pushing the … menu
+                        // off-screen — see component_header.
+                        ui.horizontal_wrapped(|ui| {
+                            cmd.inspector_changed |= crate::responsive::check(ui, &mut inst.enabled, "").changed();
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.menu_button("…", |ui| {
+                                    if ui.button("⎘  Copy values").clicked() {
+                                        copy_idx = Some(i);
+                                        ui.close();
+                                    }
+                                    if ui.button("🖊  Edit script").clicked() {
+                                        let p = self
+                                            .project_root
+                                            .join("scripts")
+                                            .join(format!("{}.lua", inst.kind));
+                                        cmd.open_script_pref = Some(p.to_string_lossy().to_string());
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("🗑  Remove").clicked() {
+                                        remove = Some(i);
+                                        ui.close();
+                                    }
+                                });
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&inst.kind).strong(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                            });
+                        });
+                        // Everything this script declares — editor
+                        // buttons, then its tunables in DECLARATION
+                        // order, grouped under `--@header` sections and
+                        // drawn as the widget each one's annotations ask
+                        // for. See `script_meta`.
+                        cmd.inspector_changed |= script_tunables_ui(
+                            ui,
+                            inst,
+                            ScriptRowCtx {
+                                meta: self.script_meta.get(self.project_root, &inst.kind),
+                                ref_kinds: self.ref_kinds,
+                                node_names: &node_names,
+                                script_nodes: &script_nodes,
+                                comp_nodes: &comp_nodes,
+                                name_of: &name_of,
+                                salt: (e.index(), i),
+                            },
+                            &mut cmd.run_editor_action,
+                            e,
+                        );
+                        ui.add_space(4.0);
+                    }
+                    if let Some(i) = copy_idx {
+                        cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
+                    }
+                    if let Some(i) = remove {
+                        scr.0.remove(i);
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+        }
+    }
+
+    /// A model's sub-objects and bones.
+    fn node_objects_and_rig_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let bone_names = self.bone_names;
+        let cur_bone = *self.bone_selection;
+        // ===== Animation Controller (when attached) =====
+        anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
+
+        // ===== ◈ Objects & Rig (this model's sub-objects + bones) =====
+        // Shown on the model node itself: two lists (Objects = mesh sub-objects,
+        // Bones = rig joints) whose entries select the same pose-able skeleton
+        // node the Hierarchy tree does, plus the per-object re-parent dropdown
+        // and the Mirror / flow-rig tools.
+        if let Some(nodes) = bone_names.get(&e) {
+            ui.separator();
+            ui.strong("◈ Objects & Rig");
+            ui.small("every object and bone in this model — click to select, then pose or keyframe it");
+
+            let sel_idx = cur_bone.filter(|(m, _)| *m == e).map(|(_, i)| i);
+            let objects: Vec<usize> =
+                (0..nodes.len()).filter(|&i| nodes[i].is_object).collect();
+            let bones_only: Vec<usize> =
+                (0..nodes.len()).filter(|&i| !nodes[i].is_object).collect();
+
+            // Descendants of `child` (so the "parent under" dropdown never offers
+            // a cycle): walk parents up from every node and mark those under child.
+            let is_descendant_of = |node: usize, ancestor: usize| -> bool {
+                let mut cur = nodes[node].parent;
+                let mut guard = 0;
+                while let Some(p) = cur {
+                    if p == ancestor {
+                        return true;
+                    }
+                    cur = nodes[p].parent;
+                    guard += 1;
+                    if guard > 256 {
+                        break;
+                    }
+                }
+                false
+            };
+
+            let mut list_group = |ui: &mut egui::Ui, title: String, idxs: &[usize], allow_reparent: bool| {
+                egui::CollapsingHeader::new(title)
+                    .id_salt(("objrig", e, allow_reparent))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for &i in idxs {
+                            let sel = sel_idx == Some(i);
+                            let icon = if nodes[i].is_object { "◈" } else { "🔗" };
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .selectable_label(sel, format!("{icon} {}", nodes[i].name))
+                                    .clicked()
+                                {
+                                    cmd.select_bone = Some((e, i));
+                                }
+                                if allow_reparent {
+                                    // "under ▸ <parent>" — reparent this object within
+                                    // the model (persisted to the .rig.ron sidecar).
+                                    let cur_parent = nodes[i].parent.map(|p| nodes[p].name.clone());
+                                    let cur_label = cur_parent.clone().unwrap_or_else(|| "(root)".into());
+                                    egui::ComboBox::from_id_salt(("reparent", e, i))
+                                        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                                        .selected_text(format!("under {cur_label}"))
+                                        .width(140.0)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(cur_parent.is_none(), "(root)").clicked()
+                                                && cur_parent.is_some()
+                                            {
+                                                cmd.set_object_parent = Some((e, nodes[i].name.clone(), None));
+                                            }
+                                            for j in 0..nodes.len() {
+                                                if j == i || is_descendant_of(j, i) {
+                                                    continue; // no self / cycles
+                                                }
+                                                let picked = cur_parent.as_deref() == Some(nodes[j].name.as_str());
+                                                let jicon = if nodes[j].is_object { "◈" } else { "🔗" };
+                                                if ui
+                                                    .selectable_label(picked, format!("{jicon} {}", nodes[j].name))
+                                                    .clicked()
+                                                    && !picked
+                                                {
+                                                    cmd.set_object_parent = Some((
+                                                        e,
+                                                        nodes[i].name.clone(),
+                                                        Some(nodes[j].name.clone()),
+                                                    ));
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                        }
+                    });
+            };
+
+            if !objects.is_empty() {
+                list_group(ui, format!("◈ Objects ({})", objects.len()), &objects, true);
+            }
+            if !bones_only.is_empty() {
+                // Bones re-parent too: a flow-rig chain root under "Head"
+                // makes skinned hair ride the head (skinned verts follow
+                // JOINTS, so parenting the hair object alone isn't enough).
+                list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, true);
+            }
+
+            // ---- tools ----
+            ui.add_space(4.0);
+            if ui
+                .button("⇋ Apply Mirror → new .glb")
+                .on_hover_text(
+                    "Complete a Blender model whose Mirror modifier wasn't applied: \
+                     synthesize the missing half, split off-center limbs into an L/R \
+                     pair, weld centerline halves. Writes a new .mirrored.glb beside \
+                     the source (non-destructive).",
+                )
+                .clicked()
+            {
+                cmd.mirror_model = Some(e);
+            }
+            let sel_obj_name = sel_idx
+                .filter(|&i| nodes[i].is_object)
+                .map(|i| nodes[i].name.clone());
+            ui.add_enabled_ui(sel_obj_name.is_some(), |ui| {
+                if ui
+                    .button("🔗 Rig selected object to flow")
+                    .on_hover_text(
+                        "Generate a soft bone-chain down the selected object and \
+                         auto-weight it (hair, cloth, antennae). Writes a new rigged \
+                         .glb beside the source; pose/keyframe the chain to make it \
+                         bend and flow.",
+                    )
+                    .clicked()
+                    && let Some(name) = sel_obj_name.clone()
+                {
+                    cmd.add_hair_rig = Some((e, name));
+                }
+            });
+        }
+    }
+
+    /// Bone attachment for a descendant of a rigged mesh.
+    fn node_bone_attachment_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let bone_names = self.bone_names;
+        // ===== 🔗 Bone attachment (any descendant of a rigged mesh) =====
+        // An equipped mesh is commonly put below an Empty/socket below the
+        // character first. Walk its ancestors instead of requiring the rigged
+        // Mesh to be its immediate Parent; choosing a bone will normalize the
+        // link to that mesh while preserving the child's world pose.
+        let rig_parent = {
+            let mut at = e;
+            let mut found = None;
+            for _ in 0..64 {
+                let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(at).copied() else {
+                    break;
+                };
+                if bone_names.contains_key(&p) {
+                    found = Some(p);
+                    break;
+                }
+                at = p;
+            }
+            found
+        };
+        if let Some(mesh) = rig_parent
+            && let Some(bones) = bone_names.get(&mesh)
+        {
+            ui.separator();
+            ui.strong("🔗 Bone attachment");
+            ui.small("ride an object or bone of this parent model (a weapon on a hand)");
+            let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
+            egui::ComboBox::from_id_salt("bone_attach_pick")
+                .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+                .selected_text(cur.clone().unwrap_or_else(|| "(not attached)".into()))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur.is_none(), "(not attached)").clicked()
+                        && cur.is_some()
+                    {
+                        world.remove::<floptle_core::BoneAttach>(e);
+                        cmd.inspector_changed = true;
+                    }
+                    for node in bones {
+                        let sel = cur.as_deref() == Some(node.name.as_str());
+                        let icon = if node.is_object { "◈" } else { "🔗" };
+                        if ui.selectable_label(sel, format!("{icon} {}", node.name)).clicked() && !sel {
+                            // Deferred because attaching reparents to the mesh and
+                            // derives a bone-local offset from the current world pose.
+                            // That keeps a nested weapon/socket exactly where it was.
+                            cmd.attach_to_bone = Some((e, mesh, node.name.clone()));
+                            cmd.inspector_changed = true;
+                        }
+                    }
+                });
+            // Offset editor + detach (only when attached) — position the node on
+            // the bone relative to it.
+            if let Some(a) = world.get::<floptle_core::BoneAttach>(e).cloned() {
+                let mut off = a.offset;
+                let mut ch = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("pos");
+                    ch |= ui.add(egui::DragValue::new(&mut off.translation.x).speed(0.01).prefix("x ")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut off.translation.y).speed(0.01).prefix("y ")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut off.translation.z).speed(0.01).prefix("z ")).changed();
+                });
+                let (ey, ex, ez) = off.rotation.to_euler(EulerRot::YXZ);
+                let mut deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("rot°");
+                    let mut rc = false;
+                    rc |= ui.add(egui::DragValue::new(&mut deg[0]).speed(0.5).prefix("x ")).changed();
+                    rc |= ui.add(egui::DragValue::new(&mut deg[1]).speed(0.5).prefix("y ")).changed();
+                    rc |= ui.add(egui::DragValue::new(&mut deg[2]).speed(0.5).prefix("z ")).changed();
+                    if rc {
+                        off.rotation = Quat::from_euler(
+                            EulerRot::YXZ,
+                            deg[1].to_radians(),
+                            deg[0].to_radians(),
+                            deg[2].to_radians(),
+                        );
+                        ch = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("scale");
+                    let mut s = off.scale.x;
+                    // Negative allowed (a mirrored attachment); only the
+                    // degenerate |s| < 0.001 band is nudged out.
+                    if ui.add(egui::DragValue::new(&mut s).speed(0.01).range(-100.0..=100.0)).changed() {
+                        if s.abs() < 0.001 {
+                            s = 0.001f32.copysign(if s == 0.0 { 1.0 } else { s });
+                        }
+                        off.scale = floptle_core::math::Vec3::splat(s);
+                        ch = true;
+                    }
+                    if ui.button("🗑 detach").clicked() {
+                        world.remove::<floptle_core::BoneAttach>(e);
+                        cmd.inspector_changed = true;
+                    }
+                });
+                if ch {
+                    if let Some(at) = world.get_mut::<floptle_core::BoneAttach>(e) {
+                        at.offset = off;
+                    }
+                    cmd.inspector_changed = true;
+                }
+            }
+        }
+    }
+
+    /// The searchable Add Component menu.
+    fn node_add_component_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let clip = self.component_clip.as_ref();
+        // ===== ➕ Add Component (searchable, icon'd) =====
+        ui.separator();
+        ui.add_space(2.0);
+        let add_btn = ui.button("➕  Add Component");
+        let add_popup_id = egui::Popup::default_response_id(&add_btn);
+        // True only on the frame the menu transitions closed → open, so we
+        // focus the search box exactly once (start typing immediately).
+        let add_opening =
+            add_btn.clicked() && !egui::Popup::is_id_open(ui.ctx(), add_popup_id);
+        // CloseOnClickOutside (not the menu default CloseOnClick) so clicking
+        // the search field doesn't dismiss the menu.
+        egui::Popup::menu(&add_btn)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(236.0)
+            .show(|ui| {
+            let filter = &mut *self.add_component_filter;
+            let search = ui.add(
+                egui::TextEdit::singleline(filter)
+                    .hint_text("🔍 search components…")
+                    .desired_width(212.0),
+            );
+            if add_opening {
+                search.request_focus();
+            }
+            let f = filter.trim().to_lowercase();
+            let hit = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
+
+            // What the node already has decides what's offered.
+            let cur = world.get::<Matter>(e);
+            let is_terrain = matches!(cur, Some(Matter::Terrain { .. }));
+            let has_mat = world.get::<Material>(e).is_some();
+            let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
+            let has_net = world.get::<floptle_core::Replicated>(e).is_some();
+            let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
+                || world.get::<floptle_core::MeshCollider>(e).is_some();
+            let collider_kind = match cur {
+                Some(Matter::Mesh { .. }) => Some("triangle mesh"),
+                Some(Matter::Primitive { shape, .. }) => Some(match shape {
+                    floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
+                    floptle_core::Shape::Sphere => "sphere",
+                    floptle_core::Shape::Capsule => "capsule",
+                }),
+                _ => None,
+            };
+            let cur_kind = cur.map(matter_kind_label);
+
+            // One catalog of (category, label, action) — built from current state.
+            enum Add {
+                Rb,
+                Celestial,
+                Coll,
+                NavExclude,
+                Mat,
+                Net,
+                Preset(String),
+                Script(String),
+                Type(Matter),
+                AnimCtl(String),
+                AnimNew,
+                Particles(String),
+                ParticlesNew,
+                Audio,
+            }
+            let mut items: Vec<(&str, String, Add)> = Vec::new();
+            if !has_rb {
+                items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
+            }
+            if world.get::<floptle_core::CelestialBody>(e).is_none() {
+                items.push(("Physics", "☉  Celestial Body (orbit rails)".into(), Add::Celestial));
+            }
+            if !has_net {
+                items.push(("Networking", "🌐  Networked".into(), Add::Net));
+            }
+            if !has_collidable
+                && let Some(k) = collider_kind {
+                    items.push(("Physics", format!("▦  Collider ({k})"), Add::Coll));
+                }
+            if !has_mat {
+                items.push(("Rendering", "◑  Material".into(), Add::Mat));
+            }
+            if world.get::<floptle_core::NavMeshExclude>(e).is_none() {
+                items.push((
+                    "Physics",
+                    "⬚  Navmesh Exclude".into(),
+                    Add::NavExclude,
+                ));
+            }
+            // Animation Controller: attach an existing controller asset, or
+            // create a fresh one (opens the graph editor).
+            if world.get::<floptle_core::AnimController>(e).is_none() {
+                items.push((
+                    "Animation",
+                    "▶  Animation Controller (new)".into(),
+                    Add::AnimNew,
+                ));
+                for (k, _) in self.anim.controllers.iter() {
+                    items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
+                }
+            }
+            if world.get::<floptle_audio::AudioSource>(e).is_none() {
+                items.push(("Effects", "♪  Audio Source".into(), Add::Audio));
+            }
+            // Particle System: attach an existing effect asset, or create a
+            // starter effect (a small looping fountain to shape from).
+            if world.get::<floptle_core::ParticleSystem>(e).is_none() {
+                items.push(("Effects", "✨  Particle System (new)".into(), Add::ParticlesNew));
+                for (k, _) in self.vfx.effects.iter() {
+                    items.push(("Effects", format!("✨  {k}"), Add::Particles(k.clone())));
+                }
+            }
+            for (name, _) in self.materials {
+                items.push(("Rendering", format!("◑  {name}  (preset)"), Add::Preset(name.clone())));
+            }
+            // Scripts not already attached.
+            let attached: std::collections::HashSet<String> = world
+                .get::<Scripts>(e)
+                .map(|s| s.0.iter().map(|i| i.kind.clone()).collect())
+                .unwrap_or_default();
+            let mut script_paths = Vec::new();
+            collect_script_names(self.asset_tree, &mut script_paths);
+            for path in script_paths {
+                let stem = script_name_of(&path);
+                if !attached.contains(&stem) {
+                    items.push(("Scripts", format!("⚙  {stem}"), Add::Script(path)));
+                }
+            }
+            // Type switch (mutually exclusive). Terrain is special — leave it be.
+            if !is_terrain {
+                for (lbl, mt) in type_catalog() {
+                    if cur_kind != Some(matter_kind_label(&mt)) {
+                        items.push(("Type — replaces current", lbl.to_string(), Add::Type(mt)));
+                    }
+                }
+                // Each importable model is a Mesh type you can become.
+                let mut models = Vec::new();
+                collect_model_paths(self.asset_tree, &mut models);
+                for p in models {
+                    let name = Path::new(&p)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone());
+                    let is_cur = matches!(cur, Some(Matter::Mesh { asset_path }) if *asset_path == p);
+                    if !is_cur {
+                        items.push((
+                            "Mesh — replaces type",
+                            format!("✳  {name}"),
+                            Add::Type(Matter::Mesh { asset_path: p }),
+                        ));
+                    }
+                }
+            }
+
+            let mut picked = false;
+            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                // Paste the clipboard onto a component the node doesn't have yet.
+                if let Some(c) = clip {
+                    let can = match c {
+                        ComponentClip::Material(_) => !has_mat,
+                        ComponentClip::RigidBody(_) => !has_rb,
+                        ComponentClip::Particles(_) => {
+                            world.get::<floptle_core::ParticleSystem>(e).is_none()
+                        }
+                        ComponentClip::Audio(_) => {
+                            world.get::<floptle_audio::AudioSource>(e).is_none()
+                        }
+                        ComponentClip::Script(_) => true,
+                        ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
+                    };
+                    if can {
+                        let lbl = format!("📋  Paste {}", c.label());
+                        if hit(&lbl) && ui.button(lbl).clicked() {
+                            cmd.paste_component = Some(e);
+                            picked = true;
+                            ui.close();
+                        }
+                    }
+                }
+                let mut shown = false;
+                for cat in [
+                    "Physics",
+                    "Networking",
+                    "Rendering",
+                    "Effects",
+                    "Animation",
+                    "Scripts",
+                    "Type — replaces current",
+                    "Mesh — replaces type",
+                ] {
+                    if !items.iter().any(|(c, l, _)| *c == cat && hit(l)) {
+                        continue;
+                    }
+                    ui.add_space(4.0);
+                    ui.weak(cat);
+                    for (c, l, a) in &items {
+                        if *c != cat || !hit(l) {
+                            continue;
+                        }
+                        shown = true;
+                        if ui.button(l).clicked() {
+                            match a {
+                                Add::Rb => cmd.add_rigidbody = Some(e),
+                                Add::Celestial => cmd.add_celestial = Some(e),
+                                Add::Net => cmd.add_networked = Some(e),
+                                Add::Coll => cmd.set_collidable = Some((e, true)),
+                                Add::NavExclude => cmd.set_nav_exclude = Some((e, true)),
+                                Add::Mat => cmd.add_material = Some(e),
+                                Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
+                                Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
+                                Add::Type(mt) => cmd.set_matter = Some((e, mt.clone())),
+                                Add::AnimCtl(k) => {
+                                    cmd.set_anim_controller = Some((e, Some(k.clone())))
+                                }
+                                Add::AnimNew => cmd.new_anim_controller = Some(Some(e)),
+                                Add::Particles(k) => {
+                                    cmd.add_particles = Some((e, k.clone()))
+                                }
+                                Add::ParticlesNew => cmd.new_particles = Some(e),
+                                Add::Audio => cmd.add_audio = Some(e),
+                            }
+                            picked = true;
+                            ui.close();
+                        }
+                    }
+                }
+                if !shown && !f.is_empty() {
+                    ui.weak("no matching components");
+                }
+            });
+            // Reset the search for next open once something's been added.
+            if picked {
+                filter.clear();
+            }
+        });
+    }
+
+    /// A scene node: its identity, type, components and the Add Component menu, in that order.
+    fn node_inspector_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        self.node_switch_ui(ui, e);
+        self.node_identity_ui(ui, e);
+        self.node_type_ui(ui, e);
+        self.node_transform_ui(ui, e);
+        self.node_material_ui(ui, e);
+        self.node_model_materials_ui(ui, e);
+        self.node_particles_ui(ui, e);
+        self.node_audio_ui(ui, e);
+        self.node_rigidbody_ui(ui, e);
+        self.node_celestial_ui(ui, e);
+        self.node_ui_element_ui(ui, e);
+        self.node_networked_ui(ui, e);
+        self.node_collider_ui(ui, e);
+        self.node_navmesh_exclude_ui(ui, e);
+        self.node_scripts_ui(ui, e);
+        self.node_objects_and_rig_ui(ui, e);
+        self.node_bone_attachment_ui(ui, e);
+        self.node_add_component_ui(ui, e);
+    }
+
+    /// The floating Material Editor window, editing the primary selection.
+    fn material_editor_window_ui(&mut self, ui: &mut egui::Ui) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        let mut open = true;
+        egui::Window::new("◑ Material Editor")
+            .open(&mut open)
+            .default_width(300.0)
+            .show(ui.ctx(), |ui| match self.selection.last().copied() {
+                Some(e) if world.get::<Matter>(e).is_some() => {
+                    let nm = self
+                        .entity_names
+                        .iter()
+                        .find(|(x, _)| *x == e)
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_default();
+                    ui.label(format!("editing: {nm}"));
+                    ui.separator();
+                    if let Some(mat) = world.get_mut::<Material>(e) {
+                        let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
+                        cmd.inspector_changed |= res.changed;
+                        cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
+                        if res.remove {
+                            cmd.remove_material = Some(e);
+                        }
+                        if let Some(name) = res.save_as {
+                            cmd.save_material =
+                                Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                        }
+                    } else {
+                        ui.label("This object uses the default look.");
+                        if ui.button("✚ Add material").clicked() {
+                            cmd.add_material = Some(e);
+                        }
+                    }
+                }
+                _ => {
+                    ui.label("Select a node to edit its material.");
+                }
+            });
+        if !open {
+            *self.show_material_editor = false;
         }
     }
 }
