@@ -62,7 +62,7 @@ pub struct Body {
     pub grounded: bool,
     /// The contact normal from the most recent resolved collision this step (telegraph).
     pub contact: Option<Vec3>,
-    /// The FLOOR this body is standing on: the most gravity-opposing contact
+    /// The floor this body is standing on: the most gravity-opposing contact
     /// normal of the step, or `None` when nothing this step counted as ground
     /// (so it is exactly `grounded`, with the surface attached).
     pub ground_normal: Option<Vec3>,
@@ -89,18 +89,18 @@ pub struct Body {
     /// `floptle_core::Layers`). The solver only resolves this body against
     /// colliders whose layer bit is set in `PhysicsWorld::matrix[layer]`.
     pub layer: u8,
-    /// KINEMATIC: transform-driven — the step skips it entirely (no gravity,
+    /// Kinematic: transform-driven — the step skips it entirely (no gravity,
     /// no depenetration; the node's transform is authoritative and the sim
     /// follows it). Dynamic bodies collide with it via
     /// `PhysicsWorld::kin_hulls` — moving platforms that push the player.
     pub kinematic: bool,
-    /// SENSOR (a `Trigger` on a rigidbody node): the body never blocks or gets
+    /// Sensor (a `Trigger` on a rigidbody node): the body never blocks or gets
     /// blocked — it passes through everything and nothing pushes back — but
     /// overlap still fires the trigger hooks. A dynamic sensor still falls
     /// (pair with gravity-off or Kinematic for pickups/zones that stay put).
     /// Sensors are also invisible to raycasts, like static trigger colliders.
     pub sensor: bool,
-    /// DRIVER-STEPPED: the whole-world step skips this body because something
+    /// Driver-stepped: the whole-world step skips this body because something
     /// else advances it one tick at a time — the rollback driver
     /// (`docs/multiplayer.md` §7 P3), which must run the identical
     /// integration live and during re-simulation. Stepping it here as well
@@ -123,47 +123,42 @@ pub struct Body {
     /// that genuinely need it: buoyancy compares the body's density against the
     /// water's, which is the difference between a cork and a cannonball.
     pub mass: f32,
-    /// SLEEPING: grounded and below rest speed for long
-    /// enough that the step skips it entirely — no gravity, no depenetration,
-    /// no ground detection — the same near-zero cost `kinematic` already
-    /// gets. Woken by a kinematic hull touching it, a Lua velocity/impulse
-    /// write, a teleport, a Kinematic→Dynamic switch, or its supporting
-    /// collider disappearing (a chunk unload).
+    /// Sleeping: grounded and below rest speed for long enough that the step
+    /// skips it entirely (no gravity, no depenetration, no ground detection),
+    /// the same near-zero cost `kinematic` gets. Woken by a kinematic hull
+    /// touching it, a Lua velocity or impulse write, a teleport, a
+    /// Kinematic→Dynamic switch, or its supporting collider disappearing (a
+    /// chunk unload).
     ///
     /// Part of the body's own state, not a cache: a rollback resimulation
-    /// that replays this body alone (`PhysicsWorld::step_body`'s "a single
-    /// body's step is exactly the trajectory in a full step" contract) must
-    /// reach this exact value on the exact same tick the live run did, or a
-    /// resimulated peer could integrate ticks the other one skipped over
-    /// something that was supposed to be standing still. See
+    /// replaying this body alone through `PhysicsWorld::step_body` must reach
+    /// this exact value on the exact same tick the live run did, or a peer
+    /// could integrate ticks the other skipped. See
     /// [`crate::sim::BodySnapshot`].
     pub asleep: bool,
     /// Seconds this body has been grounded and below the sleep speed,
     /// consecutively — reset the instant either condition breaks. Reaching
     /// [`crate::world::SLEEP_SETTLE_TIME`] is what sets `asleep`.
     pub sleep_time: f32,
-    /// FEET (`RigidBody::feet`): a capsule stands on the ground straight
+    /// Feet (`RigidBody::feet`): a capsule stands on the ground straight
     /// beneath its centre line, not wherever its rounded bottom first touches.
     ///
     /// A sphere resting on a slope touches it off to one side, so the point
-    /// directly under the centre — where a character's feet are drawn — hangs
-    /// `r·(1 − cos θ)` above the ground; in a crease it bridges the two sides
-    /// and the feet hang over the bottom; on a bump it perches. On a coarse
-    /// terrain those creases and bumps are everywhere, and the model reads as
-    /// hovering over ground it is standing on, or toeing into ground it is
-    /// not. Measured on a real project: up to 0.19 units of hover from a
-    /// 0.35 capsule at rest on 10–20° ground, with the collider itself within
-    /// a centimetre of the drawn triangles.
+    /// directly under the centre, where a character's feet are drawn, hangs
+    /// `r·(1 − cos θ)` above the ground; in a crease it bridges the two sides,
+    /// on a bump it perches. On coarse terrain that reads as hovering over
+    /// ground the model is standing on: up to 0.19 units from a 0.35 capsule
+    /// at rest on 10–20° ground.
     ///
     /// With feet, walkable ground under the bottom sphere is resolved by a
     /// probe straight down from the sphere's centre: the body is pushed up
     /// until that point clears the surface, and pulled down onto it when it
-    /// was standing and is not moving upward (so a jump is never snapped
-    /// back, and a crest is followed rather than hopped). Anything the probe
-    /// does not find — a wall, a slope past `slope_limit`, a ledge the centre
-    /// has stepped past — is left to the rounded bottom exactly as before, so
-    /// walls still push and a character still hangs by its rim at an edge.
-    /// Only a capsule has feet; a ball rolls on its curve.
+    /// was standing and is not moving upward, so a jump is never snapped back
+    /// and a crest is followed rather than hopped. Anything the probe does not
+    /// find (a wall, a slope past `slope_limit`, a ledge the centre has stepped
+    /// past) is left to the rounded bottom, so walls still push and a
+    /// character still hangs by its rim at an edge. Only a capsule has feet; a
+    /// ball rolls on its curve.
     pub feet: bool,
 }
 
@@ -236,22 +231,17 @@ impl Body {
         }
     }
 
-    /// The body's collision sample points + count + the sphere radius inflating each one:
-    /// 1 point (sphere), the 2 end-sphere centers (capsule), or the 8 corners + center
-    /// (box, sampled as zero-radius points). The depenetration loop pushes each point that
-    /// has sunk inside a collider back out along the collider normal.
-    /// A sphere around `pos` that contains every sample center this body would
-    /// probe, **plus** the tolerance those probes are compared against.
+    /// A sphere around `pos` that contains every sample centre this body
+    /// probes, plus the tolerance those probes are compared against.
     ///
-    /// That is exactly the reject a sensor pass needs: `sample_centers` is
-    /// tested as `shape.distance(c) < radius`, and a shape's distance from
-    /// outside its own bounding sphere is at least `|c − bc| − br`. So a
-    /// collider whose bound is further than this from `pos` cannot produce a
-    /// single overlapping center, and the whole body can be skipped without
-    /// calling `distance` once.
+    /// The reject a sensor pass needs: `sample_centers` is tested as
+    /// `shape.distance(c) < radius`, and a shape's distance from outside its
+    /// own bounding sphere is at least `|c − bc| − br`, so a collider whose
+    /// bound is further than this from `pos` cannot overlap a single centre
+    /// and the whole body is skipped without a `distance` call.
     ///
-    /// Conservative on purpose — it over-covers rather than clipping, so the
-    /// reject can never lose a touch event that the exact test would have found.
+    /// Over-covers rather than clipping, so the reject never loses a touch
+    /// event the exact test would find.
     pub(crate) fn bound_sphere(&self) -> (Vec3, f32) {
         let (centers, n, radius) = self.sample_centers();
         let reach = centers[..n]
@@ -261,6 +251,11 @@ impl Body {
         (self.pos, reach + radius)
     }
 
+    /// The body's collision sample points, how many, and the sphere radius
+    /// inflating each: 1 point (sphere), the 2 end-sphere centres (capsule), or
+    /// the 8 corners plus centre (box, as zero-radius points). The
+    /// depenetration loop pushes each point that has sunk inside a collider
+    /// back out along the collider normal.
     pub(crate) fn sample_centers(&self) -> ([Vec3; 9], usize, f32) {
         let mut a = [self.pos; 9];
         match self.shape {

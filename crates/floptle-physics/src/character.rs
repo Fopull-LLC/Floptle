@@ -5,10 +5,10 @@ use floptle_core::math::Vec3;
 
 use crate::world::PhysicsWorld;
 
-/// A kinematic capsule character controller (ADR-0014, the "cool movement"): moved by
+/// A kinematic capsule character controller: moved by
 /// input + gravity, it slides along surfaces, snaps to ground, respects a slope limit,
 /// and keeps its `up` aligned to −gravity — so it runs around spherical planets and up
-/// swirling fractal walls. `pos` is the FOOT (bottom of the capsule). It queries the
+/// swirling fractal walls. `pos` is the foot (bottom of the capsule). It queries the
 /// world read-only (it's not a dynamic body in the solver).
 #[derive(Clone, Copy, Debug)]
 pub struct Character {
@@ -45,7 +45,7 @@ impl Character {
         [self.pos + self.up * self.radius, self.pos + self.up * (self.height - self.radius)]
     }
 
-    /// Advance one FIXED step. `move_input` is a desired direction in world space (its
+    /// Advance one fixed step. `move_input` is a desired direction in world space (its
     /// magnitude 0..1 scales speed); only its component along the ground tangent plane
     /// is used, so input perpendicular to a wall/planet just walks along it.
     pub fn update(&mut self, world: &PhysicsWorld, move_input: Vec3, dt: f32) {

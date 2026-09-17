@@ -1,30 +1,24 @@
-//! Water as a composable scalar field `depth(p)` — the volume half of
-//! an earlier task, built the way gravity is (ADR-0014) and for the same reason:
-//! a body should ask the world one question and get one answer, whether the
-//! water it is in is a planet's ocean, a lake or a fish tank.
+//! Water as a composable scalar field `depth(p)`, built the way gravity is: a
+//! body asks the world one question and gets one answer, whether the water it
+//! is in is a planet's ocean, a lake or a fish tank.
 //!
-//! What a volume answers is a **depth**: metres below the surface, zero
-//! anywhere outside. Everything else — how much of a hull is under, how hard
-//! the water pushes back, whether the camera is wet — is derived from that one
-//! number, so there is only ever one definition of "in the water".
+//! A volume answers a depth: metres below the surface, zero anywhere outside.
+//! How much of a hull is under, how hard the water pushes back and whether the
+//! camera is wet all derive from that one number, so there is one definition
+//! of "in the water".
 //!
-//! ## Why buoyancy is per shape and not per body
-//!
-//! A hull that lands flat floats; the same hull nose-down sinks its nose and
-//! rights itself. That difference is entirely about *where* the displaced
-//! volume is, so the force has to be applied at each shape's own position and
-//! let the compound's inertia tensor turn the asymmetry into torque. Summing
-//! one buoyant force at the centre of mass gives a craft that bobs but never
-//! rights itself, which reads as "the water is a trampoline".
-//!
-//! ## Determinism
+//! Buoyancy is per shape, not per body. A hull that lands flat floats; the same
+//! hull nose-down sinks its nose and rights itself. That difference is about
+//! where the displaced volume is, so the force is applied at each shape's own
+//! position and the compound's inertia tensor turns the asymmetry into torque.
+//! One buoyant force at the centre of mass gives a craft that bobs but never
+//! rights itself.
 //!
 //! Every value here is f32 arithmetic over a volume list built from the scene
 //! in a fixed order, with no iteration-order-dependent accumulation and no
-//! state carried between steps. A water volume is exactly as static as a
-//! gravity source, so `Sim::step_body_tick` stays bit-for-bit exact and the
-//! rollback contract (ADR-0025) is untouched — which is what `0038`'s last
-//! acceptance line asks for.
+//! state carried between steps. A water volume is as static as a gravity
+//! source, so `Sim::step_body_tick` stays bit-for-bit exact and rollback
+//! resimulation is untouched.
 
 use floptle_core::math::{Quat, Vec3};
 
@@ -57,7 +51,7 @@ pub struct WaterVolume {
     /// Angular drag coefficient — what stops a dropped craft spinning forever
     /// underwater.
     pub angular_drag: f32,
-    /// A FROZEN sea is not a fluid: it applies no buoyancy and no drag, and the
+    /// A frozen sea is not a fluid: it applies no buoyancy and no drag, and the
     /// scene is expected to carry a collider for its surface instead. Freezing
     /// is a state rather than a second system, so an ice world's sea is the
     /// same node with a flag flipped — a script can thaw it.
@@ -120,7 +114,7 @@ pub struct WaterSample {
 }
 
 impl WaterField {
-    /// The DEEPEST volume containing `p`, and how deep. Deepest rather than
+    /// The deepest volume containing `p`, and how deep. Deepest rather than
     /// first so a tank sitting inside an ocean answers as the tank — the same
     /// "innermost wins" rule patched conics use for gravity, and for the same
     /// reason: overlapping volumes must not depend on scene order.
@@ -350,7 +344,7 @@ mod tests {
         assert!((f.depth_at(Vec3::ZERO) - 100.0).abs() < 1e-3, "the seabed centre");
     }
 
-    /// A lake's sides are WALLS. Standing next to a pool at the same height as
+    /// A lake's sides are walls. Standing next to a pool at the same height as
     /// its water is not standing in it — a level-set answer would drown the
     /// whole map at the waterline.
     #[test]
@@ -362,7 +356,7 @@ mod tests {
         assert_eq!(f.depth_at(Vec3::new(0.0, -9.0, 0.0)), 0.0, "below the bottom");
     }
 
-    /// Submersion is CONTINUOUS across the waterline. A step function makes
+    /// Submersion is continuous across the waterline. A step function makes
     /// buoyancy switch fully on and off within one tick as a shape's centre
     /// crosses the surface, and a craft at rest then vibrates at the tick rate
     /// forever — the bug this whole spherical-cap term exists to avoid.
@@ -388,7 +382,7 @@ mod tests {
         assert!(max_jump < 0.12, "a step, not a ramp: biggest jump was {max_jump}");
     }
 
-    /// The thing the card actually asks for: a hull that lands flat FLOATS.
+    /// A hull that lands flat floats.
     /// Integrate a light sphere dropped into a sea and it must settle at a
     /// steady depth rather than sinking or being spat out.
     #[test]
@@ -413,7 +407,7 @@ mod tests {
         assert!(p.y > 95.0, "it sank: {}", p.y);
     }
 
-    /// …and the other half of the same line: a DENSE body sinks. Buoyancy that
+    /// …and the other half of the same line: a dense body sinks. Buoyancy that
     /// floats everything is just an upward force.
     #[test]
     fn a_dense_body_still_sinks() {
@@ -472,7 +466,7 @@ mod tests {
         assert!(a.is_none(), "frozen water must not push");
     }
 
-    /// Overlapping volumes resolve by DEPTH, not scene order — a tank inside an
+    /// Overlapping volumes resolve by depth, not scene order — a tank inside an
     /// ocean answers as the tank. Order-dependence here would make a scene's
     /// physics depend on the order nodes happen to be listed in a file.
     #[test]

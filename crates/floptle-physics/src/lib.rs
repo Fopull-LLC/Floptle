@@ -1,36 +1,27 @@
 //! # floptle-physics
 //!
-//! Floptle's distinctive physics need — letting players drive, roll, and roam on
-//! **fractals that are actively morphing** — is exactly the case off-the-shelf
-//! rigid-body engines are *worst* at (they assume explicit, mostly-static
-//! collision geometry). So the collision core is custom and **SDF-first**: we
-//! collide against the same signed-distance function the renderer draws, which
-//! is cheaper and more robust than re-meshing a morphing surface every frame.
-//! See `docs/subsystems/physics.md` + ADR-0012.
+//! Players drive, roll and roam on fractals that are actively morphing, which
+//! is the case a rigid-body engine built on static collision geometry handles
+//! worst. So the collision core is signed-distance-first: bodies collide
+//! against the same distance function the renderer draws, and a morphing
+//! surface never needs re-meshing for physics.
 //!
-//! Layered design (own the novel parts, borrow only the boring parts):
-//! - `world`     : the collision world — a set of colliders queried each step.
-//! - `sdf`       : SDF colliders (fractals + analytic primitives); point/sphere/
-//!   capsule/ray queries via `f(p,t)`, normals from its gradient,
-//!   surface velocity from ∂f/∂t (so riders inherit the morph).
-//! - `field`     : baked sparse SDF/voxel grid — decouples physics cost from the
-//!   expensive analytic fractal (analytic near, baked far).
-//! - `mesh`      : triangle-BVH colliders for static/imported (Blender) meshes.
-//! - `character` : kinematic capsule controller (the "cool movement system");
-//!   samples `gravity` and aligns orientation to `-g`, so you can
-//!   run on a fractal and up its swirling walls (ADR-0014).
-//! - `vehicle`   : raycast-vehicle model (drive a car across the fractal).
-//! - `gravity`   : gravity as a composable vector field `g(p)` — global, analytic
-//!   sources (planets), SDF-surface (`-∇f`), and calculated
-//!   density-field (Poisson `∇²Φ=4πGρ`, Barnes-Hut/FFT) (ADR-0014).
-//! - `dynamics`  : OPTIONAL lightweight impulse solver for object-vs-object.
-
-//! ## Slice 1 (this module): collision core + integrator
-//! The foundational, headless-testable layer — see `docs/subsystems/physics-slices.md`.
-//! A [`CollisionShape`] trait (analytic primitives + an SDF-terrain collider), a
-//! composable [`GravityField`], and a [`PhysicsWorld`] of dynamic sphere [`Body`]s
-//! advanced on a fixed timestep with penetration resolution. Editor/ECS wiring,
-//! capsule character controllers, triggers, and mesh colliders are later slices.
+//! - `shapes`    : the [`CollisionShape`] trait and every collider — analytic
+//!   primitives, extruded polygons, triangle meshes, and the terrain collider
+//!   that lands on the drawn triangles.
+//! - `body`      : a dynamic [`Body`] — sphere, capsule or box — with feet,
+//!   sleep, and the sample points it is pushed out by.
+//! - `compound`  : rigid assemblies of many shapes with real inertia, which
+//!   split and merge at runtime.
+//! - `gravity`   : gravity as a composable vector field `g(p)` — global,
+//!   planets, and surfaces.
+//! - `water`     : water as a composable depth field, with buoyancy per shape.
+//! - `character` : the capsule character controller.
+//! - `world`     : the [`PhysicsWorld`] — colliders, bodies and compounds
+//!   advanced on a fixed timestep, where stepping one body alone is exactly its
+//!   trajectory inside a full step.
+//! - `sim`       : the ecs-facing [`Sim`] — triggers, contacts, impacts,
+//!   snapshots and the floating origin.
 
 
 mod body;
@@ -298,11 +289,10 @@ mod tests {
     /// friction` and lets it go above that — a fact about the ramp, not about
     /// the solver.
     ///
-    /// What this replaces: friction used to be a per-contact velocity
-    /// multiplier, so gravity re-added a little downhill speed every step and
-    /// the multiplier only ever scaled it. Nothing ever held. Every crate on
-    /// every ramp crept downhill forever, at a rate that depended on the frame
-    /// rate, and no amount of friction stopped it.
+    /// A per-contact velocity multiplier could never hold: gravity re-adds a
+    /// little downhill speed every step and a multiplier only scales it, so
+    /// every crate on every ramp creeps downhill at a rate that depends on the
+    /// frame rate.
     #[test]
     fn a_ramp_holds_a_body_up_to_its_friction_angle_and_lets_go_past_it() {
         // 20° needs tan(20°) ≈ 0.36 to hold.
@@ -587,12 +577,12 @@ mod tests {
         assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
     }
 
-    /// A controller that writes its own capsule height every frame (every
-    /// character controller does — that is how crouch works) must STAND there,
-    /// not levitate. The per-step component sync used to rebuild the capsule
-    /// from the authored `RigidBody::height`, so re-planting the feet against
-    /// the reverted shape pushed the body up by the same delta every single
-    /// frame: change the script's stand height and you fly into the sky.
+    /// A controller that writes its own capsule height every frame (that is
+    /// how crouch works) stands there rather than levitating. If the per-step
+    /// component sync rebuilt the capsule from the authored `RigidBody::height`,
+    /// re-planting the feet against the reverted shape would push the body up
+    /// by the same delta every frame: change the script's stand height and fly
+    /// into the sky.
     #[test]
     fn a_scripted_capsule_height_does_not_levitate_the_body() {
         let mut terrain = floptle_field::ChunkField::new(1.0);
@@ -668,7 +658,7 @@ mod tests {
         assert!((end.y - body.y).abs() < 1e-6, "alpha=1 must land on the tick-end pos");
     }
 
-    /// A driver-stepped body must land BIT-IDENTICALLY where the whole-world
+    /// A driver-stepped body must land bit-identically where the whole-world
     /// step would have put it (`docs/multiplayer.md` §7 P3).
     ///
     /// This is the foundation the whole feature stands on: the rollback driver
@@ -744,7 +734,7 @@ mod tests {
 
     #[test]
     fn rigidbody_wins_over_collidable_so_it_still_falls() {
-        // A node flagged both RigidBody and Collidable is a DYNAMIC body — the RigidBody
+        // A node flagged both RigidBody and Collidable is a dynamic body — the RigidBody
         // wins, so build() makes it a body and it falls under gravity. (The editor skips
         // adding a static collider for it so its dynamic body doesn't fight a static shape.)
         // This is the canonical character setup: a player capsule with a Rigidbody + a
@@ -865,9 +855,9 @@ mod tests {
 
     #[test]
     fn anchored_collider_is_exact_far_from_world_origin() {
-        // ADR-0015 end-to-end: content placed 10 million units out must collide as
-        // exactly as content at the origin. At 1e7 an f32 ulp is a full unit — baking
-        // world-space f32 verts there (the old path) is off by up to a meter.
+        // Content placed 10 million units out collides as exactly as content
+        // at the origin. At 1e7 an f32 ulp is a full unit, so world-space f32
+        // vertices there would be off by up to a metre.
         let far = DVec3::new(1.0e7, 0.0, 1.0e7);
         let mut ecs = World::default();
         let e = ecs.spawn();
@@ -915,7 +905,7 @@ mod tests {
 
     #[test]
     fn terrain_volume_is_exact_far_from_world_origin() {
-        // The full terrain path at distance (ADR-0015): a node-local flat field anchored
+        // The full terrain path at distance: a node-local flat field anchored
         // ten million units out must catch a falling body exactly at its surface — the
         // world placement lives in the f64 anchor, the field's own numbers stay small.
         let far = DVec3::new(1.0e7, 0.0, 1.0e7);
@@ -1164,15 +1154,15 @@ mod tests {
 
     #[test]
     fn a_fast_ram_into_solid_terrain_reports_its_true_impact_speed() {
-        // A fast lithobrake into a PLANET used to read as ~0 m/s ("rammed a
-        // planet really fast, nothing broke"). At high speed the stack tunnels
-        // past the SDF's narrow band in one substep into the SATURATED interior,
+        // A fast lithobrake into a planet must not read as ~0 m/s. At high
+        // speed the stack tunnels
+        // past the SDF's narrow band in one substep into the saturated interior,
         // where the gradient — and so the contact normal — is zero; `normal()`
         // masked that with a straight-up Vec3::Y, which is orthogonal to a
         // horizontal ram, collapsing the reported closing speed to ~0. The
         // motion-based fallback normal must now recover the true speed.
         let mut terrain = floptle_field::ChunkField::new(1.0);
-        // A fully SOLID block: top_y far above the box, so nothing in it is air.
+        // A fully solid block: top_y far above the box, so nothing in it is air.
         terrain.fill_slab(
             Vec3::new(-8.0, -8.0, -8.0),
             Vec3::new(8.0, 8.0, 8.0),

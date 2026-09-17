@@ -1,16 +1,15 @@
 //! Compound rigid bodies: one dynamic body built from many oriented shapes
-//! (spheres / capsules / boxes), with composed mass, center of mass and inertia,
-//! full 6-DOF motion (translation + rotation), per-shape contact attribution,
-//! and runtime **split** — the physics half of assemblies that come apart:
-//! multi-part vehicles, decoupling rocket stages, cranes, breakable structures.
+//! (spheres, capsules, boxes) with composed mass, centre of mass and inertia,
+//! full 6-DOF motion, per-shape contact attribution, and a runtime split. The
+//! physics half of assemblies that come apart: multi-part vehicles, rocket
+//! stages, cranes, breakable structures.
 //!
-//! Stays in this engine's idiom (see `world.rs`): shapes are depenetrated
-//! against the SDF collider set by sample points, there is no body-vs-body
-//! pass, and stepping one compound alone is exactly its trajectory inside a
-//! full step (the netcode prediction contract). What compounds add over
-//! [`crate::Body`] is the rigid-body layer: contacts apply POSITIONAL and
-//! VELOCITY corrections through the inverse inertia, so an off-center touch
-//! torques the assembly — a rocket landing on one leg tips over.
+//! Shapes are depenetrated against the collider set by sample points, there
+//! is no body-vs-body pass, and stepping one compound alone is exactly its
+//! trajectory inside a full step, which is what netcode prediction relies on.
+//! Over [`crate::Body`], contacts apply positional and velocity corrections
+//! through the inverse inertia, so an off-centre touch torques the assembly:
+//! a rocket landing on one leg tips over.
 
 use floptle_core::math::{Mat3, Quat, Vec3};
 
@@ -94,25 +93,25 @@ pub struct CompoundContact {
     /// Normal impulse magnitude applied (kg·m/s in sim units) — 0 for a
     /// purely positional resolve of an already-separating contact.
     pub impulse: f32,
-    /// Closing SPEED along the contact normal at the instant of contact, before
+    /// Closing speed along the contact normal at the instant of contact, before
     /// this contact was resolved (m/s in sim units, always ≥ 0). This is the
     /// honest crash-tolerance metric (KSP measures impact speed, not impulse):
     /// budgeted depenetration spreads a fast crash's impulse over many ticks so
     /// the per-tick impulse plateaus, but the incoming normal velocity is not
     /// capped, so `speed` faithfully reports how hard something actually hit.
     pub speed: f32,
-    /// TOTAL closing speed at the contact point (m/s, sim units, ≥ 0): the full
+    /// Total closing speed at the contact point (m/s, sim units, ≥ 0): the full
     /// magnitude of the contact-point velocity, before resolution. `speed` above
-    /// is only its NORMAL component — which collapses on a glancing hit or a hit
+    /// is only its normal component — which collapses on a glancing hit or a hit
     /// against a curved surface (a 30 m/s ram into a planet 65° off-normal reads
-    /// a normal `speed` of ~12). `speed_abs` is the honest ENERGY metric a crash
+    /// a normal `speed` of ~12). `speed_abs` is the honest energy metric a crash
     /// model should judge by; the tangential (grind/slide) speed is
     /// `sqrt(max(0, speed_abs² − speed²))`.
     pub speed_abs: f32,
 }
 
-/// A compound rigid body. Positions/velocities are sim-frame (origin-relative,
-/// ADR-0015) like every other body; `pos` is the CENTER of MASS — the frame
+/// A compound rigid body. Positions and velocities are sim-frame
+/// (origin-relative) like every other body; `pos` is the centre of mass, the frame
 /// rigid dynamics integrates in. The assembly origin the caller authored
 /// shapes around sits at `local_origin` in the body frame ([`Self::origin`]
 /// maps it back to sim space for transform writeback).
@@ -209,8 +208,8 @@ impl Compound {
         self.pos + self.orient * self.local_origin
     }
 
-    /// Re-pose the COLLISION shapes named in `updates` — `(shape id, new offset
-    /// about the assembly origin, new orientation)` — in place, WITHOUT touching
+    /// Re-pose the collision shapes named in `updates` — `(shape id, new offset
+    /// about the assembly origin, new orientation)` — in place, without touching
     /// the body's mass, CoM or inertia. For articulated parts whose pose changes
     /// at runtime (a folding landing leg): the collider follows the moving foot
     /// so the ship rests on its feet deployed and the footprint tucks away when
@@ -286,7 +285,7 @@ impl Compound {
         for &i in going.iter().rev() {
             detached_shapes.push(self.shapes.remove(i));
         }
-        // Re-express both halves' shapes in WORLD-authored frames and rebuild,
+        // Re-express both halves' shapes in world-authored frames and rebuild,
         // so each recomputes its own CoM/inertia. Offsets are currently about
         // the old CoM; that old CoM (sim-frame `self.pos`) is the shared
         // assembly origin both rebuilds use.
@@ -326,24 +325,23 @@ impl Compound {
         Some(detached)
     }
 
-    /// Absorb `other` into self — the exact inverse of [`Self::split`]: two
+    /// Absorb `other` into self, the inverse of [`Self::split`]: two
     /// assemblies become one rigid body. A docking latch closing, a crane
-    /// grabbing its load, an in-space construction weld, a magnet picking up
-    /// scrap. `other`'s shapes are re-expressed in self's body frame from both
-    /// bodies' current poses, so the merged body keeps exactly the geometry you
-    /// can see — callers snap the two into alignment first (or don't, and get a
-    /// crooked weld, honestly).
+    /// grabbing its load, a construction weld, a magnet picking up scrap.
+    /// `other`'s shapes are re-expressed in self's body frame from both bodies'
+    /// current poses, so the merged body keeps exactly the geometry you can
+    /// see; snap the two into alignment first, or the weld is crooked.
     ///
-    /// Momentum is conserved as a perfectly INELASTIC join: the combined linear
-    /// momentum sets the merged CoM velocity, and the combined ANGULAR momentum
-    /// about the new CoM sets the merged spin — each half contributing both its
-    /// own spin and the moment of its linear momentum, so a module latching on
-    /// off-center makes the stack rotate exactly as it should. The closing
-    /// energy that isn't conserved is what the latch absorbed; that's what
-    /// makes a soft dock soft, and it's why docking never adds energy.
+    /// Momentum is conserved as a perfectly inelastic join: the combined linear
+    /// momentum sets the merged velocity, and the combined angular momentum
+    /// about the new centre of mass sets the merged spin, each half
+    /// contributing its own spin and the moment of its linear momentum, so a
+    /// module latching on off-centre rotates the stack as it should. The
+    /// closing energy that is not conserved is what the latch absorbed, which
+    /// is why docking never adds energy.
     ///
-    /// Self keeps tracking its own assembly origin (its root node stays the
-    /// merged vessel's root); `other`'s root is the caller's to retire.
+    /// Self keeps its assembly origin (its root node stays the merged vessel's
+    /// root); `other`'s root is the caller's to retire.
     pub fn merge(&mut self, other: &Compound) {
         // Authored frame for the rebuild = self's current (CoM, orientation);
         // self's offsets are already about that point.
@@ -389,7 +387,7 @@ impl Compound {
         merged.use_gravity = self.use_gravity;
         merged.layer = self.layer;
         merged.active = self.active;
-        // Latching onto something PINNED pins the pair (docking at a launch
+        // Latching onto something pinned pins the pair (docking at a launch
         // clamp / a construction hold): the anchor is the stronger claim.
         merged.anchored = self.anchored || other.anchored;
         *self = merged;
@@ -452,7 +450,7 @@ fn compose_inertia(shapes: &[CompoundShape]) -> Mat3 {
     total
 }
 
-/// Angular momentum `I ω` from the INVERSE inertia tensor (what a compound
+/// Angular momentum `I ω` from the inverse inertia tensor (what a compound
 /// stores) — invert it back and apply. A degenerate tensor contributes nothing
 /// rather than poisoning the merge with NaN.
 fn inertia_times(inv_inertia_world: Mat3, w: Vec3) -> Vec3 {
@@ -503,7 +501,7 @@ mod tests {
     #[test]
     fn resync_shape_geometry_moves_collider_but_keeps_mass_props() {
         // A hull + a light "foot". Re-posing the foot (a folding leg) must move
-        // its COLLIDER to the new spot while mass/inertia/origin stay put.
+        // its collider to the new spot while mass/inertia/origin stay put.
         let authored = Vec3::new(0.0, 3.0, 0.0);
         let hull = boxs(Vec3::ZERO, Vec3::splat(0.5), 5.0, 1);
         let foot = boxs(Vec3::new(0.0, -1.0, 0.0), Vec3::splat(0.3), 0.15, 2);
@@ -568,7 +566,7 @@ mod tests {
     #[test]
     fn lander_settles_on_its_legs() {
         // A hull box + four leg spheres below its corners: the assembly rests
-        // on the LEGS (hull held above the ground), upright — the multi-shape
+        // on the legs (hull held above the ground), upright — the multi-shape
         // ground contact a rocket needs.
         let mut legs = vec![boxs(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.5, 0.8, 0.5), 6.0, 100)];
         for (i, (sx, sz)) in [(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)].iter().enumerate() {
@@ -596,7 +594,7 @@ mod tests {
     #[test]
     fn overhanging_box_tips_off_a_ledge() {
         // A platform ending at x=0; a box whose CoM overhangs the edge. Rigid
-        // contact response must TORQUE it over the lip — it rotates and falls,
+        // contact response must torque it over the lip — it rotates and falls,
         // which no translation-only solver can do.
         let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
         w.add_collider(Box::new(crate::BoxShape::new(
@@ -762,8 +760,8 @@ mod tests {
 
     #[test]
     fn merge_carries_the_anchor_and_rotated_geometry() {
-        // Docking onto something PINNED (a launch clamp, a construction hold)
-        // pins the pair; and a module that arrives ROTATED keeps its attitude
+        // Docking onto something pinned (a launch clamp, a construction hold)
+        // pins the pair; and a module that arrives rotated keeps its attitude
         // through the weld — the merged body is what you saw before the latch.
         let mut clamped = Compound::new(
             Vec3::ZERO,

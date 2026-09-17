@@ -1,11 +1,11 @@
 //! Gravity as a composable vector field `g(p)`: a global vector plus
-//! point/radial sources, sampled by bodies and the character (ADR-0014).
+//! point/radial sources, sampled by bodies and the character.
 
 use floptle_core::math::Vec3;
 
 use crate::world::AnchoredCollider;
 
-/// One contribution to the composable gravity field (ADR-0014). A body sums the
+/// One contribution to the composable gravity field. A body sums the
 /// enabled sources at its position and treats the result as "down".
 pub enum GravitySource {
     /// Constant acceleration — most games, e.g. `(0, -9.81, 0)`.
@@ -17,8 +17,8 @@ pub enum GravitySource {
     /// Pull onto a collider's surface along `-∇f` — grounds you on fractal walls.
     SdfSurface { collider: usize, strength: f32 },
     /// Real inverse-square gravity µ/r² toward a celestial body (solar demo S2).
-    /// PATCHED CONICS: of all `InvSq` sources whose SOI contains the point, only
-    /// the DEEPEST (smallest SOI — the moon inside the planet inside the sun)
+    /// Patched conics: of all `InvSq` sources whose SOI contains the point, only
+    /// the deepest (smallest SOI — the moon inside the planet inside the sun)
     /// pulls; the rest contribute nothing. `soi ≤ 0` = infinite (the system
     /// root). Non-InvSq sources still add on top as usual. inside `body_r`
     /// (the physical surface radius; 0 = point mass) the pull falls off
