@@ -1,35 +1,32 @@
-//! `floptle check` — **does this project still load?**
+//! `floptle check`: does this project still load?
 //!
-//! The question anything editing a project by hand or by script needs answered
-//! after every edit, and until now the only thing that could answer it was
-//! opening the editor. A `.ron` file that parses is not a scene that works: a
-//! parent index can point past the end of the list, a material can name a
-//! texture that is not there, a node can carry a script with no file behind it.
-//! Each of those reaches you later as a symptom somewhere else.
+//! The question anything editing a project by hand or by script needs
+//! answered after every edit, without opening the editor. A `.ron` file that
+//! parses is not a scene that works: a parent index can point past the end
+//! of the list, a material can name a texture that is not there, a node can
+//! carry a script with no file behind it. Each of those reaches you later as
+//! a symptom somewhere else.
 //!
-//! **It runs the engine's own checks, not a second opinion.** Scenes load
-//! through `floptle_scene::load`, the wiring goes through `validate_parents`
-//! and `validate_ui_visibility` at the same two levels
+//! It runs the engine's own checks, not a second opinion. Scenes load through
+//! `floptle_scene::load`, the wiring goes through `validate_parents` and
+//! `validate_ui_visibility` at the same two levels
 //! `Project::report_scene_wiring` pushes them to the Console at, and assets
-//! resolve through `project::resolve_asset_path` — the same rescue chain the
+//! resolve through `project::resolve_asset_path`, the same rescue chain the
 //! editor resolves them with, so a reference that works in the editor is not
 //! reported as broken here.
 //!
-//! **No GPU and no window.** Nothing in this file draws anything; that is the
-//! line ADR-0027 asks to be drawn deliberately, and a verb that wanted to
-//! render a thumbnail would be on the other side of it.
+//! No GPU and no window. Nothing in this file draws anything; a verb that
+//! wanted to render a thumbnail would be a different verb.
 //!
-//! **What it looks at**, since a checker's silence is read as a pass: every
+//! What it looks at, since a checker's silence is read as a pass: every
 //! scene, prefab, effect and standalone material; every node's material maps
-//! (colour, normal, roughness, metallic, ambient occlusion), its surface shader
-//! and that shader's own textures, its model and its scripts; every effect
-//! track's texture, mesh and trail; and the entry scene `project.ron` names.
+//! (colour, normal, roughness, metallic, ambient occlusion), its surface
+//! shader and that shader's own textures, its model and its scripts; every
+//! effect track's texture, mesh and trail; and the entry scene `project.ron`
+//! names.
 //!
-//! **What it does not**, said as plainly: animation controllers, audio
-//! references, and anything inside an installed package. The first list was
-//! shorter than the code's actual coverage in one direction and longer in the
-//! other — a material's surface maps went unchecked while the prose implied
-//! textures were done — so treat both lists as part of the behaviour.
+//! What it does not: animation controllers, audio references, and anything
+//! inside an installed package.
 
 use std::path::{Path, PathBuf};
 

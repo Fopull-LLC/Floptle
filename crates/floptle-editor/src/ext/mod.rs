@@ -1,4 +1,4 @@
-//! **Editor extensions** — the Lua a package runs *inside the editor*.
+//! Editor extensions: the Lua a package runs inside the editor.
 //!
 //! A package's `editor/*.lua` is loaded when the project opens and gets an API
 //! the game never sees: menus, dockable panels, Scene-view overlays, world-space
@@ -18,30 +18,27 @@
 //! end)
 //! ```
 //!
-//! ## The shape of it, and why
+//! Lua never touches the editor. Every binding either reads a per-frame
+//! mirror ([`Snapshot`], [`SceneMirror`]) or pushes an [`ExtCmd`] onto a queue
+//! the editor drains after the frame, the same contract `floptle-script` runs
+//! the game under. There is no `&mut Editor` to hand out, so an extension is
+//! safe to call from the middle of an egui pass.
 //!
-//! **Lua never touches the editor.** Every binding either reads a per-frame
-//! *mirror* ([`Snapshot`], [`SceneMirror`]) or pushes an [`ExtCmd`] onto a
-//! queue the editor drains after the frame. This is the same contract
-//! `floptle-script` runs the game under, and it is what makes an extension safe
-//! to call from the middle of an egui pass: there is no `&mut Editor` to hand
-//! out, so no extension can be holding one when the editor needs it back.
+//! Drawing is the one exception, and it is scoped rather than stored: `gui.*`
+//! is installed by [`Lua::scope`] for the length of one callback, bound to the
+//! `egui::Ui` that callback is drawing into, and taken away again. A panel
+//! that keeps a widget function and calls it next frame gets a Lua error
+//! rather than a draw into a dead layout.
 //!
-//! The one exception is drawing, and it is scoped rather than stored:
-//! `gui.*` is installed by [`Lua::scope`] for the length of one callback,
-//! bound to the `egui::Ui` that callback is drawing into, and taken away again.
-//! A panel cannot squirrel a widget function away and call it next frame — Lua
-//! raises rather than drawing into a dead layout.
-//!
-//! **A package gets what it declared, and nothing else.** `http.*` is absent
-//! from a package that did not ask for [`Permission::Network`] — absent, not
+//! A package gets what it declared, and nothing else. `http.*` is absent from
+//! a package that did not ask for [`Permission::Network`], absent rather than
 //! refused at the call, so the failure is at the top of the file where an
-//! author will see it, not three menus deep in front of a user.
+//! author sees it, not three menus deep in front of a user.
 //!
-//! **One broken extension is one broken extension.** Every entry point catches,
+//! One broken extension is one broken extension. Every entry point catches,
 //! reports to the Console once, and disables the callback that raised rather
-//! than raising sixty times a second. The editor keeps running; the package list
-//! shows what happened.
+//! than raising sixty times a second. The editor keeps running; the package
+//! list shows what happened.
 
 pub(crate) mod api;
 pub(crate) mod gui;

@@ -1,30 +1,25 @@
-//! **The standalone player: a shipped game, with no editor in it.**
+//! The standalone player: a shipped game, with no editor in it.
 //!
-//! This is the binary an export ships (`floptle-player`, renamed to the game's
-//! own title). It is a window, an input pump and [`Editor::player_frame`] —
-//! nothing else. There is no dock, no Inspector, no gizmos, no asset browser
-//! and, when built without the crate's `editor-ui` feature, no egui compiled in
-//! at all.
+//! This is the binary an export ships (`floptle-player`, renamed to the
+//! game's own title). It is a window, an input pump and
+//! [`Editor::player_frame`], nothing else. There is no dock, no Inspector, no
+//! gizmos, no asset browser and, when built without the crate's `editor-ui`
+//! feature, no egui compiled in at all.
 //!
-//! ## Why it lives in the editor's crate
+//! It lives in the editor's crate because the engine does. The World, the
+//! script host, the physics sim, the renderer and Play mode all hang off
+//! [`Editor`], and the two functions that are the game,
+//! [`Editor::play_step`] and [`Editor::render_game_into`], are shared verbatim
+//! with the authoring application. A player that reimplemented either would
+//! drift from the one the editor shows you, and the difference would be found
+//! by somebody playing the shipped build. So the split is by feature, not by
+//! copy: `floptle-player` is a three-line binary over `run_player`, and the
+//! editor half of this crate is compiled out from under it.
 //!
-//! Because the engine does. The World, the script host, the physics sim, the
-//! renderer and Play mode all hang off [`Editor`], and the two functions that
-//! *are* the game — [`Editor::play_step`] and [`Editor::render_game_into`] —
-//! are shared verbatim with the authoring application. A player that
-//! reimplemented either would drift from the one the editor shows you, and the
-//! difference would only ever be found by somebody playing the shipped build.
-//!
-//! So the split is by *feature*, not by copy: `floptle-player` is a three-line
-//! binary over `run_player`, and the editor half of this crate is compiled out
-//! from under it.
-//!
-//! ## What a player does that the editor does not
-//!
-//! It owns the window outright. Input is never somebody else's — there is no
-//! panel to have focus, no Scene view to fly a camera around, and no Escape
-//! that means "back out of a tool". A script asking for the mouse
-//! (`input.lockMouse()`) simply gets it.
+//! A player owns the window outright. Input is never somebody else's: there
+//! is no panel to have focus, no Scene view to fly a camera around, and no
+//! Escape that means "back out of a tool". A script asking for the mouse
+//! (`input.lockMouse()`) gets it.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! `gui.*` — immediate-mode widgets, for the length of one callback.
+//! `gui.*`: immediate-mode widgets, for the length of one callback.
 //!
 //! An extension's panel, overlay or dialog body is a Lua function the editor
 //! calls while it is drawing. For that call — and only for that call — a `gui`
@@ -13,23 +13,21 @@
 //! if gui.button("Apply") then apply() end
 //! ```
 //!
-//! **Widgets return their new value, they do not mutate.** `x = gui.slider(x,
-//! …)` rather than `gui.slider(&x, …)`: Lua has no references to pass, and the
-//! alternative — a table you hand in and read back — makes every call site
-//! carry a container it never wanted. The one exception is `gui.button`, which
-//! returns whether it was clicked, because that is what a button *is*.
+//! Widgets return their new value; they do not mutate. `x = gui.slider(x, …)`
+//! rather than `gui.slider(&x, …)`: Lua has no references to pass, and a
+//! table you hand in and read back makes every call site carry a container
+//! it never wanted. `gui.button` returns whether it was clicked, because that
+//! is what a button is.
 //!
-//! ## How a `&mut Ui` gets in here safely
+//! [`UiSlot`] holds a stack of the layouts currently being drawn into. The
+//! bottom is the callback's own `Ui`; a nesting call (`gui.horizontal`)
+//! pushes the child layout for the length of the inner callback and pops it
+//! after. Lua only ever reaches the top of the stack, so the outer `&mut` is
+//! never used while an inner one is live, and every pointer is popped before
+//! the borrow that produced it ends.
 //!
-//! [`UiSlot`] holds a **stack** of the layouts currently being drawn into. The
-//! bottom is the callback's own `Ui`; a nesting call (`gui.horizontal`) pushes
-//! the child layout for the length of the inner callback and pops it after. Lua
-//! only ever reaches the top of the stack, so the outer `&mut` is never used
-//! while an inner one is live, and every pointer is popped before the borrow
-//! that produced it ends.
-//!
-//! Calling any of this outside a draw callback raises — the stack is empty, and
-//! there is no layout to draw into.
+//! Calling any of this outside a draw callback raises: the stack is empty,
+//! and there is no layout to draw into.
 
 use std::cell::RefCell;
 

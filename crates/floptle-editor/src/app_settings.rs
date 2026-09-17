@@ -1,32 +1,28 @@
-//! Driving the Lua `app.*` table: what the game currently is, and what a script
-//! asked to change about it.
+//! Driving the Lua `app.*` table: what the game currently is, and what a
+//! script asked to change about it.
 //!
-//! ## What `app.quit()` does depends on where the game is running
+//! What `app.quit()` does depends on where the game is running:
 //!
-//! There is one honest answer per host, and they are genuinely different things:
+//! * In an exported build the game is the program, so quitting ends it. The
+//!   save store is flushed first, since the ordinary flush happens on Stop,
+//!   which a build never reaches, and somebody quitting from a settings menu
+//!   expects the setting they just changed to have been kept.
+//! * In the editor, Play is the game and the editor is not, so quitting stops
+//!   Play. Closing the editor because a game under test called `quit` would
+//!   lose an afternoon's unsaved work to one line of Lua.
+//! * Headless (`floptle run`), the run ends where it stands, and the verb
+//!   reports the frame it stopped on rather than claiming it ran the whole
+//!   span.
 //!
-//! * **In an exported build**, the game is the program, so quitting ends it. The
-//!   save store is flushed first — somebody quitting from a settings menu
-//!   expects the setting they just changed to have been kept, and the ordinary
-//!   flush happens on Stop, which a build never reaches.
-//! * **In the editor**, Play is the game and the editor is not. Stopping Play is
-//!   the equivalent; closing the editor because a game under test called `quit`
-//!   would lose an afternoon's unsaved work to one line of Lua.
-//! * **Headless (`floptle run`)**, the run ends where it stands, and the verb
-//!   reports the frame it stopped on rather than claiming it ran the whole span.
-//!
-//! ## A video setting a script changes is for this session only
-//!
-//! Vsync and the retro presentation live in `project.ron`, which is the file
-//! that ships to everybody who plays the game. A player turning vsync off in an
-//! options menu must not edit the game, so the project doc is **snapshotted at
-//! Play and restored at Stop** — the rule `audio.track(…):setVolume` already
-//! follows, and the reason `access.*` leaves persistence to `save.*`.
-//!
-//! That restore is not decoration. `save_project` writes the whole live
-//! `ProjectConfigDoc`, so without it a script that set vsync during a playtest
-//! would have that value written into `project.ron` the next time anybody
-//! touched Project Settings — and shipped.
+//! A video setting a script changes is for this session only. Vsync and the
+//! retro presentation live in `project.ron`, the file that ships to everybody
+//! who plays the game, and a player turning vsync off in an options menu must
+//! not edit the game. So the project doc is snapshotted at Play and restored
+//! at Stop, the rule `audio.track(…):setVolume` follows, and the reason
+//! `access.*` leaves persistence to `save.*`. `save_project` writes the whole
+//! live `ProjectConfigDoc`, so without the restore a vsync set during a
+//! playtest would be written into `project.ron` the next time anybody touched
+//! Project Settings, and shipped.
 
 use floptle_script::app_api::{AppInfo, AppRequests, Vsync};
 

@@ -1,27 +1,19 @@
-//! The ◫ UI tab — the authoring surface for game UI
-//! (docs/ui-styles.md, phase C).
+//! The ◫ UI tab: the authoring surface for game UI. Arrangement is the work
+//! in UI, and this is the tool for it.
 //!
-//! Every other subsystem in the engine has a tab of its own; UI didn't, and it
-//! shows in real projects: 53 elements hand-placed at typed pixel offsets,
-//! centring arithmetic in Lua, z-order that could only be changed by deleting
-//! and re-adding a node. Arrangement *is* the work in UI, and arrangement had
-//! no tool.
+//! - The real render. The canvas is the shipping GPU pipeline drawing the
+//!   selected layer into an offscreen target, not an egui approximation. A
+//!   gradient, a `stage ui` shader and a 9-slice look here exactly as they
+//!   look in the game, because they are the game's render.
+//! - Design-unit truth. Everything the canvas reports (rulers, guides,
+//!   readouts, nudges) is in the layer's design units, so numbers here mean
+//!   the same thing as numbers in the Inspector and in Lua.
+//! - Opinion-free. The tab imposes no look, ships no theme, and never writes
+//!   a style you did not ask for. Its defaults (snap step, resolution list)
+//!   come from your project's tokens where a project has them.
 //!
-//! What this tab is:
-//!
-//! - **The real render.** The canvas is the shipping GPU pipeline drawing the
-//!   selected layer into an offscreen target — not an egui approximation. A
-//!   gradient, a `stage ui` shader and a 9-slice look here exactly as they look
-//!   in the game, because they *are* the game's render.
-//! - **Design-unit truth.** Everything the canvas reports (rulers, guides,
-//!   readouts, nudges) is in the layer's design units, so numbers here mean the
-//!   same thing as numbers in the Inspector and in Lua.
-//! - **Opinion-free.** The tab imposes no look, ships no theme, and never
-//!   writes a style you didn't ask for. Its defaults (snap step, resolution
-//!   list) come from *your* project's tokens where a project has them.
-//!
-//! The Scene viewport's UI overlay stays: a world-space canvas genuinely
-//! belongs in the 3D view. This is where flat screens get built.
+//! The Scene viewport's UI overlay stays: a world-space canvas belongs in the
+//! 3D view. This is where flat screens get built.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

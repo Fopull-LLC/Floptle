@@ -1,31 +1,25 @@
 //! Which keys reach a running game, and which the editor keeps.
 //!
-//! A game running in the Game view is supposed to behave like a build. The raw
-//! key set scripts read is filled from the window events directly, so almost
-//! every key already arrives — but egui also sees the same events, and egui uses
-//! **Tab** for widget focus traversal before anything else gets a look. A game
-//! bound to Tab therefore received nothing, the editor's tab bar took the
-//! keypress, and `input.pressed("tab")` returned `false` — which is
-//! indistinguishable from "the player did not press it".
+//! A game running in the Game view behaves like a build. The raw key set
+//! scripts read is filled from the window events directly, but egui sees the
+//! same events and uses Tab for widget focus traversal before anything else
+//! gets a look, so without this a game bound to Tab receives nothing and
+//! `input.pressed("tab")` returns `false`, indistinguishable from "the player
+//! did not press it". Tab is the convention for opening an inventory, the
+//! first key a player tries and the first a developer reaches for, and it
+//! works in an exported build, so the binding would look broken for the
+//! whole time you were making the game and correct only once you stopped
+//! testing it.
 //!
-//! That mattered because Tab is *the* convention for opening an inventory
-//! (Minecraft, Terraria, Valheim, Don't Starve). It is the first key a player
-//! tries and the first a developer reaches for, and it worked in an exported
-//! build — so the binding appeared broken for the whole time you were making the
-//! game and correct only once you stopped testing it. A game shipped a bag on
-//! Tab, passed its headless tests (the harness stubs `input`), and found out from
-//! a player.
+//! Two halves:
 //!
-//! Two halves here:
-//!
-//! * [`claim_keys_for_game`] takes the keyboard away from egui while the game is
-//!   being played and focused, so Tab (and anything focus gives egui a route to)
-//!   reaches the game.
-//! * [`RESERVED`] is the short list the editor genuinely keeps — Play, Pause and
-//!   Step — with the reason written down. A script polling one of those gets a
-//!   Console line the first time rather than silence, which is the same remedy as
-//!   `0072` and `0083`: the bug was never that a thing was unavailable, it was
-//!   that being unavailable looked exactly like working.
+//! * [`claim_keys_for_game`] takes the keyboard away from egui while the game
+//!   is being played and focused, so Tab, and anything focus gives egui a
+//!   route to, reaches the game.
+//! * [`RESERVED`] is the short list the editor keeps (Play, Pause and Step)
+//!   with the reason written down. A script polling one of those gets a
+//!   Console line the first time rather than silence: being unavailable must
+//!   never look exactly like working.
 
 /// Keys the editor answers even while the game is focused, with the reason.
 ///

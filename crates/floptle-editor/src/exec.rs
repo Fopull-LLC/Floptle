@@ -1,37 +1,27 @@
-//! `floptle exec` — **change a project correctly, from a script.**
+//! `floptle exec`: change a project correctly, from a script.
 //!
 //! Runs a Lua file against a project through the editor's own extension API:
 //! `scene.*` to read and write the node graph, `ed.*` to ask the editor about
 //! itself, `mesh.*`, `nav.*`, `json.*`, `http.*`.
 //!
-//! ## Why this instead of a verb per operation
+//! One verb rather than a verb per operation. The editor already answers
+//! "move a node", "add a component", "retarget a material" in an API that is
+//! documented and held against the live bindings by a test, so "can an
+//! assistant do X to a project" is "is X in the editor-scripting API": one
+//! surface growing in one place. Every capability added for a package author
+//! arrives here, and the other way round.
 //!
-//! Because the alternative is a verb list that grows forever. "Can a script move
-//! a node / add a component / retarget a material" would each be a flag, a
-//! parser row, a doc line and a test — and the editor already answers all of
-//! them, in an API that is documented and held against the live bindings by a
-//! test. So the question "can an assistant do X to a project" collapses into "is
-//! X in the editor-scripting API", which is one surface growing in one place.
-//! Every capability added for a package author arrives here for free, and the
-//! other way round.
+//! The extension API is headless by construction. Its rule is that Lua never
+//! touches the editor: every binding reads a per-frame mirror or pushes a
+//! command onto a queue the editor drains after the frame, so no extension
+//! can be holding `&mut Editor` when the editor wants it back. The same rule
+//! means the whole API runs with no window and no GPU, and this verb is
+//! mostly wiring.
 //!
-//! ## It was already headless
-//!
-//! `crates/floptle-editor/src/ext/` runs package Lua with no window and no GPU,
-//! and not by accident: its rule is that **Lua never touches the editor** —
-//! every binding reads a per-frame mirror or pushes a command onto a queue the
-//! editor drains after the frame. That was adopted so no extension could be
-//! holding `&mut Editor` when the editor wanted it back. The side effect is that
-//! the whole API is a headless API, and this verb is mostly wiring.
-//!
-//! ## The commands with no meaning here
-//!
-//! A script can ask for a window, a dialog, a camera move, the clipboard. None
-//! of those exists in a terminal. They are **refused with a line naming the
-//! call**, not dropped: a script that thinks it asked a question and got no
-//! answer carries on as though the answer were no, and that is the failure mode
-//! `mirror_to_stderr` was added to the Console to stop. A correction nobody is
-//! told about is one they cannot act on.
+//! A script can ask for a window, a dialog, a camera move, the clipboard.
+//! None of those exists in a terminal, and each is refused with a line naming
+//! the call rather than dropped: a script that thinks it asked a question and
+//! got no answer carries on as though the answer were no.
 
 use std::path::Path;
 

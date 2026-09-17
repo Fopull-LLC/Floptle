@@ -1,37 +1,24 @@
-//! File ⏵ Export Game… — stamping a runnable build for any platform.
+//! File ⏵ Export Game…: stamping a runnable build for any platform.
 //!
-//! # What an export ships
+//! An export ships the player, not the editor. `floptle-player` is a separate
+//! binary over the same engine library with the authoring half compiled out
+//! (`editor-ui` in this crate's manifest): no egui, no dock, no Inspector, no
+//! asset browser, no OS file pickers. A build is that binary, the project's
+//! assets, and a `floptle-game.ron` manifest naming the game.
 //!
-//! **The player, not the editor.** `floptle-player` is a separate binary over
-//! the same engine library with the authoring half compiled out (see that
-//! crate, and `editor-ui` in this one's manifest): no egui, no dock, no
-//! Inspector, no asset browser, no OS file pickers. A build is that binary +
-//! the project's assets + a `floptle-game.ron` manifest naming the game.
+//! There is no compiler here. Nothing about a project is compiled in, so the
+//! binary a build needs is fetched rather than produced: it is exactly the
+//! bundle the release pipeline publishes for that platform, and the Hub
+//! installs to run the editor. That is the export-template model, and it is
+//! what lets a Hub install export for every platform, macOS included, with
+//! no engine source and no cross-toolchain on the developer's machine.
 //!
-//! It used to be the editor binary with its chrome hidden behind a
-//! `player_mode` flag, which meant every shipped game carried an authoring
-//! application it could never open, and anything the editor drew under `if
-//! playing` was fixed furniture on somebody's game.
+//! A template is pinned to the editor's own version. Mixing them would ship
+//! a game whose netcode protocol disagrees with the editor that built it.
 //!
-//! # Why there is no compiler here
-//!
-//! **Nothing about a project is compiled in.** So the binary a build needs is not
-//! something to produce — it is something to *fetch*: it is exactly the bundle
-//! the release pipeline already publishes for that platform, and the Hub
-//! already installs to run the editor.
-//!
-//! That is the export-template model (Godot's, Unity's). It replaced a
-//! `cargo build --target …` that needed the engine source checkout and a C
-//! cross-toolchain on the developer's machine — which meant cross-platform
-//! export silently could not work from a Hub install, the ordinary way to run
-//! the engine, and could never work at all for macOS.
-//!
-//! A template is pinned to the editor's own version. Mixing them would ship a
-//! game whose netcode protocol disagrees with the editor that built it.
-//!
-//! The `cargo` path survives only as [`ExportKind::Template::cross`]: a fallback
-//! for a source checkout whose version has no published bundles yet (in
-//! practice, engine development between a version bump and its release).
+//! The `cargo` path survives as [`ExportKind::Template::cross`]: a fallback
+//! for a source checkout whose version has no published bundles yet, which
+//! is engine development between a version bump and its release.
 
 use std::path::{Path, PathBuf};
 

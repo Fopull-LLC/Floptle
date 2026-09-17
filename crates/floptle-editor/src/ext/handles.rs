@@ -1,4 +1,4 @@
-//! `handles.*` — drawing in the world, from an editor extension.
+//! `handles.*`: drawing in the world, from an editor extension.
 //!
 //! Queued during the `onSceneDraw` hook and painted over the Scene view. Every
 //! call is immediate mode: the list is emptied at the top of each frame, so an
@@ -13,16 +13,15 @@
 //! end)
 //! ```
 //!
-//! **These paint over the scene rather than into it.** A handle is an authoring
-//! aid — a region, a path, a measurement — and one hidden behind the wall it is
-//! measuring is no use. That is the same choice `gizmo.*` makes for scripts, and
-//! it is why this projects to the screen rather than going through the 3D line
-//! layer.
+//! These paint over the scene rather than into it. A handle is an authoring
+//! aid (a region, a path, a measurement) and one hidden behind the wall it is
+//! measuring is no use, so this projects to the screen rather than going
+//! through the 3D line layer, as `gizmo.*` does for scripts.
 //!
 //! Everything takes world positions as `vec3(x, y, z)` or any `{x=, y=, z=}`
-//! table, and colours are 0–1 floats set once and inherited by every call after
-//! them — an author draws a group of things in one colour far more often than
-//! they colour each one.
+//! table, and colours are 0–1 floats set once and inherited by every call
+//! after them: an author draws a group of things in one colour far more often
+//! than they colour each one.
 
 use std::cell::RefCell;
 use std::rc::Rc;

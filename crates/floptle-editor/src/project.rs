@@ -2074,34 +2074,35 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
     let _ = floptle_vfs::write(&stamp, "");
 }
 
-/// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.
+/// See [`Editor::resolve_asset_path`]; free so it is unit-testable without an
+/// Editor.
 ///
-/// Resolution order: absolute as-is → as-written relative to the CWD (the legacy
-/// repo-root workflow, where refs spell `assets/…`) → joined onto the project root
-/// (the canonical, portable form: `textures/…`) → the LEGACY-PREFIX RESCUE: a ref
-/// whose first component is the project folder's name (`assets/textures/x.png`
-/// inside a project rooted at `…/assets`) gets that component stripped and re-joined.
-/// The rescue is what keeps old projects working when the editor is launched from
-/// anywhere but the project's parent dir — the Hub launches with an absolute root
-/// and the project dir as CWD, which broke every legacy ref ("everything
-/// dereferenced"). Missing files fall back to the canonical join.
+/// Resolution order: absolute as-is; as-written relative to the CWD (the
+/// repo-root workflow, where refs spell `assets/…`); joined onto the project
+/// root (the canonical, portable form: `textures/…`); then the legacy-prefix
+/// rescue, where a ref whose first component is the project folder's name
+/// (`assets/textures/x.png` inside a project rooted at `…/assets`) gets that
+/// component stripped and re-joined. The rescue is what keeps such refs
+/// working when the editor is launched from anywhere but the project's
+/// parent directory, as the Hub launches it. Missing files fall back to the
+/// canonical join.
 ///
-/// An absolute ref that names nothing gets the STRANDED-ROOT RESCUE: the path is
-/// walked from its tail (`…/Forgery/models/door.glb` → `models/door.glb`) and the
-/// longest tail that exists under the project root wins. That is a ref written
-/// where the project USED to live — another folder, another machine, or the
-/// disk a browser build was exported from — and the file itself came along in
-/// the project. Without it a moved project's doors and NPCs simply don't draw,
-/// and nothing says why (a browser playtest). Windows spellings
-/// (`C:\…`) walk the same way, since on any other platform they are not
-/// even absolute. Only the miss path pays for it.
+/// An absolute ref that names nothing gets the stranded-root rescue: the path
+/// is walked from its tail (`…/Forgery/models/door.glb` → `models/door.glb`)
+/// and the longest tail that exists under the project root wins. That is a
+/// ref written where the project used to live (another folder, another
+/// machine, the disk a browser build was exported from) whose file came along
+/// in the project; without it a moved project's doors and NPCs do not draw,
+/// and nothing says why. Windows spellings (`C:\…`) walk the same way, since
+/// on any other platform they are not even absolute. Only the miss path pays
+/// for it.
 ///
-/// **Whatever the chain answers, it must land inside the project** (or a
-/// linked package's folder). A reference that resolves anywhere else — an
-/// absolute path, a `../..` that happens to exist — is "missing": it resolves
-/// to a path that is not there, and the Console says so once per distinct
-/// reference. Scenes and scripts are data that may have been written by
-/// somebody else, and "load this texture from `/etc`" is not a texture.
+/// Whatever the chain answers must land inside the project or a linked
+/// package's folder. A reference that resolves anywhere else, an absolute
+/// path or a `../..` that happens to exist, is missing: it resolves to a path
+/// that is not there, and the Console says so once per distinct reference.
+/// Scenes and scripts are data that may have been written by somebody else,
+/// and "load this texture from `/etc`" is not a texture.
 pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
     let resolved = resolve_asset_path_anywhere(project_root, path);
     if is_inside_project(project_root, &resolved) {

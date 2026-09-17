@@ -1,24 +1,24 @@
-//! The Lua formatter behind **Format Document** (Alt+Shift+F) and format-on-save.
+//! The Lua formatter behind Format Document (Alt+Shift+F) and format-on-save.
 //!
-//! Deliberately CONSERVATIVE: it fixes the things that are objectively wrong and
-//! touches nothing else. A formatter that re-flows expressions would have to be a
-//! full parser, and the failure mode of getting that wrong on someone's game
-//! script — silently changing what the code means — is far worse than uneven
-//! spacing.
+//! Conservative: it fixes the things that are objectively wrong and touches
+//! nothing else. A formatter that re-flows expressions would have to be a
+//! full parser, and getting that wrong on someone's game script silently
+//! changes what the code means, which is far worse than uneven spacing.
 //!
 //! What it does:
-//! * **re-indents** every line by real block depth (`function` / `if` / `for` /
+//! * re-indents every line by real block depth (`function` / `if` / `for` /
 //!   `while` / `do` / `repeat` / table and paren nesting), including the
 //!   half-outdents `else`, `elseif`, `until` and a closing `}` / `)` want;
-//! * **trims** trailing whitespace, normalises tabs to the indent unit, and ends
+//! * trims trailing whitespace, normalises tabs to the indent unit, and ends
 //!   the file with exactly one newline;
-//! * **collapses** runs of 3+ blank lines to one (two inside a function body
-//!   would be a style choice; three is an accident);
-//! * leaves **strings, long strings and comments byte-identical**, and never
+//! * collapses runs of 3+ blank lines to one (two inside a function body is
+//!   a style choice; three is an accident);
+//! * leaves strings, long strings and comments byte-identical, and never
 //!   reorders, splits or joins a line.
 //!
-//! What it deliberately does not do: insert or remove spaces inside a line, align
-//! anything, add `then`/`end`, or reformat comment text. Your line stays your line.
+//! What it does not do: insert or remove spaces inside a line, align
+//! anything, add `then`/`end`, or reformat comment text. Your line stays
+//! your line.
 //!
 //! `--@noformat` anywhere in the file opts the whole file out (a generated or
 //! deliberately hand-aligned script), and a line ending in `--@keep` keeps its own

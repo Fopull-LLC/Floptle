@@ -1,34 +1,30 @@
-//! `http.*` — an editor extension talking to a server.
+//! `http.*`: an editor extension talking to a server. Present only for a
+//! package declaring [`Permission::Network`](floptle_package::Permission).
 //!
-//! Only present for a package declaring [`Permission::Network`](floptle_package::Permission).
-//!
-//! **Non-blocking, always.** A request goes to a worker thread and the callback
-//! runs on a later editor frame, on the main thread, where the rest of the API
-//! is safe to touch. There is no blocking form, for the same reason the game's
-//! `http.*` has none: the blocking form is the one everybody reaches for, and it
-//! turns a slow server into a frozen editor.
+//! Non-blocking, always. A request goes to a worker thread and the callback
+//! runs on a later editor frame, on the main thread, where the rest of the
+//! API is safe to touch. There is no blocking form, as with the game's
+//! `http.*`: it turns a slow server into a frozen editor.
 //!
 //! ```lua
 //! http.get("https://api.example.com/scenes", { headers = { Authorization = key } },
 //!          function(res) if res.ok then handle(res.body) end end)
 //! ```
 //!
-//! ## Signing in through a browser
-//!
-//! [`http.listen`] is the other half of the browser sign-in every hosted tool
-//! needs: open a URL, and hear the answer come back on a loopback port.
+//! [`http.listen`] is the other half of a browser sign-in: open a URL, and
+//! hear the answer come back on a loopback port.
 //!
 //! ```lua
 //! local port = http.listen(function(req) finish(req.query.token) end)
 //! ed.openUrl("https://example.com/auth?redirect=http://127.0.0.1:" .. port)
 //! ```
 //!
-//! It binds **127.0.0.1 only** — never `0.0.0.0`. A sign-in listener reachable
-//! from the network is a hole in whoever's machine the editor is running on, and
-//! the loopback address is all a browser on that machine needs. It also stops
-//! itself: one listener per package, closed when the package unloads, when the
-//! project closes, or after [`LISTEN_TIMEOUT`] with nothing arriving, so a
-//! forgotten sign-in does not leave a port open all afternoon.
+//! It binds 127.0.0.1 only, never `0.0.0.0`: a sign-in listener reachable
+//! from the network is a hole in the machine the editor runs on, and the
+//! loopback address is all a browser on that machine needs. It also stops
+//! itself: one listener per package, closed when the package unloads, when
+//! the project closes, or after [`LISTEN_TIMEOUT`] with nothing arriving, so
+//! a forgotten sign-in does not leave a port open all afternoon.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};

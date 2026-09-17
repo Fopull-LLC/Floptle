@@ -844,35 +844,30 @@ mod tests {
     }
 }
 
-/// **Every node's draw-time offset for this frame — the one answer both gathers use.**
+/// Every node's draw-time offset for this frame: the one answer both gathers
+/// use.
 ///
-/// Two 2D features write into this and neither moves anything real: a sorting
-/// layer is a nudge in **Z** (what draws in front) and parallax is a nudge in
-/// **X and Y** (how much of the camera's movement a layer keeps). Both apply to
-/// the *drawn* transform only, so a collider stays where it was authored and a
-/// script reads back the position it set.
+/// Two 2D features write into this and neither moves anything real: a
+/// sorting layer is a nudge in Z (what draws in front) and parallax is a
+/// nudge in X and Y (how much of the camera's movement a layer keeps). Both
+/// apply to the drawn transform only, so a collider stays where it was
+/// authored and a script reads back the position it set.
 ///
 /// One map because the draw loops borrow `raster` mutably and cannot call an
 /// `&self` helper once they are running, and because two maps would be two
-/// things to remember to add.
+/// things to remember to add. One function, called by the Scene view and by
+/// every offscreen camera, because a scene that sorts one way in the Scene
+/// view and another in the Game view looks like a rendering bug in whichever
+/// one you are not looking at; `offscreen_draws_the_same_world.rs` holds the
+/// two gathers together.
 ///
-/// **One function, called twice.** The Scene view and every offscreen camera
-/// each gather the world separately, and those two gathers have drifted apart
-/// three times in this file's history — see
-/// `offscreen_draws_the_same_world.rs`, which exists because of it. Sorting is
-/// exactly the kind of thing that drifts silently: a scene that sorts one way in
-/// the Scene view and another in the Game view looks like a rendering bug in
-/// whichever one you are not looking at.
-///
-/// The camera is a parameter, and only parallax reads it. **Y-sorting deliberately
-/// does not**: it ranks a layer's nodes against each other rather than mapping
-/// their coordinates onto a scale, so the answer does not depend on where the
-/// camera is, how much of the world it can see, or where the level was built.
-/// Two views of one scene therefore cannot disagree about what is in front of
-/// what — a stronger guarantee than "we remembered to pass the same camera to
-/// both". Parallax is the opposite by definition: it is a function of the
-/// viewpoint, so the Scene view and the Game view *should* show it differently,
-/// each correct for its own camera.
+/// The camera is a parameter, and only parallax reads it. Y-sorting ranks a
+/// layer's nodes against each other rather than mapping their coordinates
+/// onto a scale, so the answer does not depend on where the camera is or how
+/// much of the world it can see, and two views of one scene cannot disagree
+/// about what is in front of what. Parallax is a function of the viewpoint by
+/// definition, so the Scene view and the Game view show it differently, each
+/// correct for its own camera.
 pub(crate) fn draw_offsets(
     world: &World,
     project: &floptle_scene::ProjectConfigDoc,

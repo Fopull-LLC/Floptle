@@ -1,60 +1,41 @@
-//! `floptle vfx` — **what does this effect actually look like?**
+//! `floptle vfx`: what does this effect look like?
 //!
-//! Renders one particle effect to PNGs with no window, at several moments along
-//! its own timeline, through the editor's own offscreen path.
+//! Renders one particle effect to PNGs with no window, at several moments
+//! along its own timeline, through the editor's own offscreen path. A
+//! `.vfx.ron` says its tracks, its curves and its emission rates; none of
+//! that says what it looks like, and on a machine with no display this is the
+//! way to look.
 //!
-//! ## The gap it closes
+//! An effect happens over time, so a single frame is the wrong question: a
+//! burst reads as a blank frame before it fires and as smoke after. So this
+//! renders a spread of moments across the effect's span and reports the
+//! seconds each one is at, so the next run can ask for a moment between two
+//! of them with `--at`.
 //!
-//! Everything else about an effect can be read: the `.vfx.ron` says its tracks,
-//! its curves, its emission rates. None of that says what it *looks* like, and a
-//! particle effect is nothing but what it looks like. Somebody working without
-//! the editor open — an automated caller, or anybody on a machine with no
-//! display — had no way to see one at all, so the loop was: change a number,
-//! guess, change it again. This is the verb that turns guessing into looking.
+//! The camera is the same in every frame. It is framed once, on the union of
+//! every moment being rendered, and held: two frames at different zooms
+//! cannot be compared, and comparing the start against the middle is the
+//! point. No single frame fills the sheet the way it would on its own;
+//! `--at` on one moment is the close look.
 //!
-//! ## Several moments, one camera
-//!
-//! An effect is a thing that happens over time, so a single frame is the wrong
-//! question: a burst reads as a blank frame before it fires and as smoke after
-//! it, and both are correct. So this renders a spread of moments across the
-//! effect's own span — and reports the seconds each one is at, so the next run
-//! can ask for a moment between two of them with `--at`.
-//!
-//! **The camera is the same in every frame.** It is framed once, on the union of
-//! every moment being rendered, and then held. A camera re-framed per frame
-//! would rescale the effect between pictures, and comparing "the start" against
-//! "the middle" is the entire point — two frames at different zooms cannot be
-//! compared at all, and nothing in the picture would say they were. The cost is
-//! that no single frame fills the sheet the way it would on its own; `--at` on
-//! one moment is the close look.
-//!
-//! ## Each moment is a scrub from zero
-//!
-//! Every frame is an independent [`EffectInstance::simulate_to_at`] from `t = 0`
-//! — the sim is deterministic and seeded, so `--at 0.5` on its own gives exactly
-//! the frame `--frames` would put at 0.5s. That is what makes the contact sheet
-//! and the single frame the same picture, and it is the reason the middle of an
+//! Every frame is an independent [`EffectInstance::simulate_to_at`] from
+//! `t = 0`. The sim is deterministic and seeded, so `--at 0.5` on its own
+//! gives exactly the frame `--frames` puts at 0.5s, and the middle of an
 //! effect can be looked at without watching the start of it first.
 //!
-//! ## Which moments, decided by looking
+//! Which moments is decided by looking. Where the effect is visible is
+//! measured rather than computed ([`visible_window`]): any threshold on the
+//! simulation is right for one effect and wrong for the next, since a burst
+//! whose particles live a seventh of a second and an explosion whose smoke
+//! lingers need different ones. The effect is rendered at thumbnail size
+//! across its whole timeline first, and the frames are spread over the part
+//! where something lands in the picture.
 //!
-//! Where the effect is *visible* is measured, not computed — see
-//! [`visible_window`]. Every version of this that reasoned from the simulation
-//! needed a threshold, and each threshold was right for one effect and wrong for
-//! the next: a burst whose particles live a seventh of a second got four of its
-//! five frames after the sparks had gone out, and an explosion's smoke stayed
-//! "alive" for a fifth of a second past the last frame anything could be seen
-//! in. The effect is rendered at thumbnail size across its whole timeline first,
-//! and the frames are spread over the part where something lands in the picture.
-//!
-//! ## An empty frame is said out loud
-//!
-//! A frame the effect does not reach looks exactly like an effect that does not
-//! work, a texture that did not load, and a camera pointing the wrong way. So
-//! every frame reports how much of the picture the effect changed — measured
-//! against the same view rendered without it, so the number cannot disagree with
-//! the image beside it — and frames with nothing in them are named. This engine
-//! has paid for silent nothing often enough.
+//! An empty frame is said out loud. A frame the effect does not reach looks
+//! exactly like an effect that does not work, a texture that did not load,
+//! and a camera pointing the wrong way. So every frame reports how much of
+//! the picture the effect changed, measured against the same view rendered
+//! without it, and frames with nothing in them are named.
 
 use std::path::{Path, PathBuf};
 

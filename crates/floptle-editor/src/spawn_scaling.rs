@@ -3,27 +3,21 @@
 //!
 //! A streamer, a procedural dungeon, a voxel game and a destructible building
 //! are all the same thing: a script that spawns and destroys nodes in bursts.
-//! Four separate paths in that round trip were `O(scene)` **per node**, which
-//! makes building one chunk `O(scene × chunk)` and the whole level quadratic in
-//! how much of itself is already loaded. None of them was a hot inner loop —
-//! each was a `world.query::<…>()` where a lookup would do, and every one of
-//! them is invisible in a hand-built scene, because a hand-built scene spawns a
-//! bullet at a time.
-//!
-//! ## The measurement
+//! A path in that round trip that is `O(scene)` per node makes building one
+//! chunk `O(scene × chunk)` and the whole level quadratic in how much of
+//! itself is already loaded, and it is invisible in a hand-built scene, which
+//! spawns a bullet at a time.
 //!
 //! `cargo test -p floptle-editor --bin floptle spawn_scaling -- --nocapture`
-//! prints ms to build and to tear down a **1,000-node chunk** at scene sizes of
-//! 1k / 4k / 8k, for the path as it is and for the path as it was.
+//! prints ms to build and to tear down a 1,000-node chunk at scene sizes of
+//! 1k / 4k / 8k, for the path as it is and for a per-node scan.
 //!
-//! ## The guard
-//!
-//! Like `floptle-core/tests/scaling.rs`, the assertion is on a **ratio and not a
-//! duration**: a millisecond threshold on a shared runner is a coin flip. The
-//! chunk is a fixed size, so its cost must not depend on the size of the scene
-//! it lands in — four times the scene, roughly the same time. Anything that
-//! scans the scene per node reads four times as long instead, and that is the
-//! difference the ceiling below is set to catch.
+//! Like `floptle-core/tests/scaling.rs`, the assertion is on a ratio and not
+//! a duration: a millisecond threshold on a shared runner is a coin flip. The
+//! chunk is a fixed size, so its cost must not depend on the size of the
+//! scene it lands in; four times the scene, roughly the same time. Anything
+//! that scans the scene per node reads four times as long, and that is the
+//! difference the ceiling below catches.
 
 use floptle_core::time::Instant;
 

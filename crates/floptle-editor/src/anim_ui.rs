@@ -3769,29 +3769,19 @@ impl EditorTabViewer<'_> {
 
             // ---- keyboard transport (only when no text field is focused, not playing) ----
             //
-            // The comment was right and the test was not. `m.focused().is_none()`
-            // is "NOTHING anywhere in the editor has focus", and egui focuses
-            // every clickable widget you click — so clicking a lane header, a
-            // state button, the ⏵ transport, or any slider in this very panel
-            // switched the whole transport off: copy, cut, paste, Delete, Space,
-            // the arrows and Ctrl+Z all stopped, with no visible reason and no
-            // way back except clicking dead space. That is the reported "it just
-            // stops letting me copy keyframes".
+            // What yields is a text field (a clip name, a numeric entry), which
+            // `text_edit_focused` asks and the window-level `typing` gate uses.
+            // `m.focused().is_none()` would be "nothing anywhere in the editor
+            // has focus", and egui focuses every clickable widget you click, so
+            // clicking a lane header, a state button, the ⏵ transport or any
+            // slider in this panel would switch the whole transport off.
             //
-            // What actually needs to yield is a TEXT field (a clip name, a
-            // numeric entry) — `text_edit_focused` asks exactly that, and it is
-            // the same predicate the window-level `typing` gate uses now.
-            //
-            // The other half is OWNERSHIP, and it is load-bearing rather than
-            // accidental: the window handler routes Ctrl+C/V to the SCENE
-            // whenever the timeline doesn't own the chord, so without this a
-            // paste aimed at the Hierarchy would also drop keyframes at the
-            // playhead. One chord, one owner.
-            //
-            // The owner is the focused tab OR the panel under the pointer. Dock
-            // focus alone left a real hole (see where `sheet_hovered` is set),
-            // and both halves are read by `main.rs` too, so the two sides cannot
-            // disagree about who is about to act.
+            // The other half is ownership. The window handler routes Ctrl+C/V
+            // to the scene whenever the timeline does not own the chord, so
+            // without this a paste aimed at the Hierarchy would also drop
+            // keyframes at the playhead. One chord, one owner: the focused tab
+            // or the panel under the pointer, both halves read by `main.rs`
+            // too, so the two sides cannot disagree about who is about to act.
             let owns_chord = tab_focused || st.sheet_hovered;
             if !playing && owns_chord && !ui.ctx().text_edit_focused() {
                 // egui turns Ctrl+C/X/V into Copy/Cut/Paste EVENTS (the raw key is

@@ -1,30 +1,28 @@
-//! Multi-select Inspector edits — one change, every selected node.
+//! Multi-select Inspector edits: one change, every selected node.
 //!
-//! Selecting twenty crates and setting roughness once is the whole feature. The
-//! difficulty is that the Inspector is an immediate-mode panel that writes
-//! straight into the *primary* selection's components: by the time anything
-//! knows an edit happened, the only record of it is that the component is not
-//! what it used to be.
+//! Selecting twenty crates and setting roughness once is the whole feature.
+//! The Inspector is an immediate-mode panel that writes straight into the
+//! primary selection's components, so by the time anything knows an edit
+//! happened, the only record of it is that the component changed.
 //!
-//! So this works by **difference**, not by interception. [`Snapshot::take`]
-//! clones the primary's components before the panel draws; [`Snapshot::apply`]
-//! compares them afterwards, field by field, and writes only the fields that
-//! actually moved onto every other selected node. Change roughness and only
-//! roughness travels — each node keeps its own colour, its own texture, its own
-//! everything else. That is the behaviour the rest of the industry settled on
-//! and it is the one that survives a mixed selection.
+//! So this works by difference. [`Snapshot::take`] clones the primary's
+//! components before the panel draws; [`Snapshot::apply`] compares them
+//! afterwards, field by field, and writes only the fields that moved onto
+//! every other selected node. Change roughness and only roughness travels;
+//! each node keeps its own colour, its own texture, its own everything else,
+//! which is what survives a mixed selection.
 //!
-//! **The exhaustive destructure is the point.** Every struct's diff starts by
-//! taking the value apart with no `..` in the pattern, so adding a field to
-//! `Material` or `RigidBody` fails to compile *here* until the field is listed.
-//! A knob that silently refused to multi-edit would be indistinguishable from a
-//! knob that multi-edited fine and happened to already agree.
+//! The exhaustive destructure is the point. Every struct's diff takes the
+//! value apart with no `..` in the pattern, so adding a field to `Material`
+//! or `RigidBody` fails to compile here until the field is listed. A knob
+//! that silently refused to multi-edit would be indistinguishable from one
+//! that multi-edited fine and happened to already agree.
 //!
-//! Three things deliberately do not travel, and each has a reason rather than an
-//! omission: a `Terrain`/`MapMesh` id (two nodes pointing at one field is data
-//! loss, not an edit), a scene singleton like the Skybox or PostProcess node
-//! (there is only ever one), and a camera's `active` flag or render-target name
-//! (both are identities, not settings — see [`matter_propagates`]).
+//! Three things do not travel: a `Terrain`/`MapMesh` id (two nodes pointing
+//! at one field is data loss, not an edit), a scene singleton like the Skybox
+//! or PostProcess node (there is only ever one), and a camera's `active` flag
+//! or render-target name (identities, not settings; see
+//! [`matter_propagates`]).
 
 use floptle_core::CelestialBody;
 use floptle_core::Entity;

@@ -1,33 +1,24 @@
-//! `floptle inspect` — **what is in this project?**
+//! `floptle inspect`: what is in this project?
 //!
-//! Every answer the editor can compute in a panel was an answer a script could
-//! not get. This is the read half of that: the project, its scenes, and any node
-//! in them, as text or as JSON.
+//! The read half of the editor's panels, for a script: the project, its
+//! scenes, and any node in them, as text or as JSON.
 //!
-//! ## It reads the files, not a running world
+//! It reads the files, not a running world. The caller is almost always
+//! about to edit those files, so the files are the truth it needs; a verb
+//! that answered from a loaded world would report a hierarchy the caller
+//! cannot find anything to change in. What a running world does belongs to
+//! `run`.
 //!
-//! `docs/export-builds.md` leaves this open, and this is the answer for the read
-//! verbs: the caller is almost always about to *edit those files*, so the files
-//! are the truth it needs. A verb that answered from a loaded world would need
-//! the editor, and would report a hierarchy the caller cannot find anything to
-//! change in. What a *running* world does differently belongs to `run`, when
-//! that exists.
+//! The hierarchy comes from `resolve_parent`: a node's `parent_id` wins over
+//! its positional `parent`, so this prints the same tree the engine builds.
 //!
-//! ## Three things it does not do by hand
-//!
-//! **The hierarchy comes from `resolve_parent`.** A node's `parent_id` wins over
-//! its positional `parent`, and a reader that took `parent` would print a
-//! different tree from the one the engine builds — the exact failure stable ids
-//! were added to prevent.
-//!
-//! **A node type is the name serde writes**, not a table kept here. That name is
+//! A node type is the name serde writes, not a table kept here. That name is
 //! what appears in the `.ron` the caller is about to edit, and taking it from
-//! the serializer means the two cannot drift: a variant renamed in the format is
-//! renamed here in the same commit, whether anybody remembered this file or not.
+//! the serializer means the two cannot drift.
 //!
-//! **A selected node comes back as its whole document.** Summarising it would
-//! decide for the caller which fields matter, and the caller is a program that
-//! wants to patch one of them.
+//! A selected node comes back as its whole document. Summarising it would
+//! decide for the caller which fields matter, and the caller is a program
+//! that wants to patch one of them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

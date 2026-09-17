@@ -1,9 +1,9 @@
-//! script METADATA — what a `.lua` script tells the Inspector about its own
+//! Script metadata: what a `.lua` script tells the Inspector about its own
 //! tunables, read straight from the source.
 //!
-//! A script's `defaults` table already declares its params; this module reads the
-//! **comments around them** so the Inspector can draw a designed panel instead of
-//! a stack of anonymous drag values:
+//! A script's `defaults` table declares its params; this module reads the
+//! comments around them so the Inspector draws a designed panel instead of a
+//! stack of anonymous drag values:
 //!
 //! ```lua
 //! defaults = {
@@ -32,11 +32,11 @@
 //! }
 //! ```
 //!
-//! The annotation vocabulary is the same `--@` convention `--@editorButton`
-//! established, and every part of it is optional — an un-annotated script renders
-//! exactly as it did before, in DECLARATION order rather than alphabetically.
+//! The annotations share the `--@` convention with `--@editorButton`, and
+//! every one is optional: an un-annotated script renders as plain drag
+//! values, in declaration order rather than alphabetically.
 //!
-//! Parsing is source-level (never executing the file) and cached per
+//! Parsing is source-level, never executing the file, and cached per
 //! `(path, mtime)`, because the Inspector asks every frame.
 
 use std::collections::HashMap;

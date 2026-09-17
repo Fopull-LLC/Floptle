@@ -1,27 +1,23 @@
 //! The ▦ Tiles suite's editor-side state: the project's tilesets, the tool the
 //! pointer is holding, and what a click does to a tilemap node.
 //!
-//! The rules live in [`floptle_tiles`] — this is the part that knows about
-//! files, entities, undo and the cursor. Split that way because "does the bucket
-//! fill leak through a diagonal" is a kernel test and "does clicking there paint
-//! the square under the pointer" is not.
+//! The rules live in [`floptle_tiles`]; this is the part that knows about
+//! files, entities, undo and the cursor. "Does the bucket fill leak through a
+//! diagonal" is a kernel test and "does clicking there paint the square under
+//! the pointer" is not.
 //!
-//! ## Layers are nodes
+//! Layers are nodes. A tilemap layer is a `Matter::Tilemap` node: it has a
+//! transform (so Z orders it), a Material (so each layer has its own sheet),
+//! a `Visible` flag, a name and a place in the Hierarchy. The tab's layer
+//! list is a view of the scene's tilemap nodes, and hiding a layer is the
+//! ordinary node operation, so the Hierarchy and the Tiles tab can never
+//! disagree about whether a layer is showing.
 //!
-//! There is no layer list here. A tilemap layer is a `Matter::Tilemap` node: it
-//! already has a transform (so Z orders it), a Material (so each layer has its
-//! own sheet), a `Visible` flag, a name and a place in the Hierarchy. The tab's
-//! layer list is a view of the scene's tilemap nodes, and hiding a layer is the
-//! ordinary node operation — which means the Hierarchy and the Tiles tab can
-//! never disagree about whether a layer is showing.
-//!
-//! ## Undo is scene undo
-//!
-//! A tilemap's squares live in its own `Matter::Tilemap` component, which is
-//! scene state. So a paint stroke is `begin_edit()` + writes, and Ctrl-Z is the
-//! same Ctrl-Z as everything else — no private tile history to keep in step with
-//! the scene's, which is what the terrain and vertex-paint stores had to do
-//! (their data lives outside the scene) and what they pay for it.
+//! Undo is scene undo. A tilemap's squares live in its own `Matter::Tilemap`
+//! component, which is scene state, so a paint stroke is `begin_edit()` plus
+//! writes and Ctrl-Z is the same Ctrl-Z as everything else. The terrain and
+//! vertex-paint stores keep their data outside the scene and pay for it with
+//! a private history kept in step with the scene's.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

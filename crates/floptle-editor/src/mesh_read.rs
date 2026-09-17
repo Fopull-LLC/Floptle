@@ -1,33 +1,24 @@
-//! Reading a node's or an asset's triangles, for a package.
+//! Reading a node's or an asset's triangles, for a package: `mesh.read` in
+//! an editor extension. A tool that exports a level, measures a volume,
+//! uploads geometry for analysis, or bakes anything of its own needs the
+//! triangles, not a bounding box.
 //!
-//! `mesh.read` in an editor extension. A tool that exports a level, measures a
-//! volume, uploads geometry for analysis, or bakes anything of its own needs the
-//! actual triangles, and until this the only shape a package could see was a
-//! bounding box.
-//!
-//! ## Where the geometry comes from
-//!
-//! The same places [`crate::nav_bake`]'s gather reads it, and deliberately by
-//! the same calls: `gltf_import::geometry` for a model,
+//! The geometry comes from the same places [`crate::nav_bake`]'s gather reads
+//! it, by the same calls: `gltf_import::geometry` for a model,
 //! `floptle_map::triangulate` for a map mesh, `matter_catalog::primitive_mesh`
-//! for a built-in shape. Two readers that disagreed about what a node's
-//! geometry is would be the [`two-gathers-must-agree`] shape all over again —
-//! a package would measure one thing and the navmesh another, and both would
-//! look right on their own.
-//!
-//! ## Local space, not world
+//! for a built-in shape. Two readers that disagreed would have a package
+//! measure one thing and the navmesh another, both looking right on their
+//! own.
 //!
 //! Positions come back in the node's own space, which is what a mesh file
-//! holds and what an exporter wants. `scene.info(id)` carries the transform for
-//! anybody who needs to place them. Returning world space would bake the
-//! current transform into data a tool might be about to save.
-//!
-//! ## Flat arrays
+//! holds and what an exporter wants; `scene.info(id)` carries the transform
+//! for anybody who needs to place them. World space would bake the current
+//! transform into data a tool might be about to save.
 //!
 //! `positions` is `{x, y, z, x, y, z, …}` rather than a table per vertex. A
-//! table per vertex costs one of LuaJIT's ~8000 registry slots each and
-//! `create_table` **panics** when they run out — the same reason `nav.areas` is
-//! flat. A hundred-thousand-vertex model would take the editor down.
+//! table per vertex costs one of the VM's few thousand registry slots each
+//! and `create_table` panics when they run out, the same reason `nav.areas`
+//! is flat; a hundred-thousand-vertex model would take the editor down.
 
 use floptle_core::{Entity, Matter, World};
 use floptle_render::MeshData;

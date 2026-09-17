@@ -1,45 +1,32 @@
-//! `floptle shot` — **what does it look like?**
+//! `floptle shot`: what does it look like?
 //!
-//! Renders a scene to a PNG with no window, through the editor's own offscreen
-//! path. This is the verb that turns "I cannot see" into "I can look", and it is
-//! the other half of `run`: one says whether the project works, this one says
-//! what it looks like while it does.
+//! Renders a scene to a PNG with no window, through the editor's own
+//! offscreen path. The other half of `run`: one says whether the project
+//! works, this one says what it looks like.
 //!
-//! ## It is `render_world_into`, not a third gather
+//! It is `Editor::render_world_into`, the path every view that is not the
+//! Scene view comes through: the docked Game panel, camera previews, render
+//! targets, the GI bake. `offscreen_draws_the_same_world` holds the editor's
+//! two gathers to the same world, since a `shot` that drew a slightly
+//! different one would be worse than none; its entire value is being
+//! believed.
 //!
-//! Every view that is not the Scene view already comes through
-//! `Editor::render_world_into` — the docked Game panel, camera previews, render
-//! targets, the GI bake. This is one more of those, and that is not a
-//! convenience: `offscreen_draws_the_same_world` exists because the editor's two
-//! gathers have drifted apart five times, each time with the same symptom — the
-//! thing is right there in one view and missing from the other. A `shot` that
-//! drew a slightly different world would be worse than no `shot` at all,
-//! because its entire value is being believed.
+//! The whole post chain, not the tonemap alone, because post-processing is
+//! the project's look: the scene's own `PostProcess` node, the depth-of-field
+//! focus resolved against the scene, screen ambient occlusion, any
+//! `stage post` shaders it compiled, and the retro presentation, since a
+//! pixel-art project composites at its own resolution and upscales. Two are
+//! left out: motion blur needs a previous frame and this is a single one, and
+//! the accessibility filters are one person's display setting.
 //!
-//! ## The whole chain, not the tonemap
+//! It shows the scene's active camera, the view the game has, or a different
+//! one by name with `--camera`. A scene with no camera has no view and says
+//! so rather than inventing one; an angle picked by a tool is a picture of the
+//! tool's opinion.
 //!
-//! Post-processing is the project's look, so a picture without it is a picture
-//! of a different game: the scene's own `PostProcess` node, the depth-of-field
-//! focus resolved against the scene, screen ambient occlusion, any `stage post`
-//! shaders it compiled, and — because a pixel-art project composites at its own
-//! resolution and upscales — the retro presentation. This passed the tonemap
-//! alone for a while and defaulted the rest, which is a quiet way of being
-//! wrong: the picture still looks like a picture.
-//!
-//! Two are left out on purpose. **Motion blur** needs a previous frame and this
-//! is a single one. **The accessibility filters** are one person's display
-//! setting, and a PNG of a project should not carry them.
-//!
-//! ## What it shows
-//!
-//! The scene's **active camera**, because that is the view the game has. A
-//! different one by name with `--camera`. A scene with no camera has no view,
-//! and says so rather than inventing one — an angle picked by a tool is a
-//! picture of the tool's opinion.
-//!
-//! It renders one frame of an *unplayed* scene: nothing has moved, no `start`
-//! has run. That is the right default for "what did my edit do", and it is why
-//! this is a separate verb from `run` rather than a flag on it.
+//! It renders one frame of an unplayed scene: nothing has moved, no `start`
+//! has run. That is the right answer to "what did my edit do", and it is why
+//! this is a separate verb from `run`.
 
 use std::path::{Path, PathBuf};
 

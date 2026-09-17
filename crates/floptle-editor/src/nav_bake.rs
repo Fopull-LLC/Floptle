@@ -1,32 +1,26 @@
 //! Baking a scene's collision geometry into a navmesh.
 //!
 //! The bake itself lives in `floptle-nav`, which knows nothing about scenes:
-//! triangles in, polygons out. This is the half that knows what a scene is —
+//! triangles in, polygons out. This is the half that knows what a scene is:
 //! which nodes count as ground, where they are in the world, and where the
 //! result goes.
 //!
-//! # What counts
-//!
-//! **Anything a character would collide with.** A node is baked when it carries
-//! the collidable switch (or a static rigidbody, or is terrain), which is the
-//! rule that stays right as a level changes: a wall built today blocks a path
-//! today, without anybody remembering to tag it.
+//! Anything a character would collide with counts. A node is baked when it
+//! carries the collidable switch, or a static rigidbody, or is terrain, so a
+//! wall built today blocks a path today without anybody tagging it.
 //!
 //! Three things take a node back out, in this order:
 //!
-//! 1. [`NavMeshExclude`](floptle_core::NavMeshExclude) — this one, never, for
-//!    any reason. A glass floor collides and is not ground.
+//! 1. [`NavMeshExclude`](floptle_core::NavMeshExclude): this one, never. A
+//!    glass floor collides and is not ground.
 //! 2. The node's layer is not in the volume's `layers` filter (empty = all).
 //! 3. The node is switched off. An invisible wall standing where a disabled
-//!    node used to be is the bug people spend an evening on, and it is just as
-//!    bad in a navmesh as in the physics sim.
+//!    node was is as bad in a navmesh as in the physics sim.
 //!
-//! # Where it goes
-//!
-//! `<project>/nav/<scene>.<id>.fnav`, beside the terrain fields and the light
-//! bake, for the same reason: it is a build artefact measured in hundreds of
-//! kilobytes and a `.ron` is a thing people read. The `id` is the node's, not
-//! its entity index, because entity indices die on undo and reload.
+//! The result goes to `<project>/nav/<scene>.<id>.fnav`, beside the terrain
+//! fields and the light bake: a build artefact measured in hundreds of
+//! kilobytes, and a `.ron` is a thing people read. The `id` is the node's,
+//! not its entity index, because entity indices die on undo and reload.
 
 use floptle_core::math::{DVec3, Mat4, Vec3};
 use floptle_core::{Entity, Matter, World};

@@ -1,34 +1,25 @@
-//! The strips that float over the Scene view — the tool palette and the gizmo
-//! bar — and the state that says where each one sits.
+//! The strips that float over the Scene view, the tool palette and the gizmo
+//! bar, and the state that says where each one sits.
 //!
-//! ## They belong to the view, not to the window
+//! They belong to the view, not to the window. Every position here is
+//! measured from the Scene tab's own rect, which `scene_ui` caches for
+//! picking, so a bar anchored to a corner sits in the viewport's corner and
+//! never over the Inspector or the tab strip; `constrain_to` keeps a panel
+//! inside the view even while the dock is being resized.
 //!
-//! The gizmo bar used to be an `Area` with `.anchor(Align2::RIGHT_TOP, …)`,
-//! which is the top-right of the **whole egui screen**. In a one-panel layout
-//! that happens to look right; in any real dock layout it does not, and the bar
-//! sat over the Inspector, over the tab strip, over whatever else owned that
-//! corner — covering things that had nothing to do with the viewport. Every
-//! position here is measured from the Scene tab's own rect, which `scene_ui`
-//! already caches for picking, and `constrain_to` keeps a panel inside it even
-//! while the dock is being resized.
+//! Nothing moves on its own. A docked panel stays welded to its corner. A
+//! floating one keeps the exact offset it was dropped at, in points from the
+//! view's top-left rather than a fraction of the view, which would slide the
+//! panel every time the dock divider moved. Shrinking the view can push a
+//! panel against an edge (`constrain_to` doing its job) but the stored offset
+//! is untouched, so growing the view back puts it where it was.
 //!
-//! ## Nothing moves on its own
-//!
-//! A docked panel stays welded to its corner. A floating one keeps the exact
-//! offset it was dropped at, in points from the view's top-left — not a
-//! fraction of the view, which would slide the panel every time the dock
-//! divider moved. Shrinking the view can push a panel against an edge (that is
-//! `constrain_to` doing its job) but the stored offset is untouched, so growing
-//! the view back puts it where it was.
-//!
-//! ## The chrome is one row, not a title bar
-//!
-//! Both panels are a single line of controls, and a title bar above them would
-//! double the height of the thing whose whole complaint is that it covers the
-//! scene. So the grip, the dock menu and the collapse button sit *in* the row,
-//! and a collapsed panel shrinks to grip + name + reopen — a small tab parked
-//! in its corner, out of the way but never hidden somewhere you have to
-//! remember a menu to find.
+//! The chrome is one row, not a title bar. Both panels are a single line of
+//! controls, and a title bar above them would double the height of the thing
+//! whose whole complaint is that it covers the scene. So the grip, the dock
+//! menu and the collapse button sit in the row, and a collapsed panel shrinks
+//! to grip, name and reopen: a small tab parked in its corner, out of the way
+//! but never hidden behind a menu.
 
 use serde::{Deserialize, Serialize};
 

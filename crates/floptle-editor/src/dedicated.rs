@@ -1,11 +1,9 @@
-//! The **dedicated server** (`docs/multiplayer.md` §12, 2e) — a project's
-//! authoritative simulation with no window, no GPU and nobody sitting at it.
+//! The dedicated server: a project's authoritative simulation with no window,
+//! no GPU and nobody sitting at it.
 //!
-//! Until now every session was hosted by an editor or a player's game, which is
-//! fine for friends-and-a-lobby-code and wrong for anything that has to stay up:
-//! the world ends when the host closes the laptop, and the host is also a player
-//! with an unfair zero-latency view of it. This runs the same simulation with
-//! neither problem.
+//! A session hosted by an editor or a player's game ends when the host closes
+//! the laptop, and the host is also a player with an unfair zero-latency view
+//! of the world. This runs the same simulation with neither problem.
 //!
 //! ```text
 //! floptle serve <project> [--scene scenes/x.ron]
@@ -13,56 +11,34 @@
 //!                [--interest 150] [--budget 16384]
 //! ```
 //!
-//! ## Why this is a few hundred lines and not a few thousand
+//! There is one authoritative tick in this engine and it is the editor's.
+//! `Editor::play_step` is the gameplay tick (scripts, animation, physics,
+//! terrain edits, collision events) and `Editor::net_tick` is the host half of
+//! it: every [`floptle_script::NetCmd`] a server script can issue, the
+//! lag-compensation history `net.rewind` re-poses combat against, interest
+//! management and its line-of-sight occluder, the join policy, `net.kick`,
+//! `net.setRelevant`, voice forwarding and scene switching. None of that is
+//! display code, so a dedicated server is the editor's engine half with no
+//! window and no local player, hosting. A second implementation that
+//! re-derived a subset could never be kept in step.
 //!
-//! **There is one authoritative tick in this engine and it is the editor's.**
-//! `Editor::play_step` is the gameplay tick — scripts, animation, physics,
-//! terrain edits, collision events — and `Editor::net_tick` is the host half of
-//! it: every one of the ten [`floptle_script::NetCmd`] variants a server script
-//! can issue, the lag-compensation history `net.rewind` re-poses combat
-//! against, interest management and its line-of-sight occluder, the join
-//! policy, `net.kick`, `net.setRelevant`, voice forwarding and scene switching.
-//! None of that is display code, and none of it needs a GPU: `floptle run`
-//! already drives exactly this loop headlessly.
-//!
-//! So a dedicated server is not a second implementation of a server. It is the
-//! editor's engine half with **no window and no local player**, hosting.
-//!
-//! The version this replaced re-derived a subset once and never caught up. It
-//! drained **no** `NetCmd` at all — so `net.spawn`, `net.despawn`,
-//! `net.setOwner`, `net.kick`, `net.setRelevant` and a server-originated
-//! `net.send` were silent no-ops on `floptle serve` — had no rewind history,
-//! passed `&[]` terrain volumes, hard-coded uniform gravity, never loaded a
-//! project's packages, and never stepped animation or nav. Every one of those
-//! is a thing the tick above has done for releases; the subset simply did not
-//! call it. A subset cannot be kept in step by discipline, which is why the fix
-//! is to delete it rather than to extend it.
-//!
-//! ## The one thing a dedicated server does that a host does not
-//!
-//! **Nobody is sitting at it, so slot #1 is not spoken for.** In an editor- or
-//! player-hosted session the convention is "Predicted node #1 = the host, #2+ =
-//! joiners", because slot #1's driver is at the keyboard. Here there is no
-//! keyboard: leaving slot #1 reserved would put an avatar in the world that
-//! nobody controls and no client predicts, and the first player to join would
-//! spectate their own body. So [`Editor::dedicated`] leaves every authored slot
-//! **unowned**, hands them out from #1 in node order as peers arrive
+//! Nobody is sitting at it, so slot #1 is not spoken for. In an editor- or
+//! player-hosted session Predicted node #1 is the host and #2 onward are
+//! joiners, because slot #1's driver is at the keyboard. Here there is no
+//! keyboard, and a reserved slot #1 would put an avatar in the world that
+//! nobody controls and no client predicts, with the first player to join
+//! spectating their own body. So [`Editor::dedicated`] leaves every authored
+//! slot unowned, hands them out from #1 in node order as peers arrive
 //! ([`claim_free_slot`]), and takes them back when a peer drops
-//! ([`release_slots`]) — while a slot nobody owns stays out of the script
-//! passes entirely, because no player is driving it.
+//! ([`release_slots`]). A slot nobody owns stays out of the script passes,
+//! since no player is driving it.
 //!
-//! ## What it is not
+//! It hosts `Authority` and `Predicted` sessions. It does not host `Rollback`
+//! matches: a rollback session has every peer simulating every tick, so its
+//! host is a referee and a relay, and for a fighting game that is one of the
+//! players. If a scene's nodes are `Rollback` this says so and refuses.
 //!
-//! It hosts **`Authority` and `Predicted`** sessions — the MMO direction, which
-//! is what a dedicated server is actually for. It does not host `Rollback`
-//! matches, and that is a design position rather than a gap: a rollback session
-//! has every peer simulating every tick, so its "host" is a referee and a relay,
-//! and for a fighting game that is one of the players. If a scene's nodes are
-//! `Rollback` this says so and refuses, instead of running a session none of its
-//! clients can use.
-//!
-//! There is no rendering, no audio and no input here: nobody is watching, and a
-//! server that spent time on any of it would be spending it on nothing.
+//! There is no rendering, no audio and no input here: nobody is watching.
 
 use std::path::{Path, PathBuf};
 

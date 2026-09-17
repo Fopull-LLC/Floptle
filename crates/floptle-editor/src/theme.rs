@@ -5,30 +5,24 @@ use crate::ide::{LUA_API_WORDS, LUA_KEYWORDS};
 
 /// The three colours that mean something, shared with fopull.com.
 ///
-/// **Colour is a signal, not decoration.** A resting panel is monochrome; these
+/// Colour is a signal, not decoration. A resting panel is monochrome; these
 /// appear for a rating, a permission, a compatibility warning, or the one
-/// primary action, and nowhere else. That rule is what makes them readable —
-/// a page where everything is coloured says nothing.
+/// primary action, and nowhere else. A page where everything is coloured
+/// says nothing.
 ///
-/// They are the same values the website uses, which is deliberate and is why
-/// they live in one named place instead of being spelled out at each site. Two
-/// of them came *from* this editor and went to the site; `WARN` came back the
-/// other way, a more saturated amber than the muddy gold that was here. Change
-/// one and it changes everywhere in the editor — and then tell the site, or the
-/// two drift and "the same green" stops being the same green.
+/// They are the same values the website uses, in one named place. Change one
+/// and it changes everywhere in the editor; then tell the site, or "the same
+/// green" stops being the same green.
 ///
-/// Deliberately not theme-derived. A rating being good and a package asking for
-/// the network are facts about the thing, not about the chrome around it, and
-/// they have to keep meaning the same under every theme. Everything that is
-/// about the chrome — panel fills, text, hairlines — must still come from
-/// `ui.visuals()`.
+/// Not theme-derived. A rating being good and a package asking for the
+/// network are facts about the thing, not about the chrome around it, and
+/// they keep meaning the same under every theme. Everything that is about the
+/// chrome (panel fills, text, hairlines) comes from `ui.visuals()`.
 ///
-/// **The accent is the one that stayed with the theme**, and it is the
-/// exception that shows the rule. The site picked a teal to match this
-/// editor's default look, but an accent is chrome: somebody who chose GitHub
-/// Light should get that theme's accent, not a fixed teal sitting in it. So the
-/// editor reads `ui.visuals().selection.stroke.color` for "switched on" and
-/// "the primary action", and only the three signals below are pinned.
+/// The accent stays with the theme. Somebody who chose GitHub Light gets that
+/// theme's accent, not a fixed teal sitting in it, so the editor reads
+/// `ui.visuals().selection.stroke.color` for "switched on" and "the primary
+/// action", and only the three signals below are pinned.
 pub(crate) mod signal {
     use egui::Color32;
 

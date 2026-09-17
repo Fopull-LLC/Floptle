@@ -83,40 +83,33 @@ pub(crate) fn primitive_draw(
     Some((mesh, instance_of_mat(model, &mp)))
 }
 
-/// WATER. The instance a `Matter::WaterVolume` draws: a
-/// translucent, specular surface sized to the volume the SOLVER uses, so what
-/// you see is what floats you — the sea and the buoyancy can't drift apart,
-/// which is exactly what happened while the ocean was a hand-placed sphere the
-/// game kept in step by hand.
+/// Water. The instance a `Matter::WaterVolume` draws: a translucent, specular
+/// surface sized to the volume the solver uses, so what you see is what
+/// floats you and the sea and the buoyancy cannot drift apart.
 ///
-/// A frozen sea drops the translucency and the shine: ice is a surface you stand
-/// on, and it should not look like something you could swim through.
+/// A frozen sea drops the translucency and the shine: ice is a surface you
+/// stand on, and it should not look like something you could swim through.
 ///
-/// Asked by both gathers. It was inline in the Scene view's gather only, so an
-/// ocean was there while you edited and gone the moment you looked through the
-/// game's camera — the fourth time this file's two gathers have disagreed about
-/// whether something exists, and the reason this is a function.
+/// Asked by both gathers, so an ocean that is there while you edit is there
+/// through the game's camera too. `None` for any other matter, and for a
+/// shape that is not registered.
 ///
-/// `None` for any other matter, and for a shape that is not registered.
-///
-/// `material` is the node's own `Material` component, if any.
-/// **Absent → drawn exactly as before this card**: the hand-tuned defaults
-/// below, untouched. Present → those defaults are the FALLBACK and the
-/// material's own `specular`/`specular_strength`/`shininess` win outright, the
-/// same "the node's Material wins whole" rule the rest of this file uses
-/// (`part_look_rule`). `alpha` is the one field that does not follow that rule:
-/// every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
-/// that carries one for some other reason (today, that is almost always
-/// `retro: (exempt: true)` and nothing else) must not go opaque just because
-/// nobody touched the number. A frozen volume stays opaque ice regardless of
-/// what the material says.
+/// `material` is the node's own `Material` component, if any. Absent, the
+/// hand-tuned defaults below draw the water. Present, those defaults are the
+/// fallback and the material's own `specular`/`specular_strength`/`shininess`
+/// win outright, the same "the node's Material wins whole" rule the rest of
+/// this file uses (`part_look_rule`). `alpha` is the one field that does not
+/// follow it: every unauthored `Material` defaults to `alpha = 1.0`, and a
+/// water volume that carries one for some other reason (almost always
+/// `retro: (exempt: true)` and nothing else) must not go opaque because
+/// nobody touched the number. A frozen volume stays opaque ice regardless.
 ///
 /// `raster` doubles as "is a Raster available at all" (a thumbnail render may
-/// have none) and, when a material is present, is what turns its `retro`
-/// flags, `reflectivity` and the rest of the PBR surface extras into an
-/// `ext_index` — the same store `material_draw` interns into, so a water
-/// volume marked `retro: (exempt: true)` reads as exempt through the exact
-/// path everything else does, in both gathers that call this function.
+/// have none) and, when a material is present, turns its `retro` flags,
+/// `reflectivity` and the rest of the PBR surface extras into an `ext_index`,
+/// the same store `material_draw` interns into, so a water volume marked
+/// `retro: (exempt: true)` reads as exempt through the exact path everything
+/// else does, in both gathers.
 pub(crate) fn water_draw(
     matter: &Matter,
     material: Option<&Material>,

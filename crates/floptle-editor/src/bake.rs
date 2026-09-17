@@ -1,27 +1,18 @@
-//! `floptle bake gi` — **bake a scene's light probes, and exit.**
+//! `floptle bake gi`: bake a scene's light probes, and exit.
 //!
-//! Its help has always said "and exit". It did not: the flag set a marker, the
-//! editor opened a window, and a frame hook noticed the marker, ran the bake a
-//! slice at a time and asked the window to close when it finished. On a build
-//! server that is not a slow bake, it is no bake at all — there is no display to
-//! open, so the process dies before the first slice.
+//! Nothing about the bake needs a window. It renders the scene through the
+//! same offscreen path `shot` uses, writes its result to disk itself, and is
+//! sliced into frame-sized pieces so the editor stays responsive; here the
+//! slices run back to back instead of one per refresh, and on a build server
+//! with no display the bake still happens.
 //!
-//! Nothing about the bake needed the window. It renders the scene through the
-//! same offscreen path `shot` uses, it writes its result to disk itself, and it
-//! is already sliced into frame-sized pieces so the editor stays responsive. All
-//! the window contributed was a clock to hang the slices on, and a loop here is
-//! a better one: it runs the slices back to back instead of one per refresh.
+//! The editor keeps its own path: a bake you can watch, that you can cancel,
+//! with a progress bar. This is the same bake with nobody watching.
 //!
-//! The editor keeps its own path exactly as it was — a bake you can watch, that
-//! you can cancel, with a progress bar. This is the same bake with nobody
-//! watching.
-//!
-//! `floptle bake nav` is the same idea for the navmesh, and it needs no
-//! adapter at all: a bake is triangles and numbers, and the triangles are read
-//! straight off disk. It was the one bake with no way to run it from a script,
-//! which meant a level's navmesh could only ever be made by a person sitting in
-//! front of the editor — and a level whose geometry is generated is a level
-//! whose navmesh has to be too.
+//! `floptle bake nav` is the same idea for the navmesh, and needs no adapter
+//! at all: a bake is triangles and numbers, and the triangles are read
+//! straight off disk. A level whose geometry is generated is a level whose
+//! navmesh has to be too.
 
 use std::path::Path;
 

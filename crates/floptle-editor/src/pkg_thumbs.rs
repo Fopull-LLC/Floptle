@@ -1,29 +1,23 @@
-//! Thumbnails for the 📦 Packages catalogue.
-//!
-//! A catalogue of art is unbrowsable as a list of paragraphs. This is the piece
-//! that lets the browser be a grid of pictures: fetch each row's `thumbnail`,
+//! Thumbnails for the 📦 Packages catalogue: fetch each row's `thumbnail`,
 //! decode it, hand egui a texture, and remember which ones came to nothing so
 //! the browser does not ask again every frame.
 //!
-//! # Everything happens off the UI thread, once
+//! Everything happens off the UI thread, once. A grid of forty rows would
+//! otherwise be forty blocking HTTPS requests inside a frame. Each thumbnail
+//! is fetched on its own worker and collected when it arrives; until then the
+//! cell draws its placeholder, which is a real state and not a gap. Every URL
+//! is asked for exactly once per session, including the ones that fail: a
+//! 404 asked sixty times a second is a 404 asked sixty times a second.
 //!
-//! A grid of forty rows would otherwise be forty blocking HTTPS requests inside
-//! a frame. Each thumbnail is fetched on its own worker and collected when it
-//! arrives; until then the cell draws its placeholder, which is a real state and
-//! not a gap. **Every URL is asked for exactly once per session** — including
-//! the ones that fail, because a 404 asked sixty times a second is a 404 asked
-//! sixty times a second.
+//! A thumbnail is untrusted input: a file named by a stranger's manifest and
+//! served from a host they chose. So there is a size ceiling before decoding,
+//! a pixel ceiling after, and a hard cap on how many are held at once. A
+//! package cannot make the editor spend an unbounded amount of memory by
+//! pointing `thumbnail:` at something enormous.
 //!
-//! # A thumbnail is untrusted input
-//!
-//! It is a file named by a stranger's manifest and served from a host they
-//! chose. So: a size ceiling before decoding, a pixel ceiling after, and a hard
-//! cap on how many are held at once. A package cannot make the editor spend an
-//! unbounded amount of memory by pointing `thumbnail:` at something enormous.
-//!
-//! Local files are read for **installed** packages, which is what makes a
-//! thumbnail work offline, and while an author is still writing the package that
-//! has one.
+//! Local files are read for installed packages, which is what makes a
+//! thumbnail work offline, and while an author is still writing the package
+//! that has one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

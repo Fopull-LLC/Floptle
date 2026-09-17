@@ -1,43 +1,34 @@
-//! The rollback driver (`docs/multiplayer.md` §7 P3) — the half of
-//! rollback that actually runs a simulation.
+//! The rollback driver: the half of rollback that runs a simulation.
 //!
-//! [`floptle_net::Rollback`] is the bookkeeping brain: it decides *whether* and
-//! *how far* to roll back. This module owns everything it deliberately doesn't
-//! — the state ring, the re-simulation loop, and the side-effect gate — because
-//! all of that means running `fixedUpdate` and stepping physics bodies.
+//! [`floptle_net::Rollback`] decides whether and how far to roll back. This
+//! module owns the state ring, the re-simulation loop and the side-effect
+//! gate, since all of that means running `fixedUpdate` and stepping physics
+//! bodies. Where the predictor's replay loop (`net.rs`) rewinds one entity to
+//! the server's word and replays its unacknowledged inputs, this rewinds
+//! every rollback node together and replays every peer's inputs, in a fixed
+//! order, with all three kinds of per-tick state restored around it.
 //!
-//! It is a generalization of the predictor's replay loop (`net.rs`): where that
-//! rewinds one entity to the server's word and replays its unacknowledged
-//! inputs, this rewinds every rollback node together and replays every peer's
-//! inputs, in a fixed order, with all three kinds of per-tick state restored
-//! around it.
+//! A saved tick is physics, script and input, and dropping any one produces a
+//! rollback that looks like it works:
 //!
-//! ## The three state kinds, and why all three
-//!
-//! A saved tick (§2.4) is physics + script + input, and dropping any one of them
-//! produces a rollback that looks like it works:
-//!
-//! - **Physics** — [`floptle_physics::BodySnapshot`] plus the node `Transform`
-//!   (rotation isn't in the body snapshot).
-//! - **Script** — each script's `snapshot()` value, deep-copied by the engine in
+//! - Physics: [`floptle_physics::BodySnapshot`] plus the node `Transform`
+//!   (rotation is not in the body snapshot).
+//! - Script: each script's `snapshot()` value, deep-copied by the engine in
 //!   both directions so a replay cannot corrupt the state it restored from.
-//! - **Input tick-state** — [`floptle_input::InputSystem::snapshot_tick`]. This
-//!   is the one that's easy to forget: `consume` records a *decision* a script
-//!   made, not a function of the inputs, so it cannot be recomputed — only
-//!   restored. Skip it and a buffered punch fires twice, or a quarter-circle
-//!   that matched once fails to match on the replay. Neither shows up as an
-//!   error; both show up as a desync.
+//! - Input tick-state: [`floptle_input::InputSystem::snapshot_tick`].
+//!   `consume` records a decision a script made, not a function of the
+//!   inputs, so it cannot be recomputed, only restored. Without it a buffered
+//!   punch fires twice, or a quarter-circle that matched once fails to match
+//!   on the replay, and both show up as a desync rather than an error.
 //!
-//! ## Live and replayed ticks run the same code
-//!
-//! [`RollbackDriver::advance`] and the replay loop both end in
-//! [`RollbackDriver::simulate_tick`]. That is not tidiness — it is the whole
-//! correctness argument. The acceptance test asserts that re-simulating a span
-//! reproduces an uninterrupted run *bit for bit*, and that can only hold by
-//! construction: same input injection, same hook order, same physics call.
-//! It is also why the driver takes the rollback bodies away from the whole-world
-//! physics step ([`floptle_physics::Sim::set_driven_bodies`]) rather than
-//! stepping them one way live and another way in a replay.
+//! Live and replayed ticks run the same code: [`RollbackDriver::advance`] and
+//! the replay loop both end in [`RollbackDriver::simulate_tick`]. That is the
+//! whole correctness argument. Re-simulating a span reproduces an
+//! uninterrupted run bit for bit only by construction: same input injection,
+//! same hook order, same physics call. It is also why the driver takes the
+//! rollback bodies away from the whole-world physics step
+//! ([`floptle_physics::Sim::set_driven_bodies`]) rather than stepping them one
+//! way live and another way in a replay.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -353,28 +344,13 @@ impl RollbackDriver {
         0
     }
 
-    /// The state checksum for a saved tick (§6): the body snapshots and script
-    /// state the driver holds for it, folded into one FNV-1a digest.
-    ///
-    /// Script state is hashed through [`floptle_net::NetValue::canonical_hash`],
-    /// which sorts table pairs first. Without that, two peers in perfect
-    /// agreement would report a desync roughly every time Lua handed them one
-    /// table's keys in a different order — an alarm that cries wolf is worse
-    /// than no alarm, because everyone learns to ignore it.
-    ///
-    /// Transforms are deliberately not hashed. Rotation on a fighter is derived
-    /// presentation (which way the model faces), and a checksum that fires on
-    /// divergence the simulation cannot feel is the same cried wolf.
-    /// The same fold `state_hash` performs, but **labelled** and one hash per
-    /// leaf value instead of one hash for everything.
-    ///
-    /// A checksum knows exactly which value diverged and used to carry none of
-    /// it: `net.on("desync")` fired with no payload at all — not the tick, not
-    /// the node, not the script, not the key. So a match that ended itself left
-    /// the game unable to tell a player whether their connection or their build
-    /// was at fault, and finding the real cause (one Lua number smoothed with
-    /// `math.exp`, which is not required to agree across libm implementations)
-    /// took a day of reading engine source.
+    /// The same fold `state_hash` performs, but labelled and one hash per leaf
+    /// value instead of one hash for everything, so `net.on("desync")` can
+    /// carry the tick, the node, the script and the key that diverged. A match
+    /// that ends itself can then tell a player whether their connection or
+    /// their build was at fault, and a cause like one Lua number smoothed with
+    /// `math.exp` (which is not required to agree across libm implementations)
+    /// is named rather than read out of engine source.
     ///
     /// Costs nothing in a healthy session: it is only ever built once a
     /// mismatch has already been declared fatal.
@@ -439,6 +415,18 @@ fn breakdown_of(
 }
 
 impl RollbackDriver {
+    /// The state checksum for a saved tick: the body snapshots and script
+    /// state the driver holds for it, folded into one FNV-1a digest.
+    ///
+    /// Script state is hashed through
+    /// [`floptle_net::NetValue::canonical_hash`], which sorts table pairs
+    /// first; otherwise two peers in perfect agreement would report a desync
+    /// whenever Lua handed them one table's keys in a different order, and an
+    /// alarm that cries wolf is one everyone learns to ignore.
+    ///
+    /// Transforms are not hashed. Rotation on a fighter is derived
+    /// presentation (which way the model faces), and a checksum that fires on
+    /// divergence the simulation cannot feel is the same cried wolf.
     pub fn state_hash(&self, tick: u64) -> Option<u64> {
         let s = self.ring.iter().find(|s| s.tick == tick)?;
         let mut h = floptle_net::Fnv::new();
@@ -602,44 +590,32 @@ impl RollbackDriver {
         Some(next)
     }
 
-    /// Re-simulate the last few ticks from the ring and check they come out the
-    /// same.
+    /// Re-simulate the last few ticks from the ring and check they come out
+    /// the same.
     ///
-    /// ## What this catches, and why nothing else can
+    /// The rollback contract is "put back everything the simulation can
+    /// read". A game that reads something `snapshot()`/`restore()` does not
+    /// carry breaks it invisibly on one machine, and the cross-peer checksum
+    /// fires minutes later on the other one, about a value already
+    /// overwritten. A node handle cached in a Lua local at the top of one
+    /// script's hook and read by a different script during the correction is
+    /// enough: `restore()` cannot put a Lua local back, so a re-simulated
+    /// tick computes a hit the original pass did not, from byte-identical
+    /// rollback state, on under 1% of ticks, which survives a playtest and
+    /// then voids a session.
     ///
-    /// The rollback contract is "put back everything the simulation can read".
-    /// A game that reads something `snapshot()`/`restore()` does not carry
-    /// breaks it — and until now there was **no way to find that out except by
-    /// losing a live match**, because the failure is invisible on one machine
-    /// and silent until the cross-peer checksum fires, minutes later, on the
-    /// other one, about a value that has already been overwritten.
-    ///
-    /// Fofighter shipped one: a node handle cached in a Lua local at the top of
-    /// one script's hook and read by a different script during the correction.
-    /// `restore()` cannot put a Lua local back and the driver never knew it
-    /// existed, so a re-simulated tick computed a hit the original pass did
-    /// not, from byte-identical rollback state. It showed up as 8-to-15
-    /// divergent points in 1500 — under 1%, which is exactly why it survived a
-    /// playtest and then voided a session.
-    ///
-    /// ## Why it is a re-simulation and not a comparison of the live replay
-    ///
-    /// The obvious cheap check — hash a correction's replayed ticks against
-    /// their originals — does not work: a correction changes an input, so the
-    /// state legitimately differs from that tick onward and every later tick
-    /// inherits the difference. There is nothing to compare against.
-    ///
-    /// So this runs its own replay with **provably identical inputs** and the
-    /// same anchor. Same inputs, same start, same code: any difference is the
-    /// simulation reading something the snapshot does not carry. No network
-    /// condition explains it, which is what makes the report unambiguous.
+    /// A re-simulation rather than a comparison of the live replay: a
+    /// correction changes an input, so the state legitimately differs from
+    /// that tick onward and there is nothing to compare against. This runs
+    /// its own replay with provably identical inputs and the same anchor, so
+    /// any difference is the simulation reading something the snapshot does
+    /// not carry, and no network condition explains it.
     ///
     /// Returns the named values that diverged, `(tick, label, before, after)`.
     /// Empty is the healthy answer.
     ///
     /// Costs one extra state hash and `depth` extra ticks of simulation per
-    /// call, which is why the caller runs it on a slow cadence and only when
-    /// asked for.
+    /// call, so the caller runs it on a slow cadence and only when asked for.
     pub fn audit_replay(
         &mut self,
         ctx: &mut Ctx,

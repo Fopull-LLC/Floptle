@@ -1,27 +1,22 @@
-//! `floptle lint --vec3` — what a project would have to change to switch its
-//! `vec3` to `fast` (ADR-0028, Phase 3; platform card).
+//! `floptle lint --vec3`: what a project would have to change to switch its
+//! `vec3` to `fast`.
 //!
-//! **This is a textual scan, and it says so.** A Lua file has no types to read,
-//! so nothing here can be complete, and a lint that implied otherwise would be
-//! worse than none: somebody would take a clean report as a guarantee, flip the
-//! setting, and meet the one case it could not see. What it does is find the
-//! shapes that actually appear in this engine's scripts, name them with a file
-//! and a line, and be honest in the summary about what it cannot know.
+//! A textual scan, and it says so. A Lua file has no types to read, so
+//! nothing here can be complete, and a clean report is not a guarantee. It
+//! finds the shapes that appear in this engine's scripts, names them with a
+//! file and a line, and says in the summary what it cannot know.
 //!
 //! Two things change when a project moves from `exact` to `fast`:
 //!
-//! 1. **A vector stops being mutable.** `v.x = 1` raises. The fix is
-//!    `v = v:withX(1)`, which exists in both modes precisely so a project can
-//!    be moved over before the setting changes.
-//! 2. **`type(v)` stops saying `"userdata"`** and starts saying `"vector"`.
-//!    A script branching on that answer silently takes the other branch — no
-//!    error, no log, which is the failure shape this whole migration is under
-//!    orders not to add to.
+//! 1. A vector stops being mutable. `v.x = 1` raises. The fix is
+//!    `v = v:withX(1)`, which exists in both modes so a project can be moved
+//!    over before the setting changes.
+//! 2. `type(v)` stops saying `"userdata"` and says `"vector"`. A script
+//!    branching on that answer silently takes the other branch.
 //!
-//! Everything else — the methods, the operators, the constructor forms, what a
-//! method accepts as an argument — is identical between the two, and that
-//! identity is asserted by a shared corpus in `floptle-script`'s `math_api`
-//! rather than promised here.
+//! Everything else (the methods, the operators, the constructor forms, what a
+//! method accepts as an argument) is identical between the two, and that
+//! identity is asserted by a shared corpus in `floptle-script`'s `math_api`.
 
 use std::path::{Path, PathBuf};
 

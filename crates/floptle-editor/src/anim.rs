@@ -2258,31 +2258,28 @@ mod tests {
         assert_eq!(anim_subtree(&w, &registry, capsule), vec![capsule, model]);
     }
 
-    /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
-    /// a bone translates the vertices weighted to it while others stay put — a two-joint
-    /// blend interpolates. This is the math that makes a vertex-skinned mesh animate.
     /// The CPU skinning cost, at a stated character count: still the fallback
     /// path's cost.
     ///
-    /// Nothing draws through this any more unless the skinning store refused the
-    /// part or a custom `.flsl` material owns the draw. The number below is what
-    /// those cases still pay, and what every character paid before v0.35.0; the
-    /// after-number lives in `gpu_skinning_leaves_the_cpu_a_fraction_of_the_work`,
-    /// which measures both halves in one run so the comparison is honest.
+    /// Nothing draws through this unless the skinning store refused the part
+    /// or a custom `.flsl` material owns the draw. The number below is what
+    /// those cases pay; the GPU path's number lives in
+    /// `gpu_skinning_leaves_the_cpu_a_fraction_of_the_work`, which measures
+    /// both halves in one run so the comparison is honest.
     ///
-    /// Ignored by default because it is a measurement, not a guard: it prints a
-    /// duration, and a duration on a shared runner is a coin flip. Run it when
-    /// you are about to change this:
+    /// Ignored by default because it is a measurement, not a guard: it prints
+    /// a duration, and a duration on a shared runner is a coin flip. Run it
+    /// when you are about to change this:
     ///
     /// ```text
     /// cargo test -p floptle-editor --bin floptle cpu_skinning_cost -- --ignored --nocapture
     /// ```
     ///
-    /// What it does not measure is the other half of the cost: every skinned
-    /// entity's deformed vertices are re-uploaded to its own vertex buffer every
-    /// frame, which is bandwidth rather than arithmetic. A GPU path removes both,
-    /// and the upload is the half that scales with vertex count rather than with
-    /// core count.
+    /// It does not measure the other half of the cost: every skinned entity's
+    /// deformed vertices are re-uploaded to its own vertex buffer every frame,
+    /// bandwidth rather than arithmetic. The GPU path removes both, and the
+    /// upload is the half that scales with vertex count rather than with core
+    /// count.
     #[test]
     #[ignore = "a measurement, not a guard — see the doc comment"]
     fn cpu_skinning_cost_per_character() {
@@ -2413,6 +2410,9 @@ mod tests {
         );
     }
 
+    /// CPU skinning: at the bind pose the deform is the identity (no garble),
+    /// and moving a bone translates the vertices weighted to it while others
+    /// stay put; a two-joint blend interpolates.
     #[test]
     fn cpu_skin_bind_is_identity_and_bones_deform() {
         let v = |p: [f32; 3]| floptle_render::Vertex { pos: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] };

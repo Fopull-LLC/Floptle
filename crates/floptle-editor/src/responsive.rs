@@ -1,42 +1,33 @@
-//! **Nothing goes off the edge.**
+//! Nothing goes off the edge.
 //!
-//! A dock panel is whatever width the user dragged it to, and the answer to a
-//! narrow one is never "the right-hand half of the controls is somewhere past
-//! the border". A panel that is too thin should get *smaller* controls, then
-//! *wrapped* controls, then *stacked* ones — and only ever stop shrinking when
-//! a chip can no longer hold a glyph. It must never stop being fully visible.
+//! A dock panel is whatever width the user dragged it to. A panel that is too
+//! thin gets smaller controls, then wrapped controls, then stacked ones, and
+//! only stops shrinking when a chip can no longer hold a glyph. It never stops
+//! being fully visible. egui draws a fixed-width row at the width it asked
+//! for and the renderer throws away the part past the clip rect, with nothing
+//! in the frame saying so; this module is what stops that.
 //!
-//! The panels this module replaced were laid out with fixed widths inside a
-//! non-wrapping [`egui::Ui::horizontal`]: a 58 px label column plus four 74 px
-//! chips is 350 px of row that a 240 px panel simply cannot show. egui does not
-//! complain about that — the row is *drawn*, at the width it asked for, and the
-//! part past the clip rect is thrown away by the renderer. Nothing in the frame
-//! says so, which is why this shipped.
+//! The three behaviours, in the order they kick in:
 //!
-//! ## The three behaviours, in the order they kick in
-//!
-//! 1. **Shrink.** Equal-width chips fill the row exactly instead of holding a
+//! 1. Shrink. Equal-width chips fill the row exactly instead of holding a
 //!    fixed width, down to [`MIN_CHIP_W`].
-//! 2. **Wrap.** Below that, the strip breaks onto as many lines as it needs,
-//!    with the chips on every line still equal-width — [`columns`] is the whole
-//!    decision and it is a pure function, so it is tested directly.
-//! 3. **Stack.** Below [`MIN_CONTENT_W`] of usable room the label column costs
+//! 2. Wrap. Below that, the strip breaks onto as many lines as it needs,
+//!    with the chips on every line still equal-width. [`columns`] is the
+//!    whole decision and a pure function, so it is tested directly.
+//! 3. Stack. Below [`MIN_CONTENT_W`] of usable room the label column costs
 //!    more than it aligns, so [`row`] moves the caption onto its own line and
 //!    hands the controls the full width.
 //!
 //! A panel narrower than one chip still gets that chip, clipped to the panel:
-//! the floor is a floor on *layout*, not a minimum size we impose on the user.
-//! Dragging a panel down to a sliver is allowed, and it degrades rather than
-//! breaking.
+//! the floor is on layout, not a minimum size imposed on the user. A panel
+//! dragged to a sliver degrades rather than breaking.
 //!
-//! ## Why the guard is a shape test
-//!
-//! [`tests::overflow`] runs a panel headlessly at a ladder of widths and walks
-//! the frame's [`egui::epaint::ClippedShape`]s, flagging any whose bounding box
-//! crosses its own clip rect horizontally. That is exactly the condition "the
-//! user cannot see this", stated once, in terms of what actually reached the
-//! renderer — so it catches a fixed width, an unwrapped row and an over-long
-//! label with one assertion and needs no per-widget bookkeeping.
+//! The guard is a shape test. [`tests::overflow`] runs a panel headlessly at
+//! a ladder of widths and walks the frame's [`egui::epaint::ClippedShape`]s,
+//! flagging any whose bounding box crosses its own clip rect horizontally:
+//! "the user cannot see this", stated once, in terms of what reached the
+//! renderer. It catches a fixed width, an unwrapped row and an over-long
+//! label with one assertion.
 
 use egui::{Label, RichText, Ui, Vec2};
 
@@ -607,6 +598,12 @@ pub(crate) mod tests {
     /// is a user who dragged the splitter almost shut — which is allowed.
     pub(crate) const LADDER: [f32; 6] = [420.0, 320.0, 260.0, 200.0, 160.0, 120.0];
 
+    /// Tall enough that no panel this drives is cut off at the bottom. A tab
+    /// with every disclosure open runs to twice 2000: the part below the fold
+    /// would never be laid out, so never checked, and the scroll area's own
+    /// clipped bottom edge would show up as an overflow of its own.
+    const PANEL_H: f32 = 8000.0;
+
     /// Run `add` in a panel `width` wide and report everything it drew that
     /// falls outside the **panel**.
     ///
@@ -621,20 +618,11 @@ pub(crate) mod tests {
     /// content lost from it.
     ///
     /// The exemption has to be written this way round. Measuring the visible
-    /// part (rect ∩ clip) against the panel reads as the obvious simplification
-    /// and is **wrong**: where nothing clipped early the clip rect is the panel,
-    /// so the intersection is inside the panel by definition and the guard can
-    /// never fire at all. That mistake was caught by
-    /// `the_old_fixed_width_layout_does_not_fit_and_the_harness_says_so`, which
-    /// is the entire reason to keep a test whose job is to fail.
-    /// Tall enough that no panel this drives is cut off at the bottom.
-    ///
-    /// It was 2000, and a tab with every disclosure open runs to twice that: the
-    /// part below the fold was never laid out, so it was never checked — and the
-    /// scroll area's own clipped bottom edge showed up as an overflow of its
-    /// own, which is a false positive on top of the blind spot.
-    const PANEL_H: f32 = 8000.0;
-
+    /// part (rect ∩ clip) against the panel is wrong: where nothing clipped
+    /// early the clip rect is the panel, so the intersection is inside the
+    /// panel by definition and the guard can never fire.
+    /// `the_old_fixed_width_layout_does_not_fit_and_the_harness_says_so`
+    /// catches that, which is the reason to keep a test whose job is to fail.
     pub(crate) fn overflow(width: f32, mut add: impl FnMut(&mut Ui)) -> Vec<String> {
         let ctx = egui::Context::default();
         let input = || egui::RawInput {

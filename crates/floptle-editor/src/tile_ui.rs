@@ -1,38 +1,30 @@
-//! The **▦ Tiles** tab: the tool strip, the layer list, the palette, and the
+//! The ▦ Tiles tab: the tool strip, the layer list, the palette, and the
 //! tileset editor.
 //!
-//! Laid out in the order you work in — LAYER, TOOL, PALETTE, TILE, AUTOTILE —
-//! with the same visual language as the ▦ Model tab (a rule under each section
-//! title, equal-width chips for anything that picks a mode, equal-width buttons
-//! for anything that acts).
+//! Laid out in the order you work in (layer, tool, palette, tile, autotile)
+//! with the same visual language as the ▦ Model tab: a rule under each
+//! section title, equal-width chips for anything that picks a mode,
+//! equal-width buttons for anything that acts.
 //!
-//! ## The palette is the tileset editor
-//!
-//! There is no separate "tileset properties" window. Click a tile in the palette
-//! and its collision, tags and autotile mask are right there under it. That is
-//! deliberate and it is the whole answer to "make it easy to set up collisions
-//! and autotiling": both are per-tile facts, the palette is where you are looking
-//! at a tile, so both are one click from the tile.
+//! The palette is the tileset editor. Click a tile in the palette and its
+//! collision, tags and autotile mask are right there under it: both are
+//! per-tile facts, the palette is where you are looking at a tile, so both
+//! are one click from the tile.
 //!
 //! The palette also draws what it knows, over the art:
 //!
-//! * a solid tile gets a collision overlay in the shape of its collider (so a
-//!   half-tile collider looks like a half tile, not like a tick);
+//! * a solid tile gets a collision overlay in the shape of its collider, so a
+//!   half-tile collider looks like a half tile, not like a tick;
 //! * an autotiled tile gets a 3×3 neighbourhood diagram showing the mask it
 //!   answers.
 //!
-//! That second one is what makes the autotile presets safe to offer. A preset has
-//! to guess somebody's sheet layout, and a wrong guess otherwise reads as bad art
-//! — with the diagram you can see which tiles disagree and fix one in a click.
+//! The diagram is what makes the autotile presets safe to offer. A preset
+//! guesses a sheet layout, and with the diagram you can see which tiles
+//! disagree and fix one in a click.
 //!
-//! ## Every section is always here
-//!
-//! The sections that need a tileset used to return before drawing so much as
-//! their own heading, so a layer without one showed a panel with no TILE and no
-//! AUTOTILE in it at all. That is indistinguishable from an engine that has
-//! neither, and it was reported as exactly that. A section that cannot act now
-//! says what it would do and what it is waiting for; the panel's shape does not
-//! change under you.
+//! Every section is always here. A section that cannot act says what it
+//! would do and what it is waiting for, so a layer without a tileset still
+//! shows TILE and AUTOTILE, and the panel's shape does not change under you.
 
 use egui::{Color32, RichText};
 use floptle_core::{Entity, Matter, TileXform};

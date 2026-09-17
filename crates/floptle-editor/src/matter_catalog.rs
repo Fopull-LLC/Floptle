@@ -263,31 +263,26 @@ pub(crate) struct NewGroup {
     pub(crate) items: &'static [NewEntry],
 }
 
-/// **The catalog is data, and this is the only copy of it.**
+/// The catalog is data, and this is the only copy of it.
 ///
-/// It was a hundred and eighty lines of `if ui.button(..)` in one flat list, and
-/// a flat list is what a menu becomes when nobody decides it is a menu: twenty
-/// items deep, every node type the engine has ever had, with the four a 2D game
-/// wants scattered between a nav link and a reflection probe. Every new node
-/// type made it worse, and there was no way to say so — a list has no shape to
-/// check.
+/// Grouped, and the groups are the ones a project thinks in. 2D and 3D are
+/// the top-level split because that is the first thing true about a game and
+/// the last thing that changes about it; the rest are the systems you reach
+/// for when you are already thinking about that system. A flat list of every
+/// node type the engine has ever had, twenty items deep, is a menu you have
+/// to read every time.
 ///
-/// So: **grouped, and the groups are the ones a project thinks in.** 2D and 3D
-/// are the top-level split because that is the first thing true about a game and
-/// the last thing that changes about it; the rest are the systems you reach for
-/// when you are already thinking about that system.
+/// Two rules hold it together, both tested:
 ///
-/// Two rules that hold it together, both testable and both tested:
-///
-/// * **The order is fixed.** It is not sorted by what the scene looks like, not
-///   promoted by what you used last, and the 2D group does not jump to the top
-///   because the camera is orthographic. A menu whose contents move is a menu
-///   you have to read every time; muscle memory is worth more than relevance.
-/// * **Nothing is hidden.** Grouping is not filtering. Every node type the
-///   engine can spawn is in here exactly once, which
-///   `every_node_type_is_in_the_new_menu` asserts against `MatterDoc` itself, so
-///   adding a variant without giving it a home is a build failure rather than a
-///   node nobody can create.
+/// * The order is fixed. Not sorted by what the scene looks like, not
+///   promoted by what you used last, and the 2D group does not jump to the
+///   top because the camera is orthographic. Muscle memory is worth more
+///   than relevance.
+/// * Nothing is hidden. Grouping is not filtering: every node type the engine
+///   can spawn is in here exactly once, which
+///   `every_node_type_is_in_the_new_menu` asserts against `MatterDoc` itself,
+///   so adding a variant without giving it a home is a build failure rather
+///   than a node nobody can create.
 pub(crate) const NEW_CATALOG: &[NewGroup] = &[
     NewGroup {
         title: "▦ 2D",

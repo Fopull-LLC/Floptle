@@ -1,72 +1,50 @@
-//! `floptle run` — **does the project actually work?**
+//! `floptle run`: does the project work?
 //!
 //! Runs a project's scripts and physics for a bounded stretch of simulated
-//! time, with no window and no GPU, and reports what happened.
+//! time, with no window and no GPU, and reports what happened. `floptle
+//! check` proves the files load; this proves the game runs without raising,
+//! and it runs in CI.
 //!
-//! Until this existed, nothing could answer that question without a person.
-//! `--play` opens a window, so a project's scripts could not be run by CI at
-//! all; `floptle check` proves the files load, which is a different and much
-//! weaker claim than "the game runs without raising".
-//!
-//! ## It is the editor's own play loop
-//!
-//! `Editor::play_step` — the whole of Play mode: the scene-transition queue,
-//! script hot-reload, the frame pass, the fixed-rate tick pass, physics, the
-//! script host's command queues — turns out to touch neither the GPU nor egui.
-//! So this verb does not reimplement playing a game; it opens the project the
-//! way the editor opens it, presses Play, and calls the same function the frame
+//! It is the editor's own play loop. `Editor::play_step` is the whole of Play
+//! mode (the scene-transition queue, script hot-reload, the frame pass, the
+//! fixed-rate tick pass, physics, the script host's command queues) and it
+//! touches neither the GPU nor egui. So this verb opens the project the way
+//! the editor opens it, presses Play, and calls the same function the frame
 //! loop calls, with a fixed `dt`.
 //!
-//! ## Time is fixed, on purpose
+//! Time is fixed. `--seconds` and `--frames` are converted to a whole number
+//! of steps at a fixed `dt`, never read off the wall clock, so two runs of the
+//! same project give the same answer. A bug that only appears at a particular
+//! frame rate will not appear here.
 //!
-//! `--seconds`/`--frames` are converted to a whole number of steps at a fixed
-//! `dt`, never read off the wall clock. A verb whose answer changes between two
-//! runs of the same project is not worth having: the point is to be able to say
-//! "this raised" and be believed. It does mean a bug that only appears at a
-//! particular frame rate will not appear here, which is the honest cost and is
-//! said out loud rather than discovered.
+//! No rendering, so nothing that depends on a drawn frame happens. Models are
+//! not registered (`import_model` bails without a GPU), so anything reading
+//! back a rendered mesh sees nothing. Physics is unaffected, since a mesh
+//! collider's triangles are read from the file, and so are scripts, input
+//! actions, terrain and the tick pass.
 //!
-//! ## What a headless run does not have
+//! No input. Every key reads as up and every action as inactive, so a project
+//! whose `start` waits for a press sits still and reports nothing wrong. "No
+//! errors" from this verb means "nothing raised", not "the game is good".
 //!
-//! **No rendering, so nothing that depends on a drawn frame happens.** Models
-//! are not registered (`import_model` bails without a GPU), so anything reading
-//! back a *rendered* mesh sees nothing. Physics is unaffected — a mesh
-//! collider's triangles are read from the file, not from the GPU registry — and
-//! so are scripts, input actions, terrain and the tick pass.
+//! `perf.counts()` is honest about the same gap. `scripts` and `physics` are
+//! real numbers here; `draws`, `instances`, `lights`, `nodes` and the rest of
+//! the render-gather counts stay `0`, since there is no gather to have counted
+//! them. A project asserting a script or physics budget in CI gets a real
+//! answer from `run`; one asserting on draw calls or light counts wants
+//! `floptle shot` or `--play`.
 //!
-//! **No input.** Every key reads as up and every action as inactive, so a
-//! project whose `start` waits for a press will sit still and report nothing
-//! wrong. That is correct and is also why "no errors" from this verb means
-//! "nothing raised", not "the game is good".
+//! `--timing` is the one thing here that is a wall clock. It changes nothing
+//! about how far the run goes or what it answers; it reports what the steps
+//! cost, as a distribution of real milliseconds per step, p50/p95/p99/max. A
+//! distribution rather than a mean, because a mean cannot tell a steady frame
+//! from one that is fine four times out of five and stalls on the fifth, and
+//! a collector pause is exactly that shape.
 //!
-//! **`perf.counts()` is honest about the same gap.** `scripts` and `physics`
-//! are real numbers here — they cost the same whether or not anything ever
-//! draws them. `draws`, `instances`, `lights`, `nodes` and the rest of the
-//! render-gather counts stay `0`, for the same reason nothing above draws:
-//! there is no gather to have counted them. That is a real "not measured
-//! here", not a bug — a project asserting a script or
-//! physics budget in CI gets a real answer from `run`; one asserting on draw
-//! calls or light counts wants `floptle shot` or `--play` instead.
-//!
-//! ## `--timing`: the one thing here that is a wall clock
-//!
-//! The paragraph above says the span never comes off the clock, and it still
-//! does not — `--timing` changes nothing about how far the run goes or what it
-//! answers. It only reports what the steps COST: a distribution of real
-//! milliseconds per step, p50/p95/p99/max.
-//!
-//! **A distribution, not a mean**, and for the reason `present_stats` prints
-//! one: a mean cannot tell a steady frame from one that is fine four times out
-//! of five and stalls on the fifth, and a collector pause is exactly that
-//! shape. It is why this exists at all — the ADR-0028 VM comparison needs
-//! frame p95 on a real game, and `--seconds` reports simulated time, which is
-//! the same number on both VMs by construction.
-//!
-//! What is inside the measurement is the engine's frame: world streaming and
-//! `play_step`. The runner's own bookkeeping — draining the log, folding the
-//! profiler — is outside it, so the number is the game's cost and not this
-//! file's. What is not inside it is anything a window would have done: no
-//! render, no present, no vsync. A step here is the CPU half of a frame.
+//! Inside the measurement is the engine's frame: world streaming and
+//! `play_step`. The runner's own bookkeeping (draining the log, folding the
+//! profiler) is outside it, and so is anything a window would do: no render,
+//! no present, no vsync. A step here is the CPU half of a frame.
 
 use std::path::Path;
 
@@ -139,24 +117,17 @@ impl Span {
 /// percentiles are the point: a run with 2415 frames out of ~5100 over 8 ms
 /// is one a mean reports as comfortable.
 ///
-/// ## Why a paused step is not a sample
+/// A paused step is not a sample. A session held at the start of Play while
+/// the terrain worker builds the ground steps with `dt = 0`; those steps are
+/// cheap and not gameplay, and counting them would answer "what does a frame
+/// of this game cost" with a distribution a third of which is the loading
+/// screen. The hold ends when the terrain does, so two runs of one project
+/// would pause for different numbers of steps and put their p95 at different
+/// points of the real workload.
 ///
-/// A step is not a frame. A session held at the start of Play while the terrain
-/// worker builds the ground steps happily with `dt = 0` — that is the same
-/// stepped-but-not-simulated gap, and `summary_line` already
-/// says it out loud. Those steps are cheap and they are not gameplay, so
-/// counting them here would answer "what does a frame of this game cost" with a
-/// distribution a third of which is the loading screen.
-///
-/// It is not only an understatement, it is one whose SIZE varies: the hold ends
-/// when the terrain does, so two runs of one project — let alone two builds of
-/// the engine — pause for different numbers of steps and put their p95 at
-/// different points of the real workload. A comparison drawn between two such
-/// runs is measuring the terrain worker.
-///
-/// So the paused ones are counted and excluded, and the count is reported. Not
-/// dropped silently: a caller who sees 400 of 900 steps excluded has learned
-/// something true about the run.
+/// So the paused ones are counted and excluded, and the count is reported: a
+/// caller who sees 400 of 900 steps excluded has learned something true about
+/// the run.
 struct Timing {
     /// One entry per step that ADVANCED the session clock, in the order they ran.
     samples: Vec<f32>,

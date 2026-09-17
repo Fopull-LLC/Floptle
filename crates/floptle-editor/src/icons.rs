@@ -1,30 +1,23 @@
 //! The editor's icon glyphs, in one place.
 //!
-//! egui's bundled font stack (Ubuntu + a *subset* of NotoEmoji + an icon font,
-//! plus Hack for geometry) covers far less than the emoji block suggests. A
-//! glyph it lacks renders as a **tofu square**, and nothing warns you — the
-//! label just looks broken to whoever opens the editor.
+//! egui's bundled font stack (Ubuntu, a subset of NotoEmoji, an icon font,
+//! Hack for geometry) covers far less than the emoji block suggests. A glyph
+//! it lacks renders as a tofu square, and nothing warns you.
 //!
 //! So every icon lives here as a named constant, and [`ALL`] names the ones
-//! shared across tabs. But the test that guards them ([`tests`]) does not read
-//! that list: it scans **every string literal in every source file**, because
-//! the icon that ships broken is always the one nobody remembered to register.
+//! shared across tabs. The test that guards them ([`tests`]) does not read
+//! that list: it scans every string literal in every source file, because the
+//! icon that ships broken is always the one nobody remembered to register.
 //!
-//! ## Ask the charmaps, not egui
-//!
-//! `epaint::Fonts::has_glyph` is not usable for this. It answers by resolving
-//! the character to a font face and comparing that face against the one holding
-//! the replacement glyph — so a character whose real home happens to *be* that
-//! face reports missing (upstream marks the case with a TODO). An earlier pass
-//! trusted it and swapped away icons that were fine: 🎮 ⚠ 🔍 ✏ ✨ 🎧 ✔ were all
-//! recorded here as dead, and all of them draw correctly.
-//!
-//! The test below instead reads each bundled font's **character map** with
-//! `skrifa` — the same crate epaint uses to resolve a glyph — which is the fact
-//! the renderer actually acts on. To settle a case by eye rather than by
-//! assertion, `cargo run -p floptle-editor --example glyph_probe` draws every
-//! glyph in the editor to `target/glyph_probe.png` above a control row of known
-//! -missing codepoints, so "broken" has a reference to be compared against.
+//! Ask the charmaps, not egui. `epaint::Fonts::has_glyph` answers by
+//! resolving the character to a font face and comparing that face against the
+//! one holding the replacement glyph, so a character whose real home is that
+//! face reports missing: 🎮 ⚠ 🔍 ✏ ✨ 🎧 ✔ all draw correctly and all report
+//! missing. The test reads each bundled font's character map with `skrifa`,
+//! the crate epaint resolves a glyph with, which is the fact the renderer
+//! acts on. To settle a case by eye, `cargo run -p floptle-editor --example
+//! glyph_probe` draws every glyph in the editor to `target/glyph_probe.png`
+//! above a control row of known-missing codepoints.
 
 // Some of these appear only inside `dock.rs`'s title literals (`concat!` can't
 // take a const) — they still belong here, because [`ALL`] is what the coverage

@@ -29,26 +29,15 @@ use crate::Editor;
 #[cfg(feature = "editor-ui")]
 use crate::{Egui, PreviewTarget, PreviewView, scene_hit};
 
-/// Create a `w×h` offscreen color+depth target the scene renders into, and register its
-/// color with egui so a tab/inspector can draw it as an `Image`.
-///
-/// The color texture is the sRGB **surface** format, so the raster/raymarch/post
-/// pipelines (all built against `surface_format()`) render into it unchanged and the
-/// render-target view stays sRGB. But egui is handed a NON-sRGB *view* of the same
-/// texture: egui-wgpu treats a sampled native texture as already gamma-encoded and
-/// decodes it once in its shader, so sampling through an sRGB-format view would decode a
-/// second time (hardware sRGB→linear) and display the offscreen view ~40% too dark
-/// (`srgb_to_linear` applied twice). A linear view makes egui sample the stored bytes
-/// verbatim, so the docked Game view / camera POV / asset preview match the surface. On a
-/// non-sRGB surface `remove_srgb_suffix()` is a no-op, so this stays correct there too.
-/// The colour + depth textures an offscreen scene render needs.
+/// The colour and depth textures an offscreen scene render needs.
 ///
 /// Shared, because there are two callers and the depth usage flags are
 /// load-bearing in a way that is invisible from the call site: without
-/// `COPY_DST` the opaque depth prepass cannot prime the buffer, and every effect
-/// that reads it — contact shadows, shoreline foam, reflections, lamp shadows —
-/// silently takes its "nothing to report" branch. A second copy of this that
-/// drifted by one flag would render a different world and look almost right.
+/// `COPY_DST` the opaque depth prepass cannot prime the buffer, and every
+/// effect that reads it (contact shadows, shoreline foam, reflections, lamp
+/// shadows) silently takes its "nothing to report" branch. A second copy of
+/// this that drifted by one flag would render a different world and look
+/// almost right.
 ///
 /// `extra_color` is what the caller adds on top: egui's targets are sampled
 /// (`TEXTURE_BINDING`, added here), and `floptle shot`'s is read back
@@ -92,6 +81,19 @@ pub(crate) fn offscreen_textures(
     (color, depth)
 }
 
+/// Create a `w×h` offscreen colour+depth target the scene renders into, and
+/// register its colour with egui so a tab or inspector can draw it as an
+/// `Image`.
+///
+/// The colour texture is the sRGB surface format, so the raster, raymarch and
+/// post pipelines (all built against `surface_format()`) render into it
+/// unchanged and the render-target view stays sRGB. egui is handed a non-sRGB
+/// view of the same texture: egui-wgpu treats a sampled native texture as
+/// already gamma-encoded and decodes it once in its shader, so sampling
+/// through an sRGB-format view would decode a second time and display the
+/// offscreen view ~40% too dark. A linear view makes egui sample the stored
+/// bytes verbatim, so the docked Game view, camera POV and asset preview match
+/// the surface. On a non-sRGB surface `remove_srgb_suffix()` is a no-op.
 #[cfg(feature = "editor-ui")]
 fn make_offscreen_target(
     gpu: &Gpu,

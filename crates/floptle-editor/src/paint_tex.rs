@@ -1,55 +1,50 @@
-//! Texture painting — the resolution-independent companion to vertex painting.
+//! Texture painting: the resolution-independent companion to vertex painting.
 //!
-//! A brush stamps into a per-node paint texture that renders as a **transparent overlay**
-//! on top of the node, so painted detail is independent of the mesh's polygon count (fine
-//! detail on a flat low-poly wall) while the node underneath keeps rendering exactly as it
-//! always did — same mesh, same UVs, same textures, same tiling, same vertex colors.
+//! A brush stamps into a per-node paint texture that renders as a transparent
+//! overlay on top of the node, so painted detail is independent of the mesh's
+//! polygon count (fine detail on a flat low-poly wall) while the node
+//! underneath keeps rendering exactly as it does: same mesh, same UVs, same
+//! textures, same tiling, same vertex colours.
 //!
-//! # Why an overlay (and not a baked canvas)
+//! An overlay rather than a baked canvas, because resampling the node's base
+//! texture into the paint atlas changes the base's look: the atlas texel grid
+//! is aligned per-triangle and sized per-world-area, so a nearest-sampled
+//! pixel-art texture comes back with its texels at a different angle and
+//! scale. The paint texture starts fully transparent, dabs deposit colour and
+//! alpha, and the GPU alpha-blends it over the ordinary draw; unpainted
+//! texels contribute nothing, so the base is pixel-exact by construction.
 //!
-//! The first cut seeded a canvas by RESAMPLING the node's base texture into the paint
-//! atlas. That changes the base's look: the atlas texel grid is aligned per-triangle and
-//! sized per-world-area, so a nearest-sampled pixel-art texture came back with its texels
-//! at a different angle and scale ("the angle of the pixels seems completely
-//! different"). An overlay never touches the base render — the paint texture starts fully
-//! TRANSPARENT, dabs deposit color + alpha, and the GPU alpha-blends it over the ordinary
-//! draw. Unpainted texels contribute nothing, so the base is pixel-exact by construction.
+//! The overlay draws through the ordinary transparent pass: its instance
+//! alpha rides just under the opaque cutoff, and the transparent pipeline
+//! depth-tests less-equal, so the coplanar overlay (identical positions,
+//! byte-identical depth) lands exactly on its surface without z-fighting and
+//! is still occluded by anything in front.
 //!
-//! The overlay draws through the ordinary transparent pass: its instance alpha rides just
-//! under the opaque cutoff, and the transparent pipeline depth-tests less-equal, so the
-//! coplanar overlay (identical positions → byte-identical depth) lands exactly on its
-//! surface without z-fighting, and is still occluded by anything actually in front.
+//! A per-triangle atlas, because painting into the mesh's own UVs repeats:
+//! level meshes reuse UV space, so a single dab would appear everywhere those
+//! UVs repeat. The overlay renders through a generated unique UV set where
+//! every triangle owns its own patch of the texture
+//! ([`crate::paint_mesh::MeshAtlas`]), packed by its real flattened shape at a
+//! shared texel density, so a dab lands in exactly one patch and a long thin
+//! face gets a long thin patch.
 //!
-//! # Why a per-triangle ATLAS
+//! A dab paints in world space: for every texel of every triangle the brush
+//! sphere touches, it reconstructs the surface point and weights by world
+//! distance to the cursor ([`crate::paint_mesh::for_each_cell_texel`]).
+//! Texels on either side of a shared edge reconstruct the same world point,
+//! so paint flows across the edge with no seam.
 //!
-//! Painting into the mesh's own UVs REPEATS: level meshes reuse UV space (one texture
-//! tiles across many faces), so a single dab appears everywhere those UVs repeat. The
-//! overlay instead renders through a generated **unique** UV set where every triangle owns
-//! its own patch of the texture ([`crate::paint_mesh::MeshAtlas`]), packed by its real
-//! (flattened) shape at a shared texel density — a dab lands in exactly one patch, and a
-//! long thin face gets a long thin patch (no stretch).
+//! The node's vertex colours keep multiplying the overlay, so paint sits in
+//! the same light as the surface it covers: imported COLOR_0 rides the atlas
+//! mesh's own paint block, and brush vertex paint is mirrored into an
+//! atlas-ordered block ([`Editor::sync_tex_paint_mirrors`]). The ⊘ Erase
+//! brush pulls the paint's alpha back to zero, revealing the live base.
 //!
-//! # Smooth across faces
-//!
-//! A dab paints in world space: for every texel of every triangle the brush sphere touches,
-//! it reconstructs the surface point and weights by world distance to the cursor (see
-//! [`crate::paint_mesh::for_each_cell_texel`]). Texels on either side of a shared edge
-//! reconstruct the same world point, so paint flows across the edge with no visible seam.
-//!
-//! # Shading + erase
-//!
-//! The node's vertex colors keep multiplying the overlay, so paint sits in the same light
-//! as the surface it covers: imported COLOR_0 rides the atlas mesh's own paint block, and
-//! brush vertex paint is mirrored into an atlas-ordered block
-//! ([`Editor::sync_tex_paint_mirrors`]). The ⊘ Erase brush pulls the paint's alpha back to
-//! zero — revealing the live base, not a copy of it.
-//!
-//! # Identity + undo + save
-//!
-//! Keyed by a stable `TexturePaint { id }` component (not `Entity`, which `restore()`
-//! invalidates), exactly like vertex paint — so undo survives a World rebuild. The painted
-//! images round-trip to `<project>/paint/<scene>.tpaint` (see `paint_tex_io`); the atlas
-//! layout is deterministic, so a reload rebuilds it identically and the saved pixels line up.
+//! Keyed by a stable `TexturePaint { id }` component rather than `Entity`,
+//! which `restore()` invalidates, so undo survives a World rebuild. The
+//! painted images round-trip to `<project>/paint/<scene>.tpaint`
+//! (`paint_tex_io`); the atlas layout is deterministic, so a reload rebuilds
+//! it identically and the saved pixels line up.
 
 use floptle_core::math::{Mat4, Vec3};
 use floptle_core::{Entity, TexturePaint};

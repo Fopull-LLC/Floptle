@@ -1,31 +1,23 @@
-//! A **second, headless simulation** of a rollback match, driven from an input
-//! log (`docs/multiplayer.md` §5, §7 P6).
+//! A second, headless simulation of a rollback match, driven from an input
+//! log. Two features are the same object with a different stopping rule, so
+//! [`ShadowSim`] takes the rule as a parameter:
 //!
-//! Two features want this, and they want the same thing, which is why they are
-//! built together rather than one growing a private copy the other would have
-//! to refactor:
-//!
-//! - **The referee.** The host runs the match a second time at the *confirmed
-//!   frontier only* — never guessing, never rolling back — and holds the
+//! - The referee. The host runs the match a second time at the confirmed
+//!   frontier only, never guessing and never rolling back, and holds the
 //!   authoritative result. A player's own copy is always a few ticks out on
 //!   speculation; this one is never wrong, only late. That is the anti-cheat
-//!   story, and it costs one more sim instance and no new netcode at all.
-//! - **Match replays.** Inputs plus the seed *are* the replay file, so playback
-//!   is not playback: it is running the match again in a fresh world. Which
-//!   means a replay can be stepped, watched from a different camera, or diffed
-//!   against another run of the same log.
+//!   story, and it costs one more sim instance and no new netcode.
+//! - Match replays. Inputs plus the seed are the replay file, so playback is
+//!   running the match again in a fresh world: a replay can be stepped,
+//!   watched from a different camera, or diffed against another run of the
+//!   same log.
 //!
-//! Both are the same object with a different stopping rule, so [`ShadowSim`]
-//! takes the rule as a parameter and nothing else differs.
-//!
-//! ## Why it can be trusted
-//!
-//! Because it is not a re-implementation. It builds a `World`, a `Sim` and a
+//! It is not a re-implementation. It builds a `World`, a `Sim` and a
 //! `ScriptHost` exactly as Play does, and advances them with the same
-//! [`RollbackDriver`] the live session uses — the one that runs `simulate_tick`
-//! for live and replayed ticks alike. A second code path would agree with the
-//! first by coincidence; this agrees by construction, and the round-trip test
-//! (`a_recorded_match_replays_to_the_same_state`) is what holds it to that.
+//! [`RollbackDriver`] the live session uses, the one that runs
+//! `simulate_tick` for live and replayed ticks alike. It agrees with the live
+//! match by construction, and `a_recorded_match_replays_to_the_same_state`
+//! holds it to that.
 
 use std::path::{Path, PathBuf};
 

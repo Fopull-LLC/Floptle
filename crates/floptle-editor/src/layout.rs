@@ -3,36 +3,24 @@
 //! Two things are persisted, per user, beside the other preferences in
 //! [`crate::prefs::floptle_config_dir`]:
 //!
-//! - **the dock layout** — which tabs exist, where they are docked, how the
+//! - the dock layout: which tabs exist, where they are docked, how the
 //!   splits are divided, which tab is front in each leaf.
-//! - **the window** — its size, its position, and whether it was maximised.
+//! - the window: its size, its position, and whether it was maximised.
 //!
-//! Neither used to be. Every session started at [`default_dock`] on a 1280×720
-//! window, so anybody who works with the Inspector wider, or the Console pulled
-//! out beside the viewport, rebuilt that arrangement every single time they
-//! opened the editor. Arranging a workspace is work, and work the tool throws
-//! away is work you stop doing — you learn to live with the default rather than
-//! set it up again daily.
+//! Arranging a workspace is work, and work the tool throws away is work you
+//! stop doing.
 //!
-//! # Restoring is best-effort, on purpose
+//! Restoring is best-effort. A layout file is a cache of a preference, not a
+//! document: anything wrong with it (written by an older build, hand-edited
+//! into nonsense, naming a tab this build no longer has) falls back to
+//! [`default_dock`] silently. Nothing about a window arrangement should stop
+//! the editor opening. Window ▸ Reset layout puts the default back, and is
+//! the answer to every question that starts "my panels have gone weird".
 //!
-//! A layout file is a cache of a preference, not a document. Anything wrong with
-//! it — written by an older build, hand-edited into nonsense, naming a tab this
-//! build no longer has — falls back to the default **silently**. There is no
-//! version of "your window arrangement would not load" that a person wants to
-//! read at startup, and there is no version of it that should stop the editor
-//! opening.
-//!
-//! What is *not* silent is the escape hatch: **Window ▸ Reset layout** puts the
-//! default back, and it is the answer to every question that starts "my panels
-//! have gone weird". Restoring a saved layout without one of those is a trap.
-//!
-//! # Why the window is clamped to a monitor
-//!
-//! A position saved on a second display is a window nobody can see once that
-//! display is unplugged — the single most common way "remember my window" turns
-//! into "the app will not start". [`WindowPlace::sane_on`] drops a position that
-//! no longer lands on anything.
+//! The window is clamped to a monitor. A position saved on a second display
+//! is a window nobody can see once that display is unplugged, the commonest
+//! way "remember my window" turns into "the app will not start";
+//! [`WindowPlace::sane_on`] drops a position that no longer lands on anything.
 
 use std::path::PathBuf;
 

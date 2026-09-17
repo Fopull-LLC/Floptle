@@ -1,34 +1,26 @@
-//! CPU mesh residency + ray-triangle picking for the vertex-paint brush.
+//! CPU mesh residency and ray-triangle picking for the vertex-paint brush.
 //!
-//! Two gaps this closes, both real before it existed:
+//! The editor retains no CPU geometry: `MeshAsset` holds only `MeshId`s, and
+//! every consumer that needs vertices re-imports the `.glb` from disk. A
+//! brush cannot re-import per dab, so painted meshes get a retained cache
+//! here. And `pick()` tests analytic primitives while `TriMeshCollider` is an
+//! unsigned closest-point spatial hash, so this adds Möller–Trumbore plus the
+//! same uniform-spatial-hash shape `TriMeshCollider` uses, ray-walked instead
+//! of sphere-queried.
 //!
-//! 1. **The editor retains no CPU geometry.** `MeshAsset` holds only `MeshId`s, and
-//!    every consumer that needs vertices (`play.rs`, `net.rs`, `viz.rs`,
-//!    `terrain_edit.rs`) re-imports the `.glb` from disk. A brush cannot re-import per
-//!    dab, so painted meshes get a retained cache here.
-//! 2. **Nothing in the engine casts a ray at a triangle.** `pick()` tests analytic
-//!    primitives; `TriMeshCollider` is an unsigned closest-point spatial hash. So this
-//!    adds Möller–Trumbore plus an acceleration structure — deliberately the same
-//!    uniform-spatial-hash shape `TriMeshCollider` uses, ray-walked instead of
-//!    sphere-queried, rather than introducing a second spatial-structure concept.
+//! Three bounds are load-bearing, each with a regression test below:
 //!
-//! ## Three bounds that are load-bearing, not defensive
-//!
-//! The first cut of this froze the editor outright. Every one of these has a regression
-//! test below; if you touch the traversal, keep them:
-//!
-//! 1. **`raycast` clips to the part's AABB before marching.** It used to walk `t = 0`
-//!    to `max_t` (the brush passes `1e5`) at half-cell steps — on a mesh with millimetre
-//!    triangles that is tens of millions of iterations, per mesh, per frame. A MISS is
-//!    the common case (most of the scene isn't under the cursor) and must cost one slab
-//!    test.
-//! 2. **`build` sends huge triangles to `oversized` instead of bucketing them.** Cell
-//!    size comes from the mean edge, so one big floor quad among fine detail spans
-//!    `(extent/cell)³` cells. This is not hypothetical: `RetroMap.glb` has exactly one
-//!    such triangle. `cell` is also floored at `extent/MAX_CELLS_PER_AXIS`.
-//! 3. **`in_radius` falls back to a linear scan** when the cell sweep `(2r+1)³` would
-//!    cost more than just walking the vertices. A 0.5 brush on a 1mm mesh is otherwise
-//!    ~8M lookups per dab.
+//! 1. `raycast` clips to the part's AABB before marching. Walking `t = 0` to
+//!    `max_t` (the brush passes `1e5`) at half-cell steps on a mesh with
+//!    millimetre triangles is tens of millions of iterations, per mesh, per
+//!    frame. A miss is the common case and costs one slab test.
+//! 2. `build` sends huge triangles to `oversized` instead of bucketing them.
+//!    Cell size comes from the mean edge, so one big floor quad among fine
+//!    detail would span `(extent/cell)³` cells. `cell` is also floored at
+//!    `extent/MAX_CELLS_PER_AXIS`.
+//! 3. `in_radius` falls back to a linear scan when the cell sweep `(2r+1)³`
+//!    would cost more than walking the vertices: a 0.5 brush on a 1 mm mesh is
+//!    otherwise ~8M lookups per dab.
 
 use std::collections::HashMap;
 
