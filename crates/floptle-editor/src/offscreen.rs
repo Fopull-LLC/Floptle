@@ -1164,6 +1164,13 @@ impl Editor {
                     .collect();
                 tri_layer.draw(gpu, color, depth, view_proj, &verts);
             }
+            // Script-drawn textured quads (draw.quad): in the world, depth-tested.
+            if !self.script_quads.is_empty() {
+                headless_mark!("script-quads");
+                let (verts, batches) =
+                    crate::render_frame::pack_script_quads(&self.script_quads, cam.world_position);
+                tri_layer.draw_textured(gpu, color, depth, view_proj, &verts, &batches, raster);
+            }
             if !vfx_batches.is_empty() {
                 headless_mark!("particles");
                 particles.draw(

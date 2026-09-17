@@ -147,6 +147,60 @@ per-particle ribbon on billboard tracks, spanning `time` seconds of history at
 `width` world units, optionally tapering to nothing (`fade`); a track with no
 trail records no history and pays for none.
 
+```rust
+struct Trail {
+    time: f32,                // seconds of history the ribbon spans
+    width: f32,               // world units at the head
+    fade: bool,               // taper width and alpha to nothing at the tail
+    texture: Option<String>,  // None = the track's texture; v runs along the ribbon
+    min_distance: f32,        // a point is recorded only after this much motion
+    emitter_path: bool,       // follow the emitter's world path (Local tracks)
+}
+```
+
+A trail records the particle's own motion — a spark's arc, a shard's tumble.
+That is nothing for a particle that sits still on a moving node, and a sword
+trail is exactly that: one particle at the blade tip, with the *node* doing
+the moving. `emitter_path` records the ribbon along the node's world path
+instead — **follows the emitter** in the Inspector — so a `Local` track with
+one still particle and a trail is a sword trail, a wing-tip streak or a tyre
+mark in one effect asset, with no script:
+
+```ron
+(
+    name: "SwordTrail",
+    lifetime: 10.0,
+    playback: Looping,
+    tracks: [(
+        name: "Ribbon",
+        render: Billboard(texture: Some("textures/streak.png")),
+        space: Local,
+        clips: [(start: 0.0, end: 10.0,
+                 emit: Some(Burst(count: 1, count_jitter: 0.0, pulses: 1,
+                                  interval: 0.0, interval_jitter: 0.0)))],
+        shape: Point,
+        velocity: Const(Vec3((0.0, 0.0, 0.0))),
+        size: Const(F32(0.25)),
+        color: Const(Rgba((1.0, 0.6, 0.2, 1.0))),
+        trail: Some((time: 0.45, width: 0.5, fade: true,
+                     texture: Some("textures/streak.png"),
+                     min_distance: 0.03, emitter_path: true)),
+    )],
+)
+```
+
+Put that on a node parented to the blade and swing. The ribbon is
+camera-facing, `width` wide, and depth-tested like every particle; a
+`World` track already leaves its ribbon in the world, so the option is offered
+for `Local` tracks only. The Particles tab's **∞ sweep** moves the preview
+emitter through a figure-eight so a trail like this, a World track left
+behind, or inherited velocity can be seen without leaving the tab.
+
+For a ribbon that lies in the blade's own plane rather than facing the camera
+— two marker nodes, hilt and tip, and a quad between each frame's pair and the
+last — the Lua `draw.quad` draws a textured, depth-tested quad in the world;
+see [lua-api.md](../lua-api.md#drawquad) for the copyable ribbon.
+
 ### Look
 
 `RenderMode` decides what a track draws:

@@ -60,6 +60,10 @@ pub(crate) struct VfxUiState {
     /// lifetime while a one-shot's particle tails play out).
     pub playhead: f32,
     pub playing: bool,
+    /// Sweep the preview emitter through a figure-eight as it plays, so what a
+    /// moving node does — an emitter-path trail, a World track left behind,
+    /// inherited velocity — shows in the tab. Off, the emitter sits on its node.
+    pub sweep: bool,
     /// The effect time the preview instance is currently simulated to.
     sim_t: f32,
     /// Timeline zoom, px per second (horizontal). Driven by the wheel.
@@ -116,6 +120,7 @@ impl Default for VfxUiState {
             profile_rev: u64::MAX,
             playhead: 0.0,
             playing: true, // auto-play on open: see it live immediately
+            sweep: false,
             sim_t: 0.0,
             zoom: 220.0,
             row_scale: 1.0,
@@ -708,10 +713,15 @@ impl EditorTabViewer<'_> {
         }
 
         // The preview emitter = the scene node carrying this effect (static while
-        // editing), so World-space tracks preview at the node rather than the origin.
-        let emitter = anchor_for(self.world, &key)
+        // editing), so World-space tracks preview at the node rather than the origin;
+        // with the sweep on it rides a figure-eight from there, so the effect is
+        // seen the way a moving node plays it.
+        let base = anchor_for(self.world, &key)
             .map(|e| floptle_core::world_transform(self.world, e))
             .unwrap_or(floptle_core::transform::Transform::IDENTITY);
+        let sweep = st.sweep;
+        let emitter_at = move |t: f32| if sweep { sweep_emitter(base, t) } else { base };
+        let emitter = emitter_at(st.playhead);
         // Re-measure the cost on the same staleness signal the preview uses.
         if st.profile_rev != st.doc_rev {
             st.profile = crate::vfx::profile_effect(&crate::vfx::effect_from_doc(&doc));
@@ -722,26 +732,31 @@ impl EditorTabViewer<'_> {
         if stale {
             let fx = Arc::new(effect_from_doc(&doc).compile());
             let mut inst = EffectInstance::new(fx, 1);
-            inst.simulate_to_at(st.playhead, VFX_GRAVITY, emitter);
-            self.vfx.preview = Some(VfxPreview { key: key.clone(), inst, anchor: None });
+            inst.simulate_to_along(st.playhead, VFX_GRAVITY, emitter_at);
+            self.vfx.preview = Some(VfxPreview { key: key.clone(), inst, anchor: None, emitter });
             st.preview_rev = st.doc_rev;
             st.sim_t = st.playhead;
         } else if let Some(p) = self.vfx.preview.as_mut() {
             if st.playhead >= st.sim_t {
                 let d = st.playhead - st.sim_t;
                 if d > 0.0 {
-                    p.inst.advance_at(d, VFX_GRAVITY, emitter);
+                    // The sweep's velocity over this step, for inherited momentum.
+                    let vel = ((emitter.translation - emitter_at(st.sim_t).translation) / d as f64).as_vec3();
+                    p.inst.advance_at_moving(d, VFX_GRAVITY, emitter, vel);
                 }
             } else {
                 // Backward scrub / loop wrap: deterministic re-sim from zero.
-                p.inst.simulate_to_at(st.playhead, VFX_GRAVITY, emitter);
+                p.inst.simulate_to_along(st.playhead, VFX_GRAVITY, emitter_at);
             }
             st.sim_t = st.playhead;
         }
         // Anchor the preview to a scene node carrying this effect (world origin
-        // otherwise) — you see it exactly where the game will play it.
+        // otherwise) — you see it exactly where the game will play it — and keep
+        // the emitter the sim was stepped with, so the draw and the gizmo agree
+        // with it.
         if let Some(p) = self.vfx.preview.as_mut() {
             p.anchor = anchor_for(self.world, &key);
+            p.emitter = emitter;
         }
 
         self.vfx_ui.doc = Some(doc);
@@ -825,6 +840,27 @@ fn anchor_for(world: &World, key: &str) -> Option<floptle_core::Entity> {
 // Transport
 // ---------------------------------------------------------------------------
 
+/// The preview sweep: a figure-eight in the node's own XZ plane, 2 u wide, one
+/// lap every 2.4 s, the node turned to face along its motion — so a trail that
+/// follows the emitter shows both where it went and how it turned.
+pub(crate) fn sweep_emitter(
+    base: floptle_core::transform::Transform,
+    t: f32,
+) -> floptle_core::transform::Transform {
+    use floptle_core::math::{Quat, Vec3};
+    let w = std::f32::consts::TAU / 2.4;
+    let (r, a) = (1.0, w * t);
+    let offset = Vec3::new(r * a.sin(), 0.0, 0.5 * r * (2.0 * a).sin());
+    let tangent = Vec3::new(r * w * a.cos(), 0.0, r * w * (2.0 * a).cos());
+    // Yaw so local −Z (a node's forward) points along the motion.
+    let yaw = Quat::from_rotation_y((-tangent.x).atan2(-tangent.z));
+    floptle_core::transform::Transform {
+        translation: base.translation + (base.rotation * (base.scale * offset)).as_dvec3(),
+        rotation: base.rotation * yaw,
+        scale: base.scale,
+    }
+}
+
 fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
     // Wrapped so a narrow/vertical panel flows the controls onto extra rows instead
     // of overlapping (no right-to-left sub-layout to collide with the left widgets).
@@ -839,6 +875,19 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
         if ui.button("⏹").clicked() {
             st.playing = false;
             st.playhead = 0.0;
+        }
+        if ui
+            .selectable_label(st.sweep, "∞ sweep")
+            .on_hover_text(
+                "move the preview emitter through a figure-eight while it plays — see a \
+                 trail that follows the emitter, a world-space track left behind, or \
+                 inherited velocity, as they look on a moving node",
+            )
+            .clicked()
+        {
+            st.sweep = !st.sweep;
+            // The path is part of the sim: re-simulate from zero so a scrub agrees.
+            st.bump();
         }
         let shown = match doc.playback {
             VfxPlaybackDoc::Looping => st.playhead % doc.lifetime.max(1e-3),

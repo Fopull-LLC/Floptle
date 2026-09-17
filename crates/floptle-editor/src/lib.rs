@@ -1938,6 +1938,10 @@ struct Editor {
     script_lines: Vec<floptle_script::DrawLine>,
     /// This tick's script-drawn filled triangles (world space, immediate mode).
     script_tris: Vec<floptle_script::DrawTri>,
+    /// This tick's script-drawn textured quads (`draw.quad`), each with its
+    /// texture resolved through the registry and sorted by texture, so the draw
+    /// is one run per image.
+    script_quads: Vec<(floptle_render::TexId, floptle_script::DrawQuad)>,
     /// Screen-space rectangles queued this frame (`draw.rect` / `draw.rectOutline`).
     /// Drawn through the game-UI pipeline over the HUD — see `gather_game_ui`.
     script_rects: Vec<floptle_script::DrawRect>,

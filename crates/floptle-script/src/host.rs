@@ -1526,6 +1526,7 @@ fn install_spawn_effect(lua: &Lua) -> Rc<RefCell<Vec<crate::SpawnedEffect>>> {
 struct DrawCells {
     draw_lines: Rc<RefCell<Vec<crate::DrawLine>>>,
     draw_tris: Rc<RefCell<Vec<crate::DrawTri>>>,
+    draw_quads: Rc<RefCell<Vec<crate::DrawQuad>>>,
     draw_rects: Rc<RefCell<Vec<crate::DrawRect>>>,
     draw_texts: Rc<RefCell<Vec<crate::DrawText>>>,
 }
@@ -1538,6 +1539,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
     // screen draws its orbit conics this way). Depth-tested in the scene.
     let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
+    let draw_quads: Rc<RefCell<Vec<crate::DrawQuad>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
     {
@@ -1679,6 +1681,46 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     },
                 ) {
                     let _ = t.set("tri", f);
+                }
+            }
+            // `draw.quad(texture, x0,y0,z0, x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b[,a
+            // [,u0,v0,u1,v1]])` — one textured quad in the world, depth-tested
+            // against the scene and blended with the image's alpha. The corners
+            // run around the quad; the UV rectangle defaults to the whole image,
+            // corner 0 at (u0, v0) and corner 2 at (u1, v1). A ribbon is one quad
+            // per segment with `u` walking along it.
+            {
+                let q = draw_quads.clone();
+                type QuadArgs = (
+                    String,
+                    [f64; 12],
+                    f32,
+                    f32,
+                    f32,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                );
+                if let Ok(f) = lua.create_function(
+                    move |_, args: mlua::MultiValue| {
+                        let (texture, c, r, g, b, a, u0, v0, u1, v1): QuadArgs = quad_args(args)?;
+                        q.borrow_mut().push(crate::DrawQuad {
+                            p: [
+                                [c[0], c[1], c[2]],
+                                [c[3], c[4], c[5]],
+                                [c[6], c[7], c[8]],
+                                [c[9], c[10], c[11]],
+                            ],
+                            uv: [u0.unwrap_or(0.0), v0.unwrap_or(0.0), u1.unwrap_or(1.0), v1.unwrap_or(1.0)],
+                            color: [r, g, b, a.unwrap_or(1.0)],
+                            texture,
+                        });
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("quad", f);
                 }
             }
             // A basis ⊥ to a direction, for fan-tessellating cones/discs.
@@ -1892,9 +1934,55 @@ fn install_draw(lua: &Lua) -> DrawCells {
     DrawCells {
         draw_lines,
         draw_tris,
+        draw_quads,
         draw_rects,
         draw_texts,
     }
+}
+
+/// `draw.quad`'s argument list: the texture, twelve corner numbers, a colour
+/// with optional alpha, and an optional UV rectangle. Read by position so a
+/// missing corner number is named, not silently zero.
+#[allow(clippy::type_complexity)]
+fn quad_args(
+    args: mlua::MultiValue,
+) -> mlua::Result<(String, [f64; 12], f32, f32, f32, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>)> {
+    let mut it = args.into_iter();
+    let texture = match it.next() {
+        Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "draw.quad: the first argument is the texture path, got {}",
+                other.map(|v| v.type_name()).unwrap_or("nothing")
+            )));
+        }
+    };
+    let mut num = |what: &str, required: bool| -> mlua::Result<Option<f64>> {
+        match it.next() {
+            Some(mlua::Value::Number(n)) => Ok(Some(n)),
+            Some(mlua::Value::Integer(n)) => Ok(Some(n as f64)),
+            None | Some(mlua::Value::Nil) if !required => Ok(None),
+            other => Err(mlua::Error::runtime(format!(
+                "draw.quad: {what} must be a number, got {}",
+                other.map(|v| v.type_name()).unwrap_or("nothing")
+            ))),
+        }
+    };
+    let mut c = [0.0; 12];
+    const AXES: [&str; 3] = ["x", "y", "z"];
+    for (i, slot) in c.iter_mut().enumerate() {
+        let what = format!("corner {} {}", i / 3, AXES[i % 3]);
+        *slot = num(&what, true)?.expect("required");
+    }
+    let r = num("r", true)?.expect("required") as f32;
+    let g = num("g", true)?.expect("required") as f32;
+    let b = num("b", true)?.expect("required") as f32;
+    let a = num("a", false)?.map(|v| v as f32);
+    let u0 = num("u0", false)?.map(|v| v as f32);
+    let v0 = num("v0", false)?.map(|v| v as f32);
+    let u1 = num("u1", false)?.map(|v| v as f32);
+    let v1 = num("v1", false)?.map(|v| v as f32);
+    Ok((texture, c, r, g, b, a, u0, v0, u1, v1))
 }
 
 /// What [`install_node_queues`] hands back to the host.
@@ -2100,6 +2188,7 @@ impl ScriptHost {
         let DrawCells {
             draw_lines,
             draw_tris,
+            draw_quads,
             draw_rects,
             draw_texts,
         } = install_draw(&lua);
@@ -2475,6 +2564,7 @@ impl ScriptHost {
             assembly_cmds,
             draw_lines,
             draw_tris,
+            draw_quads,
             draw_rects,
             draw_texts,
             destroy_queue,
@@ -3515,6 +3605,11 @@ impl ScriptHost {
     /// Drain this tick's filled triangles (`draw.tri/cone/disc`).
     pub fn take_draw_tris(&self) -> Vec<crate::DrawTri> {
         std::mem::take(&mut *self.draw_tris.borrow_mut())
+    }
+
+    /// Drain this tick's textured quads (`draw.quad`).
+    pub fn take_draw_quads(&self) -> Vec<crate::DrawQuad> {
+        std::mem::take(&mut *self.draw_quads.borrow_mut())
     }
 
     /// Drain this tick's screen-space rectangles (`draw.rect/rectOutline`).
@@ -7780,6 +7875,68 @@ function update() synced.hx = synced.hx + 1 end
         assert!(said.contains("hx"), "the write names its var: {said}");
         assert!(said.contains("state"), "the read names its var too: {said}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`draw.quad` queues a textured quad in the world.** The corners, colour
+    /// and UV rectangle arrive as given; alpha and the UV rectangle default to 1
+    /// and the whole image; the queue is drained per tick, so an idle script
+    /// draws nothing; and a short argument list is a named error, not a quad
+    /// with a zero corner.
+    #[test]
+    fn draw_quad_queues_corners_uv_and_texture_and_names_a_missing_corner() {
+        let dir = std::env::temp_dir().join(format!("floptle-drawquad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/ribbon.lua"),
+            "local n = 0\n\
+             function update(node, dt)\n\
+             \x20 n = n + 1\n\
+             \x20 if n == 1 then\n\
+             \x20   draw.quad('textures/VFX/SlashTrail.png',\n\
+             \x20     0,1,2, 3,4,5, 6,7,8, 9,10,11,\n\
+             \x20     0.5, 0.25, 1, 0.75,\n\
+             \x20     0.1, 0, 0.6, 1)\n\
+             \x20   draw.quad('textures/dot.png', 1,1,1, 2,2,2, 3,3,3, 4,4,4, 1, 1, 1)\n\
+             \x20 elseif n == 3 then\n\
+             \x20   draw.quad('textures/dot.png', 1,1,1, 2,2,2, 3,3,3, 1, 1, 1)\n\
+             \x20 end\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("ribbon");
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let quads = host.take_draw_quads();
+        assert_eq!(quads.len(), 2, "two quads this tick: {quads:?}");
+        assert_eq!(
+            quads[0],
+            crate::DrawQuad {
+                p: [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0], [9.0, 10.0, 11.0]],
+                uv: [0.1, 0.0, 0.6, 1.0],
+                color: [0.5, 0.25, 1.0, 0.75],
+                texture: "textures/VFX/SlashTrail.png".into(),
+            }
+        );
+        assert_eq!(quads[1].color, [1.0, 1.0, 1.0, 1.0], "alpha defaults to 1");
+        assert_eq!(quads[1].uv, [0.0, 0.0, 1.0, 1.0], "the UV rectangle defaults to the whole image");
+        assert!(host.take_draw_quads().is_empty(), "the drain empties the queue");
+
+        // Tick 2 draws nothing; the queue stays empty rather than replaying tick 1.
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.take_draw_quads().is_empty(), "an idle tick queues nothing");
+
+        // Tick 3: eleven corner numbers, then the colour — the twelfth corner
+        // number is missing and the error says which.
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 2.0 / 60.0);
+        let errs = host.errors();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        let msg = format!("{:?}", errs[0]);
+        assert!(msg.contains("draw.quad") && msg.contains("must be a number"), "{msg}");
+        assert!(host.take_draw_quads().is_empty(), "a refused call queues nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

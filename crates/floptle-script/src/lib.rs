@@ -136,6 +136,21 @@ pub struct DrawTri {
     pub color: [f32; 4],
 }
 
+/// One world-space textured quad a script queued via `draw.quad` this tick
+/// (immediate mode). `p` runs around the quad; `uv` is the texture rectangle
+/// the corners map to (`u0, v0, u1, v1`: corner 0 at `(u0, v0)`, corner 1 at
+/// `(u1, v0)`, corner 2 at `(u1, v1)`, corner 3 at `(u0, v1)`), so a ribbon
+/// can put one slice of a streak image on each of its segments. Drawn
+/// depth-tested and alpha-blended by the runtime triangle layer — a thing in
+/// the world (a sword trail, a decal, a ground ring), not a gizmo over it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawQuad {
+    pub p: [[f64; 3]; 4],
+    pub uv: [f32; 4],
+    pub color: [f32; 4],
+    pub texture: String,
+}
+
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
@@ -874,6 +889,8 @@ pub struct ScriptHost {
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
     draw_tris: Rc<RefCell<Vec<DrawTri>>>,
+    /// This tick's `draw.quad(...)` textured quads (immediate mode).
+    draw_quads: Rc<RefCell<Vec<DrawQuad>>>,
     draw_rects: Rc<RefCell<Vec<DrawRect>>>,
     draw_texts: Rc<RefCell<Vec<DrawText>>>,
     /// The `http.*` bridge: callbacks waiting on a reply, the caps, and the

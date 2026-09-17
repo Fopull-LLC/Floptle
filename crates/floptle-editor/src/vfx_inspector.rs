@@ -617,6 +617,18 @@ fn trail_editor(
                 *dirty = true;
             }
         });
+        // A World track already leaves its ribbon in the world; the option only
+        // changes a Local track, so it is offered there.
+        if track.space == VfxSpaceDoc::Local {
+            *dirty |= ui
+                .checkbox(&mut t.emitter_path, "follows the emitter")
+                .on_hover_text(
+                    "record the ribbon along the node's path in the world: a still particle at a \
+                     blade tip leaves a sword trail, a wing tip a streak — turn on ∞ sweep in the \
+                     Particles tab to see it move",
+                )
+                .changed();
+        }
     });
 }
 

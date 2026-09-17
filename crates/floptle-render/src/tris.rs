@@ -6,10 +6,18 @@
 //! and the editor feeds them here per camera. Camera-relative:
 //! callers pre-subtract the camera position, so the GPU never sees a large
 //! coordinate.
+//!
+//! The same layer has a textured, depth-tested form ([`Tris::draw_textured`])
+//! for things that are IN the world rather than over it — a sword trail, a
+//! decal, a ground ring — fed by the Lua `draw.quad`: each [`TexTriBatch`]
+//! names one registered texture for a run of [`TexTriVertex`]es.
+
+use std::ops::Range;
 
 use glam::Mat4;
 
 use crate::device::Gpu;
+use crate::raster::{Raster, TexId};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -43,6 +51,61 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     ],
 };
 
+/// One textured-triangle vertex: camera-relative position, RGBA tint, UV.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TexTriVertex {
+    pub pos: [f32; 3],
+    pub color: [f32; 4],
+    pub uv: [f32; 2],
+}
+
+/// A run of [`TexTriVertex`]es (triples) drawn with one texture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TexTriBatch {
+    pub texture: TexId,
+    pub range: Range<u32>,
+}
+
+const TEX_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: 36,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &[
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 12, shader_location: 1 },
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 28, shader_location: 2 },
+    ],
+};
+
+const TEX_WGSL: &str = r#"
+struct Globals { view_proj: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> g: Globals;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>, @location(2) uv: vec2<f32>) -> VsOut {
+    var out: VsOut;
+    out.clip = g.view_proj * vec4<f32>(pos, 1.0);
+    out.color = color;
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let c = in.color * textureSample(tex, samp, in.uv);
+    if c.a <= 0.002 { discard; }
+    return c;
+}
+"#;
+
 const WGSL: &str = r#"
 struct Globals { view_proj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -72,6 +135,11 @@ pub struct Tris {
     bind: wgpu::BindGroup,
     vbuf: wgpu::Buffer,
     vcap: u32,
+    /// The textured, depth-tested form: its own pipeline and vertex buffer (a
+    /// wider vertex), sharing the globals.
+    tex_pipeline: wgpu::RenderPipeline,
+    tex_vbuf: wgpu::Buffer,
+    tex_vcap: u32,
 }
 
 impl Tris {
@@ -161,7 +229,140 @@ impl Tris {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { pipeline, globals_buf, bind, vbuf, vcap }
+
+        // Textured form. Group 1 is the raster surface layout — the same builder
+        // the particle pass uses — so a texture registered once serves all three.
+        let tex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tris-textured"),
+            source: wgpu::ShaderSource::Wgsl(TEX_WGSL.into()),
+        });
+        let tex_layout = crate::raster::surface_bind_layout(device);
+        let tex_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tris-textured"),
+            bind_group_layouts: &[Some(&bind_layout), Some(&tex_layout)],
+            immediate_size: 0,
+        });
+        let tex_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tris-textured"),
+            layout: Some(&tex_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &tex_module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[TEX_VERTEX_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // A ribbon has no back: it reads from both sides.
+                cull_mode: None,
+                ..Default::default()
+            },
+            // In the world: tested against the scene's depth so a trail behind a
+            // pillar stays behind it, and writing none so its own blended pixels
+            // never cut a later quad.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &tex_module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.scene_format(),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let tex_vcap = 1024;
+        let tex_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tris-textured-verts"),
+            size: (tex_vcap as u64) * 36,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, globals_buf, bind, vbuf, vcap, tex_pipeline, tex_vbuf, tex_vcap }
+    }
+
+    /// Draw textured triangles into the scene: `verts` in triples, each batch's
+    /// `range` with its texture (resolved through `raster`'s registry; a batch
+    /// whose texture is not registered is skipped). Depth-tested against
+    /// `depth`, alpha-blended, both sides drawn. No-op on fewer than one
+    /// triangle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_textured(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        view_proj: Mat4,
+        verts: &[TexTriVertex],
+        batches: &[TexTriBatch],
+        raster: &Raster,
+    ) {
+        if verts.len() < 3 || batches.is_empty() {
+            return;
+        }
+        let device = &gpu.device;
+        if verts.len() as u32 > self.tex_vcap {
+            self.tex_vcap = (verts.len() as u32).next_power_of_two();
+            self.tex_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("tris-textured-verts"),
+                size: (self.tex_vcap as u64) * 36,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        gpu.queue.write_buffer(&self.tex_vbuf, 0, bytemuck::cast_slice(verts));
+        gpu.queue.write_buffer(
+            &self.globals_buf,
+            0,
+            bytemuck::bytes_of(&TriGlobals { view_proj: view_proj.to_cols_array_2d() }),
+        );
+        let mut enc = device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tris-textured") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tris-textured"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.tex_pipeline);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_vertex_buffer(0, self.tex_vbuf.slice(..));
+            let n = verts.len() as u32;
+            for b in batches {
+                let Some(bind) = raster.material_bind(b.texture) else { continue };
+                let end = b.range.end.min(n);
+                let start = b.range.start.min(end);
+                let count = ((end - start) / 3) * 3;
+                if count == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, bind, &[]);
+                pass.draw(start..start + count, 0..1);
+            }
+        }
+        gpu.queue.submit(Some(enc.finish()));
     }
 
     /// Draw `verts` (triples of camera-relative corners) over the already-filled

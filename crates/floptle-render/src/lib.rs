@@ -51,7 +51,7 @@ pub use gi::GiVolume;
 pub use grid::Grid;
 pub use light2d::{Light2d, Light2dInstance, Light2dUniform};
 pub use lines::{LineVertex, Lines};
-pub use tris::{TriVertex, Tris};
+pub use tris::{TexTriBatch, TexTriVertex, TriVertex, Tris};
 pub use mesh::{
     capsule, chunk_mesh_data, cone, cube, cylinder, plane, pyramid, uv_sphere, GpuMesh, MeshData,
     MeshId, TextureData, Vertex,

@@ -164,9 +164,14 @@ pub fn collect_trails(
             continue;
         };
         let Some(hists) = &inst.track_particles(ti).trail else { continue };
-        let xf = if ct.space == Space::World { world_xf } else { local_xf };
+        // The history's own frame: the world matrix for a history kept in
+        // anchor-relative world space (a World track, or an emitter-path trail),
+        // the node matrix otherwise. The live head is always the particle's
+        // position through its track's frame.
+        let head_xf = if ct.space == Space::World { world_xf } else { local_xf };
+        let hist_xf = if ct.trail_in_world() { world_xf } else { local_xf };
         let scale = {
-            let m = glam_mat3_scale(&xf);
+            let m = glam_mat3_scale(&head_xf);
             (m.0 + m.1 + m.2) / 3.0
         };
         let head_w = trail.width.max(0.0) * scale;
@@ -177,11 +182,11 @@ pub fn collect_trails(
         inst.sample_track_indexed(ti, |i, s| {
             pts.clear();
             for pt in &hists[i] {
-                pts.push(xf.transform_point3(pt.truncate()));
+                pts.push(hist_xf.transform_point3(pt.truncate()));
             }
             // The live head: the particle's current position (history only samples
             // every `min_distance`, so the ribbon must still reach the particle).
-            let head = xf.transform_point3(s.pos);
+            let head = head_xf.transform_point3(s.pos);
             if pts.last().is_none_or(|l| (head - *l).length_squared() > 1e-10) {
                 pts.push(head);
             }
@@ -654,6 +659,51 @@ mod tests {
     }
 
     #[test]
+    fn emitter_path_ribbon_lies_along_the_nodes_world_path() {
+        use crate::curve::{Value, ValueOrCurve};
+        use crate::effect::{Space, Trail};
+        use floptle_core::math::{DVec3, Quat};
+        use floptle_core::transform::Transform;
+        // A still Local particle on a node that slides 3 u along world +X while
+        // turned a quarter turn about Y. Its emitter-path history is world points,
+        // so the ribbon must run along world X behind the node's current place —
+        // through the node matrix it would come out swung 90° along Z instead.
+        let track = Track {
+            clips: vec![burst_clip(1, 5.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            space: Space::Local,
+            trail: Some(Trail { time: 5.0, width: 0.1, min_distance: 0.05, emitter_path: true, ..Trail::default() }),
+            ..Track::default()
+        };
+        let fx = Arc::new(
+            ParticleEffect { lifetime: 1.0, playback: Playback::OneShot, tracks: vec![track], ..ParticleEffect::default() }
+                .compile(),
+        );
+        let mut inst = EffectInstance::new(fx, 1);
+        let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        for k in 0..4 {
+            let emitter = Transform { translation: DVec3::new(k as f64, 0.0, -5.0), rotation: rot, scale: Vec3::ONE };
+            inst.advance_at(0.05, Vec3::ZERO, emitter);
+        }
+        // Camera at the world origin: the node matrix carries its rotation, the
+        // world matrix is the anchor's translation alone (as the editor builds them).
+        let node_xf = Mat4::from_rotation_translation(rot, Vec3::new(3.0, 0.0, -5.0));
+        let world_xf = Mat4::from_translation(inst.anchor().as_vec3());
+        let (mut packed, mut draws) = (Vec::new(), Vec::new());
+        collect_trails(&inst, node_xf, world_xf, Vec3::X, &mut packed, &mut draws);
+        assert_eq!(draws.len(), 1);
+        assert_eq!(packed.len(), 3, "three steps of motion = three segments");
+        let (tail, _) = segment_ends(&packed[0]);
+        let (_, head) = segment_ends(&packed[2]);
+        assert!((tail - Vec3::new(0.0, 0.0, -5.0)).length() < 1e-4, "tail at the path's start, got {tail}");
+        assert!((head - Vec3::new(3.0, 0.0, -5.0)).length() < 1e-4, "head at the node, got {head}");
+        for p in &packed {
+            let (a, b) = segment_ends(p);
+            assert!((a.z + 5.0).abs() < 1e-4 && (b.z + 5.0).abs() < 1e-4, "the ribbon stays on the path's line: {a} {b}");
+        }
+    }
+
+    #[test]
     fn beam_track_generates_a_connected_segment_chain() {
         use crate::curve::ValueOrCurve;
         use crate::effect::{Look, RenderMode};
@@ -793,6 +843,7 @@ mod tests {
                         fade: true,
                         texture: Some("vfx/streak.png".into()),
                         min_distance: 0.05,
+                        emitter_path: false,
                     }),
                     ..Track::default()
                 }],

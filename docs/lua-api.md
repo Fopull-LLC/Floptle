@@ -21,7 +21,7 @@ each group, and meant to be searched.
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
-- [drawing — draw.*](#drawing--draw) — 13
+- [drawing — draw.*](#drawing--draw) — 14
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
@@ -1611,6 +1611,32 @@ draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around no
 ### `draw.line`
 
 draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these.
+
+### `draw.quad`
+
+draw.quad(texture, x0,y0,z0, x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a] [,u0,v0,u1,v1]) — one textured quad IN the world: depth-tested against the scene (a trail behind a pillar stays behind it), blended with the image's alpha, visible from both sides. The corners run around the quad; the colour tints the image. The UV rectangle defaults to the whole image — corner 0 sits at (u0,v0), corner 1 at (u1,v0), corner 2 at (u1,v1), corner 3 at (u0,v1). A ribbon is one quad per segment with u walking along it: paint the streak with u running tail→head and v across the width, then give segment i the slice u = i/n .. (i+1)/n. A sword trail, a tyre mark, a decal, a ground ring. Immediate mode: draw it every lateUpdate you want it.
+
+```lua
+-- a ribbon between two marker nodes on a moving object (a blade's mid and tip):
+-- sample them each frame, keep half a second, one textured quad per segment
+local samples = {}
+function lateUpdate(node, dt)
+  local tip, mid = node:find("BladeTip"), node:find("BladeMid")
+  samples[#samples + 1] = { tip = tip.worldPos, mid = mid.worldPos, t = time }
+  while time - samples[1].t > 0.5 do table.remove(samples, 1) end
+  local n = #samples
+  for i = 2, n do
+    local a, b = samples[i - 1], samples[i]
+    local alpha = 1 - (time - b.t) / 0.5
+    -- u walks tail→head along the ribbon, v runs mid→tip across it
+    local u0, u1 = (i - 2) / (n - 1), (i - 1) / (n - 1)
+    draw.quad("textures/streak.png",
+      a.tip.x, a.tip.y, a.tip.z,  b.tip.x, b.tip.y, b.tip.z,
+      b.mid.x, b.mid.y, b.mid.z,  a.mid.x, a.mid.y, a.mid.z,
+      0.6, 0.9, 1.0, alpha,  u0, 0, u1, 1)
+  end
+end
+```
 
 ### `draw.rect`
 

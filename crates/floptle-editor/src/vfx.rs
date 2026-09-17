@@ -65,6 +65,10 @@ pub struct VfxPreview {
     pub key: String,
     pub inst: EffectInstance,
     pub anchor: Option<Entity>,
+    /// The emitter transform the instance was last stepped with: the anchor node's,
+    /// or the tab's sweep path from it. The draw and the emitter gizmo both use
+    /// this, so the picture agrees with the sim.
+    pub emitter: floptle_core::transform::Transform,
 }
 
 /// A fire-and-forget one-shot effect spawned from code (`spawnEffect(...)`), not
@@ -478,8 +482,7 @@ impl VfxSystem {
         if include_preview
             && let Some(p) = &self.preview
         {
-            let xf = p.anchor.map(node_xf).unwrap_or_else(|| point_xf(DVec3::ZERO));
-            pack(&p.inst, xf);
+            pack(&p.inst, p.emitter.render_matrix(cam.world_position));
         }
     }
 
@@ -565,8 +568,7 @@ impl VfxSystem {
         if include_preview
             && let Some(p) = &self.preview
         {
-            let xf = p.anchor.map(node_xf).unwrap_or_else(|| point_xf(DVec3::ZERO));
-            pack(&p.inst, xf);
+            pack(&p.inst, p.emitter.render_matrix(cam.world_position));
         }
         out
     }
@@ -900,6 +902,7 @@ fn trail_from_doc(t: &VfxTrailDoc) -> Trail {
         fade: t.fade,
         texture: t.texture.clone(),
         min_distance: t.min_distance,
+        emitter_path: t.emitter_path,
     }
 }
 
@@ -1016,7 +1019,12 @@ mod tests {
         assert!(inst.alive() > 0, "must emit");
 
         let sys = VfxSystem {
-            preview: Some(VfxPreview { key: "T".into(), inst, anchor: None }),
+            preview: Some(VfxPreview {
+                key: "T".into(),
+                inst,
+                anchor: None,
+                emitter: floptle_core::transform::Transform::IDENTITY,
+            }),
             ..Default::default()
         };
         assert_eq!(sys.texture_paths(), vec![P.to_string()], "prewarm sees the preview texture");

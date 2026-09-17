@@ -416,6 +416,21 @@ draw = {}
 ---@param a? number alpha, default 1
 function draw.line(x1, y1, z1, x2, y2, z2, r, g, b, a) end
 
+---One textured quad IN the world for this frame: depth-tested, alpha-blended,
+---both sides. Corners run around the quad; corner 0 is at (u0,v0), corner 2 at
+---(u1,v1); the UV rectangle defaults to the whole image. A ribbon is one quad
+---per segment with u walking along it.
+---e.g. `draw.quad("textures/streak.png", a.x,a.y,a.z, b.x,b.y,b.z, c.x,c.y,c.z, d.x,d.y,d.z, 1,1,1, 0.8, 0, 0, 0.5, 1)`
+---@param texture string Project-relative image path.
+---@param x0 number @param y0 number @param z0 number
+---@param x1 number @param y1 number @param z1 number
+---@param x2 number @param y2 number @param z2 number
+---@param x3 number @param y3 number @param z3 number
+---@param r number 0..1 @param g number 0..1 @param b number 0..1
+---@param a? number alpha, default 1
+---@param u0? number @param v0? number @param u1? number @param v1? number UV rectangle, default 0,0,1,1
+function draw.quad(texture, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b, a, u0, v0, u1, v1) end
+
 ---Spawn a PREFAB instance (make one by dragging a node into the Assets panel).
 ---`"bullet"` finds `prefabs/bullet.prefab.ron`; subfolder names and full
 ---paths work too. `pos` places the first root (a vec3/table/node); `fn(root)`

@@ -3758,6 +3758,10 @@ const API_EXAMPLES: &[(&str, &str)] = &[
         "-- x, y is the CENTRE\ndraw.circle(mx, my, 6, 0.3, 1.0, 0.5, 0.9)\ndraw.circleOutline(mx, my, 18, 0.3, 1.0, 0.5, 0.5, 2)",
     ),
     (
+        "draw.quad",
+        "-- a ribbon between two marker nodes on a moving object (a blade's mid and tip):\n-- sample them each frame, keep half a second, one textured quad per segment\nlocal samples = {}\nfunction lateUpdate(node, dt)\n  local tip, mid = node:find(\"BladeTip\"), node:find(\"BladeMid\")\n  samples[#samples + 1] = { tip = tip.worldPos, mid = mid.worldPos, t = time }\n  while time - samples[1].t > 0.5 do table.remove(samples, 1) end\n  local n = #samples\n  for i = 2, n do\n    local a, b = samples[i - 1], samples[i]\n    local alpha = 1 - (time - b.t) / 0.5\n    -- u walks tail→head along the ribbon, v runs mid→tip across it\n    local u0, u1 = (i - 2) / (n - 1), (i - 1) / (n - 1)\n    draw.quad(\"textures/streak.png\",\n      a.tip.x, a.tip.y, a.tip.z,  b.tip.x, b.tip.y, b.tip.z,\n      b.mid.x, b.mid.y, b.mid.z,  a.mid.x, a.mid.y, a.mid.z,\n      0.6, 0.9, 1.0, alpha,  u0, 0, u1, 1)\n  end\nend",
+    ),
+    (
         "terrain.dig",
         "if input.clicked(\"left\") then\n  local hit = raycast(node.pos, node.forward, 6)\n  if hit then terrain.dig(hit.x, hit.y, hit.z, 1.5) end\nend",
     ),
@@ -4443,6 +4447,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "draw.box", insert: "draw.box(", doc: "draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a]) — a yaw-rotated wireframe box from half-extents. Trigger volumes, build footprints, an attach point." },
     ApiEntry { label: "draw.cone", insert: "draw.cone(", doc: "draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b [,a]) — a SOLID cone: base disc at b, apex `height` along the unit direction d. Gizmo arrowheads, thruster plumes, direction markers." },
     ApiEntry { label: "draw.disc", insert: "draw.disc(", doc: "draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around normal n (r0 = inner, r1 = outer; r0 = 0 gives a full disc). Rotation gizmo bands, ground markers." },
+    ApiEntry { label: "draw.quad", insert: "draw.quad(", doc: "draw.quad(texture, x0,y0,z0, x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a] [,u0,v0,u1,v1]) — one textured quad IN the world: depth-tested against the scene (a trail behind a pillar stays behind it), blended with the image's alpha, visible from both sides. The corners run around the quad; the colour tints the image. The UV rectangle defaults to the whole image — corner 0 sits at (u0,v0), corner 1 at (u1,v0), corner 2 at (u1,v1), corner 3 at (u0,v1). A ribbon is one quad per segment with u walking along it: paint the streak with u running tail→head and v across the width, then give segment i the slice u = i/n .. (i+1)/n. A sword trail, a tyre mark, a decal, a ground ring. Immediate mode: draw it every lateUpdate you want it." },
     ApiEntry { label: "draw.rect", insert: "draw.rect(", doc: "draw.rect(x, y, w, h, r,g,b [,a] [,radius]) — a filled rectangle in SCREEN PIXELS, in input.mouse()'s space. An RTS marquee is just the two corners you dragged between — the 3D version has to be projected onto a ground plane, which fights the camera angle and misses whatever the plane doesn't cross." },
     ApiEntry { label: "draw.rectOutline", insert: "draw.rectOutline(", doc: "draw.rectOutline(x, y, w, h, r,g,b [,a] [,thickness]) — the hollow twin of draw.rect. The last number is the border thickness rather than a corner radius." },
     ApiEntry { label: "draw.ring", insert: "draw.ring(", doc: "draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a]) — a circle around normal n at c. Range rings, selection circles, an area-of-effect telegraph." },

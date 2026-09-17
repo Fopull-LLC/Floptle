@@ -142,11 +142,17 @@ pub struct VfxTrailDoc {
     /// A new history point is recorded only after the particle moves this far.
     #[serde(default = "trail_min_dist_f32")]
     pub min_distance: f32,
+    /// Record the ribbon along the emitter's world path (Local tracks): a particle
+    /// held still at a blade tip leaves its ribbon where the tip has been — a sword
+    /// trail, a wing-tip streak, a tyre mark. Off, the ribbon follows the particle's
+    /// own motion within the emitter.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub emitter_path: bool,
 }
 
 impl Default for VfxTrailDoc {
     fn default() -> Self {
-        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05 }
+        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05, emitter_path: false }
     }
 }
 
@@ -484,6 +490,9 @@ impl VfxEffectDoc {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 fn true_bool() -> bool {
     true
 }
@@ -695,6 +704,7 @@ mod tests {
                     fade: true,
                     texture: Some("vfx/streak.png".into()),
                     min_distance: 0.02,
+                    emitter_path: false,
                 }),
                 segments: 12,
                 beam_end: [0.0, 5.0, 0.0],
@@ -1014,6 +1024,24 @@ mod tests {
         assert_eq!(doc, back);
         assert!(matches!(back.tracks[0].render, VfxRenderDoc::Beam { texture: Some(_) }));
         assert_eq!(back.tracks[1].trail, Some(VfxTrailDoc::default()));
+    }
+
+    #[test]
+    fn emitter_path_trail_round_trips_and_is_off_by_default() {
+        // A trail written before the option existed loads with it off, and the
+        // file says nothing about it until it is on.
+        let old: VfxTrailDoc = ron::from_str("(time: 0.2, width: 0.3)").unwrap();
+        assert!(!old.emitter_path);
+        let mut track = minimal_track();
+        track.trail = Some(VfxTrailDoc { emitter_path: true, ..VfxTrailDoc::default() });
+        let mut doc: VfxEffectDoc = ron::from_str(r#"(name: "Slash")"#).unwrap();
+        doc.tracks = vec![track];
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        assert!(text.contains("emitter_path: true"), "{text}");
+        let back: VfxEffectDoc = ron::from_str(&text).unwrap();
+        assert!(back.tracks[0].trail.as_ref().unwrap().emitter_path);
+        let off = ron::ser::to_string_pretty(&VfxTrailDoc::default(), Default::default()).unwrap();
+        assert!(!off.contains("emitter_path"), "an off option stays out of the file: {off}");
     }
 
     /// A minimal track for tests that only care about a couple of fields.

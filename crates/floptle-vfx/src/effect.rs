@@ -282,11 +282,17 @@ pub struct Trail {
     pub texture: Option<String>,
     /// A new history point is recorded only after the particle moves this far.
     pub min_distance: f32,
+    /// Record the ribbon along the emitter's world path (`Space::Local` tracks):
+    /// a particle sitting still at a blade tip leaves its ribbon where the tip
+    /// has been in the world — a sword trail, a wing-tip vortex, a tyre mark. Off,
+    /// the ribbon follows the particle's own motion within the emitter. A World
+    /// track leaves its ribbon in the world either way.
+    pub emitter_path: bool,
 }
 
 impl Default for Trail {
     fn default() -> Self {
-        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05 }
+        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05, emitter_path: false }
     }
 }
 
@@ -522,6 +528,16 @@ pub struct CompiledTrack {
     pub lane_tint: Prop4,
     pub lane_shape: Prop1,
     pub lane_aspect: Prop1,
+}
+
+impl CompiledTrack {
+    /// Whether this track's ribbon history is kept in anchor-relative world space:
+    /// every World track's is, and a Local track's when its trail follows the
+    /// emitter's path (see [`Trail::emitter_path`]). The sim shifts such a history
+    /// with the anchor and the draw places it through the world matrix.
+    pub fn trail_in_world(&self) -> bool {
+        self.space == Space::World || self.trail.as_ref().is_some_and(|t| t.emitter_path)
+    }
 }
 
 /// A compiled effect: share via `Arc` across every live instance.

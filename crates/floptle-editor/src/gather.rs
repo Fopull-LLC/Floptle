@@ -1395,7 +1395,12 @@ impl Editor {
             (particle_node.filter(|_| filter.particles), self.vfx_ui.doc.as_ref())
         {
             use floptle_scene::{VfxForceDoc, VfxShapeDoc, VfxSpaceDoc};
-            let wt = floptle_core::world_transform(&self.world, node);
+            // The preview's emitter (the node, or the tab's sweep from it) when
+            // the gizmo is for the preview, so it rides along with the sweep.
+            let wt = match &self.vfx.preview {
+                Some(p) if p.anchor == Some(node) => p.emitter,
+                _ => floptle_core::world_transform(&self.world, node),
+            };
             let m_shape = Mat4::from_scale_rotation_translation(
                 wt.scale,
                 wt.rotation,

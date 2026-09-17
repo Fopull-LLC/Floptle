@@ -194,8 +194,11 @@ impl TrackParticles {
         self.count -= 1;
     }
 
+    /// `trail_pos` is the birth position in the space the track's ribbon history is
+    /// kept in — the particle's own for most tracks, the anchor-relative world point
+    /// for an emitter-path trail (see [`Trail::emitter_path`]).
     #[allow(clippy::too_many_arguments)]
-    fn push(&mut self, pos: Vec3, age: f32, vel: Vec3, life: f32, frame: Quat, misc: Vec4, seed: u32) {
+    fn push(&mut self, pos: Vec3, age: f32, vel: Vec3, life: f32, frame: Quat, misc: Vec4, seed: u32, trail_pos: Vec3) {
         self.pos_age.push(pos.extend(age));
         self.vel_life.push(vel.extend(life));
         self.frame.push(Vec4::new(frame.x, frame.y, frame.z, frame.w));
@@ -203,7 +206,7 @@ impl TrackParticles {
         self.seed.push(seed);
         if let Some(t) = &mut self.trail {
             // The birth position seeds the history so the ribbon starts immediately.
-            t.push(vec![pos.extend(age)]);
+            t.push(vec![trail_pos.extend(age)]);
         }
         self.count += 1;
     }
@@ -373,14 +376,30 @@ impl EffectInstance {
     /// [`simulate_to`] with the emitter's world transform (for `Space::World` tracks).
     /// A scrub has no emitter motion history, so newborns inherit no velocity.
     pub fn simulate_to_at(&mut self, target: f32, gravity: Vec3, emitter: Transform) {
+        self.simulate_to_along(target, gravity, |_| emitter);
+    }
+
+    /// [`Self::simulate_to_at`] with the emitter on the move: `emitter_at(t)` is its world
+    /// transform at effect time `t`, sampled at every fixed step, and each step's
+    /// newborns inherit the emitter's velocity over that step — so a scrub shows an
+    /// emitter-path trail, a World track and `inherit_velocity` the way they play
+    /// on a moving node.
+    pub fn simulate_to_along(&mut self, target: f32, gravity: Vec3, mut emitter_at: impl FnMut(f32) -> Transform) {
         self.reset();
         let mut sim_t = 0.0;
+        let mut prev = emitter_at(0.0);
+        let mut step = |this: &mut Self, dt: f32, t: f32| {
+            let now = emitter_at(t);
+            let vel = ((now.translation - prev.translation) / dt as f64).as_vec3();
+            this.advance_at_moving(dt, gravity, now, vel);
+            prev = now;
+        };
         while sim_t + SCRUB_STEP <= target {
-            self.advance_at(SCRUB_STEP, gravity, emitter);
             sim_t += SCRUB_STEP;
+            step(self, SCRUB_STEP, sim_t);
         }
         if target > sim_t {
-            self.advance_at(target - sim_t, gravity, emitter);
+            step(self, target - sim_t, target);
         }
     }
 
@@ -418,14 +437,17 @@ impl EffectInstance {
                             let np = pa.truncate() - delta;
                             *pa = np.extend(pa.w);
                         }
-                        // Trail history is stored in the same anchor-relative space —
-                        // shift it in lockstep so ribbons stay put in the world.
-                        if let Some(trails) = &mut self.tracks[ti].particles.trail {
-                            for hist in trails {
-                                for pt in hist {
-                                    let np = pt.truncate() - delta;
-                                    *pt = np.extend(pt.w);
-                                }
+                    }
+                    // Trail history in anchor-relative world space — a World track's,
+                    // or an emitter-path trail on a Local one — shifts in lockstep so
+                    // the ribbon stays put in the world while the particle rides on.
+                    if ct.trail_in_world()
+                        && let Some(trails) = &mut self.tracks[ti].particles.trail
+                    {
+                        for hist in trails {
+                            for pt in hist {
+                                let np = pt.truncate() - delta;
+                                *pt = np.extend(pt.w);
                             }
                         }
                     }
@@ -436,7 +458,7 @@ impl EffectInstance {
         self.anchored = true;
 
         // Age existing particles first; newborns then age only their partial step.
-        self.integrate(dt, gravity);
+        self.integrate(dt, gravity, &emitter);
 
         // Emitter velocity for newborns this advance (Space::World inherit), consumed once.
         let emit_vel = std::mem::replace(&mut self.pending_emit_vel, Vec3::ZERO);
@@ -548,7 +570,7 @@ impl EffectInstance {
     }
 
     /// Age, gravity, drag, forces, retire. Kinematic-velocity tracks sample their LUT.
-    fn integrate(&mut self, dt: f32, gravity: Vec3) {
+    fn integrate(&mut self, dt: f32, gravity: Vec3, emitter: &Transform) {
         // World-track turbulence samples noise at the absolute world position; the
         // anchor (as f32) shifts it back into world space from the anchor-relative store.
         let anchor = self.anchor.as_vec3();
@@ -557,6 +579,11 @@ impl EffectInstance {
             let damp = (-ct.drag * dt).exp();
             let g = gravity * ct.gravity * dt;
             let is_world = ct.space == Space::World;
+            // An emitter-path trail records where the particle IS in the world: the
+            // anchor sits at the emitter, so that is the local point rotated and
+            // scaled by the node, and a particle that never moves within the emitter
+            // still lays its ribbon along the node's path.
+            let emitter_path = !is_world && ct.trail_in_world();
             let mut i = 0;
             while i < p.count {
                 let age = p.pos_age[i].w + dt;
@@ -594,15 +621,16 @@ impl EffectInstance {
                 // [`TRAIL_MAX_POINTS`]. Untrailed tracks skip all of this.
                 if let (Some(trail), Some(trails)) = (&ct.trail, &mut p.trail) {
                     let hist = &mut trails[i];
+                    let rec = if emitter_path { emitter.rotation * (emitter.scale * pos) } else { pos };
                     let min_d2 = trail.min_distance.max(1e-4).powi(2);
                     let moved = hist
                         .last()
-                        .is_none_or(|l| (pos - l.truncate()).length_squared() >= min_d2);
+                        .is_none_or(|l| (rec - l.truncate()).length_squared() >= min_d2);
                     if moved {
                         if hist.len() >= TRAIL_MAX_POINTS {
                             hist.remove(0);
                         }
-                        hist.push(pos.extend(age));
+                        hist.push(rec.extend(age));
                     }
                     // Expire off the tail: a point's own age = particle age − record age.
                     let cutoff = age - trail.time.max(1e-3);
@@ -694,7 +722,14 @@ fn spawn(
     let pos = offset + (carried + inherit) * age0;
 
     let misc = Vec4::new(birth_size, speed_mul, 0.0, 0.0);
-    ts.particles.push(pos, age0, vel, life, frame, misc, seed);
+    // An emitter-path trail keeps its history in anchor-relative world space, so the
+    // seed point is the birth position through the node's rotation and scale.
+    let trail_pos = if ct.space == Space::Local && ct.trail_in_world() {
+        emitter.rotation * (emitter.scale * pos)
+    } else {
+        pos
+    };
+    ts.particles.push(pos, age0, vel, life, frame, misc, seed, trail_pos);
 }
 
 /// Deterministic shape sample: birth offset (emitter space) + unit emit direction.
@@ -1247,7 +1282,7 @@ mod tests {
         let track = Track {
             clips: vec![burst_clip(0.0, 1, 10.0)],
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
-            trail: Some(Trail { time: 0.2, width: 0.1, fade: true, texture: None, min_distance: 0.1 }),
+            trail: Some(Trail { time: 0.2, width: 0.1, min_distance: 0.1, ..Trail::default() }),
             ..Track::default()
         };
         let fx = one_track_effect(track, 1.0, Playback::OneShot);
@@ -1270,6 +1305,96 @@ mod tests {
     }
 
     #[test]
+    fn emitter_path_trail_records_the_emitters_world_motion() {
+        use crate::effect::{Space, Trail};
+        // A particle that never moves within the emitter (a blade tip) — with an
+        // emitter-path trail its history is where the tip has BEEN in the world as
+        // the node moves; without one, the particle has not moved, so nothing is
+        // recorded. The node carries the particle 1 u along +X per step and turns a
+        // quarter turn about Y over the run, so both translation and rotation must
+        // show in the path.
+        let make = |emitter_path: bool| {
+            let track = Track {
+                clips: vec![burst_clip(0.0, 1, 10.0)],
+                shape: crate::effect::EmitShape::Point,
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                space: Space::Local,
+                trail: Some(Trail { time: 10.0, width: 0.1, min_distance: 0.05, emitter_path, ..Trail::default() }),
+                ..Track::default()
+            };
+            EffectInstance::new(one_track_effect(track, 1.0, Playback::OneShot), 1)
+        };
+        let steps = 8;
+        let mut with = make(true);
+        let mut without = make(false);
+        for k in 0..steps {
+            let emitter = Transform {
+                translation: DVec3::new(k as f64, 0.0, 0.0),
+                rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 * k as f32 / (steps - 1) as f32),
+                scale: Vec3::splat(2.0),
+            };
+            with.advance_at(0.05, NO_G, emitter);
+            without.advance_at(0.05, NO_G, emitter);
+        }
+        let hist_off = &without.track_particles(0).trail.as_ref().unwrap()[0];
+        assert_eq!(hist_off.len(), 1, "a still particle records no path without emitter_path");
+
+        let hist = &with.track_particles(0).trail.as_ref().unwrap()[0];
+        assert_eq!(hist.len(), steps, "one point per step of emitter motion ({} pts)", hist.len());
+        // Anchor-relative world space: the anchor is the emitter's LAST position
+        // (x = 7), so the point recorded at step k sits at x = k − 7 … the oldest
+        // 7 u behind the head, the newest at the head.
+        let head = hist.last().unwrap().truncate();
+        assert!(head.length() < 1e-4, "the newest point is at the emitter: {head}");
+        let tail = hist[0].truncate();
+        assert!((tail.x - -(steps as f32 - 1.0)).abs() < 1e-3, "tail x = {} (the path's start)", tail.x);
+        // The particle in the sim stays at the origin of the emitter — the ribbon
+        // moved, the particle did not.
+        assert!(with.track_particles(0).pos_age[0].truncate().length() < 1e-6);
+    }
+
+    #[test]
+    fn emitter_path_trail_turns_with_the_node() {
+        use crate::effect::{EmitShape, Space, Trail};
+        // A particle born on a unit sphere shell around a node that turns in place
+        // and is scaled ×2: the recorded path is the node's rotation and scale
+        // applied to the particle's local offset — an arc of radius 2 at a constant
+        // height — while the particle itself never moves in local space.
+        let track = Track {
+            clips: vec![burst_clip(0.0, 1, 10.0)],
+            shape: EmitShape::Sphere { radius: 1.0, shell: true },
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            space: Space::Local,
+            trail: Some(Trail { time: 10.0, width: 0.1, min_distance: 0.05, emitter_path: true, ..Trail::default() }),
+            ..Track::default()
+        };
+        let mut inst = EffectInstance::new(one_track_effect(track, 1.0, Playback::OneShot), 3);
+        let n = 12;
+        for k in 0..n {
+            let ang = std::f32::consts::PI * k as f32 / (n - 1) as f32;
+            let emitter = Transform {
+                translation: DVec3::new(5.0, 1.0, -2.0),
+                rotation: Quat::from_rotation_y(ang),
+                scale: Vec3::splat(2.0),
+            };
+            inst.advance_at(0.05, NO_G, emitter);
+        }
+        let local = inst.track_particles(0).pos_age[0].truncate();
+        assert!((local.length() - 1.0).abs() < 1e-4, "the particle stays on the unit shell: {local}");
+        assert!(Vec3::new(local.x, 0.0, local.z).length() > 0.2, "fixture: the offset needs a sideways part to turn ({local})");
+        let hist = &inst.track_particles(0).trail.as_ref().unwrap()[0];
+        assert_eq!(hist.len(), n, "one point per step of turning ({} pts)", hist.len());
+        for (k, pt) in hist.iter().enumerate() {
+            let p = pt.truncate();
+            assert!((p.length() - 2.0).abs() < 1e-3, "scale must show in the path: |p| = {}", p.length());
+            assert!((p.y - 2.0 * local.y).abs() < 1e-3, "a turn about Y keeps the height: {p}");
+            let ang = std::f32::consts::PI * k as f32 / (n - 1) as f32;
+            let expect = Quat::from_rotation_y(ang) * (2.0 * local);
+            assert!((p - expect).length() < 1e-3, "step {k}: {p} vs {expect}");
+        }
+    }
+
+    #[test]
     fn trail_history_is_bounded_and_untrailed_tracks_pay_nothing() {
         use crate::effect::Trail;
         // A tiny min_distance + long window would record every step — the cap must
@@ -1277,7 +1402,7 @@ mod tests {
         let track = Track {
             clips: vec![burst_clip(0.0, 1, 10.0)],
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
-            trail: Some(Trail { time: 100.0, width: 0.1, fade: true, texture: None, min_distance: 1e-3 }),
+            trail: Some(Trail { time: 100.0, width: 0.1, min_distance: 1e-3, ..Trail::default() }),
             ..Track::default()
         };
         let fx = one_track_effect(track, 1.0, Playback::OneShot);

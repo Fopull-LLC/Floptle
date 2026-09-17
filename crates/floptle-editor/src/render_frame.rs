@@ -814,6 +814,12 @@ impl Editor {
                         .collect();
                     tri_layer.draw(gpu, color, depth, view_proj, &verts);
                 }
+                // Script-drawn textured quads (draw.quad — sword trails, decals,
+                // ground rings): in the world, depth-tested, one run per texture.
+                if !self.script_quads.is_empty() {
+                    let (verts, batches) = pack_script_quads(&self.script_quads, cam.world_position);
+                    tri_layer.draw_textured(gpu, color, depth, view_proj, &verts, &batches, raster);
+                }
                 // Live particles: after all opaque work (they depth-test against
                 // meshes and raymarched matter), before post/retro — so they're
                 // AO'd/bloomed and pixelate with the scene.
@@ -1329,4 +1335,31 @@ fn dump_presented_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture, frame_no
             BUSY.fetch_sub(1, SeqCst);
         }
     }
+}
+
+/// Pack this tick's `draw.quad`s (already texture-resolved and sorted by
+/// texture) into camera-relative textured triangles, two per quad, with one
+/// batch per run of the same texture. Corner 0 maps to `(u0, v0)`, 1 to
+/// `(u1, v0)`, 2 to `(u1, v1)`, 3 to `(u0, v1)`.
+pub(crate) fn pack_script_quads(
+    quads: &[(floptle_render::TexId, floptle_script::DrawQuad)],
+    cam_pos: DVec3,
+) -> (Vec<floptle_render::TexTriVertex>, Vec<floptle_render::TexTriBatch>) {
+    let mut verts: Vec<floptle_render::TexTriVertex> = Vec::with_capacity(quads.len() * 6);
+    let mut batches: Vec<floptle_render::TexTriBatch> = Vec::new();
+    for (id, q) in quads {
+        let start = verts.len() as u32;
+        let [u0, v0, u1, v1] = q.uv;
+        let corner = |i: usize, u: f32, v: f32| {
+            let p = (DVec3::from(q.p[i]) - cam_pos).as_vec3();
+            floptle_render::TexTriVertex { pos: [p.x, p.y, p.z], color: q.color, uv: [u, v] }
+        };
+        let (c0, c1, c2, c3) = (corner(0, u0, v0), corner(1, u1, v0), corner(2, u1, v1), corner(3, u0, v1));
+        verts.extend_from_slice(&[c0, c1, c2, c0, c2, c3]);
+        match batches.last_mut() {
+            Some(b) if b.texture == *id => b.range.end = verts.len() as u32,
+            _ => batches.push(floptle_render::TexTriBatch { texture: *id, range: start..verts.len() as u32 }),
+        }
+    }
+    (verts, batches)
 }

@@ -979,6 +979,18 @@ impl Editor {
         // behind an interpolated camera.
         self.script_lines = self.script_host.take_draw_lines();
         self.script_tris = self.script_host.take_draw_tris();
+        // Textured quads: each texture path resolves through the registry here,
+        // while `self` is ours to borrow mutably (the render pass only reads), and
+        // the list is grouped by texture. A path that will not load is dropped,
+        // not drawn white.
+        let quads = self.script_host.take_draw_quads();
+        self.script_quads.clear();
+        for q in quads {
+            if let Some(id) = self.ensure_texture(&q.texture) {
+                self.script_quads.push((id, q));
+            }
+        }
+        self.script_quads.sort_by_key(|(id, _)| id.0);
         self.script_rects = self.script_host.take_draw_rects();
         self.script_texts = self.script_host.take_draw_texts();
         // Script debug gizmos queued this frame — by `update` and `fixedUpdate` —
