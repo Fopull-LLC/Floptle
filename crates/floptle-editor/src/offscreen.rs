@@ -330,6 +330,10 @@ impl Editor {
         // without this, a shot of a scene draws every model in the texture it
         // was IMPORTED with, whatever its materials say.
         self.ensure_scene_textures();
+        // Particle textures and mesh-track models live in their own registry,
+        // and a live effect's billboards resolve their texture in this same
+        // gather — so a shot draws every burst textured, not as a tinted square.
+        self.ensure_vfx_assets();
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
         let layer_table = (cull_mask != u32::MAX).then(|| self.project.build_layers());
