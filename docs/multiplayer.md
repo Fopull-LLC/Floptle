@@ -455,6 +455,18 @@ Only the root replicates; children are local nodes that follow it, and their
 scripts run on every peer. `net.despawn(root)` takes the subtree away
 everywhere, and a peer leaving despawns what it owned.
 
+**Around a scene switch, spawn whenever you like.** The server's `scene.load`
+tells every client to load the same scene, and each client takes its own time
+over that. Anything the server spawns, despawns or re-owns in the new scene
+meanwhile — the rigs a `scene.onLoaded` handler spawns on the very next frame
+— is held by the client until its own load finishes and then applied, in the
+order it was sent. So a game may assume: a `net.spawn` after `scene.load`
+reaches every connected client, including one whose load finishes later than
+the server's, and a rig despawned before the client caught up never appears
+there. A spawn made in the *old* scene, after the switch was announced, is
+dropped — it belongs to a scene the client is leaving. No warm-up spawn, hold
+timer or "ask for a body" RPC is needed.
+
 **Interest management** — the player-count feature. Off by default, because
 below a few dozen players broadcasting is cheaper and simpler:
 

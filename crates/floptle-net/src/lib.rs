@@ -108,6 +108,16 @@ mod tests {
         from + ticks
     }
 
+    /// A node a server can spawn at runtime, by name — every other field at
+    /// its file default.
+    fn spawnable_node(name: &str) -> floptle_scene::NodeDoc {
+        ron::from_str(&format!(
+            "(name: {name:?}, transform: (translation: (5.0, 1.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+             scale: (1.0, 1.0, 1.0)), matter: Primitive(shape: Sphere, color: (1.0, 0.2, 0.2)))"
+        ))
+        .expect("a spawnable node")
+    }
+
     fn connect_pair(hub: &MemoryHub) -> (NetSession, NetSession) {
         let server = NetSession::server(Box::new(hub.server_endpoint()), 0);
         let client = NetSession::client(Box::new(hub.connect()), 0);
@@ -670,7 +680,7 @@ mod tests {
         assert!(client.is_connected());
         assert_eq!(client.take_scene_switch().as_deref(), Some("scenes/first.ron"));
         // The driver is already in that scene — it rebinds and traffic flows.
-        client.rebind_scene(&cw);
+        client.rebind_scene(&mut cw);
         let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 40, |w, tick| {
             if let Some(tr) = w.get_mut::<Transform>(se[0]) {
                 tr.translation.x = tick as f64 * 0.1;
@@ -682,7 +692,7 @@ mod tests {
         // Switch: the server flips to a different scene (different shape too).
         let (mut sw2, se2) = world_with(1);
         server.switch_scene("scenes/arena.ron");
-        server.rebind_scene(&sw2);
+        server.rebind_scene(&mut sw2);
         // Server ticks keep flowing while the client hasn't rebound yet: none
         // of the new scene's state may land on the old world's entities.
         let frozen = cw.get::<Transform>(ce[0]).unwrap().translation.x;
@@ -701,7 +711,7 @@ mod tests {
         // The client loads the new scene locally and rebinds: replication
         // resumes against the new ids (keyframes heal anything dropped).
         let (mut cw2, ce2) = world_with(1);
-        client.rebind_scene(&cw2);
+        client.rebind_scene(&mut cw2);
         let _ = run(&hub, &mut server, &mut sw2, &mut client, &mut cw2, t, 80, |w, tick| {
             if let Some(tr) = w.get_mut::<Transform>(se2[0]) {
                 tr.translation.x = 500.0 + tick as f64;
@@ -709,6 +719,79 @@ mod tests {
         });
         let nx = cw2.get::<Transform>(ce2[0]).unwrap().translation.x;
         assert!(nx > 400.0, "post-switch replication resumes in the new scene, got {nx}");
+    }
+
+    /// **A spawn sent while a client is still swapping scenes arrives once it
+    /// has.** The server switches and spawns a rig in the same breath — the
+    /// shape of every `scene.onLoaded` spawner; a client whose own load of that
+    /// scene finishes later held the spawn nowhere, dropped it as "early", and
+    /// nothing re-sent it: the first rig after every map change was missing on
+    /// every client, and which one depended on roster order. The new scene's
+    /// spawns are held through the swap and applied at the rebind — in order,
+    /// with a despawn that followed one — while a stale epoch's stay dropped.
+    #[test]
+    fn a_spawn_sent_during_the_clients_scene_swap_lands_at_the_rebind() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_scene("scenes/first.ron");
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 10, |_, _| {});
+        assert!(client.is_connected());
+        assert_eq!(client.take_scene_switch().as_deref(), Some("scenes/first.ron"));
+        client.rebind_scene(&mut cw);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 10, |_, _| {});
+
+        // A rig spawned in the OLD scene, right before the switch: it belongs
+        // to the epoch that is about to end and must not come along.
+        let mut stale = spawnable_node("stale");
+        stale.transform.translation = [9.0, 0.0, 0.0];
+        server.spawn_subtree(&mut sw, std::slice::from_ref(&stale), Some(1));
+
+        // Switch, then spawn two rigs on the very next tick and despawn the
+        // second — all before the client has rebound.
+        let (mut sw2, _) = world_with(1);
+        server.switch_scene("scenes/arena.ron");
+        server.rebind_scene(&mut sw2);
+        let rig = server.spawn_subtree(&mut sw2, std::slice::from_ref(&spawnable_node("rig")), Some(1))[0];
+        let gone = server.spawn_subtree(&mut sw2, std::slice::from_ref(&spawnable_node("gone")), Some(1))[0];
+        let t = run(&hub, &mut server, &mut sw2, &mut client, &mut cw, t, 5, |_, _| {});
+        server.despawn(&mut sw2, gone);
+        let t = run(&hub, &mut server, &mut sw2, &mut client, &mut cw, t, 5, |_, _| {});
+        assert_eq!(client.take_scene_switch().as_deref(), Some("scenes/arena.ron"));
+        // Nothing landed on the old world while the swap was pending.
+        assert!(
+            cw.query::<floptle_core::Name>().all(|(_, n)| n.0 != "rig" && n.0 != "gone"),
+            "a spawn applied to the old world during the swap"
+        );
+
+        // The client finishes its own load and rebinds: the rig is there, the
+        // despawned one is not, and the old scene's is not.
+        let (mut cw2, _) = world_with(1);
+        client.rebind_scene(&mut cw2);
+        let spawned = client.take_spawned();
+        let names: Vec<String> = cw2.query::<floptle_core::Name>().map(|(_, n)| n.0.clone()).collect();
+        assert!(names.iter().any(|n| n == "rig"), "the spawn sent during the swap never arrived: {names:?}");
+        assert!(!names.iter().any(|n| n == "gone"), "a despawn sent during the swap was lost: {names:?}");
+        assert!(!names.iter().any(|n| n == "stale"), "the old scene's spawn came along: {names:?}");
+        assert!(
+            spawned.iter().any(|(_, e, owner)| {
+                *owner == Some(1) && cw2.get::<floptle_core::Name>(*e).is_some_and(|n| n.0 == "rig")
+            }),
+            "the driver was not told about the held spawn: {spawned:?}"
+        );
+        // …and it keeps replicating afterwards, so the held spawn is a live
+        // node and not a stranded one.
+        let _ = run(&hub, &mut server, &mut sw2, &mut client, &mut cw2, t, 40, |w, tick| {
+            if let Some(tr) = w.get_mut::<Transform>(rig) {
+                tr.translation.x = 100.0 + tick as f64;
+            }
+        });
+        let (ce, _) = cw2.query::<floptle_core::Name>().find(|(_, n)| n.0 == "rig").unwrap();
+        let x = cw2.get::<Transform>(ce).unwrap().translation.x;
+        assert!(x > 100.0, "the held rig does not replicate: x = {x}");
     }
 
     // -----------------------------------------------------------------------

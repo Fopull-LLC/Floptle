@@ -1364,7 +1364,7 @@ mod server_tests {
                 .unwrap_or_else(|e| panic!("the client could not load {scene}: {e}"));
             self.world = World::default();
             floptle_scene::spawn_into(&doc, &mut self.world);
-            self.session.rebind_scene(&self.world);
+            self.session.rebind_scene(&mut self.world);
         }
     }
 

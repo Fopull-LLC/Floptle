@@ -2255,7 +2255,7 @@ mod tests {
             pump(1, &mut wall, &mut host, &mut peer, &mut pw);
             if let Some(s) = peer.take_scene_switch() {
                 assert_eq!(s, "first");
-                peer.rebind_scene(&pw);
+                peer.rebind_scene(&mut pw);
             }
             if peer.take_rollback_start().is_some() {
                 break;

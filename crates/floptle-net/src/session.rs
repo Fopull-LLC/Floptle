@@ -335,6 +335,12 @@ pub struct NetSession {
     /// scene-scoped messages are dropped until the driver rebinds (the old
     /// id map must never eat the new scene's snapshots).
     scene_pending: bool,
+    /// Client: the new scene's spawns, despawns and owner changes that arrived
+    /// while the swap was pending — sent by a server that switched and spawned
+    /// in the same breath, received by a client still loading. Applied, in
+    /// order, the moment the driver rebinds; a stale epoch's are still dropped.
+    /// Bounded, so a client that never rebinds cannot grow it without limit.
+    held_for_rebind: Vec<Msg>,
     /// Live body states fed by the driver each tick (velocity + grounded per
     /// physics-synced entity) — carried in snapshots for prediction.
     body_states: HashMap<Entity, ([f32; 3], bool)>,
@@ -671,6 +677,7 @@ impl NetSession {
             scene: String::new(),
             scene_switch_in: None,
             scene_pending: false,
+            held_for_rebind: Vec::new(),
             body_states: HashMap::new(),
             late_inputs: 0,
             peer_inputs: HashMap::new(),
@@ -1010,7 +1017,7 @@ impl NetSession {
     /// assign fresh deterministic NetIds against the new one. Peer links,
     /// input timing, and pending events survive — only scene-scoped state
     /// resets. The next server snapshot is a keyframe (the new baseline).
-    pub fn rebind_scene(&mut self, world: &World) {
+    pub fn rebind_scene(&mut self, world: &mut World) {
         self.net_to_ent.clear();
         self.ent_to_net.clear();
         self.next_id = 1;
@@ -1039,6 +1046,12 @@ impl NetSession {
         self.synced_in.clear();
         self.scene_pending = false;
         self.register_scene(world);
+        // What the server sent for this scene while the swap was pending —
+        // the first spawn after its `scene.load`, typically — lands now, in
+        // the order it was sent, against the ids the rebind just built.
+        for msg in std::mem::take(&mut self.held_for_rebind) {
+            self.client_message(world, msg);
+        }
     }
 
     /// Client: a scene the server told us to be in (a mid-session `Scene`
@@ -2999,6 +3012,19 @@ impl NetSession {
         });
     }
 
+    /// How many of the new scene's messages a client keeps while its swap is
+    /// pending. Well above what a server sends in the seconds a load takes;
+    /// past it the oldest goes, and a keyframe heals what a dropped one named.
+    const MAX_HELD_FOR_REBIND: usize = 1024;
+
+    /// Keep a scene-scoped message of the current epoch for the rebind.
+    fn hold_for_rebind(&mut self, msg: Msg) {
+        if self.held_for_rebind.len() >= Self::MAX_HELD_FOR_REBIND {
+            self.held_for_rebind.remove(0);
+        }
+        self.held_for_rebind.push(msg);
+    }
+
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
             Msg::Welcome { peer, tick, scene, epoch, input_delay, .. } => {
@@ -3044,6 +3070,7 @@ impl NetSession {
                 // Everything buffered belongs to the old scene; scene-scoped
                 // messages stay dropped until the driver rebinds.
                 self.scene_pending = true;
+                self.held_for_rebind.clear();
                 self.interp.clear();
                 self.anim_bufs.clear();
                 self.anim_started.clear();
@@ -3064,8 +3091,13 @@ impl NetSession {
                 self.state_hashes.clear();
             }
             Msg::Spawn { epoch, id, nodes_ron, owner } => {
-                if epoch != self.scene_epoch || self.scene_pending {
-                    return; // another scene's spawn — stale or early
+                if epoch != self.scene_epoch {
+                    return; // another scene's spawn — stale
+                }
+                if self.scene_pending {
+                    // This scene's spawn, ahead of the rebind: held, not lost.
+                    self.hold_for_rebind(Msg::Spawn { epoch, id, nodes_ron, owner });
+                    return;
                 }
                 if self.net_to_ent.contains_key(&id) {
                     return; // duplicate catch-up
@@ -3096,7 +3128,11 @@ impl NetSession {
                 self.spawned_ents.insert(id, ents);
             }
             Msg::Despawn { epoch, id } => {
-                if epoch != self.scene_epoch || self.scene_pending {
+                if epoch != self.scene_epoch {
+                    return;
+                }
+                if self.scene_pending {
+                    self.hold_for_rebind(Msg::Despawn { epoch, id });
                     return;
                 }
                 let Some(&root) = self.net_to_ent.get(&id) else { return };
@@ -3113,7 +3149,11 @@ impl NetSession {
                 }
             }
             Msg::SetOwner { epoch, id, owner } => {
-                if epoch != self.scene_epoch || self.scene_pending {
+                if epoch != self.scene_epoch {
+                    return;
+                }
+                if self.scene_pending {
+                    self.hold_for_rebind(Msg::SetOwner { epoch, id, owner });
                     return;
                 }
                 let Some(&e) = self.net_to_ent.get(&id) else { return };

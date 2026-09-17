@@ -1490,7 +1490,7 @@ impl Editor {
             self.net_history = floptle_net::LagHistory::new();
             if let Some(s) = self.net_server.as_mut() {
                 s.switch_scene(&rel);
-                s.rebind_scene(&self.world);
+                s.rebind_scene(&mut self.world);
             }
             // The conversation outlives the map. Only the node attachments go —
             // the nodes they named are gone — and the game re-attaches in the
@@ -2643,7 +2643,7 @@ impl Editor {
                 // way — the host sends it right behind the scene message.
                 self.net_rollback_stop();
                 if let Some(cs) = self.net_play_client.as_mut() {
-                    cs.rebind_scene(&self.world);
+                    cs.rebind_scene(&mut self.world);
                 }
                 self.voice_rebind_scene();
                 let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
