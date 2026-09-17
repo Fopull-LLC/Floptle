@@ -2108,8 +2108,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
         "Material",
         &[
             ("texture", PropKind::Text, ""),
-            // The headline miss before this pass: a material could be faded
-            // from a script and not from a clip.
+            // A material fades from a clip the way it fades from a script.
             ("opacity", PropKind::Float, ""),
             ("ambient", PropKind::Float, ""),
             ("r", PropKind::Float, "Colour"),

@@ -559,15 +559,15 @@ impl Editor {
     ///
     /// **This is `scene_rel`, not `scenes/{scene_name}.ron`**.
     /// `scene_name` is only the file stem — it is what the hierarchy header and
-    /// the window title show, and what `scene.current()` hands a script. Building
-    /// a save path out of it threw the subfolder away, so
-    /// `scenes/cutscenes/Opening.ron` was loaded and `scenes/Opening.ron` was
-    /// written: a different file, at the project root, reported as a success.
-    /// Reopening loaded the original, so every edit looked reverted, while a
-    /// stray file quietly accumulated the real work. Hours of it, in one report.
+    /// the window title show, and what `scene.current()` hands a script. A save
+    /// path built out of it throws the subfolder away:
+    /// `scenes/cutscenes/Opening.ron` loads and `scenes/Opening.ron` is
+    /// written — a different file, at the project root, reported as a success,
+    /// so every edit looks reverted on reopen while a stray file accumulates
+    /// the real work.
     ///
-    /// `scene_rel` has recorded the true relative path all along — multiplayer
-    /// names scenes by it on the wire. It simply was not the thing the save used.
+    /// `scene_rel` records the true relative path — multiplayer names scenes by
+    /// it on the wire — so it is what the save uses.
     pub(crate) fn scene_path(&self) -> PathBuf {
         self.project_root.join(self.scene_rel_or_default())
     }

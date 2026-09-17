@@ -250,8 +250,7 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
         )?;
     }
     // Fullscreen. The one Video setting every player looks for first, and the
-    // one a settings menu could not offer until now — a reviewer said so, in
-    // public, about a game whose menu had everything else.
+    // one a settings menu is judged on.
     {
         let i = info.clone();
         t.set("fullscreen", lua.create_function(move |_, ()| Ok(i.borrow().fullscreen))?)?;

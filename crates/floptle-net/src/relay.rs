@@ -204,9 +204,9 @@ pub const HOST_GRACE: Duration = Duration::from_secs(20);
 
 /// Why a lobby ended, for the operator's journal.
 ///
-/// ⚠ **The relay logged a bare count before this.** "lobbies: 1" cannot say
-/// which lobby died or what killed it, which is why a real teardown mid-match
-/// took a byte-level diff of two counters to find at all.
+/// A bare count — "lobbies: 1" — cannot say which lobby died or what killed
+/// it, and a teardown mid-match then takes a byte-level diff of two counters
+/// to find at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LobbyEnd {
     /// The host's connection went, and it did not come back inside
@@ -414,19 +414,18 @@ pub trait RelayPolicy: Send {
 
     /// **A lobby ended, and why.**
     ///
-    /// ⚠ The relay logged a bare lobby count before this. A count cannot say
-    /// which lobby died or what killed it, and a real mid-match teardown
-    /// therefore took a byte-level diff of two counters that are supposed to be
-    /// equal before anybody noticed it had happened at all.
+    /// Named, with the reason: a bare lobby count cannot say which lobby died
+    /// or what killed it, and a mid-match teardown then takes a byte-level
+    /// diff of two counters that are supposed to be equal before anybody
+    /// notices it happened at all.
     fn lobby_ended(&mut self, _code: &str, _why: LobbyEnd) {}
 
     /// **Payload that arrived for a lobby that does not exist**.
     ///
-    /// Invisible until now: these bytes were received and never forwarded, so
-    /// they showed up only as `bytes_in` exceeding `bytes_out` — which is how
-    /// the teardown was found, by differencing two numbers that had matched to
-    /// the byte in every other bucket in the product's history. Counted on
-    /// purpose now, so nobody has to notice it that way again.
+    /// These bytes were received and never forwarded. Uncounted, they show up
+    /// only as `bytes_in` exceeding `bytes_out`, and a teardown is found by
+    /// differencing two numbers that match to the byte in every other bucket.
+    /// Counted, so nobody has to notice it that way.
     fn orphaned(&mut self, _code: &str, _bytes: u64) {}
     fn peer_joined(&mut self, _code: &str) {}
     fn peer_left(&mut self, _code: &str) {}

@@ -1175,8 +1175,8 @@ pub(crate) fn is_verb_head(arg: &str) -> bool {
 
 /// Read the command line.
 ///
-/// Returns [`Outcome::Legacy`] unless `args[1]` is a verb, so every invocation
-/// that worked before this module existed still reaches the code that served it.
+/// Returns [`Outcome::Legacy`] unless `args[1]` is a verb, so a bare project
+/// path still reaches the code that serves it.
 pub(crate) fn dispatch(args: &[String]) -> Outcome {
     let Some(first) = args.get(1) else { return Outcome::Legacy };
     if !is_verb_head(first) {

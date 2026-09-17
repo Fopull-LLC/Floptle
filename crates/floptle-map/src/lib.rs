@@ -64,7 +64,7 @@ pub struct MapMesh {
     /// The generator that produced this mesh, while it is still untouched —
     /// the editor uses it to re-generate with different parameters (stair
     /// steps, cylinder sides). Cleared by the first op that moves geometry.
-    /// `#[serde(default)]` so sidecars written before this existed still load.
+    /// `#[serde(default)]` so a sidecar without one still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<ShapeSpec>,
 }

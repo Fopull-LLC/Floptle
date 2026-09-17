@@ -2304,8 +2304,8 @@ impl Editor {
                                     // A skinned part draws from `model` alone —
                                     // the pose is in the deform, not the matrix.
                                     // Applying node_world here too would transform
-                                    // it twice, which is the offset outline that was reported
-                                    // on the astronaut. Match the draw.
+                                    // it twice and draw the outline offset from the
+                                    // model. Match the draw.
                                     let raw = instance_of(model, [1.0, 1.0, 1.0]);
                                     let base = rig.skin_bases.get(i).copied().unwrap_or(0);
                                     if base != 0 {

@@ -714,11 +714,10 @@ impl RelayPolicy for CloudPolicy {
     }
 
     fn lobby_host_lost(&mut self, code: &str) {
-        // ⚠ **Named, with the code.** The relay printed a bare lobby count
-        // before this, and a count cannot say which lobby died or what killed
-        // it — which is why a host dropping three times inside one real match
-        // was found by differencing two byte counters rather than by reading
-        // the journal.
+        // Named, with the code: a bare lobby count cannot say which lobby
+        // died or what killed it, and a host dropping three times inside one
+        // match is then found by differencing two byte counters rather than
+        // by reading the journal.
         self.say(format!("lobby {code}: host connection lost — holding the lobby for its return"));
     }
 

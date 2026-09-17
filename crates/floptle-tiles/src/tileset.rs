@@ -459,8 +459,8 @@ pub struct TileSet {
     /// image and the same cut, kept in agreement by hand, and a tileset on its
     /// own renders nothing.
     ///
-    /// Empty falls back to the node's Material, which is every tileset written
-    /// before this — so nothing is repainted that did not ask to be.
+    /// Empty falls back to the node's Material, so a tileset that names no
+    /// texture is not repainted.
     pub texture: String,
     pub sheet_cols: u32,
     pub sheet_rows: u32,

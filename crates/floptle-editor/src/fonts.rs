@@ -19,8 +19,7 @@
 //! Faces are read once per package load and merged into one `set_fonts` call.
 //! egui rebuilds its glyph atlas on `set_fonts`, so doing it per frame — or once
 //! per package — would be paying an alphabet's worth of rasterisation for a
-//! heading. A project whose packages ship no fonts calls `set_fonts` exactly as
-//! often as it did before this existed: once.
+//! heading. A project whose packages ship no fonts calls `set_fonts` once.
 
 /// One typeface a package shipped, read off disk and ready to register.
 #[derive(Clone, Debug)]

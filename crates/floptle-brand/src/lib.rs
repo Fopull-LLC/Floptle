@@ -13,8 +13,8 @@
 //!   eframe (`with_icon`). That is the taskbar and the title bar on Windows
 //!   and X11. **Wayland ignores it**: a Wayland compositor shows the icon of
 //!   the `.desktop` entry whose name matches the window's `app_id`, and a
-//!   window with no `app_id` gets the compositor's placeholder — which on
-//!   GNOME is the yellow "W" that was reported. So every window also names itself
+//!   window with no `app_id` gets the compositor's placeholder — on GNOME, a
+//!   yellow "W". So every window also names itself
 //!   ([`APP_ID`], [`HUB_APP_ID`]) and the Hub installs the entries
 //!   ([`linux::install`]) that those names resolve to.
 //! - The **executable**: what Explorer and the Dock show for the file itself.

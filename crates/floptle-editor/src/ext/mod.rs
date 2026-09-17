@@ -428,8 +428,8 @@ pub(crate) struct OverlayLook {
 
 impl Default for OverlayLook {
     fn default() -> Self {
-        // The old behaviour, unchanged: a framed card down the right edge. An
-        // overlay written before this existed must look exactly as it did.
+        // A framed card down the right edge: what an overlay that sets nothing
+        // looks like.
         Self { left: false, bare: false, width: 260.0, fill: false, bottom: false }
     }
 }
@@ -649,7 +649,7 @@ impl ExtHost {
     /// what a manifest claims — and a manifest is exactly what this has none of.
     /// **One shot, and it assumes it.** The synthetic package is pushed onto
     /// `packages` and never removed, and `dynamic` is replaced outright rather
-    /// than merged — so a project's own packages, which loaded before this
+    /// than merged — so a project's own packages, which load before this
     /// runs, lose whatever they put there. That is harmless today because
     /// nothing runs after this in the process and every package's environment
     /// captured its table already, but it is a landmine for any second caller:

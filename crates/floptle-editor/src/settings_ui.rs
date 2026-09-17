@@ -392,9 +392,8 @@ impl<'a> SettingsCtx<'a> {
     ///
     /// This section exists because the website tells every developer to come
     /// here. The registration flow ends "paste it into Floptle: Project
-    /// settings ⏵ Networked ⏵ Game key", and before this there was no such
-    /// place — the key could only be set by hand-editing `project.ron`, which
-    /// is exactly the thing that was ruled out.
+    /// settings ⏵ Networked ⏵ Game key", so there has to be such a place —
+    /// hand-editing `project.ron` is exactly the thing ruled out.
     ///
     /// **Multiplayer needs none of it.** A direct connection and a self-hosted
     /// relay both work with no account, no key and no internet, and the blurb

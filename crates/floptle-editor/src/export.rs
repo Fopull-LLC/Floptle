@@ -786,8 +786,8 @@ fn absolute_refs(text: &str) -> Vec<String> {
                 && matches!(chunk.as_bytes()[2], b'\\' | b'/'));
         // A bare "/" or a URL is not an asset reference. Nor is an HTTP
         // endpoint path — `"/api/login"` is shaped exactly like an absolute
-        // Unix path and was reported as a foreign asset on every export of a
-        // game with a login script. What separates a reference from a route:
+        // Unix path, and a game with a login script must not export with a
+        // foreign-asset warning. What separates a reference from a route:
         // an asset either names a file (has an extension on its last segment)
         // or exists on this machine, which a route never does.
         if is_abs

@@ -159,8 +159,8 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
         // whatever its internal array happens to end at: sometimes the full
         // count, in which case a nil entry would abort the whole screen with
         // an error naming an index rather than the section, and sometimes the index
-        // before the hole, in which case every later section was silently
-        // dropped and nothing was reported at all.
+        // before the hole, in which case every later section is silently
+        // dropped and nothing is reported at all.
         //
         // So walk the integer keys the table actually has, and treat nil as
         // what a person writing it means: no element here. A deferred child

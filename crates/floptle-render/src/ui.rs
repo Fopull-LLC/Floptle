@@ -185,8 +185,8 @@ fn pivot_for(patch: [f32; 4], element: [f32; 4], pivot: [f32; 2]) -> [f32; 2] {
 /// `slice` is `[L, T, R, B]` as a fraction of the sampled UV region; `tex` is
 /// the source's pixel size. Corner patches are drawn at their source pixel size
 /// times `scale`, so a panel's border art keeps a constant visual weight no
-/// matter how large the panel gets — which is the entire point, and the reason
-/// authored panel textures were unusable before this.
+/// matter how large the panel gets — which is the entire point of authored
+/// panel textures.
 ///
 /// Degenerate cases fall back to the single stretched quad: insets that meet or
 /// cross, or an element too small to seat its own corners.
@@ -1517,8 +1517,8 @@ impl Ui {
             }
             // An OUTER shadow's soft edge spreads beyond the shape, so its quad
             // has to be bigger than the shape or the feather is clipped square
-            // — which is exactly what a glow looked like before this: a hard
-            // box with a gradient in it. Grow the geometry and tell the
+            // and a glow becomes a hard box with a gradient in it. Grow the
+            // geometry and tell the
             // fragment to inset the SDF by the same amount, leaving the drawn
             // shape unchanged.
             let pad = if q.kind == QuadKind::Shadow { q.feather.max(0.0) * scale } else { 0.0 };

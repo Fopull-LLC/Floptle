@@ -618,9 +618,8 @@ pub(crate) fn render_frame_pixels(
     // resolution, not chunky with the world. The picture's own texture was
     // made samplable above, so `backdrop()` shaders frost the real scene.
     //
-    // Nothing was drawn here before this call existed, and nothing said so:
-    // three of four scenes in the project that reported it were UI-first,
-    // every one "verified" by `run` and wrong on first sight.
+    // A UI-first scene photographed without its UI is wrong on first sight,
+    // and nothing else would say so.
     if ui {
         ed.draw_game_ui_overlay(&color_view, w, h, true);
     }

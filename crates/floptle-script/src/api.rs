@@ -712,17 +712,15 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
-    // The Lighting node. `ambient2d*` is the one that had no
-    // route at all and is the reason this arm exists: it is **the whole light a
-    // flat scene has** until a torch is placed, so turning it down is how a 2D
-    // game gets a dark room — and until now that was a decision you made once in
-    // the scene file and could never read back, animate, or undo.
-    //
-    // Which cost, concretely, a quality governor that parks every light at
-    // `intensity = 0` on a weak machine and had nowhere to put the base back to
-    // white; a brightness setting, which is the single most common request a
-    // game with atmospheric lighting gets; and a blackout, or a lights-back-on
-    // beat, which is one lerp on a value the renderer already reads per frame.
+    // The Lighting node. `ambient2d*` is the reason this arm exists: it is the
+    // whole light a flat scene has until a torch is placed, so turning it
+    // down is how a 2D game gets a dark room — a decision a script must be
+    // able to read back, animate and undo, not one made once in the scene
+    // file. That is what a quality governor that parks every light at
+    // `intensity = 0` on a weak machine needs to put the base back to white;
+    // what a brightness setting is, the single most common request a game
+    // with atmospheric lighting gets; and what a blackout, or a lights-back-on
+    // beat, is — one lerp on a value the renderer already reads per frame.
     //
     // The rest of `Light`'s numeric surface comes along because the arm is being
     // written anyway and each of them is a day cycle or a weather system

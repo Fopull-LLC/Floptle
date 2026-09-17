@@ -115,8 +115,8 @@ pub struct SteamPlatform {
     client: steamworks::Client,
     app_id: steamworks::AppId,
     persona_changed: Arc<AtomicBool>,
-    /// Set by the `UserStatsReceived` callback — every `Achievements` method
-    /// answers honestly (`None`/`Err`) before this, rather than guessing.
+    /// Set by the `UserStatsReceived` callback — until it is, every
+    /// `Achievements` method answers `None`/`Err` rather than guessing.
     /// This SDK version has no `RequestCurrentStats` to wait on explicitly
     /// (removed from the interface Valve ships in this `steamworks-sys`
     /// vendor — confirmed against the header, not guessed); stats arrive on

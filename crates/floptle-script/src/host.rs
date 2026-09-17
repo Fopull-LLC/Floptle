@@ -5369,7 +5369,7 @@ impl ScriptHost {
                 } else if !fan_out_param(world, ent, &name, v) {
                     // A model with per-part overrides and no node Material:
                     // the write fans out to every part that wears a shader
-                    // (above), and with none it was silently lost until now.
+                    // (above), and with none it must say so, not vanish.
                     shader_nowhere(
                         &mut self.shader_warned, &self.logs, &scene.names,
                         eid, "", &name, "has no Material and no part wears a shader",
@@ -6550,12 +6550,11 @@ impl ScriptHost {
         // **Set to true only if a hook was actually called.**
         //
         // Separate from the `ran` flag below, which gates the node read-back and
-        // must keep its existing meaning. This one exists for the profiler: a
-        // script with no `update` at all was still timed, so whatever the
-        // machine did during its (empty) span — a garbage collection, the OS
-        // taking the core away — was reported as that script's cost. A game
-        // measured 12–21 ms "peaks" on a file with no `update` in it and went
-        // looking for the problem there.
+        // must keep its meaning. This one exists for the profiler: timing a
+        // script with no `update` at all reports whatever the machine did
+        // during its empty span — a garbage collection, the OS taking the core
+        // away — as that script's cost, and a game goes looking for 12–21 ms
+        // "peaks" in a file with no `update` in it.
         called: &mut bool,
         rebuild_params: bool,
     ) -> mlua::Result<()> {

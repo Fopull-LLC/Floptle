@@ -942,9 +942,9 @@ pub(crate) fn load(path: &std::path::Path) -> Result<NavMesh, LoadError> {
         return Err(LoadError::Missing);
     }
     let bytes = floptle_vfs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
-    // No header at all is a bake from before this file had one. There is
-    // nothing to migrate — the fields it lacks were never written — so the only
-    // honest thing to do is say which file and why.
+    // No header at all is a bake with no version. There is nothing to
+    // migrate — the fields it lacks were never written — so the only honest
+    // thing to do is say which file and why.
     let Some(rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
         return Err(LoadError::Version { found: None });
     };

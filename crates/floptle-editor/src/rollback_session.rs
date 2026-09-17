@@ -187,14 +187,13 @@ impl Editor {
         // session is already skipping every authority-driven node.
         //
         // …but first take them out of the session's sets. On a client,
-        // `net_client_side_setup` ran at join time and again at Welcome, and
-        // both of those are structurally before this moment — so
-        // `rollback_filter_eids()` was empty for them and every fighter landed
-        // in `script_skip`. That set gates every pass including `lateUpdate`,
-        // which no driver replays, and nothing else ever removes them. The
-        // fight then runs normally (the driver bypasses filters) while the
-        // cosmetic pass is silently dead on the client only — which is why
-        // this looked fixed from the host and was reported three times.
+        // `net_client_side_setup` runs at join time and again at Welcome,
+        // both structurally before this moment — so `rollback_filter_eids()`
+        // was empty for them and every fighter landed in `script_skip`. That
+        // set gates every pass including `lateUpdate`, which no driver
+        // replays, and nothing else removes them: left in, the fight runs
+        // normally (the driver bypasses filters) while the cosmetic pass is
+        // silently dead on the client only, and looks fine from the host.
         self.script_host.shrink_filters(d.eids());
         self.script_host.extend_filters(d.eids());
         // And tell the session which nodes the driver owns, so its snapshot

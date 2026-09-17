@@ -330,8 +330,8 @@ impl EditorTabViewer<'_> {
                         // because a palette's images are not authored at one
                         // detail level: a fine gravel and a broad rock face
                         // only look like the same ground if one of them tiles
-                        // several times as often, and until now the only way to
-                        // arrange that was to resample the image.
+                        // several times as often — a knob, not a resample of
+                        // the image.
                         //
                         // Bigger number = smaller features, because it scales
                         // the sampling coordinate — so the control says what it

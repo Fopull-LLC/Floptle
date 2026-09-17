@@ -14,10 +14,10 @@
 //! ## aarch64
 //!
 //! The fleet box is an Oracle A1 and `floptle-dist::PLATFORMS` does not list
-//! `linux-aarch64` — the release pipeline never built one, because until now
-//! nothing ran an engine on ARM Linux. `release.yml` publishes
-//! `floptle-server-<version>-linux-aarch64` as a bare binary beside the relay's
-//! for exactly this, and this module is the only thing that downloads it.
+//! `linux-aarch64` — nothing but a fleet box runs an engine on ARM Linux.
+//! `release.yml` publishes `floptle-server-<version>-linux-aarch64` as a bare
+//! binary beside the relay's for exactly this, and this module is the only
+//! thing that downloads it.
 
 use std::path::PathBuf;
 

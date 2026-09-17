@@ -285,8 +285,7 @@ fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
                 "connected": g.session.is_connected(),
                 // The count a relevancy test reads. `net.setRelevant(node, peer,
                 // false)` is verified by this number going down for that peer
-                // and not for the others — which is that task's whole
-                // promise, and was taken on trust in every project until now.
+                // and not for the others — which is the whole promise.
                 // Nodes actually being sent state, not ids bound locally.
                 "receiving": g.receiving(),
                 "rtt_ms": stats.rtt_ms,

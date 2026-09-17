@@ -412,8 +412,8 @@ impl crate::Editor {
         }
         // `FLOPTLE_AUTO_LOOK=scene|game`: with the session playing, keep that
         // tab in front and look around with the Scene view's own camera, in
-        // flicks, the way a hand on a mouse does — the condition under which
-        // the sky was reported to flicker. Opt-in and separate from the frame
+        // flicks, the way a hand on a mouse does — the condition that shows a
+        // sky flicker. Opt-in and separate from the frame
         // dump, so a person reproducing something by hand with the dump on is
         // not fought for the camera. Re-asserted every few frames, because
         // pressing Play brings the Game tab forward itself.

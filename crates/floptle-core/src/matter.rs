@@ -362,8 +362,8 @@ pub struct Lighting2D {
 
 impl Default for Lighting2D {
     fn default() -> Self {
-        // Every one of these is "what a light did before this component
-        // existed". A scene that has never heard of it must be unchanged.
+        // Every one of these is what a light does without this component.
+        // A scene that has never heard of it must be unchanged.
         Self { mode: Lit2D::default(), layers: Vec::new(), inner: 0.0, falloff: 2.0, shadows: true }
     }
 }
@@ -1140,7 +1140,7 @@ pub struct Light {
     ///
     /// Each extra layer costs one more capture of the scene and one more pass,
     /// and only while something see-through is actually in view. 1 is the
-    /// cheapest and matches how the engine behaved before this existed.
+    /// cheapest.
     pub refraction_layers: u32,
 
     /// Depth fog: blend everything toward `fog_color` between `fog_start` and

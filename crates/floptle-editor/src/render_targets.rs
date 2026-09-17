@@ -9,10 +9,9 @@
 //! function ([`plan_render_targets`]) so it is testable without a GPU — the part
 //! that allocates textures is thin.
 //!
-//! before this, every target was 480×270 and redrew every frame,
-//! and a fifth target was dropped silently in whatever order the ECS query
-//! happened to return. All three are now the game's choice, and the one thing
-//! that remains a limit says so.
+//! A target's size and refresh are the game's choice, and the one thing that
+//! is a limit — how many there can be — says so rather than dropping a fifth
+//! in whatever order the ECS query happens to return.
 
 use std::collections::HashMap;
 

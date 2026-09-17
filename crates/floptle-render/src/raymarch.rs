@@ -241,9 +241,9 @@ pub struct RaymarchGlobals {
     /// (0..1), yzw spare. Appended at the end so this struct stays
     /// byte-identical to the WGSL one.
     ///
-    /// Zero is the behaviour fog had before this lane existed — surfaces
-    /// tinted, background untouched — and it is worth being able to get back
-    /// to, but it is not the default: see `fog_sky` in `field.wgsl` for why a
+    /// Zero is fog that stops at the geometry — surfaces tinted, background
+    /// untouched — and it is worth being able to ask for, but it is not the
+    /// default: see `fog_sky` in `field.wgsl` for why a
     /// ramp that stops at the geometry makes a dark fog colour unusable.
     pub fog_extra: [f32; 4],
     /// **Per-slot terrain texture scale**, [`TERRAIN_SLOTS`] of them packed four

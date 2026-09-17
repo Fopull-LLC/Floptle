@@ -85,8 +85,8 @@ pub struct NodeDoc {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub object_materials: std::collections::BTreeMap<String, MaterialDoc>,
     /// A colour multiplied over everything this node draws — see
-    /// [`floptle_core::Tint`]. `None` = no tint, which is what every scene
-    /// written before this said, so their bytes are unchanged.
+    /// [`floptle_core::Tint`]. `None` = no tint, so a scene that never set
+    /// one keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tint: Option<[f32; 4]>,
     /// The same Tint's additive fresnel edge: `(r, g, b, strength)`.
@@ -891,8 +891,8 @@ pub enum MatterDoc {
         /// before area lights existed round-trips byte-identically.
         #[serde(default, skip_serializing_if = "is_point_shape")]
         shape: LightShapeDoc,
-        /// Local shadows, off by default and skipped when off — so a lamp placed
-        /// before this existed round-trips byte-identically and costs nothing.
+        /// Local shadows, off by default and skipped when off — so a lamp that
+        /// never set them round-trips byte-identically and costs nothing.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         shadows: bool,
         /// Aimed down the node's local −Z, or `None` for an ordinary
@@ -2219,11 +2219,11 @@ pub struct LightDoc {
     pub fog_noise: f32,
     #[serde(default = "default_fog_noise_scale")]
     pub fog_noise_scale: f32,
-    /// Volumetric light injection. These default to lit rather than to the old
-    /// flat look on purpose: a fog layer that ignores the sun standing behind it
-    /// is the thing that made volumetric mode read as a grey wash, and a scene
-    /// saved before this existed wants the fix, not a preserved bug. Set
-    /// `fog_light: 0` to pin the previous appearance exactly.
+    /// Volumetric light injection. These default to lit rather than to a flat
+    /// look: a fog layer that ignores the sun standing behind it is what makes
+    /// volumetric mode read as a grey wash, and a scene saved without the field
+    /// wants the light, not a preserved wash. Set `fog_light: 0` for the flat
+    /// look exactly.
     #[serde(default = "default_fog_light")]
     pub fog_light: f32,
     #[serde(default = "default_fog_anisotropy")]

@@ -56,8 +56,8 @@ pub struct ReleaseInfo {
     /// v0.22.1 changed only the Hub, and every reader still saw a new engine to install, a
     /// banner telling them to install it, and an offer to migrate every project onto it.
     ///
-    /// **Empty means unknown, and unknown means both.** Every release published before this
-    /// field existed carries none, and a reader that read that as "nothing changed" would
+    /// Empty means unknown, and unknown means both. A release published without this
+    /// field carries none, and a reader that read that as "nothing changed" would
     /// quietly stop offering the entire back catalogue.
     #[serde(default)]
     pub changed: Vec<String>,

@@ -1404,9 +1404,8 @@ fn tilemap_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         ui.label("tileset");
         if tileset.is_empty() {
             // Named as the two features somebody would
-            // go looking for, and coloured, because
-            // this was reported twice as the engine
-            // not having either of them.
+            // go looking for, and coloured: unnamed, the
+            // engine reads as not having either of them.
             ui.colored_label(
                 egui::Color32::from_rgb(255, 200, 80),
                 "none",
