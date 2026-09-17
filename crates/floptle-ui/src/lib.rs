@@ -1346,7 +1346,7 @@ pub fn sort_roots(roots: &mut [Node]) {
 /// paint bigger glyphs into the same box, i.e. clip — the failure that makes a
 /// text-size setting useless at exactly the sizes somebody needs it.
 ///
-/// `fit` text is left alone deliberately: its size comes from the box it is
+/// `fit` text is left alone: its size comes from the box it is
 /// filling, so it is already as large as it can be, and multiplying it would
 /// only overflow a rect the author sized on purpose.
 ///
@@ -1815,7 +1815,7 @@ impl Default for TextRun {
 /// Which element is being typed into, and where its caret is.
 ///
 /// Runtime state, held by the editor/player and handed to [`draw_list_with`]
-/// once per frame. It is deliberately not part of [`ElementSpec`]: a caret
+/// once per frame. It is not part of [`ElementSpec`]: a caret
 /// position in a saved scene would be nonsense, and keeping it out means it is
 /// structurally impossible for one to get there.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

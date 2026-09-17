@@ -379,7 +379,7 @@ impl Editor {
 
         // Lighting comes from the scene's mandatory Lighting node (a Light
         // component). `spawn_into` makes exactly one, and `spawn_additive`
-        // deliberately brings no second — so `next()` is *the* Lighting node
+        // brings no second — so `next()` is *the* Lighting node
         // rather than the first of several, and `find("Lighting")` from a script
         // reaches the same one this reads.
         //
@@ -489,14 +489,14 @@ impl Editor {
         // per project): PostStack settings + the raymarch SDF-ao params.
         let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
         // The player's colour-vision filter rides on top of the scene's chain,
-        // and deliberately survives a scene whose PostProcess node is disabled
-        //: a scene must not be able to veto an accessibility
+        // and survives a scene whose PostProcess node is disabled:
+        // a scene must not be able to veto an accessibility
         // setting the player turned on.
         post_settings.color_filter = self.access.color_filter.lane();
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
         // Film grain needs a clock or it is a dirty lens, not film. Reduced
-        // motion is deliberately not applied here: grain is texture, not
+        // motion is not applied here: grain is texture, not
         // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
         // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
@@ -1070,7 +1070,7 @@ impl Editor {
         // everything, so an opaque one would hide the geometry it is
         // describing — and high enough to read as a surface rather than a
         // tint. A step's ribbon is stronger because it is the answer to a
-        // question somebody is deliberately asking.
+        // question somebody is asking.
         const NAV_FILL_ALPHA: f32 = 0.22;
         const NAV_STEP_ALPHA: f32 = 0.40;
         // While a game is running, the mesh it is walking on is the bake
@@ -2035,7 +2035,7 @@ impl Editor {
                 for d in &mut skin_draws[ext_from.2..] {
                     fill(&mut d.instance);
                 }
-                // `flat2d` is deliberately absent: the 2D lit pass has its own
+                // `flat2d` is absent: the 2D lit pass has its own
                 // shader and its own instance type, and none of this reaches it.
             }
         }

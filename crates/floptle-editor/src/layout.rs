@@ -240,7 +240,7 @@ mod tests {
         repair(&mut dock);
         assert!(dock.find_tab(&EditorTab::Scene).is_some());
         assert!(dock.find_tab(&EditorTab::Game).is_some());
-        // …and it does not force back the tabs somebody deliberately closed.
+        // …and it does not force back the tabs somebody closed.
         assert!(dock.find_tab(&EditorTab::Mixer).is_none());
     }
 

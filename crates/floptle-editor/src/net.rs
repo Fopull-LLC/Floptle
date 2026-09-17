@@ -186,7 +186,7 @@ impl Editor {
         // before anything else so a message about this tick's refusals is on
         // the console in the same frame.
         //
-        // The `print()` level, deliberately, not a warning: nothing is broken,
+        // The `print()` level, not a warning: nothing is broken,
         // nobody was disconnected, and a game filling up is the best news a
         // developer gets all week. A warning icon would say the opposite of
         // what the sentence says.
@@ -721,7 +721,7 @@ impl Editor {
                         if cleaned {
                             self.net_apply_host_filters();
                         }
-                        // The other half of the same rule, and it is deliberately
+                        // The other half of the same rule, and it is
                         // not the same half. A rig the game spawned FOR a player
                         // belongs to that player and left with them, just above.
                         // An authored slot belongs to the scene: it stays in the
@@ -1519,8 +1519,8 @@ impl Editor {
         } else {
             self.net_apply_offline_slots();
         }
-        // Tell whatever survived the swap that the new world is whole. Last,
-        // deliberately: a loading screen's job is to go away once the thing it
+        // Tell whatever survived the swap that the new world is whole. Last:
+        // a loading screen's job is to go away once the thing it
         // was covering exists, so being told any earlier would be a lie.
         let name = self.scene_name.clone();
         self.script_host.fire_scene_loaded(&mut self.world, &name, false);
@@ -1686,7 +1686,7 @@ impl Editor {
     /// The transport-agnostic tail of hosting a real session: the ownership
     /// convention, per-owner routing filters, the session itself.
     /// The dev-only link-impairment knob, or `None` when `FLOPTLE_NET_IMPAIR`
-    /// is unset — which is every build nobody deliberately asked to degrade.
+    /// is unset — which is every build nobody asked to degrade.
     ///
     /// Process-global because the environment is: read once, at first use. The
     /// handle is shared with every transport opened afterwards, which is what

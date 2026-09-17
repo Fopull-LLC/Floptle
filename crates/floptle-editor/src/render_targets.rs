@@ -7,7 +7,7 @@
 //! targets exist, how big each one is, which ones are due to redraw this frame,
 //! and what to say about the ones that cannot be served. That decision is a pure
 //! function ([`plan_render_targets`]) so it is testable without a GPU — the part
-//! that allocates textures is deliberately thin.
+//! that allocates textures is thin.
 //!
 //! before this, every target was 480×270 and redrew every frame,
 //! and a fifth target was dropped silently in whatever order the ECS query

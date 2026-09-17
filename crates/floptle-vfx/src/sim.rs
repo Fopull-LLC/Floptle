@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn clip_gated_rate_emits_exact_count() {
         // 10/s inside a [0.0, 0.55] clip = exactly 5 particles, none outside it
-        // (crossings at 0.1..0.5; the clip edge is deliberately not a crossing so
+        // (crossings at 0.1..0.5; the clip edge is not a crossing so
         // float accumulation can't fencepost the count). The clip length (0.55) is now
         // the lifetime, so check at t=0.6 — after emission ends but before the first
         // particle (born ~0.1) expires at 0.65.

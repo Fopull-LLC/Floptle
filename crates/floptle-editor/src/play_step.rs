@@ -603,8 +603,8 @@ impl Editor {
         // is the floating-origin focus: drift far enough and the sim recenters on it.
         if let Some(sim) = self.sim.as_mut() {
             sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
-            // Water is rebuilt every frame for the same reason gravity is
-            //: a WaterVolume spawned, moved, resized,
+            // Water is rebuilt every frame for the same reason gravity is:
+            // a WaterVolume spawned, moved, resized,
             // disabled or destroyed while the game is running must be in
             // the solver's field the same frame it is in the renderer's —
             // `water_draw` already gathers from the live world every

@@ -671,7 +671,7 @@ mod tests {
     fn rails_world_position_survives_a_scene_parent() {
         let mut w = World::default();
         let group = w.spawn();
-        // A group deliberately not at identity — offset, rotated, scaled.
+        // A group not at identity — offset, rotated, scaled.
         w.insert(
             group,
             Transform {

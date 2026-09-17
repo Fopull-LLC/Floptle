@@ -21,7 +21,7 @@
 //! * [`cloud`] — authorized calls to the Floptle Cloud API, with the bearer
 //!   attached here and the token never handed out.
 //!
-//! **The Hub and a game share one session.** Same keyring entry, deliberately:
+//! **The Hub and a game share one session.** Same keyring entry:
 //! signing in to the Hub signs you in to the games you launch from it, and
 //! signing in from a game means the Hub already knows you next time. One
 //! account, one sign-in, however you got here.

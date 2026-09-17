@@ -23,7 +23,7 @@
 //! * [`collide`] — the greedy rectangle merge that makes a 100×100 solid floor
 //!   one box instead of ten thousand.
 //!
-//! ## What is deliberately not here
+//! ## What is not here
 //!
 //! **Layers.** A tilemap layer is a `Matter::Tilemap` node — it already has a
 //! transform, a material, a visibility flag, a name and a place in the hierarchy.

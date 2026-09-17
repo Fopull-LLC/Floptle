@@ -90,7 +90,7 @@ pub(crate) fn usable_width(ui: &Ui) -> f32 {
 }
 
 /// The right-hand edge nothing may be laid out past: the panel, or a region that
-/// has deliberately been made narrower than it.
+/// has been made narrower than it.
 ///
 /// The clip rect alone is not enough. A [`group`] sets an explicit max width so
 /// its frame can draw a border inside the panel — and the content inside it must
@@ -607,7 +607,7 @@ pub(crate) mod tests {
     /// Run `add` in a panel `width` wide and report everything it drew that
     /// falls outside the **panel**.
     ///
-    /// Horizontal only, deliberately: a form panel scrolls vertically and being
+    /// Horizontal only: a form panel scrolls vertically and being
     /// below the fold is not being invisible. Being past the right edge is.
     ///
     /// A shape is reported when it crosses **its own clip rect**, with one

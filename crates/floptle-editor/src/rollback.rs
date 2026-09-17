@@ -499,7 +499,7 @@ impl RollbackDriver {
         self.stalled = false;
         self.last_checksum = 0;
         self.resimulated_ticks = 0;
-        // `desynced` deliberately survives a restart. A restart is how a roster
+        // `desynced` survives a restart. A restart is how a roster
         // change re-syncs the clock, not a fresh install: if the last match
         // forked, the panel keeps saying so until the session actually ends,
         // because "we desynced and then quietly restarted" is exactly the state
@@ -949,7 +949,7 @@ mod tests {
     const P2: PeerId = 2;
     const STEP: f32 = 1.0 / 60.0;
 
-    /// A deliberately small fighter written to the determinism profile the
+    /// A small fighter written to the determinism profile the
     /// design documents (§3.1): integer frame counters, no wall clock, no
     /// unseeded RNG, everything the simulation reads inside `snapshot()`.
     ///
@@ -1005,7 +1005,7 @@ end\n";
     /// cached in a Lua local at the top of one script's hook and read by a
     /// different script during the correction), reduced to the smallest thing
     /// with the same shape: a value the simulation reads that the snapshot does
-    /// not carry. Nobody stores one deliberately — this one is a `local`
+    /// not carry. Nobody stores one — this one is a `local`
     /// refreshed every hook, which is itself the recommended fix for a
     /// different bug.
     const LEAKY: &str = "\
@@ -1981,8 +1981,8 @@ end\n";
         );
     }
 
-    /// The desync an adversarial review found before this batch shipped
-    ///: a driven body's ground vanishing must wake it
+    /// The desync an adversarial review found before this batch shipped:
+    /// a driven body's ground vanishing must wake it
     /// through the same sequence a resimulated tick actually runs —
     /// `reclaim_world`'s per-tick collider swap, then that tick's
     /// `step_body_tick` — not only through `render_frame.rs`'s

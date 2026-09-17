@@ -60,7 +60,7 @@ fn io<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> InstallError + '_ {
 /// Install a package from a folder on this machine.
 ///
 /// `replace` allows overwriting an installed package of the same id — that is
-/// the Update path, and it is deliberately not the default: silently replacing
+/// the Update path, and it is not the default: silently replacing
 /// somebody's package because the ids matched is how a project loses local
 /// edits.
 pub fn install_from_dir(

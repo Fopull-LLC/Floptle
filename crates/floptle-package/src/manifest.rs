@@ -296,7 +296,7 @@ pub struct Manifest {
     #[serde(default)]
     pub media: Vec<Media>,
     /// Which engine versions this works with, e.g. `">=0.55.0"`. Absent = any,
-    /// which is a claim worth making deliberately.
+    /// which is a claim worth making.
     #[serde(default)]
     pub engine: Option<VersionReq>,
     #[serde(default)]

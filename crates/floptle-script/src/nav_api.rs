@@ -745,7 +745,7 @@ pub(crate) fn install_nav_api(
     // rebake is the honest answer and this is not.
     //
     // A handle, not an id, so taking it away is `ob:remove()` and there is
-    // nothing to write down. A moving obstacle is deliberately not offered:
+    // nothing to write down. A moving obstacle is not offered:
     // carving per frame is a rebuild per frame, which is the trade this exists
     // to avoid.
     let m = mesh.clone();

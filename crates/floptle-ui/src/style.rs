@@ -23,7 +23,7 @@
 //!    selected. If you need a sixth, that's a script.
 //!
 //! Those are constraints, not defaults. Every "but what about…" that needs a
-//! fifth rule is answered with Lua, deliberately.
+//! fifth rule is answered with Lua.
 //!
 //! # Tokens
 //!

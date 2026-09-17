@@ -1002,7 +1002,7 @@ impl<'a> SettingsCtx<'a> {
         );
         ui.add_space(8.0);
 
-        // Sorting layers live here too, and are deliberately a separate list.
+        // Sorting layers live here too, and are a separate list.
         // A 2D scene routinely wants a Background that collides with nothing and
         // a Player that does, both sorting independently of either fact; sharing
         // one list would mean every new draw order invents a physics layer.

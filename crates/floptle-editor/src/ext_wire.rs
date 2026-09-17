@@ -1,7 +1,7 @@
 //! Where the extension host meets the editor: the per-frame handshake, the menu
 //! the packages build, their floating panels, and applying what they asked for.
 //!
-//! [`ext`](crate::ext) deliberately knows nothing about `Editor`. This module is
+//! [`ext`](crate::ext) knows nothing about `Editor`. This module is
 //! the only place the two touch, which is what keeps the host testable without a
 //! window and the editor free of a second Lua state threaded through it.
 //!

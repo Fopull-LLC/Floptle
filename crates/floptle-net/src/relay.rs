@@ -212,7 +212,7 @@ pub enum LobbyEnd {
     /// The host's connection went, and it did not come back inside
     /// [`HOST_GRACE`].
     HostGone,
-    /// The host closed it deliberately, or the process ended cleanly.
+    /// The host closed it or the process ended cleanly.
     HostLeft,
     /// Nobody was in it for [`RelayLimits::idle_lobby`], and the host is not
     /// a dedicated server.
@@ -1311,8 +1311,8 @@ pub struct RelayHost {
     /// The code this host asks to reclaim, remembered so it goes again with
     /// every re-host.
     wanted: Option<String>,
-    /// Everything needed to host again after the relay goes away
-    ///: where it is, and what to ask it for.
+    /// Everything needed to host again after the relay goes away:
+    /// where it is, and what to ask it for.
     relay_addr: String,
     ask: RelayMsg,
     /// When to try again, and how long to wait after that.
@@ -1567,7 +1567,7 @@ impl Transport for RelayHost {
                     // asked**.
                     //
                     // The control plane detects a mismatch one report later and
-                    // deliberately keeps its reservation rather than adopting
+                    // keeps its reservation rather than adopting
                     // the new code — adopting it looks helpful and produces a
                     // restart loop, which is how a live server was stopped for
                     // two minutes. So the only other evidence is a silence, and
@@ -2703,7 +2703,7 @@ mod managed_tests {
 
     /// ⚠ **A server that could not reclaim its code says so itself**.
     ///
-    /// W's control plane detects the mismatch one report later and deliberately
+    /// W's control plane detects the mismatch one report later and
     /// keeps its reservation rather than adopting the new code — adopting it
     /// looks helpful and produced a restart loop that stopped a live server for
     /// two minutes. So on this side a failed reclaim would otherwise be a

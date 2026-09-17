@@ -1,6 +1,6 @@
 //! The browser's audio output: a Web Audio scheduler of our own.
 //!
-//! cpal has a WebAudio backend, and this deliberately does not use it. That
+//! cpal has a WebAudio backend, and this does not use it. That
 //! backend keeps one cursor for where the next chunk of sound starts and
 //! advances it by exactly one buffer each time a chunk finishes playing,
 //! **with no clamp against the context clock**. Two consequences follow, and
@@ -226,7 +226,7 @@ mod imp {
         // not stays suspended, and the clock does not advance until it does,
         // so the pump simply has nothing to do until then.
         let _ = ctx.resume();
-        // The queue deliberately starts empty. Opening the audio happens
+        // The queue starts empty. Opening the audio happens
         // partway through booting a game, and the rest of that boot — parsing
         // scenes, importing models, baking occluders — is one long task
         // holding the main thread. Filling the queue here would mean the

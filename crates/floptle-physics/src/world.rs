@@ -2401,7 +2401,7 @@ mod ray_identity_tests {
     /// A ray hits a labelled map mesh, names the node, and the collider it
     /// named can then be asked what the surface at that point is made of.
     ///
-    /// The lookup is deliberately not part of the hit — it costs a
+    /// The lookup is not part of the hit — it costs a
     /// closest-point search of its own, and a line-of-sight ray that never asks
     /// must not pay for it.
     #[test]

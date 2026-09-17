@@ -4659,7 +4659,7 @@ impl EditorTabViewer<'_> {
             // "collision layer", not "layer". A node has two things
             // called a layer — this one, which answers "does this hit
             // that", and the sorting layer below, which answers "which
-            // draws in front" — and they are deliberately independent: a
+            // draws in front" — and they are independent: a
             // background collides with nothing and still sorts, a player
             // collides with everything and sorts separately. Two controls
             // both labelled "layer" is how that independence gets read as
@@ -7733,7 +7733,7 @@ mod tests {
              \x20 debugScale = 1.0,\n\
              }\n",
         );
-        // Values as the editor would have seeded them (deliberately not in
+        // Values as the editor would have seeded them (not in
         // declaration order, and alphabetically wrong, to prove the order comes
         // from the source).
         let mut inst = floptle_core::ScriptInst {

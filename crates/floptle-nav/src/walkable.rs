@@ -10,7 +10,7 @@
 //! 3. **Group.** Flood-fill what survives into regions. A region is a set of
 //!    cells you can walk between without leaving the ground.
 //!
-//! Erosion runs **before** grouping, deliberately. A doorway narrower than the
+//! Erosion runs **before** grouping. A doorway narrower than the
 //! character is supposed to disappear, and if it disappears after grouping it
 //! leaves one region that claims to be connected through a gap nobody fits
 //! through — a path that exists right up until something tries to walk it.
@@ -62,7 +62,7 @@ pub struct WalkableGrid {
     column_start: Vec<u32>,
 }
 
-/// The four directions a step can go. Diagonals are deliberately excluded: a
+/// The four directions a step can go. Diagonals are excluded: a
 /// diagonal move between two cells that are each beside a wall would cut the
 /// corner, and the funnel that smooths the final path can produce the diagonal
 /// itself when there is really room for it.

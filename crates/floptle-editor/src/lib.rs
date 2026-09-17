@@ -2671,7 +2671,7 @@ struct Editor {
     settings_section: crate::settings_ui::SettingsSection,
     settings_search: String,
     /// A live resolve of the current devices for the Input settings' tester,
-    /// deliberately independent of the gameplay one: you edit bindings with the
+    /// independent of the gameplay one: you edit bindings with the
     /// game view unfocused, which is exactly when gameplay input reads neutral,
     /// so a tester sharing that state would always look dead.
     input_test_rt: floptle_input::ActionRuntime,
@@ -3324,7 +3324,7 @@ struct Editor {
     /// How many Lighting nodes the last warning was about, so a scene with two
     /// of them says so once rather than sixty times a second.
     ///
-    /// The loader spawns exactly one and an additive load deliberately brings no
+    /// The loader spawns exactly one and an additive load brings no
     /// second, so more than one means a script or a hand-edited scene made it —
     /// and then "the" ambient a script writes and "the" ambient the renderer
     /// reads are whichever the ECS yielded first, which is precisely the
@@ -3494,7 +3494,7 @@ enum Snapshot {
     /// once per frame when the selection moved and nothing else entered the
     /// history — so Ctrl+Z steps back through picks as well as edits, and never
     /// jumps further than the last thing you did. Costs bytes, not a scene doc,
-    /// and deliberately does not mark the scene unsaved.
+    /// and does not mark the scene unsaved.
     Selection(Vec<usize>),
     /// A terrain stroke snapshot: `(terrain id, the touched chunks' pre-stroke
     /// contents)` — keyed by the stable id (not Entity) so it survives scene
@@ -3989,7 +3989,7 @@ impl ApplicationHandler for Editor {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Always feed egui so its widgets stay live. We deliberately ignore the
+        // Always feed egui so its widgets stay live. We ignore the
         // returned `consumed` flag: egui_dock paints the whole editor in the
         // Background layer, which makes egui report `consumed == true` for mouse
         // input even over the *transparent* Scene tab — so trusting it would (and

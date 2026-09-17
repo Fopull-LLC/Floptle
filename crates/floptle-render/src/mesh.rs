@@ -4,7 +4,7 @@
 //! plus `u32` indices. It is exactly the type a future glTF/OBJ importer
 //! (`floptle-assets`) will produce, so import never has to know about wgpu.
 //! `GpuMesh` is the uploaded vertex/index buffer pair. Meshes are referenced by a
-//! `MeshId` — an index into the render pass's registry (a deliberately minimal
+//! `MeshId` — an index into the render pass's registry (a minimal
 //! stand-in for the asset-id / pool handle that lands with the asset database).
 
 use crate::device::Gpu;

@@ -562,7 +562,7 @@ pub struct LobbyResult {
 pub enum LobbyMemberChange {
     /// They joined.
     Entered,
-    /// They left deliberately.
+    /// They left.
     Left,
     /// They dropped without leaving first.
     Disconnected,
@@ -578,7 +578,7 @@ pub enum LobbyMemberChange {
 pub enum LobbyEvent {
     /// A member joined or left.
     ///
-    /// **Who did it is deliberately not reported.** The Steamworks binding
+    /// **Who did it is not reported.** The Steamworks binding
     /// this engine uses fills its own "who made this change" field from the
     /// *changed member's* id — so for a kick it names the person kicked, not
     /// the person kicking. Exposing a field that is wrong whenever it would

@@ -36,7 +36,7 @@ pub struct OptTable {
 /// if the call accepts it. So an entry here is a promise the code has to keep,
 /// and the companion source-scan test
 /// (`no_option_table_escapes_the_registry`) fails when a new option table
-/// appears that is neither registered nor deliberately excused.
+/// appears that is neither registered nor excused.
 pub const TABLES: &[OptTable] = &[
     OptTable { call: "scatter.create", keys: crate::scatter_api::CREATE_KEYS },
     OptTable { call: "node:setCamera", keys: crate::api::CAMERA_KEYS },
@@ -206,8 +206,8 @@ pub fn opt_num(
     }
 }
 
-/// Read an option as a string, refusing anything else. A number is refused
-/// deliberately: Lua would coerce `42` to `"42"`, and a numeric asset path or
+/// Read an option as a string, refusing anything else. A number is refused:
+/// Lua would coerce `42` to `"42"`, and a numeric asset path or
 /// target name is a mistake worth seeing.
 pub fn opt_str(t: &Table, call: &str, key: &str) -> mlua::Result<Option<String>> {
     match t.get::<Value>(key)? {

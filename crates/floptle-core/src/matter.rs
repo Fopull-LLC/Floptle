@@ -288,7 +288,7 @@ pub struct Lit2DFacts {
 ///   scene stays 3D-lit unless told otherwise, so mixing the two is deliberate.
 ///
 /// Distance to the camera plane and the presence of sorting layers are
-/// deliberately not part of it: both are true of scenes that want nothing to
+/// not part of it: both are true of scenes that want nothing to
 /// do with 2D lighting.
 /// right is worse than none — it fails in the scenes least able to explain it.
 pub fn infers_2d(facts: Lit2DFacts) -> (bool, &'static str) {
@@ -1088,7 +1088,7 @@ pub struct Light {
     /// ([`Material::reflectivity`](crate::Material::reflectivity)) and how
     /// sharply ([`Material::roughness`](crate::Material::roughness)).
     ///
-    /// Off by default, and deliberately: it costs a march per reflective pixel
+    /// Off by default, and: it costs a march per reflective pixel
     /// and a copy of the frame, and a scene that never wanted mirrors should not
     /// pay for them. What it cannot do is show anything the camera cannot —
     /// whatever is off-screen, behind the viewer or hidden behind something
@@ -1370,7 +1370,7 @@ pub enum TerrainCollision {
 }
 
 /// What an entity is made of, interpreted by the renderer. Placed via the
-/// entity's `Transform`; deliberately free of GPU handles.
+/// entity's `Transform`; free of GPU handles.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Matter {
     /// A lit, textured polygon primitive.
@@ -1903,7 +1903,7 @@ pub enum Matter {
         /// bakes **on another thread** so the editor and the game keep their
         /// frame rate.
         auto_rebake: bool,
-        /// The tallest ledge the character steps off deliberately.
+        /// The tallest ledge the character steps off.
         ///
         /// The other half of `step_height`. A lip under `step_height` is walked
         /// over; a drop between there and here gets a **one-way link** the bake

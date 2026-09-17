@@ -13,7 +13,7 @@ use crate::wire::{Desired, Report};
 const TIMEOUT_SECS: u64 = 30;
 
 /// A bundle is 25 MB today and capped at 256 MB by the contract. The ceiling
-/// here is deliberately above that and below "fills the disk": a signed URL
+/// here is above that and below "fills the disk": a signed URL
 /// that started serving something enormous should stop, not consume the 92 GB
 /// the box has.
 const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;

@@ -241,7 +241,7 @@ impl SteamPlatform {
         let events = lobby_events.clone();
         let _lobby_chat_update_cb =
             client.register_callback::<steamworks::LobbyChatUpdate, _>(move |cb| {
-                // `cb.making_change` is deliberately not read — see
+                // `cb.making_change` is not read — see
                 // `LobbyEvent::MemberChanged`; the binding fills it from the
                 // wrong SDK field.
                 lock(&events).push(LobbyEvent::MemberChanged {
@@ -1448,7 +1448,7 @@ mod tests {
     #[test]
     fn init_answers_a_result_either_way_and_never_panics() {
         // Dropping an `Ok` here shuts Steam back down; that is fine, and
-        // deliberately the last thing this test does.
+        // the last thing this test does.
         match SteamPlatform::init(480) {
             Ok(p) => assert!(p.available(), "a live backend must report itself available"),
             Err(_) => { /* no client running — equally correct */ }

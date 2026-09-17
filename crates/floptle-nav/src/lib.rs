@@ -191,7 +191,7 @@ pub struct NavSettings {
     /// quadruples the columns and the bake's cost with them. Small enough to
     /// resolve the gaps that matter, no smaller.
     pub cell_size: f32,
-    /// The tallest ledge the character will step off deliberately.
+    /// The tallest ledge the character will step off.
     ///
     /// This is the other half of `step_height`. A lip inside `step_height` is
     /// walked over as if it were flat; a drop between there and here is a real

@@ -28,7 +28,7 @@
 //!
 //! [`collision_shapes`] answers boxes and outlines, in one struct, because a
 //! caller that only asked for boxes would silently walk through every slope in
-//! the level. There is deliberately no "just the boxes" entry point for the same
+//! the level. There is no "just the boxes" entry point for the same
 //! reason: the way to get half the colliders should not be to call the shorter
 //! function.
 //!

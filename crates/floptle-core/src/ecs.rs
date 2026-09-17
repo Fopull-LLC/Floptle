@@ -164,7 +164,7 @@ impl World {
     /// might have": `revision() - revision_of::<Transform>()` is unchanged
     /// across a physics tick and changes on any spawn, despawn, attach, detach
     /// or mutable access to any other type. Structural operations (`insert`,
-    /// `remove`, `spawn`, `despawn`) deliberately count against the global
+    /// `remove`, `spawn`, `despawn`) count against the global
     /// number only, so they always read as "something else" — the direction
     /// that is safe to be wrong in.
     pub fn revision_of<T: 'static>(&self) -> u64 {

@@ -3,7 +3,7 @@
 //! [`Channel::UnreliableSequenced`] — only the newest matters, loss is healed
 //! by periodic keyframes (full-state snapshots), not resends.
 //!
-//! v1 deliberately sends full values for changed entities (dirty-flag
+//! v1 sends full values for changed entities (dirty-flag
 //! detection) rather than baseline-delta compression — correct first, compact
 //! in phase 2e when the bandwidth profiler exists to measure it.
 
@@ -182,7 +182,7 @@ pub enum Msg {
     /// position, so two peers running differently-ordered maps would decode
     /// each other's input as the wrong actions and desync with no error
     /// anywhere. Refusing the connection is the only safe answer; a player's
-    /// personal rebinds deliberately don't affect the hash.
+    /// personal rebinds don't affect the hash.
     Hello { proto: u16, input_map: u64, identity: Option<IdentityClaim> },
     /// Server → client: accepted; your peer id, the current tick, the snapshot
     /// cadence (ticks between snapshots), the current scene (project-root-

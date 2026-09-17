@@ -141,7 +141,7 @@ pub(crate) fn focus(dock: &mut egui_dock::DockState<EditorTab>, tab: EditorTab) 
 
 /// Focus the ⚙ Settings dock tab — creating it if it isn't open. Project
 /// Settings is a TAB, not a modal window: it can be dragged into any panel,
-/// split beside the viewport, or closed like anything else. It is deliberately
+/// split beside the viewport, or closed like anything else. It is
 /// absent from the default layout — you open it when you need it.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn focus_settings_tab(dock: &mut egui_dock::DockState<EditorTab>) {

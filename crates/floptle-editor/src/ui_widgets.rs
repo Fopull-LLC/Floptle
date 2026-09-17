@@ -35,7 +35,7 @@ pub(crate) fn asset_picker(
     // Whatever width the call site asked for, capped at what is still on screen.
     // Every picker in the editor comes through here, so this is the one place
     // that has to know: an inspector field is authored at 160 px and a docked
-    // Inspector is regularly narrower than that. The popup is deliberately not
+    // Inspector is regularly narrower than that. The popup is not
     // capped — it is an overlay, it is allowed to be wider than its panel, and
     // shrinking it would make browsing worse for no gain.
     let width = crate::responsive::fit_here_wrapping(ui, width);

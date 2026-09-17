@@ -1336,7 +1336,7 @@ mod tests {
     /// field regression: a referee that disagrees with everyone
     /// is the one that is wrong, and must not take the match down with it.
     ///
-    /// The referee is the sole judge when one is running — deliberately, because
+    /// The referee is the sole judge when one is running — because
     /// a quorum of players could all be running the same modified build. But a
     /// cheat changes one machine, while an engine or content fault in the
     /// referee changes only the referee. So "every peer disagrees with the

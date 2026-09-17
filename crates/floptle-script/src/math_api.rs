@@ -12,7 +12,7 @@ use mlua::{IntoLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMe
 
 /// Which `vec3` a Lua state hands to scripts.
 ///
-/// Per **state**, held as mlua app data, and deliberately not a thread-local:
+/// Per **state**, held as mlua app data, and not a thread-local:
 /// the editor runs a second Lua state for package extensions on the same
 /// thread as the game's, and a mode that leaked between them would make an
 /// extension's vectors depend on which project happened to be open.
@@ -120,7 +120,7 @@ fn warn_precision(lua: &Lua, v: glam::DVec3) {
 
 /// Marker: this state's vector metatable has already been extended.
 ///
-/// Switching back to `exact` deliberately leaves it in place. Nothing produces
+/// Switching back to `exact` leaves it in place. Nothing produces
 /// a native vector in that mode, so the methods are unreachable rather than
 /// wrong, and tearing a metatable back down is a good deal more dangerous than
 /// leaving a few functions nobody can reach.
@@ -798,7 +798,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let byte = |i: usize| -> Option<f32> {
                     u8::from_str_radix(h.get(i..i + 2)?, 16).ok().map(|v| v as f32 / 255.0)
                 };
-                // 6 or 8 digits. A 3-digit shorthand is deliberately refused:
+                // 6 or 8 digits. A 3-digit shorthand is refused:
                 // silently reading "#f80" as something else would be worse
                 // than saying so.
                 let c = match h.len() {
@@ -1505,7 +1505,7 @@ mod helper_tests {
         // fallback and `fast` would answer nil too, matching `exact` by making
         // the stricter mode worse.
         //
-        // `fast` is left strict deliberately. Raising is the better behaviour,
+        // `fast` is left strict. Raising is the better behaviour,
         // and the mode is opt-in, so nothing that exists today is affected;
         // teaching `exact` to raise would change a shipped project's behaviour,
         // which is the one thing this phase must not do.

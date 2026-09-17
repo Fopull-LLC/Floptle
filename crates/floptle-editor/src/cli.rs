@@ -1189,7 +1189,7 @@ pub(crate) fn dispatch(args: &[String]) -> Outcome {
     // default disposition makes the process die quietly the way every other
     // command-line tool does.
     //
-    // Only on the verb path, deliberately. The flags the Hub drives keep exactly
+    // Only on the verb path. The flags the Hub drives keep exactly
     // the behaviour they shipped with, and this binary is also a GUI: a window
     // whose stdout pipe closes should not take the editor down with it.
     sigpipe(SigPipe::Fatal);

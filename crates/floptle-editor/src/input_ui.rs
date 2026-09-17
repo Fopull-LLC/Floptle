@@ -77,7 +77,7 @@ pub(crate) enum InputCmd {
 ///
 /// `test` is a live, focus-independent resolve of the current devices — the
 /// tester has to light up while you're editing settings, which is exactly when
-/// the game view is *not* focused and gameplay input is deliberately neutral.
+/// the game view is *not* focused and gameplay input is neutral.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn input_section(
     ui: &mut egui::Ui,

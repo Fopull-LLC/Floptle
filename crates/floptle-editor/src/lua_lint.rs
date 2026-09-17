@@ -296,7 +296,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 }
             }
         }
-        // A bare `name = …` at file scope publishes a global deliberately —
+        // A bare `name = …` at file scope publishes a global —
         // unless we're inside an open bracket, where it's a table field.
         if depth == 0
             && open_before == 0
@@ -768,7 +768,7 @@ print(used)
         assert!(
             lint("valid = true\n", &api).iter().any(|l| l.kind == LintKind::ReservedKey)
         );
-        // `name` is deliberately allowed: the script's own wins now, and that is
+        // `name` is allowed: the script's own wins now, and that is
         // the whole point of the fix.
         assert!(
             !lint("function name(id)\n  return 'Iron Ore'\nend\n", &api)

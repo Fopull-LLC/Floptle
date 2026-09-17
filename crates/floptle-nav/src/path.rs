@@ -85,7 +85,7 @@ impl NavMesh {
     }
 
     /// [`NavMesh::path`], with your own idea of how far off the mesh an end may
-    /// be. Useful when asking about a point that is deliberately loose — a click
+    /// be. Useful when asking about a point that is loose — a click
     /// in the world, say, where the answer should be "the nearest walkable
     /// thing" rather than nothing.
     pub fn path_within(&self, from: [f32; 3], to: [f32; 3], snap: f32) -> Option<Path> {

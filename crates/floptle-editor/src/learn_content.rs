@@ -1,6 +1,6 @@
 //! The tutorials themselves — the text, the code, and what each step checks.
 //!
-//! Content, deliberately kept apart from [`crate::learn`]'s machinery: this file
+//! Content, kept apart from [`crate::learn`]'s machinery: this file
 //! is prose and Lua, and it should be editable by anyone who can write both
 //! without reading a line of Rust.
 //!

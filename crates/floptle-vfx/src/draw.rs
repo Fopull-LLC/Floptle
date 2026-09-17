@@ -147,7 +147,7 @@ fn ribbon_segment(
 /// polyline points (its recorded history plus its current position as the head)
 /// contributes `points − 1` quads, colored with the particle's current color; when
 /// the trail fades, width and alpha taper to zero at the tail. Segments are pushed
-/// tail→head and deliberately not depth-sorted — a ribbon must keep its connected
+/// tail→head and not depth-sorted — a ribbon must keep its connected
 /// order even under an order-dependent blend.
 pub fn collect_trails(
     inst: &EffectInstance,

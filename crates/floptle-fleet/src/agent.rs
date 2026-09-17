@@ -370,7 +370,7 @@ pub fn unit_state(host: &mut dyn Host, unit: &str) -> State {
 /// server is free.
 ///
 /// One `systemctl show` for both properties rather than two calls; the output is
-/// `KEY=value` lines, so `--value` is deliberately not passed.
+/// `KEY=value` lines, so `--value` is not passed.
 fn unit_memory(host: &mut dyn Host, unit: &str) -> (Option<u64>, Option<u64>) {
     let out = host
         .run("systemctl", &["show", unit, "--property=MemoryCurrent", "--property=MemoryPeak"])
@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(s.relay.as_deref(), Some("us-east.relay.fopull.com:7788"));
 
         // …and it survives serialization, because the POST body is the only
-        // part of this the control plane ever sees. `port` is deliberately
+        // part of this the control plane ever sees. `port` is
         // asserted ABSENT rather than zero: a control plane that read a
         // missing port as 0 would publish `quic://host:0`.
         let body = r.to_json();

@@ -8,7 +8,7 @@
 //! who has not re-exported must not have their server silently upgraded
 //! underneath them by somebody else's deploy.
 //!
-//! So versions accumulate, deliberately: `<root>/engines/<version>/floptle-server`.
+//! So versions accumulate: `<root>/engines/<version>/floptle-server`.
 //! A version is fetched once and then costs 30 MB of a 92 GB disk forever.
 //!
 //! ## aarch64

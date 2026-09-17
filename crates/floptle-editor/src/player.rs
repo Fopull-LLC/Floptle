@@ -419,7 +419,7 @@ impl Player {
         }
         let Some(window) = self.ed.window.clone() else { return };
         // **The browser's own Escape.** A page cannot see the keypress that
-        // exits pointer lock — the browser consumes it deliberately, so a
+        // exits pointer lock — the browser consumes it so a
         // page cannot trap the player inside a locked cursor — which means the
         // Escape handling in `feed_key` never runs on the web. Ask the
         // document instead, and treat a lock that was granted and is now gone

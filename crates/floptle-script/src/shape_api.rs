@@ -37,7 +37,7 @@ pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers"];
 
 /// Parse the shared options table into (bodies to skip, layer mask).
 ///
-/// Identical in meaning to `raycast`'s, deliberately: an unknown layer name is
+/// Identical in meaning to `raycast`'s: an unknown layer name is
 /// an error rather than a silent everything-misses, which is the failure mode
 /// that costs an afternoon.
 fn query_opts(

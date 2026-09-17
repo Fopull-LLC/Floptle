@@ -233,7 +233,7 @@ impl ProbeGrid {
     ///
     /// The spacing is a *request*: the real spacing is whatever divides the box
     /// into a whole number of steps, and an over-budget grid is COARSENED rather
-    /// than trimmed. Coarsening keeps the grid isotropic and keeps a deliberately
+    /// than trimmed. Coarsening keeps the grid isotropic and keeps a
     /// flat volume — a corridor, a room one storey high — flat. Trimming the
     /// longest axis instead would quietly turn every large volume into a cube of
     /// probes with the wrong aspect, which is worse light and much harder to see.
@@ -709,7 +709,7 @@ mod tests {
     }
 
     /// A silly spacing on a big volume must produce a grid, not a hang. The cap
-    /// thins the densest axis, so a deliberately flat volume stays flat.
+    /// thins the densest axis, so a flat volume stays flat.
     #[test]
     fn an_absurd_spacing_is_clamped_not_obeyed() {
         let g = ProbeGrid::from_spacing([0.0; 3], [500.0, 4.0, 500.0], 0.05);

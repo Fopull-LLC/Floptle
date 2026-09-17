@@ -458,7 +458,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         floptle_vfs::create_dir_all(&dir).unwrap();
 
-        // A project with one custom action and a deliberately rebound Jump.
+        // A project with one custom action and a rebound Jump.
         let mut mine = InputMap::default();
         mine.actions.push(floptle_input::Action {
             name: "Grapple".into(),

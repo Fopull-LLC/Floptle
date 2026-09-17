@@ -284,7 +284,7 @@ pub struct UsageSample {
     pub bytes_in: u64,
     /// Payload bytes the relay **sent** on for this key's lobbies. This is the
     /// half that costs money — egress is what a region is billed for — and it
-    /// is deliberately separate from `bytes_in` rather than assumed equal: a
+    /// is separate from `bytes_in` rather than assumed equal: a
     /// datagram for a peer that has just left is received and never forwarded,
     /// so the two diverge exactly when something is going wrong.
     pub bytes_out: u64,

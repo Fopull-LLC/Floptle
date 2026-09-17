@@ -833,7 +833,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     }
     // The post chain. A mandatory scene node, so a script that
     // wants to dim the bloom for a cutscene finds it with `find` and writes
-    // here. `ao` is deliberately absent: it picks HOW occlusion is computed, and
+    // here. `ao` is absent: it picks HOW occlusion is computed, and
     // switching that mid-scene is a look change nobody asked a number for.
     if let Some(Matter::PostProcess {
         tonemap,
@@ -1108,7 +1108,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     // names cannot collide because `frame` is the only one the lane owns.
     if let Some(Matter::Sprite { ppu, size, flip_x, flip_y, pivot, .. }) = world.get::<Matter>(e) {
         // "Sprite" is `floptle_scene::SPRITE_COMPONENT`, spelled out because this
-        // crate does not depend on the scene crate. `cell` is deliberately NOT
+        // crate does not depend on the scene crate. `cell` is NOT
         // here: it belongs to the `frame` lane, and two lanes writing one value
         // is a conflict settled by whichever is applied second.
         out.insert(
@@ -2601,7 +2601,7 @@ fn describe_cell_range() -> String {
 /// They are reported at load, because the collision is
 /// decidable then and undecidable by anyone reading a call site.
 ///
-/// `name` is deliberately NOT here: it asks the script first, and falls back to
+/// `name` is NOT here: it asks the script first, and falls back to
 /// the script's kind only when the script has no `name` of its own. `kind` is
 /// the same string, so nothing lost the ability to ask.
 pub const HANDLE_KEYS: &[(&str, &str)] = &[
@@ -3263,7 +3263,7 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
 /// texture therefore wrote **nothing at all**, with no error and no lane: the
 /// one gesture the feature is for.
 ///
-/// Kept in step with [`apply_component_field_str`] deliberately. A field this
+/// Kept in step with [`apply_component_field_str`]. A field this
 /// reads and that cannot write is a key that never plays back; one that writes
 /// and this cannot read is a lane record will never notice. Both are silent, so
 /// the two lists are the same list.
@@ -3371,7 +3371,7 @@ pub fn apply_sprite_frame(
 pub fn set_sprite_cell(world: &mut World, ent: Entity, cell: u32) {
     if let Some(Matter::Sprite { cell: c, .. }) = world.get_mut::<floptle_core::Matter>(ent) {
         *c = cell;
-        // **And the Material's copy is deliberately NOT written.** It is unused
+        // **And the Material's copy is NOT written.** It is unused
         // here, the Inspector re-seeds its frame grid from the node every time
         // it draws, and writing it would mutate the material on every frame of
         // every playback — a scene that marks itself edited because somebody
@@ -6444,7 +6444,7 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
     // A fighter cannot let clip events drive gameplay: they fire off float playback
     // time, stepped playback (`sample_fps`) quantises them to the step grid, clip
     // time and state frame disagree mid-crossfade, and a prediction replay
-    // deliberately does not re-fire them. Baking at load sidesteps all four — every
+    // does not re-fire them. Baking at load sidesteps all four — every
     // machine loads the same `.anim.ron`, so the numbers are identical and constant.
     {
         let inf = shared.anim_info.clone();
@@ -7100,7 +7100,7 @@ mod tests {
         assert_eq!(tile_cell(&Value::Nil).unwrap(), floptle_core::EMPTY_TILE);
         // And the constant the editor's autocomplete has always named round-trips.
         //
-        // As a `Number`, deliberately: `EMPTY_TILE` is `u32::MAX`, which is past
+        // As a `Number`: `EMPTY_TILE` is `u32::MAX`, which is past
         // what a Lua integer holds under Luau, so that is the shape the value
         // actually arrives in there — and `u32::MAX as i32` is `-1`, which would
         // have let this pass for entirely the wrong reason.

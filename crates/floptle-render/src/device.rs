@@ -252,7 +252,7 @@ impl Gpu {
         // sRGB view of the non-sRGB swapchain instead. See `frame_format`.
         let frame_format = if format.is_srgb() { format } else { format.add_srgb_suffix() };
         let view_formats = if frame_format == format { vec![] } else { vec![frame_format] };
-        // Fifo (classic vsync) is the default, deliberately — see [`Vsync`] for
+        // Fifo (classic vsync) is the default — see [`Vsync`] for
         // why, and for why it is no longer the only choice.
         let present_modes = caps.present_modes.clone();
         let vsync = Vsync::default();
@@ -346,7 +346,7 @@ impl Gpu {
     /// [`headless`](Self::headless) with the HDR scene format the windowed path
     /// uses — for a probe that means to exercise the pipeline as it SHIPS.
     ///
-    /// The plain `headless` deliberately keeps the 8-bit surface format for the
+    /// The plain `headless` keeps the 8-bit surface format for the
     /// scene as well, because forty render probes read their target back as
     /// tightly-packed RGBA8 and none of them is about the format. This is the
     /// opt-in for the ones that are.

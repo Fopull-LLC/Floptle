@@ -213,7 +213,7 @@ impl Compound {
     /// the body's mass, CoM or inertia. For articulated parts whose pose changes
     /// at runtime (a folding landing leg): the collider follows the moving foot
     /// so the ship rests on its feet deployed and the footprint tucks away when
-    /// retracted. Mass properties are held frozen deliberately — a leg's mass is
+    /// retracted. Mass properties are held frozen — a leg's mass is
     /// negligible against the stack, so re-deriving the tensor every fold-frame
     /// would cost more than it's worth (and risk jitter). Offsets are stored
     /// about the CoM, so we shift each incoming origin-relative offset by

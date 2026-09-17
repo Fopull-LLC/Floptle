@@ -10,7 +10,7 @@
 //!
 //! This type computes *when* and *by how much* to rebase; applying the shift to
 //! all `Transform`s is the caller's job (it owns the ECS) and lands with the ECS
-//! integration. Kept deliberately tiny and side-effect-free so it's trivial to
+//! integration. Kept tiny and side-effect-free so it's trivial to
 //! test and to call from the fixed-step "quiet point".
 
 use crate::math::DVec3;

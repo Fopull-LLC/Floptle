@@ -576,7 +576,7 @@ mod tests {
     }
 
     /// ⚠ **Every field the server writes reaches the wire, or is named here as
-    /// deliberately left behind** (the fourth time). The file
+    /// left behind** (the fourth time). The file
     /// below is what `dedicated.rs::status_document` writes on `us-east-1`;
     /// the test runs it through the same function the agent's report does, so
     /// a field the agent parses and then forgets to copy fails here — which

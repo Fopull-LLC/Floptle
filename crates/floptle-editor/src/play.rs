@@ -65,8 +65,8 @@ impl Editor {
     /// gravity well at the node. No GravityVolume node → zero gravity (a space/zero-g
     /// world). Takes `&World` (not `&self`) so it can be called from the play loop
     /// while `self.gpu`/egui are mutably borrowed — see call site.
-    /// Build the scene's gravity field for the sim. `origin` is the sim's world origin
-    ///: radial centers are converted to the sim frame in f64 here, so a
+    /// Build the scene's gravity field for the sim. `origin` is the sim's world origin:
+    /// radial centers are converted to the sim frame in f64 here, so a
     /// planet placed far out pulls exactly.
     pub(crate) fn build_gravity_field(world: &floptle_core::World, origin: DVec3) -> floptle_physics::GravityField {
         use floptle_core::{GravityMode, Matter};
@@ -1320,7 +1320,7 @@ impl Editor {
         }
         // Meshes need GPU parts before they can draw; map/paint sidecars are
         // keyed by scene name and belong to the base scene, so an additive
-        // layer deliberately does not touch them.
+        // layer does not touch them.
         self.register_scene_meshes();
         // Physics: the same incremental wiring a spawned prefab gets. Bodies
         // first, then compounds — `add_body_for` refuses an assembly's parts,

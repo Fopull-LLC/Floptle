@@ -163,7 +163,7 @@ impl Editor {
 
     /// Start or stop editing, following focus.
     ///
-    /// Focus and text entry are deliberately the same thing: a caret blinking
+    /// Focus and text entry are the same thing: a caret blinking
     /// in a box that doesn't have the ring is exactly how "my typing went
     /// somewhere else" happens.
     pub(crate) fn ui_sync_edit(&mut self) {

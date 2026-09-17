@@ -228,7 +228,7 @@ pub struct Manifest {
 
 /// Read `floptle-server.ron` out of an unpacked bundle.
 ///
-/// A deliberately small reader rather than a RON dependency: this file has five
+/// A small reader rather than a RON dependency: this file has five
 /// string fields written by one function in `export.rs`, and the agent needs
 /// three of them. Pulling in a parser to read it would be the larger risk, not
 /// the smaller one.

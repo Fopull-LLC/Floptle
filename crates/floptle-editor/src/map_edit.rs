@@ -623,7 +623,7 @@ impl Editor {
     }
 
     /// Drop stored geometry no live node references (copy/paste and duplicate
-    /// each mint a fresh id + a full copy, and deleted nodes deliberately leave
+    /// each mint a fresh id + a full copy, and deleted nodes leave
     /// theirs behind so an undo can resurrect them — over a long session that
     /// piles up). Returns how many entries went. Undo history that references
     /// them still restores values, so this only ever costs disk, never edits.
@@ -3271,7 +3271,7 @@ impl Editor {
     /// Run one bound Map command. Returns false when the command declined to
     /// consume the key, so the editor's own handler still gets it (delete-faces
     /// with nothing selected falls through to "delete node", which is the one
-    /// key the map deliberately shares).
+    /// key the map shares).
     pub(crate) fn run_map_command(&mut self, cmd: crate::map_keys::MapCmd) -> bool {
         use crate::map_keys::MapCmd as C;
         let shape_of = |c: C| match c {
@@ -3364,7 +3364,7 @@ impl Editor {
             C::PivotToSelection => self.apply_map_op(MapOp::PivotToSelection),
             C::NewMaterialFromSelection => {
                 // Same as the Map tab's button, with its auto-generated name —
-                // the tab's text field is for naming it deliberately.
+                // the tab's text field is for naming it.
                 let n = self
                     .map_target()
                     .and_then(|(_, id)| self.maps.meshes.get(&id))
@@ -4082,8 +4082,8 @@ mod tests {
     }
 
     /// Shift adds, Ctrl+click takes the shortest path, Shift+Ctrl removes — and
-    /// a plain click replaces. A box reads the same modifiers differently, and
-    /// deliberately: there is no path in a rectangle.
+    /// a plain click replaces. A box reads the same modifiers differently, and:
+    /// there is no path in a rectangle.
     #[test]
     fn the_modifiers_mean_what_they_do_in_blender() {
         assert_eq!(SelectMode::of(false, false), SelectMode::Replace);

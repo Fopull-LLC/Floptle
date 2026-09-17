@@ -640,7 +640,7 @@ impl TileSet {
         }
         // Decided before anything is written: a group that already has rules is
         // authored, and folding the stale per-tile masks into it would resurrect
-        // assignments somebody deliberately changed.
+        // assignments somebody changed.
         let convert: Vec<bool> = self.groups.iter().map(|g| g.rules.is_empty()).collect();
         for (cell, g, mask) in legacy {
             if convert.get(g as usize) != Some(&true) {
@@ -888,7 +888,7 @@ mod tests {
     }
 
     /// A group somebody has authored rules for is not re-converted — the stale
-    /// per-tile masks would resurrect assignments that were deliberately moved.
+    /// per-tile masks would resurrect assignments that were moved.
     #[test]
     fn a_group_that_already_has_rules_is_left_alone() {
         let mixed = r#"TileSet(name: "t", sheet_cols: 4, sheet_rows: 4,

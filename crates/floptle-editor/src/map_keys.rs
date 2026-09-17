@@ -255,7 +255,7 @@ impl MapCmd {
     }
 }
 
-/// A key plus the modifiers that must be held with it. Ctrl is deliberately
+/// A key plus the modifiers that must be held with it. Ctrl is
 /// absent: every Ctrl chord belongs to the application (undo, save, copy…), so
 /// keeping it out of reach is what stops a map bind from ever shadowing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,7 +377,7 @@ fn function_keys() -> Vec<KeyCode> {
 /// what they do. Their handlers don't test modifiers, so a reserved key is
 /// reserved with every modifier — `Shift+W` still flies the camera.
 ///
-/// `Delete`/`Backspace` are deliberately absent: the map's delete-faces bind
+/// `Delete`/`Backspace` are absent: the map's delete-faces bind
 /// falls through to "delete node" whenever no face is selected, which is a
 /// deliberate share rather than a clash.
 pub(crate) fn reserved(key: KeyCode) -> Option<&'static str> {

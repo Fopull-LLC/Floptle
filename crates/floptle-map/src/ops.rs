@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 ///
 /// Every op that moves a vertex or changes the face set calls this: once the
 /// user has pulled a face, re-generating from the old parameters would throw
-/// that edit away. Material-slot assignment deliberately does not clear it —
+/// that edit away. Material-slot assignment does not clear it —
 /// painting a stair's treads must not cost you the step-count control.
 fn touched(mesh: &mut MapMesh) {
     mesh.spec = None;

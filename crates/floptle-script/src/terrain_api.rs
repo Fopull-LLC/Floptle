@@ -393,7 +393,7 @@ pub(crate) fn install_terrain_api(
             // per-frame publish owns the flag from the real job state after
             // this, and is what lowers it again.
             //
-            // Only the queueing calls raise it. `terrain.warm` deliberately does
+            // Only the queueing calls raise it. `terrain.warm` does
             // not: it is immediate-mode, called every frame for as long as a
             // caller cares about a body, so raising it there would pin the flag
             // true for the whole time the map has a planet focused.

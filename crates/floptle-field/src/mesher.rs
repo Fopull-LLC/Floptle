@@ -754,7 +754,7 @@ mod tests {
              ~0.3×) — that is the shape of a per-VOXEL lookup where a per-vertex one \
              belongs, which measured 11 ms/chunk the last time it happened"
         );
-        // A second, deliberately enormous absolute bound. The ratio cannot catch a
+        // A second, enormous absolute bound. The ratio cannot catch a
         // regression that slows the scan and the gradient equally; nothing in this
         // subsystem should ever take a tenth of a second for one chunk on any machine.
         assert!(

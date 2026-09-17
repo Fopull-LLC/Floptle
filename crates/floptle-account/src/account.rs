@@ -124,7 +124,7 @@ impl Account {
     /// refuses every network call with the reason (see
     /// [`auth::OfflineProvider`]).
     ///
-    /// The store is real and the restore still runs, deliberately: the shape a
+    /// The store is real and the restore still runs: the shape a
     /// signed-in session takes is settled here, so when fopull.com's side of
     /// the contract lands there is nothing left to design on this side.
     #[cfg(target_arch = "wasm32")]
@@ -400,7 +400,7 @@ impl Account {
     }
 
     /// Sign out: forget the session **now**, then clear the store and revoke the
-    /// refresh token in the background. In that order deliberately — a player
+    /// refresh token in the background. In that order — a player
     /// who presses Sign Out is signed out whether or not the network agrees.
     pub fn sign_out(&self) {
         self.cancel.store(true, Ordering::Relaxed);

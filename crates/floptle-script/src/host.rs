@@ -4535,7 +4535,7 @@ impl ScriptHost {
     /// Simulation-relevant writes — body velocity/position, script state,
     /// component writes — all still land; that is the point of the replay.
     ///
-    /// Errors are deliberately not suppressed. A replay that throws is a
+    /// Errors are not suppressed. A replay that throws is a
     /// correctness problem, and hiding it would leave a desync with no
     /// symptom. The scheduler needs no gating here: it already refuses to
     /// advance in the targeted passes a replay uses (see [`crate::sched_api`]).
@@ -5581,7 +5581,7 @@ impl ScriptHost {
         // transforms alone; their difference moves on anything else — a spawn,
         // a despawn, an attach, a rename, a material edit, a script's queued
         // writes landing. Unchanged difference means transforms-only, and
-        // transforms-only means the cheap path. The world is deliberately
+        // transforms-only means the cheap path. The world is
         // conservative in what it counts (a `get_mut` that wrote nothing still
         // counts), so this can only ever do too much work, never too little.
         let non_transform_rev = world.revision() - world.revision_of::<Transform>();

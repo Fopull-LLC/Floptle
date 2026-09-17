@@ -1376,7 +1376,7 @@ impl ExtHost {
                     "there is no Play mode without the editor; `floptle run` is how a project \
                      is played from a terminal",
                 ),
-                // `Copy` is deliberately not here: the applier already refuses
+                // `Copy` is not here: the applier already refuses
                 // it with a better line than this one could ("there is no
                 // clipboard to write to here"). Replacing a specific message
                 // with a generic one is not coverage.

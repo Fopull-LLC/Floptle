@@ -1857,7 +1857,7 @@ mod tests {
         // land near 0 beside a ±band neighbour: a configuration a true SDF cannot hold
         // (−band→+band needs ~8 voxels, not 2). No projection repairs that — only a real
         // redistance (fast-marching) pass reseeded from the zero crossing would, and that
-        // is deliberately not in P1.
+        // is not in P1.
         //
         // It is tolerable for now because of who reads the field: the mesher normalizes
         // the gradient (magnitude irrelevant) and trusts the zero crossing (unmoved), and
@@ -2064,7 +2064,7 @@ mod tests {
         // enforced |∇d| ≤ 1 either (they nudge voxels by weight, the same mistake this
         // module's first cut made). A faithful import cannot be cleaner than its input,
         // so this asserts "no worse than the source", not "correct" — the redistance pass
-        // that would actually fix it is deliberately out of P1.
+        // that would actually fix it is out of P1.
         let (worst_g, bad) = f.lipschitz_audit();
         println!("migrated field: worst |∇d| {worst_g:.2}, {:.1}% bad (source is itself non-SDF)", bad * 100.0);
         assert!(

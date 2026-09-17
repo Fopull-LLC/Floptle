@@ -264,7 +264,7 @@ impl InputSystem {
     /// to match on the replay. Neither shows up as an error; both show up as a
     /// desync.
     ///
-    /// The frame domain is deliberately excluded. It advances per rendered
+    /// The frame domain is excluded. It advances per rendered
     /// frame, is not part of the simulation, and must not be rewound by one.
     pub fn snapshot_tick(&self) -> TickSnapshot {
         TickSnapshot {

@@ -352,7 +352,7 @@ fn floored(
 /// Whether the column `k` out from `i` has something in it tall enough to be in
 /// the way.
 ///
-/// "In the way" is deliberately narrow: taller than the ledge by more than a
+/// "In the way" is narrow: taller than the ledge by more than a
 /// step, and with its foot low enough to be at the character rather than a
 /// ceiling well overhead. A parapet blocks; the roof three storeys up does not.
 fn walled(

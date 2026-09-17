@@ -536,7 +536,7 @@ fn scheduler_fires_on_ticks_and_ignores_replays() {
     let dt = 1.0 / 60.0;
     host.run(&mut world, &dir, dt, 0.0); // start() schedules everything
     // 30 global ticks = 0.5s: after(0.045) fired once, every(0.095) fired 5
-    // times (0.095, 0.19, 0.285, 0.38, 0.475 — periods deliberately off the
+    // times (0.095, 0.19, 0.285, 0.38, 0.475 — periods off the
     // tick grid so f64 accumulation can't make the count edge-dependent),
     // and the 0.1s tween completed, ending exactly at eased(1.0) = 1.0.
     for i in 0..30 {

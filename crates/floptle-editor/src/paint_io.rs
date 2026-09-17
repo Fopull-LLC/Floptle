@@ -2,7 +2,7 @@
 //!
 //! one container per scene, not one file per node — an all-painted scene would
 //! otherwise mean hundreds of tiny files and hundreds of syscalls per load. The
-//! format is deliberately "the GPU buffer, serialized": an index of
+//! format is "the GPU buffer, serialized": an index of
 //! `paint_id → (offset, count, geom_hash)` followed by the bulk RGBA8, so loading is
 //! one read and a run of block allocations.
 //!

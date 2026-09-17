@@ -98,7 +98,7 @@ impl Binding {
     ///
     /// "Do I already have this bound" is a question about the source. Whole-value
     /// equality answered a different question and so treated a binding the user
-    /// had deliberately scoped as absent, duplicating it with an unscoped copy
+    /// had scoped as absent, duplicating it with an unscoped copy
     /// that then served every local player.
     pub fn same_source(&self, other: &Binding) -> bool {
         self.source == other.source && self.modifiers == other.modifiers
@@ -404,7 +404,7 @@ impl InputMap {
     /// The netcode wire indexes actions by declaration order, so a client and
     /// server running differently-ordered maps would decode each other's inputs
     /// as the wrong actions and desync silently. The session handshake compares
-    /// this and refuses a mismatch. Bindings deliberately do not contribute —
+    /// this and refuses a mismatch. Bindings do not contribute —
     /// a player rebinding Jump to their own liking must not lock them out.
     pub fn hash(&self) -> u64 {
         // FNV-1a, spelled out so no dependency (and no hasher-version drift)
@@ -446,7 +446,7 @@ impl InputMap {
     /// for at all**, matching by name. Returns the names added.
     ///
     /// This is what a version upgrade may do to a project, and it is
-    /// deliberately blunter than [`Self::merge_missing`]: it never adds a
+    /// blunter than [`Self::merge_missing`]: it never adds a
     /// binding to an action the project already defines.
     ///
     /// `merge_missing` decided "missing" with whole-struct equality on
@@ -601,7 +601,7 @@ impl InputMap {
                 act("Crouch", key(Key::KeyC), pad(PadButton::East)),
                 act("Pause", key(Key::Escape), pad(PadButton::Start)),
                 // Hold-to-look, for the free cursor. Bound on the mouse only,
-                // and deliberately so: a right stick recentres itself, so there
+                // and so: a right stick recentres itself, so there
                 // is nothing to gate, and the `Look` axis below leaves its stick
                 // binding ungated. A pad therefore looks around at all times
                 // while a mouse only does so while dragging.

@@ -337,7 +337,7 @@ impl WebState {
     /// Bind a loopback port and call back on the first request that arrives.
     /// Returns the port chosen.
     pub(crate) fn listen(&mut self, port: u16, cb: RegistryKey) -> Result<u16, String> {
-        // 127.0.0.1, deliberately — see the module docs.
+        // 127.0.0.1 — see the module docs.
         let listener = std::net::TcpListener::bind(("127.0.0.1", port))
             .map_err(|e| format!("could not listen on 127.0.0.1:{port}: {e}"))?;
         let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);

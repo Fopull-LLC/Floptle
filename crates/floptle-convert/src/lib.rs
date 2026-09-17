@@ -99,7 +99,7 @@ pub struct Report {
     pub triangles: usize,
     pub textures: usize,
     pub materials: usize,
-    /// Things deliberately not carried across, in words. Shown, never hidden.
+    /// Things not carried across, in words. Shown, never hidden.
     pub dropped: Vec<String>,
     /// Trouble that did not stop the conversion — a texture that could not be
     /// found, a mesh with no normals. Worth saying; not worth failing over.
@@ -140,7 +140,7 @@ pub const SUPPORTED: &[&str] = &["fbx", "obj", "stl", "ply", "gltf"];
 
 /// Can this path be converted? Used by the editor to decide whether to offer.
 ///
-/// `.glb` is deliberately **not** here. It is already the output format, and
+/// `.glb` is **not** here. It is already the output format, and
 /// offering to convert one to itself is an action whose best case is doing
 /// nothing.
 pub fn is_convertible(path: &Path) -> bool {

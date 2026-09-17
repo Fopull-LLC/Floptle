@@ -3113,8 +3113,8 @@ impl Raster {
         // frame on a big planet (the 60→10 fps collapse on approach).
         const OPAQUE_CUTOFF: f32 = 0.999;
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        // Terrain's alpha lane is a DISSOLVE threshold, not opacity
-        //: the fragment shader discards a matching fraction of
+        // Terrain's alpha lane is a dissolve threshold, not opacity:
+        // the fragment shader discards a matching fraction of
         // a newly meshed chunk's pixels and what survives is fully opaque. So a
         // fading chunk belongs in the OPAQUE pass — blending it instead would
         // dim it toward the sky rather than reveal it, drop it out of the depth
@@ -3363,7 +3363,7 @@ impl Raster {
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            // The OPAQUE pipeline, deliberately: glass composites the scene
+            // The OPAQUE pipeline: glass composites the scene
             // behind it itself, through `transmission`. Blending it as well
             // would mix the same background in twice and make every pane read as
             // washed out — and would drop the depth write that lets one piece of
@@ -3700,7 +3700,7 @@ impl Raster {
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
                 .is_some_and(|s| s.opaque)
         };
-        // Glass is deliberately absent from the prepass. It is drawn last, after
+        // Glass is absent from the prepass. It is drawn last, after
         // the scene behind it has been captured — and if it primed depth here,
         // the opaque fragments behind it would be killed by early-z, so the
         // capture would hold a glass-shaped hole and the glass would refract it.

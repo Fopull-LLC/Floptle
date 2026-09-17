@@ -21,7 +21,7 @@
 //! your line.
 //!
 //! `--@noformat` anywhere in the file opts the whole file out (a generated or
-//! deliberately hand-aligned script), and a line ending in `--@keep` keeps its own
+//! hand-aligned script), and a line ending in `--@keep` keeps its own
 //! indentation.
 
 /// One indent level. Two spaces matches every script in the engine's projects and

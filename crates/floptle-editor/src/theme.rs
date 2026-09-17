@@ -538,7 +538,7 @@ mod look_tests {
     /// The accent is checked by *varying*: it is the one a theme actually
     /// chooses, so two themes must not answer the same. The panel is checked
     /// against `visuals` directly, because its fill is egui's own additive
-    /// lift — deliberately the same value on every theme, since "one step
+    /// lift — the same value on every theme, since "one step
     /// brighter than whatever is underneath" is the same instruction
     /// everywhere. What the assertion catches is somebody replacing it with a
     /// number.

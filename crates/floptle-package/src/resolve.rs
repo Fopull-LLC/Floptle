@@ -88,7 +88,7 @@ pub struct LoadReport {
     /// Installed but not loaded, and why. Includes the ones simply switched
     /// off, so the package list has one source of truth for every row's state.
     pub problems: Vec<Problem>,
-    /// Installed and deliberately off.
+    /// Installed and off.
     pub disabled: Vec<Entry>,
 }
 

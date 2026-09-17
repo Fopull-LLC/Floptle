@@ -29,7 +29,7 @@ use floptle_render::{Projection, RenderCamera};
 /// probes per stall matters more than the copies do.
 const BATCH: usize = 8;
 
-/// How long one editor frame may spend baking. The bake is deliberately not
+/// How long one editor frame may spend baking. The bake is not
 /// allowed to own the frame: a progress bar that cannot repaint is a hang with
 /// extra steps.
 const FRAME_BUDGET_MS: u128 = 24;
@@ -152,7 +152,7 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// The scene's light probe volume, if it has one: `(entity, settings)`.
 ///
-/// The first one, deliberately. Several volumes is a real thing to want later (a
+/// The first one. Several volumes is a real thing to want later (a
 /// level of rooms at different densities), but "the second one is silently
 /// ignored" is a much better failure than "two volumes fight over the same
 /// uniform slots and the light flickers".

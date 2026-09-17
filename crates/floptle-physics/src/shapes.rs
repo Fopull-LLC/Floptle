@@ -1042,7 +1042,7 @@ mod face_label_tests {
     use super::*;
 
     /// A floor in two halves: `x < 0` is one material, `x > 0` is another, and a
-    /// deliberately degenerate triangle sits between them.
+    /// degenerate triangle sits between them.
     ///
     /// The degenerate one is the point. `TriMeshCollider` drops zero-area
     /// triangles — they are common in imported meshes and a source of NaNs — so

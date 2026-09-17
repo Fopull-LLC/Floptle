@@ -36,7 +36,7 @@
 //! only air. That is the safe direction (the alternative is a path through a
 //! wall) and erosion by the agent radius already removes more than it adds.
 //!
-//! Winding is deliberately not trusted: `|normal.y|` decides slope, so a floor
+//! Winding is not trusted: `|normal.y|` decides slope, so a floor
 //! whose triangles face down is still a floor. The cost is that the inside of a
 //! solid thicker than the agent is not filled in — its perimeter blocks, its
 //! middle reads as ground. That ground is enclosed by the perimeter, so nothing
@@ -507,7 +507,7 @@ mod tests {
     fn a_wall_thinner_than_a_column_still_blocks_the_ground_under_it() {
         let s = NavSettings { cell_size: 0.5, agent_height: 1.8, ..Default::default() };
         let mut tris = floor(0.0);
-        // 8 cm thick, and deliberately nowhere near a column centre.
+        // 8 cm thick, and nowhere near a column centre.
         tris.extend(boxy([1.93, 0.0, 0.0], [2.01, 3.0, 4.0]));
         let hf = Heightfield::build(&tris, &s).unwrap();
 

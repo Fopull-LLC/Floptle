@@ -129,7 +129,7 @@ impl WebClient {
     /// CORS and needs none (§6.3).
     pub fn begin(&self) -> (String, Handshake) {
         let pkce = Pkce::generate();
-        // §6.2 requires at least 32 characters and calls it deliberately stricter
+        // §6.2 requires at least 32 characters and calls it stricter
         // than RFC 6749. 32 bytes of CSPRNG is 43 base64url characters, from the
         // same generator that just made the verifier.
         let state = Pkce::generate().verifier;
@@ -477,7 +477,7 @@ mod tests {
 // ---- the browser layer: `fetch` and `location`, and nothing that decides ------------
 //
 // Everything above this line is pure and tested on the desktop. Everything below
-// is I/O against APIs that only exist in a page, and is deliberately as thin as
+// is I/O against APIs that only exist in a page, and is as thin as
 // it can be — it moves strings, it does not make judgements. The judgements are
 // all above, where a test can reach them.
 
@@ -623,7 +623,7 @@ pub mod browser {
     /// Step 3, at boot: if this load is a return from sign-in, finish it.
     ///
     /// `Ok(None)` is the ordinary case — most page loads are not redirects — and
-    /// is deliberately not an error, because every boot runs this.
+    /// is not an error, because every boot runs this.
     pub async fn complete(client: &WebClient) -> Result<Option<Tokens>, String> {
         let query = current_query();
         // Peek without consuming: an ordinary page load must not throw away a

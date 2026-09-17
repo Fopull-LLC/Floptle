@@ -596,7 +596,7 @@ mod new_menu_tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// Node types the ✚ New menu deliberately does not offer, and why. A reason
+    /// Node types the ✚ New menu does not offer, and why. A reason
     /// per line, because "it wasn't on the list" is not something anybody can
     /// check later.
     const NOT_IN_THE_MENU: &[(&str, &str)] = &[
@@ -698,7 +698,7 @@ mod new_menu_tests {
         assert!(stale.is_empty(), "NOT_IN_THE_MENU names variants that are gone: {stale:?}");
     }
 
-    /// Node types the Inspector's Add Component ▸ Type menu deliberately cannot
+    /// Node types the Inspector's Add Component ▸ Type menu cannot
     /// switch a node into, and why. A reason per line, for the same reason as
     /// `NOT_IN_THE_MENU`: "it wasn't on the list" is not something anybody can
     /// check later.
@@ -830,7 +830,7 @@ mod new_menu_tests {
     /// **No group is a wall of text.** The whole point of grouping was that a
     /// twenty-item list is unreadable; a twelve-item group is the same list one
     /// level down. If a group grows past this it wants splitting, and the split
-    /// is a decision to make deliberately rather than discover.
+    /// is a decision to make rather than discover.
     #[test]
     fn no_group_is_longer_than_a_glance() {
         for g in NEW_CATALOG {

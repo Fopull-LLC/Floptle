@@ -1324,7 +1324,7 @@ impl FindScope {
 impl SceneMirror {
     /// Is this node switched off — itself, or because an ancestor is?
     ///
-    /// The mirror stores only each node's own `Disabled`, deliberately (the
+    /// The mirror stores only each node's own `Disabled`, (the
     /// engine resolves inheritance and duplicating it would give two answers
     /// that can drift). So the walk happens here, bounded like every other
     /// parent walk in the engine, and only for candidates a lookup already

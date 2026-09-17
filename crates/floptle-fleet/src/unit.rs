@@ -164,7 +164,7 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
 
     // Restart with backoff, which systemd does better than a loop in this
     // agent would. The burst limit is
-    // deliberately not `always`: a build that cannot start must eventually stop
+    // not `always`: a build that cannot start must eventually stop
     // trying and sit in `failed`, where the agent reports it and a developer
     // sees a reason, rather than restarting forever and filling the journal
     // with the same traceback.

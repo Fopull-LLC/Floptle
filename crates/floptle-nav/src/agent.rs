@@ -53,7 +53,7 @@
 //! Given a velocity it would like, an agent tries that one and a fan of
 //! alternatives, and scores each by how soon it would run into somebody and how
 //! far it is from what was wanted. It is a velocity-obstacle method by another
-//! name, and it is deliberately not ORCA: ORCA is exact for the linear program
+//! name, and it is not ORCA: ORCA is exact for the linear program
 //! it solves and quite hard to reason about when it deadlocks, while a fan of
 //! samples degrades into "everybody slows down and shuffles", which is what a
 //! crowd of units in a doorway should look like anyway.
@@ -810,7 +810,7 @@ impl Crowd {
             agent.stalled = 0.0;
         } else if agent.params.stuck_after > 0.0 {
             // Waiting one's turn in a crowd is not being stuck: while the
-            // avoidance is deliberately hanging back, the clock runs slow —
+            // avoidance is hanging back, the clock runs slow —
             // a genuine gridlock still ends as Blocked, just not before the
             // queue in front has had a fair chance to clear.
             agent.stalled += if agent.yielding { dt * 0.25 } else { dt };

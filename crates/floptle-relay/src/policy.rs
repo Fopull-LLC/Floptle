@@ -281,7 +281,7 @@ impl CloudPolicy {
     /// refused, because a stranger's join must never restart a server its owner
     /// turned off.
     ///
-    /// ⚠ **The wake POST is deliberately synchronous here**, unlike the usage
+    /// ⚠ **The wake POST is synchronous here**, unlike the usage
     /// flush. This is a decision the joiner is waiting on — the alternative is
     /// answering before asking, which means either refusing a server we are
     /// about to wake or promising a wake that may be refused. It is one request
@@ -966,7 +966,7 @@ pub const FULL_RIGHT_NOW: &str = "This game is full right now. Try again in a mi
 /// that nobody playing was affected, and gives the one link where the ceiling
 /// can be raised.
 ///
-/// **The word "limit" is deliberately absent**, and a guard enforces it. Nobody
+/// **The word "limit" is absent**, and a guard enforces it. Nobody
 /// is charged for reaching the ceiling, no game is throttled and nobody playing
 /// is disconnected — so "limit" is the less accurate word as well as the more
 /// discouraging one. The website's copy makes the same choice, and the two

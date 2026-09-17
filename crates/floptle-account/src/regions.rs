@@ -112,7 +112,7 @@ impl Regions {
 /// happens to anybody's DNS or hour of downtime, and a first launch with no
 /// network still hosts.
 ///
-/// It is deliberately marked `planned`, because that is what it is until a
+/// It is marked `planned`, because that is what it is until a
 /// region has been joined across a real network, and a build that shipped
 /// before us-east came up must not claim otherwise. A successful fetch replaces
 /// this wholesale, so the day the region goes `up` every game learns it within

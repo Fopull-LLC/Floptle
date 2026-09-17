@@ -631,7 +631,7 @@ impl Editor {
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
         // Film grain needs a clock or it is a dirty lens, not film. Reduced
-        // motion is deliberately not applied here: grain is texture, not
+        // motion is not applied here: grain is texture, not
         // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
         let retro_on = self.project.retro;

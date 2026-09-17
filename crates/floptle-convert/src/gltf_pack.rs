@@ -13,7 +13,7 @@
 //!
 //! **Faithful, not normalised.** Unlike the FBX path there is nothing to fix:
 //! the source is already right-handed Y-up in metres with triangles. The
-//! engine's own `gltf_import` is deliberately not reused here because it
+//! engine's own `gltf_import` is not reused here because it
 //! *recenters* what it loads — right for placing a prop in a scene, wrong for a
 //! conversion, which must give back the model that went in.
 

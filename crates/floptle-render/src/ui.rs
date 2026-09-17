@@ -1472,7 +1472,7 @@ impl Ui {
             ];
             let mut uv = q.uv;
             // Aspect handling. Contain/Cover need the source's pixel size, so
-            // this is the one place it can happen — floptle-ui is deliberately
+            // this is the one place it can happen — floptle-ui is
             // renderer-agnostic and has no texture registry.
             if q.fit != ImageFit::Stretch
                 && let Some([tw, th]) = tex_size
@@ -1598,8 +1598,8 @@ impl Ui {
             } else {
                 t.size
             };
-            // Rasterize on the layer's own grid when it asked for one
-            //: a pixel font's cells only look like pixels when
+            // Rasterize on the layer's own grid when it asked for one:
+            // a pixel font's cells only look like pixels when
             // a cell is a whole number of screen pixels, and `size * scale` is
             // almost never that because the scale is the window's, not the
             // author's.
@@ -2325,7 +2325,7 @@ mod tests {
     fn placements_never_overlap_or_touch_the_notdef_box() {
         let mut p = ShelfPacker::new(256);
         let mut boxes: Vec<(u32, u32, u32, u32)> = Vec::new();
-        // A spread of sizes in a deliberately awkward order.
+        // A spread of sizes in an awkward order.
         for (i, &(w, h)) in
             [(9, 12), (24, 31), (5, 7), (18, 22), (40, 48), (6, 9), (12, 16)].iter().cycle().take(60).enumerate()
         {

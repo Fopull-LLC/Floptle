@@ -222,7 +222,7 @@ impl Editor {
     /// Load `input.ron` into the script host.
     ///
     /// A **missing** file falls back to [`InputMap::starter`] in memory rather
-    /// than to an empty map, and deliberately does not write anything to disk.
+    /// than to an empty map, and does not write anything to disk.
     /// The shipped default scripts (`freelook`, `first_person`, `third_person`,
     /// …) are written against the starter names, so an empty map would leave a
     /// fresh project's camera unable to move — while a file appearing on disk
@@ -488,7 +488,7 @@ mod tests {
     /// journey across to the Inspector — and every click on a slider would also
     /// be a click in the game.
     ///
-    /// The keyboard is deliberately untouched: the game is still playing.
+    /// The keyboard is untouched: the game is still playing.
     #[test]
     fn freeing_the_cursor_takes_the_mouse_out_of_the_action_layer() {
         let mut raw = floptle_input::RawInput { mouse_delta: (12.0, -4.0), ..Default::default() };

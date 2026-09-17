@@ -63,7 +63,7 @@ impl Editor {
     ///
     /// A locked selection ignores viewport picks, Hierarchy clicks, select-all
     /// and the arrow-key step — see [`Editor::selection_locked`]. It
-    /// deliberately does not gate the world changing underneath: undo/redo
+    /// does not gate the world changing underneath: undo/redo
     /// restoring what was selected at the time, a scene switch dropping a dead
     /// entity, an extension setting the selection through its own API. Those
     /// are not somebody clicking, and a lock that swallowed them would leave
@@ -1165,7 +1165,7 @@ mod focus_tests {
         ed.toggle_selection_lock();
 
         // Not a gesture — this is the scene changing underneath, which is the
-        // one thing the lock deliberately does not hold back.
+        // one thing the lock does not hold back.
         ed.selection.clear();
         ed.enforce_selection_lock();
         assert!(!ed.selection_locked, "a lock over nothing must release itself");

@@ -592,7 +592,7 @@ fn ships_file(path: &Path) -> bool {
         .is_some_and(|e| NEVER_SHIPS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// What an export deliberately left out, so its message can say so rather
+/// What an export left out, so its message can say so rather
 /// than a developer wondering where a folder went.
 #[cfg(feature = "editor-ui")]
 #[derive(Default)]

@@ -1,7 +1,7 @@
 //! The engine clock and the fixed-step accumulator — the heartbeat the whole
 //! frame loop hangs on (roadmap Phase 1).
 //!
-//! Two timesteps, deliberately separate:
+//! Two timesteps, separate:
 //! - **Variable** (`Time::dt`): advances once per rendered frame; rendering,
 //!   camera, and `on_update(dt)` scripts read it. Smooth, frame-rate dependent.
 //! - **Fixed** (`FixedTimestep`): a determinism-preserving accumulator that

@@ -2281,7 +2281,7 @@ mod tests {
 
     /// Render the Installs tab to a PNG so a layout change can be LOOKED at.
     ///
-    /// Ignored: it needs a GPU, and CI has none. Run it deliberately —
+    /// Ignored: it needs a GPU, and CI has none. Run it —
     /// `cargo test -p floptle-hub -- --ignored --nocapture` — and open the path it
     /// prints. The same rule as the render crate's `*_probe` examples: a visual change
     /// that was only reasoned about is a visual change that was not checked.
@@ -2498,7 +2498,7 @@ mod tests {
     /// `["engine"]`. Nine of the ten releases before this fix changed zero files under
     /// `crates/floptle-hub`, and every one of them offered a self-update.
     ///
-    /// Versions are 99.x deliberately: the check compares against the Hub's own compiled-in
+    /// Versions are 99.x: the check compares against the Hub's own compiled-in
     /// version, so anything near the real one stops testing anything the day it is bumped.
     #[test]
     fn an_engine_only_release_is_not_offered_as_a_hub_update() {

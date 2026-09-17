@@ -1,7 +1,7 @@
 //! The vertex-paint stroke: cursor ray → mesh hit → brush dab → `vpaint` upload.
 //!
 //! Modelled on `terrain_edit::terrain_frame_update` (same ray build, same telegraph,
-//! same dab spacing, same lazy per-stroke snapshot) — deliberately, so there is one
+//! same dab spacing, same lazy per-stroke snapshot) — so there is one
 //! way brushes behave in this editor rather than two.
 //!
 //! Where it differs from terrain, and why:

@@ -2483,7 +2483,7 @@ impl EditorTabViewer<'_> {
                 }
             }
             // Cut = delete only the keys copied from this selection (by node+time,
-            // robust to reindexing).  A stale clipboard is deliberately irrelevant.
+            // robust to reindexing).  A stale clipboard is irrelevant.
             if flags.cut_keys
                 && !copied_now.is_empty()
                 && let Some((_, d)) = st.clip_doc.as_mut()
@@ -2789,7 +2789,7 @@ fn timeline_header(ui: &mut egui::Ui, st: &mut AnimUiState, live: &TimelineLive,
             st.clip_dirty = true;
         }
         ui.separator();
-        // Key-all commands (both, deliberately — they serve different needs):
+        // Key-all commands (both — they serve different needs):
         // "all bones" drops a key on every armature bone at its current pose (a
         // full-body keyframe, even bones with no track yet); "all tracks" keys
         // every existing lane (transform + property) at its current value.

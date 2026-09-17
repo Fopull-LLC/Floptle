@@ -87,7 +87,7 @@ pub struct PostSettings {
     /// Not part of this chain. It runs as its own pass over the art, at the
     /// composited (retro) resolution and before the 2D light composite — see
     /// [`crate::palette`] and [`Self::palette`]. Everything in the chain below is
-    /// downstream of it and is deliberately left smooth.
+    /// downstream of it and is left smooth.
     pub posterize_bands: u32,
     /// Ordered-dither the posterize quantization so a smooth ramp in the *art*
     /// stipples rather than hard-stepping. It has no bearing on lighting.
@@ -1151,7 +1151,7 @@ impl PostStack {
         let custom = custom.filter(|c| c.has_passes());
         let ssao_on = s.ssao && ssao.is_some();
         let filter_on = s.color_filter_on();
-        // Posterize is deliberately absent: it ran before the 2D light composite,
+        // Posterize is absent: it ran before the 2D light composite,
         // upstream of everything here. A scene whose only post
         // setting is posterize therefore takes the passthrough below — the frame
         // it hands us is already quantized.

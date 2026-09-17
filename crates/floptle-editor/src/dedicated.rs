@@ -215,7 +215,7 @@ impl ServerArgs {
 /// **A supervisor cannot put a key on the command line.** An `ExecStart` is
 /// readable by every `ps` on the box and is echoed into the journal — which is
 /// then shipped to a control plane and rendered on a web page — so
-/// `floptle-fleet` deliberately passes the key as `FLOPTLE_GAME_KEY` in the
+/// `floptle-fleet` passes the key as `FLOPTLE_GAME_KEY` in the
 /// unit's environment instead, with a test of its own asserting it never
 /// appears in the command. Nothing here read that variable, so the careful path
 /// went nowhere and every status report said `"game_key": null`.
@@ -328,8 +328,8 @@ pub fn run(args: ServerArgs) -> i32 {
 
     // **Say that the port is not being listened on**. A
     // caller that passed both had no way to learn one of them did nothing, and
-    // an address built from it reaches nothing. Said rather than refused,
-    // deliberately: a fleet box passes both today, and refusing would take a
+    // an address built from it reaches nothing. Said rather than refused:
+    // a fleet box passes both today, and refusing would take a
     // region down to make a point about a flag.
     if args.relay.is_some()
         && let Some(port) = args.port
@@ -1108,7 +1108,7 @@ mod tests {
         let documented: Vec<&str> =
             serve.args.iter().map(|a| a.name).filter(|n| n.starts_with("--")).collect();
 
-        // Two are deliberately out of the published table, and neither is an
+        // Two are out of the published table, and neither is an
         // oversight:
         //
         // `--game-key` is a credential. `ps` shows a command line, the journal

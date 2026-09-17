@@ -730,7 +730,7 @@ fn first_quoted(s: &str) -> Option<&str> {
 /// Infer variable types from this file's assignments (`local rb =
 /// node:getcomponent("RigidBody")` → `rb` completes RigidBody fields only) and
 /// from `defaults` reference declarations (`hp = componentref("UiSlider")` →
-/// `params.hp` completes slider fields). Line-based and deliberately simple —
+/// `params.hp` completes slider fields). Line-based and simple —
 /// wrong inferences only cost a fallback to the generic list.
 fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
     let mut out: Vec<(String, VarType)> = Vec::new();
@@ -2508,7 +2508,7 @@ impl EditorTabViewer<'_> {
     /// headings, wrapped prose, bullets, and code blocks in the editor's own
     /// syntax highlighting inside a framed panel.
     ///
-    /// The markup is deliberately tiny — indented lines (4 spaces) or ``` fences
+    /// The markup is tiny — indented lines (4 spaces) or ``` fences
     /// are code, `## ` is a heading, `- ` is a bullet, `` `x` `` is inline code —
     /// because doc bodies are written by hand right here in the source and anything
     /// heavier would rot. Prose wraps to the panel, so the Scripting tab is
@@ -5547,7 +5547,7 @@ mod tests {
     /// **Every method a node handle answers to must have a reference entry.**
     ///
     /// `api_surface()` walks the globals, and the annotation test below
-    /// deliberately excludes `Node` — so between them, `node:` methods were
+    /// excludes `Node` — so between them, `node:` methods were
     /// covered by nothing at all. Six 2D bindings shipped into the reference
     /// only because somebody typed them there, and regenerating the docs would
     /// have been perfectly happy without them.
@@ -6031,7 +6031,7 @@ Prose with `inline code` in it.
     /// Mechanical, unmissable, and it fails the build the day somebody adds the
     /// twenty-fifth such binding without one.
     ///
-    /// The check is deliberately about presence and not about wording — a test
+    /// The check is about presence and not about wording — a test
     /// cannot read English, and one that tried would be a test people route
     /// around. What it can do is refuse to let the question go unanswered.
     #[test]

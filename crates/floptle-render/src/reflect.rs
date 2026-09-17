@@ -67,7 +67,7 @@ impl ProbeDetail {
     ///
     /// Half the map's width. A face spans 90° and the map spans 360°, so equal
     /// angular density at the equator would want a face a QUARTER of the width;
-    /// half of it is deliberately generous, because the conversion then averages
+    /// half of it is generous, because the conversion then averages
     /// rather than magnifies, and a magnified capture shows its own texels in a
     /// mirror.
     pub fn face(self) -> u32 {
@@ -686,7 +686,7 @@ mod tests {
     fn every_direction_round_trips_through_its_face() {
         let mut worst = 0.0f32;
         // A spread that covers all six faces and every edge between them,
-        // deliberately including directions exactly on a face boundary.
+        // including directions exactly on a face boundary.
         for i in 0..31 {
             for j in 0..31 {
                 let phi = (i as f32 / 30.0) * std::f32::consts::TAU;

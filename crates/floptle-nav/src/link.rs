@@ -6,7 +6,7 @@
 //! connection between two pieces of that surface with no floor in between. This
 //! is that connection.
 //!
-//! A link is deliberately dumb: two points, a cost, and a switch. It does not
+//! A link is dumb: two points, a cost, and a switch. It does not
 //! know what a ladder is. What makes it a ladder is the animation a script plays
 //! while an agent is on it, and [`crate::Agent`] reports exactly that — *which*
 //! link, and how far along it — for the whole of a traversal.

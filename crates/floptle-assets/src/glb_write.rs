@@ -5,7 +5,7 @@
 //! and packs all geometry + embedded PNG textures + inverse-bind matrices into one
 //! BIN chunk.
 //!
-//! Scope is deliberately narrow: triangle meshes with POSITION/NORMAL, optional
+//! Scope is narrow: triangle meshes with POSITION/NORMAL, optional
 //! TEXCOORD_0 / COLOR_0 / JOINTS_0+WEIGHTS_0, a node tree with TRS + optional skin,
 //! PBR base-color (factor + optional embedded texture), and skins with
 //! inverse-bind matrices. That's the exact surface our importer round-trips.

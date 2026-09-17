@@ -17,7 +17,7 @@
 //!
 //! **It can legitimately fail, and it must say so rather than half-succeed.** A Hub in
 //! `/usr/local/bin`, or inside a read-only mount, or on macOS under a quarantine flag,
-//! cannot rewrite itself without privileges this app deliberately never asks for. So
+//! cannot rewrite itself without privileges this app never asks for. So
 //! writability is checked *before* the button is offered, and a swap that fails puts the
 //! old binary back.
 

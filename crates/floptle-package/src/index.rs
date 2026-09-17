@@ -71,7 +71,7 @@ pub struct Rating {
 /// reviews of pull it takes to escape it.
 ///
 /// `PRIOR_WEIGHT` reviews at `PRIOR_SCORE` are added to everybody's tally before
-/// ranking. Five is deliberately small — it is enough that one enthusiastic
+/// ranking. Five is small — it is enough that one enthusiastic
 /// friend cannot top the catalogue, and few enough that a genuinely good
 /// package with a dozen reviews still gets there.
 const PRIOR_SCORE: f32 = 3.5;
@@ -883,7 +883,7 @@ mod tests {
     }
 
     /// The number on the star row and the number the catalogue is ordered by
-    /// are deliberately not the same number.
+    /// are not the same number.
     #[test]
     fn the_shown_score_is_plain_and_the_ranked_one_is_not() {
         let lone = Rating { score: 5.0, count: 1 };

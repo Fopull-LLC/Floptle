@@ -809,7 +809,7 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
 }
 
 /// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
-/// rotation and scale quantized to 1e-3. Translation is deliberately absent —
+/// rotation and scale quantized to 1e-3. Translation is absent —
 /// the volume anchors on the node's f64 translation per frame, so moving a map
 /// never rebakes; only re-orienting or rescaling it does.
 pub(crate) type OccKey = (String, [i32; 4], [i32; 3]);

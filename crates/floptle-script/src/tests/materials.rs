@@ -23,7 +23,7 @@ fn every_material_field_can_be_both_read_and_written() {
          them, assign them and watch nothing happen"
     );
     // The other direction, minus the write-only spellings that are
-    // deliberately aliases of a published field.
+    // aliases of a published field.
     let aliases = ["opacity"];
     let unreadable: Vec<&&str> = crate::api::MATERIAL_NUM_FIELDS
         .iter()

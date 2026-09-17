@@ -4,7 +4,7 @@
 //! game's settings menu: arm a capture with a [`BindFilter`], then feed it each
 //! window's [`RawInput`] until it returns a [`Capture`].
 //!
-//! Escape is deliberately never captured, so "press the input you want" always
+//! Escape is never captured, so "press the input you want" always
 //! has a way out.
 
 use crate::raw::RawInput;

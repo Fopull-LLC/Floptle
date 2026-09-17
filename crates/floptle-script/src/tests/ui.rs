@@ -388,7 +388,7 @@ fn a_manager_hears_buttons_it_does_not_live_on() {
             "hits = 0\n",
             "last = \"\"\n",
             "lastEvent = \"\"\n",
-            // Registered from `update`, deliberately: re-registering the
+            // Registered from `update`: re-registering the
             // same (element, hook) must replace rather than stack.
             "function update(node, dt)\n",
             "  for i = 1, 2 do\n",

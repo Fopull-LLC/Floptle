@@ -90,7 +90,7 @@ impl Poly {
 
 /// The shape of a bake, in the three numbers worth reading off it.
 ///
-/// `islands` rather than regions, deliberately: a region is what the walking
+/// `islands` rather than regions: a region is what the walking
 /// surface flooded into *before* any link joined two of them, so it is the
 /// bake's working. An island is what a character can actually reach, and that
 /// is the number a person is asking for when they ask how many pieces their
@@ -184,7 +184,7 @@ pub struct NavMesh {
     #[serde(skip)]
     pub(crate) island_index: OnceLock<Vec<u32>>,
     /// What is currently cut out of this mesh at runtime, and the bake it was
-    /// cut out of. `serde(skip)` on both, deliberately: a carve is a fact about
+    /// cut out of. `serde(skip)` on both: a carve is a fact about
     /// this play session and must never reach the `.fnav` on disk, for the same
     /// reason a bake taken during Play does not. See [`crate::carve`].
     #[serde(skip)]
@@ -773,7 +773,7 @@ impl NavMesh {
     /// `near` is `(centre, radius)`, and the neighbourhood it describes is a
     /// **square** of side `2 * radius` rather than a circle. Sampling a circle
     /// uniformly means rejecting and re-drawing, and re-drawing means a random
-    /// stream this deliberately does not have. A square is the shape that can be
+    /// stream this does not have. A square is the shape that can be
     /// sampled in one pass from two numbers, so a square is what it is — said
     /// here rather than approximated silently.
     pub fn random_point(
@@ -860,7 +860,7 @@ impl NavMesh {
         //
         // The neighbourhood is a **square** of side `2 * radius`, not a circle.
         // Sampling a circle uniformly means rejecting and re-drawing, and
-        // re-drawing means a random stream this deliberately does not have — the
+        // re-drawing means a random stream this does not have — the
         // caller supplies `u` and `v` precisely so a rollback re-simulates to
         // the same destination. A square is the shape two numbers can fill in
         // one pass, so a square is what it is, said here rather than
@@ -930,7 +930,7 @@ impl NavMesh {
 /// that box's area, the running total through it, and the height to place a
 /// point at.
 ///
-/// The polygon index is deliberately **not** kept: a sampler is a snapshot, and
+/// The polygon index is **not** kept: a sampler is a snapshot, and
 /// holding an index into a mesh that `splice` may have re-baked underneath it is
 /// how a stale handle turns into a wrong answer rather than an obvious one.
 #[derive(Clone, Copy)]

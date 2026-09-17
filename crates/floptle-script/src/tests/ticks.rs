@@ -370,7 +370,7 @@ fn a_script_with_no_update_is_not_charged_for_the_frame() {
 fn a_script_reads_its_own_frame_cost_by_name() {
     let dir = std::env::temp_dir().join(format!("floptle_perf_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    // Two scripts, one deliberately doing more work than the other, so the
+    // Two scripts, one doing more work than the other, so the
     // ordering `perf.scripts()` promises has something to order.
     write_script(
         &dir,
@@ -585,7 +585,7 @@ fn the_tick_pose_channel_reads_and_writes_the_body_not_the_render_transform() {
     );
     let mut world = World::default();
     let e = world.spawn();
-    // The render transform is deliberately somewhere the body is not — that
+    // The render transform is somewhere the body is not — that
     // is exactly the situation mid-tick, and the two must not be confused.
     world.insert(e, Transform::from_translation(glam::DVec3::new(-99.0, 0.0, 0.0)));
     world.insert(

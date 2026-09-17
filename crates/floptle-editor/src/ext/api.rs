@@ -1764,7 +1764,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
         t.set(
             "set",
             lua.create_function(move |lua, (id, patch): (u32, Table)| {
-                // Partial, deliberately. A tool that wants to tint a light
+                // Partial. A tool that wants to tint a light
                 // should not have to read the whole node back and write it out
                 // again — and a whole-document write is how a tool silently
                 // reverts a field it did not know about.
@@ -2048,7 +2048,7 @@ fn json_table(lua: &Lua) -> mlua::Result<Table> {
     // absent field as "leave this alone" and an explicit null as "clear it" —
     // without a sentinel, a package can set such a field and never unset it.
     //
-    // **Decoding is deliberately not symmetric.** JSON `null` still arrives as
+    // **Decoding is not symmetric.** JSON `null` still arrives as
     // Lua nil, because every package already reads an optional field with
     // `if body.field then`, and handing them a sentinel that is truthy would
     // silently turn every one of those tests the wrong way round.

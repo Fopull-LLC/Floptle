@@ -28,7 +28,7 @@ use crate::Editor;
 /// Asked of the elements layout actually placed, which is the whole point: an
 /// `ElementSpec` query over the world counts a button inside a hidden panel,
 /// because `visible` doesn't cascade through the ECS the way it cascades
-/// through the solver. A tooltip is deliberately not on this list — hovering is
+/// through the solver. A tooltip is not on this list — hovering is
 /// an interaction, but a HUD readout with a tooltip is not a menu, and it must
 /// not take back a cursor the game is aiming with.
 pub(crate) fn spec_wants_pointer(spec: &ElementSpec) -> bool {

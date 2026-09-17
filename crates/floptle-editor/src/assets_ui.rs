@@ -536,7 +536,7 @@ impl<'a> EditorTabViewer<'a> {
             ui.close();
         }
         // A `.spriteanim.ron` is edited as its file and by no other route — the
-        // Animating tab plays it and deliberately will not write it — so the
+        // Animating tab plays it and will not write it — so the
         // editor telling you to hand-edit a file it refuses to open was a dead
         // end with no way out of it.
         let openable = is_script(path)

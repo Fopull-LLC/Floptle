@@ -970,7 +970,7 @@ impl TileCtx<'_> {
             let (shift, add) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
             if add {
                 // Ctrl-click builds a selection that need not be a rectangle —
-                // the six slope tiles scattered around a sheet. It deliberately
+                // the six slope tiles scattered around a sheet. It
                 // does NOT touch the brush: you are editing, not arming.
                 if !self.tools.inspect.remove(&idx) {
                     self.tools.inspect.insert(idx);

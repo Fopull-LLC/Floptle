@@ -79,7 +79,7 @@ pub fn import(path: &Path) -> Result<ImportedModel, ImportError> {
 /// streamed level of 313 props spends ~43 MB of RGBA allocation, per bake,
 /// on pixels it drops on the next line.
 ///
-/// Geometry is produced by the same walk as [`import`], deliberately: two
+/// Geometry is produced by the same walk as [`import`]: two
 /// importers that were supposed to agree about vertex positions and did not
 /// would move a level's navmesh out from under it, and the disagreement would
 /// be invisible until somebody walked into a wall.

@@ -199,7 +199,7 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 /// values, and — the one that matters most — interest management, whose whole
 /// promise is about what a client is not sent.
 ///
-/// These are owned by the run loop rather than by the Editor, deliberately: the
+/// These are owned by the run loop rather than by the Editor: the
 /// Editor holds exactly one ghost and one Lua VM, and N of either is a design
 /// question this verb does not need to answer to make the wire observable.
 struct Ghost {

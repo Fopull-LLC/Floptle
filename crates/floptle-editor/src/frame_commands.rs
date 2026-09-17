@@ -940,7 +940,7 @@ impl Editor {
             self.record();
             match c {
                 // The live half (where the follow has got to, any shake running)
-                // is deliberately left at its default here: this is an edit to
+                // is left at its default here: this is an edit to
                 // the rule, and inheriting a play session's position into an
                 // authored camera is how a camera moves when you change its
                 // dead zone.

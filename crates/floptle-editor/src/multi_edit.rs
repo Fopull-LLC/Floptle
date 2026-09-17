@@ -602,7 +602,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(exclude_layers, bex, tex, &mut hit);
             hit
         }
-        // Different kinds of node, or a kind that deliberately stays put.
+        // Different kinds of node, or a kind that stays put.
         _ => false,
     }
 }

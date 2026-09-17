@@ -48,7 +48,7 @@ pub(crate) fn family_key(pkg_id: &str, name: &str) -> String {
 /// it has already cost this repo one round of swapping away icons that were
 /// fine (see `icons.rs`). The charmap is the fact the renderer acts on.
 ///
-/// The **proportional chain only**, deliberately. A package face is checked
+/// The **proportional chain only**. A package face is checked
 /// against the stack it falls back to rather than against itself, so a package
 /// shipping a rare glyph in its own face is told `false` for it. That is the
 /// conservative direction: the answer is used to pick between an icon and a

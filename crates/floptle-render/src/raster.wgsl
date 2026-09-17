@@ -1441,8 +1441,8 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // unlit early-return's fog too, so it's computed before that branch.
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
 
-    // A newly meshed terrain chunk DISSOLVES in rather than popping
-    //: the streamer ramps `color.a` 0 → 1 over its first
+    // A newly meshed terrain chunk dissolves in rather than popping:
+    // the streamer ramps `color.a` 0 → 1 over its first
     // moments and the fraction of pixels that survive follows it.
     //
     // A dissolve and not a blend, because terrain is opaque and must stay in

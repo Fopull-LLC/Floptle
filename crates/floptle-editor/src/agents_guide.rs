@@ -6,7 +6,7 @@
 //! does without a tool: reads `.ron` by eye, edits it, and finds out whether
 //! that worked when a person opens the editor.
 //!
-//! This page is the pointer that closes that gap. It is deliberately short and
+//! This page is the pointer that closes that gap. It is short and
 //! almost entirely references: the authority is `floptle help --json`, which
 //! cannot go stale, and a long guide here would be a second description of the
 //! CLI to keep in step with the first.

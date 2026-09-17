@@ -260,7 +260,7 @@ pub struct NodeDoc {
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
 /// The runtime `owner`/`NetId` are session state, not authored — they are
-/// deliberately not serialized.
+/// not serialized.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ReplicatedDoc {
     /// true = the owner-client predicts this node (its own avatar);
@@ -530,7 +530,7 @@ impl RigidBodyDoc {
 /// [`floptle_core::camera2d::Camera2D`] — the saved half of it.
 ///
 /// The live half (where the follow has got to, and any shake in progress) is
-/// deliberately absent: a scene records the *rule*, and a camera that reloaded
+/// absent: a scene records the *rule*, and a camera that reloaded
 /// mid-shake would be recording a moment.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Camera2DDoc {
@@ -964,7 +964,7 @@ pub enum MatterDoc {
         tileset: String,
     },
     /// N sprites from one node, each with its own transform, cell and tint. The
-    /// sprites themselves are runtime-only and deliberately not saved.
+    /// sprites themselves are runtime-only and not saved.
     SpriteBatch {
         #[serde(default = "one_f32")]
         size: f32,
@@ -1091,7 +1091,7 @@ pub enum MatterDoc {
         motion_blur: f32,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         motion_samples: u32,
-        /// A tuning view, so it is deliberately not saved when off — and it is
+        /// A tuning view, so it is not saved when off — and it is
         /// saved when on, because leaving it on and closing the project is a
         /// thing that happens and finding it still on is better than a frame
         /// that mysteriously fixed itself.
@@ -1540,7 +1540,7 @@ fn default_water_density() -> f32 {
     1000.0
 }
 
-/// A green-blue you can see through — deliberately not "ocean blue", which
+/// A green-blue you can see through — not "ocean blue", which
 /// reads as a filter rather than as water.
 fn default_water_tint() -> [f32; 3] {
     [0.10, 0.32, 0.38]
@@ -5366,7 +5366,7 @@ mod tests {
         assert_eq!(back.to_light(), authored, "every injection knob round trips");
 
         // A `Lighting` block written before light injection existed. The defaults
-        // land it on LIT rather than on the flat colour, deliberately: fog that
+        // land it on LIT rather than on the flat colour: fog that
         // ignores the sun standing behind it is what made volumetric mode read as
         // a grey wash, and a scene saved before the fix wants the fix.
         let old: LightDoc = ron::from_str(

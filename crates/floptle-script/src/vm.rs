@@ -132,7 +132,7 @@ mod tests {
     /// The compatibility layer installs on a bare state without raising.
     ///
     /// Cheap, and it is the failure that would be worst: `ScriptHost::new`
-    /// panics on it deliberately, because a shipped script silently losing a
+    /// panics on it because a shipped script silently losing a
     /// documented library is the outcome this migration promised not to
     /// produce. Better to find it here.
     #[test]

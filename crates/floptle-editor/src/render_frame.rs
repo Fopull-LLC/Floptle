@@ -857,13 +857,13 @@ impl Editor {
                 // the reflection and then grade it a second time on the way out.
                 //
                 // The editor's own furniture (the grid, gizmos, selection
-                // outlines) is deliberately on the far side of this line too: a
+                // outlines) is on the far side of this line too: a
                 // mirror must not show the reference grid.
                 if let Some(h) = scene_history.as_mut() {
                     h.capture(gpu, color, view_proj, cam.world_position);
                 }
                 // The reference grid is an editor aid — Scene view only, and
-                // deliberately after the capture above: it is not part of the
+                // after the capture above: it is not part of the
                 // scene, and a mirror that reflected the editor's own graph
                 // paper would be showing something that does not exist.
                 if self.grid.show && !game_view {

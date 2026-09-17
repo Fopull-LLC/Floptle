@@ -1,6 +1,6 @@
 //! `ui.make(container, tree)` — the Lua half of the data-driven UI builder.
 //!
-//! Two jobs, deliberately kept apart from the rules in `floptle_ui::make`:
+//! Two jobs, kept apart from the rules in `floptle_ui::make`:
 //! reading a Lua table into a [`MadeNode`] tree, and doing what the resulting
 //! diff says to the ECS.
 //!

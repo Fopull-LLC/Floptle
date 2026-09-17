@@ -1,7 +1,7 @@
 //! Tests for the extension host: load a package from a temp folder, run its
 //! Lua, and check what it registered and queued.
 //!
-//! These deliberately go through [`ExtHost::reload`] rather than poking the
+//! These go through [`ExtHost::reload`] rather than poking the
 //! bindings directly — the thing worth testing is that a folder on disk becomes
 //! a working extension, which is the whole path a package author walks.
 
@@ -627,7 +627,7 @@ fn read_bytes_reads_binary_and_honours_what_the_user_picked() {
 
     // Somewhere the package has no business reaching on its own.
     let outside = std::env::temp_dir().join(format!("floptle-picked-{}.bin", std::process::id()));
-    // Bytes that are deliberately not valid utf-8, which is what makes this a
+    // Bytes that are not valid utf-8, which is what makes this a
     // different function rather than a convenience.
     std::fs::write(&outside, [0xffu8, 0x00, 0xfe, b'h', b'i']).unwrap();
     let outside_s = outside.to_string_lossy().to_string();
@@ -895,7 +895,7 @@ fn a_flexible_spacer_pushes_right_without_pushing_the_panel_wider() {
         .filter_map(|l| l.msg.strip_prefix("gap ").and_then(|n| n.parse::<f32>().ok()))
         .collect();
     assert_eq!(gaps.len(), 3, "one reading per frame");
-    // Frame one has no measurement yet and claims nothing — deliberately, since
+    // Frame one has no measurement yet and claims nothing — since
     // a spacer that guessed would overflow once, and once is all a ratchet needs.
     assert!(gaps[0] > 100.0, "first frame should not have guessed: {gaps:?}");
     assert!(
@@ -2525,7 +2525,7 @@ fn a_package_can_read_the_documents_of_nodes_that_are_not_selected() {
         "#,
     );
     let mut host = host_for(&proj);
-    // Nothing selected, deliberately: the whole point is that this does not
+    // Nothing selected: the whole point is that this does not
     // need one.
     host.begin_frame(
         Snapshot { project_root: proj.clone(), ..Snapshot::default() },

@@ -31,7 +31,7 @@ use crate::transport::PeerId;
 
 /// Server-side interest configuration. Off by default: broadcasting is cheaper
 /// and simpler below a few dozen players, and a feature that changes what
-/// arrives on the wire should be something a project turns on deliberately.
+/// arrives on the wire should be something a project turns on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InterestConfig {
     pub enabled: bool,

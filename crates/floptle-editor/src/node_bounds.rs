@@ -73,7 +73,7 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
         }),
         // A tilemap's grid is `cols × rows` squares of `tile` units. Using the
         // full extent as if it were the half-extent is twice as loose as it
-        // needs to be, and deliberately so: where the generated mesh puts its
+        // needs to be, and so: where the generated mesh puts its
         // origin is a detail of the mesh builder, and a cull that silently
         // depends on that would break the day somebody recentres it.
         Matter::Tilemap { cols, rows, tile, .. } => {

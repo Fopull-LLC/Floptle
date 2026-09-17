@@ -30,7 +30,7 @@ macro_rules! keys {
             pub const ALL: &'static [Key] = &[$(Key::$variant),*];
 
             /// The lowercase name scripts use (`"w"`, `"space"`, `"shift"`).
-            /// Left and right modifiers deliberately collapse onto one name,
+            /// Left and right modifiers collapse onto one name,
             /// matching the long-standing `input.key("shift")` behaviour.
             pub fn script_name(self) -> &'static str {
                 match self { $(Key::$variant => $script),* }

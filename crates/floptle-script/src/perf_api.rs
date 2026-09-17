@@ -64,7 +64,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
     // perf.worstMs(bucket) -> the worst single frame in the last second.
     //
     // The one to reach for. A spike is what anybody is ever chasing and a mean
-    // hides it, so this is deliberately as easy to call as `ms`.
+    // hides it, so this is as easy to call as `ms`.
     let p = profile.clone();
     t.set(
         "worstMs",
@@ -321,7 +321,7 @@ mod tests {
             let mut prof = p.borrow_mut();
             // A pass records the bucket; the hooks inside it record themselves.
             // Two calls since 0.84.2 — `Scripts` is the whole pass and the rows
-            // are the part of it that was inside a hook, so 8.0 is deliberately
+            // are the part of it that was inside a hook, so 8.0 is
             // more than the 5.25 the rows come to.
             prof.record(Bucket::Scripts, 8.0);
             prof.record_script("vessel_controller", 5.0);

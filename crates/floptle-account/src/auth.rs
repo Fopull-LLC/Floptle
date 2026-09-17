@@ -639,7 +639,7 @@ impl TokenStore for WebStore {
 /// This is not "signing in does not work in a browser" any more — it does, by
 /// redirect, in [`crate::web_auth`]. This type exists because [`Provider`] is
 /// the device grant's shape and `Account` is generic over it, and a page is
-/// refused that grant deliberately at both ends: contract §6.1 gives
+/// refused that grant at both ends: contract §6.1 gives
 /// `floptle-web` its own client id and refuses it a `device_code`, and §6.3
 /// leaves `/oauth/device` off the CORS list on purpose, because a page can
 /// redirect and therefore has no business in the flow built for things that

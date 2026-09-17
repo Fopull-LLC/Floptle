@@ -76,7 +76,7 @@ fn find_camera(
 /// steps happily with `dt = 0`, and reporting the span that was asked for is
 /// how `run` once published sixty seconds of simulation it had not done.
 ///
-/// It deliberately does **not** stop afterwards. `toggle_play` restores the
+/// It does **not** stop afterwards. `toggle_play` restores the
 /// scene to how it was authored, which would undo the entire point: the picture
 /// is of the live session.
 fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> {
@@ -287,7 +287,7 @@ pub(crate) fn run(args: Args) -> i32 {
         }
     }
 
-    // **After the play span, deliberately.** A game that switches its own active
+    // **After the play span.** A game that switches its own active
     // camera during play must be photographed through the one the game chose,
     // not the one the file did — for a runtime-built world that is the whole
     // point, since the camera that takes over does so on the first frame.
@@ -567,7 +567,7 @@ pub(crate) fn render_frame_pixels(
     // settings, the depth-of-field focus resolved against the scene, screen
     // ambient occlusion, and any `stage post` shaders the project compiled.
     //
-    // Two are deliberately left out. **Motion blur** needs a previous frame and
+    // Two are left out. **Motion blur** needs a previous frame and
     // this is a single one, so a shutter here would smear against a frame that
     // does not exist. **The accessibility filters** are one person's display
     // preference, and a PNG of a project should not carry them.

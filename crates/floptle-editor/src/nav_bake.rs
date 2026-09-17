@@ -1130,7 +1130,7 @@ impl crate::Editor {
         // entire time.
         //
         // after the heal block, not before it: a load made here sets `nav_heal`,
-        // and the flag is deliberately acted on a frame later — once the scene
+        // and the flag is acted on a frame later — once the scene
         // it describes has finished arriving.
         if self.bakes_loaded_scene.as_deref() != Some(self.scene_path().as_path()) {
             self.adopt_scene_bakes();
@@ -1215,7 +1215,7 @@ impl crate::Editor {
     /// which is backwards, because the amount of *new* level per crossing is
     /// constant. This costs the box.
     ///
-    /// Synchronous, unlike [`Self::start_nav_bake`], and deliberately: a caller
+    /// Synchronous, unlike [`Self::start_nav_bake`], and: a caller
     /// asks for this at the moment it knows the chunk is finished, and the
     /// answer has to be in before anything paths through it. The box is small —
     /// that is the whole premise — so it stays on this thread rather than

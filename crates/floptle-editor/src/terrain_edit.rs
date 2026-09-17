@@ -503,7 +503,7 @@ impl Editor {
     /// animates on wall time rather than on the play session's `play_t`, which
     /// restarts with every Play.
     ///
-    /// `None` before there is a window, and deliberately an `Option` rather
+    /// `None` before there is a window, and an `Option` rather
     /// than a zero: a clock that never advances is not "time zero", it is no
     /// time at all, and anything measuring an age against a frozen zero would
     /// read as *permanently* mid-animation. For the terrain dissolve that

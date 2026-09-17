@@ -1,6 +1,6 @@
 //! The command line, and where the box's token comes from.
 //!
-//! Shaped like `floptle-relay`'s deliberately: the two are the only binaries
+//! Shaped like `floptle-relay`'s: the two are the only binaries
 //! that run unattended on a Fopull box, they take the same kind of token, and an
 //! operator who has set one up should recognise the other. That includes
 //! `--help` printing a table and exiting 0 — which is how W tells a current

@@ -3261,7 +3261,7 @@ impl NetSession {
             // fighter, so it refuses on its own terms rather than trusting that
             // nothing upstream ever buffers one.
             //
-            // Two questions, deliberately: the driver's set (which cannot get
+            // Two questions: the driver's set (which cannot get
             // out of step with the driver) and the session flag (which can, and
             // once did). Either one is enough to refuse.
             let driven = self.locally_driven.contains(&e.index())

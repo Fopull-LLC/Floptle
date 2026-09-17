@@ -1,7 +1,7 @@
 //! Editor plumbing for a rollback session: engaging the driver, moving inputs
 //! and checksums across the wire, and driving one tick of the play loop.
 //!
-//! The driver ([`crate::rollback::RollbackDriver`]) is deliberately ignorant of
+//! The driver ([`crate::rollback::RollbackDriver`]) is ignorant of
 //! sessions, transports and the editor's frame; this is the layer that knows
 //! about all three. It is the rollback equivalent of `net.rs`'s client/server
 //! tick halves, and it sits beside them — nothing here touches the
@@ -242,7 +242,7 @@ impl Editor {
         on && self.game_tick_no.is_multiple_of(ROLLBACK_AUDIT_EVERY)
     }
 
-    /// Report an audit's findings — local, and deliberately not a desync.
+    /// Report an audit's findings — local, and not a desync.
     ///
     /// Nothing has gone wrong between the peers yet: this machine is about to
     /// be wrong on its own. Ending the match to say so would be the desync
@@ -334,7 +334,7 @@ impl Editor {
     /// that leaves the flag off while the driver is on turns off every guard
     /// that stops a snapshot pose landing on a locally-simulated fighter — and
     /// the symptom is a fighter facing the wrong way with a green checksum,
-    /// because rotation is deliberately not hashed.
+    /// because rotation is not hashed.
     ///
     /// This set comes from the driver, so it cannot disagree with the driver.
     pub(crate) fn net_publish_driven(&mut self, eids: &std::collections::HashSet<u32>) {
@@ -739,7 +739,7 @@ impl Editor {
         // 3. Advance — resolving any banked correction first.
         //
         // ⚠ From this `take` to the restore at the bottom there is no early
-        // return, deliberately. An exit that skips the restore drops the driver
+        // return. An exit that skips the restore drops the driver
         // — and a dropped driver leaves its fighters in the script filters with
         // nothing running them, for the rest of the match, with no error. That
         // is a match that freezes: the fighters ticked exactly once, then the driver
@@ -946,8 +946,8 @@ impl Editor {
     ///
     /// Silent while the match is healthy — a line per second in a working
     /// session is noise, and noise is what gets a diagnostic ignored. But a
-    /// frozen match must never again be silent on both screens at once
-    ///: the whole failure was two machines showing the same
+    /// frozen match must never again be silent on both screens at once:
+    /// the whole failure was two machines showing the same
     /// frozen frame with nothing anywhere saying which one had stopped
     /// receiving.
     fn net_rollback_report_flow(&mut self) {
