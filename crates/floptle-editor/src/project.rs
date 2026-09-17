@@ -1237,15 +1237,11 @@ impl Editor {
         };
         // A project with no map gets the whole starter set — that is the
         // feature. A project that has one has an opinion, and only gets entries
-        // it has no name for at all.
-        //
-        // It used to top up at binding granularity, which could not tell "never
-        // had this" from "deleted this on purpose" or "kept it but scoped it to
-        // one player". So every version bump silently re-added unscoped
-        // bindings a two-player game had deliberately removed — an unscoped
-        // binding serves every local slot, so the re-seeded Space jumped both
-        // fighters — and the rewrite took the file's explanatory comments with
-        // it. That shipped into two builds before anyone re-read the file.
+        // it has no name for at all. Action granularity, not binding: a
+        // per-binding top-up cannot tell "never had this" from "deleted this on
+        // purpose" or "kept it but scoped it to one player", and would re-add
+        // unscoped bindings a two-player game removed — an unscoped binding
+        // serves every local slot, so a re-seeded Space jumps both fighters.
         let added = if had_map {
             map.top_up_missing(&floptle_input::InputMap::starter())
         } else {
@@ -1277,10 +1273,9 @@ impl Editor {
         let cfg = floptle_scene::load_project(&self.project_cfg_path());
         if let Some(entry) = cfg.entry_scene.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
             // Resolved the way `scene.load` resolves names, so a path and a bare
-            // scene name both work. They used to disagree — this field demanded
-            // `scenes/menu.ron` while `scene.load` took `menu` — and a plausible
-            // `"menu"` fell through to `scenes/first.ron`, so the scene you
-            // playtested was not the one that shipped.
+            // scene name both work: `scenes/menu.ron` and `menu` name the same
+            // scene here and in a script, and the scene you playtest is the
+            // one that ships.
             match crate::export::resolve_entry_scene(&self.project_root, entry) {
                 Some(p) => match floptle_scene::load(&p) {
                     Ok(doc) => return (p, doc),
@@ -1915,8 +1910,8 @@ impl Editor {
     /// one definition, so the window's close button, Ctrl+Q and the confirm
     /// dialog cannot disagree about what counts. Tilesets are in here because
     /// they are edited from a dock tab like everything else and their file is
-    /// not the scene's — a level's collision shapes used to walk out the door
-    /// without a word.
+    /// not the scene's, so a level's collision shapes count as unsaved work
+    /// too.
     #[cfg(feature = "editor-ui")]
     pub(crate) fn unsaved_work(&self) -> bool {
         self.scene_dirty || self.image.dirty || !self.tiles.dirty.is_empty()

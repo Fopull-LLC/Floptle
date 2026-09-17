@@ -193,21 +193,12 @@ impl Editor {
             // Page 0 comes from the tileset, and the node's Material is the
             // fallback for a layer whose tileset names no sheet of its own.
             //
-            // It used to be the other way round — the material was the
-            // authority and the tileset's own `texture` was informational, on
-            // the reasoning that a tileset silently repainting a node's art
-            // would be worse. The cost of that turned out to be the whole
-            // feature: a tileset is *a sheet plus what its cells mean*, so
-            // making it describe a sheet it does not draw means every tilemap
-            // needs a Material carrying the same image and the same cols/rows,
-            // kept in agreement by hand, and a tileset alone renders nothing at
-            // all. Reported as "I still have to assign a texture to the
-            // material on the tileset for it to register as something I can
-            // use", which is precisely the bookkeeping.
-            //
-            // Nothing is silently repainted: a tileset that names no texture
-            // still defers to the material, which is every project written
-            // before this.
+            // The tileset is the authority because a tileset is a sheet plus
+            // what its cells mean: were it to describe a sheet it does not
+            // draw, every tilemap would need a Material carrying the same image
+            // and the same cols/rows, kept in agreement by hand, and a tileset
+            // alone would render nothing. Nothing is silently repainted: a
+            // tileset that names no texture defers to the material.
             let (p0_tex, sc, sr) = match set {
                 Some(s) if !s.texture.trim().is_empty() => {
                     (s.texture.clone(), s.sheet_cols.max(1), s.sheet_rows.max(1))
@@ -388,11 +379,10 @@ pub(crate) fn tilemap_draws(
 ///
 /// The quad these instance is [`crate::matter_catalog::PRIMITIVE_HALF`] across
 /// — 1.4 units, not 1 — so `size` is divided by that rather than multiplied
-/// straight onto the mesh. It used to be multiplied straight on, which made
-/// `size = 1` draw a 1.4-unit sprite and the default the misleading case
-///: a game that moved its bullets onto a batch saw them all
-/// come out 40% too big, which reads as somebody's tuning change rather than a
-/// unit mismatch.
+/// straight onto the mesh: `size = 1` draws a 1-unit sprite. Multiplied on,
+/// a game that moved its bullets onto a batch would see them all come out
+/// 40% too big, which reads as somebody's tuning change rather than a unit
+/// mismatch.
 pub(crate) fn sprite_draws(
     world: &World,
     e: Entity,
@@ -947,7 +937,7 @@ pub(crate) fn draw_offsets(
         // never was meant to be: it is what lets a character Y-sort against the
         // props around it while its shadow stays pinned below the lot. Y only
         // decides between nodes that would otherwise be level, which is exactly
-        // the case that used to be settled by whatever the ECS yielded first.
+        // the case ECS order would otherwise settle.
         //
         // **X, then the entity index, break a remaining exact tie.** The
         // answer has to be the same every frame — two nodes swapping places
@@ -955,8 +945,8 @@ pub(crate) fn draw_offsets(
         // cannot be reproduced on purpose — and X is the tiebreak that is also
         // the same next *session*. The index alone is stable within a run and
         // not across one: destroy a node and spawn it again and it can come back
-        // with a lower index than the sibling it used to sit behind, so a scene
-        // reloaded, or a pooled enemy respawned, quietly restacked. X is
+        // with a lower index than the sibling it sat behind, so a scene
+        // reloaded, or a pooled enemy respawned, would quietly restack. X is
         // ascending, so the node further right draws in front. Two nodes at the
         // same X and the same Y are in the same place, where nothing is
         // observable either way, and the index settles those.

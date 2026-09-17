@@ -235,10 +235,9 @@ pub(crate) fn sparkline(ui: &egui::Ui, curve: &VfxCurveDoc, kind: CurveKind, rec
 
 /// Auto-fit value range across all channels of a runtime curve, sampled.
 ///
-/// **Zero is kept in frame when it is anywhere near the data.** A curve that has
-/// never been negative used to fit to itself, so there was no zero line to see —
-/// and you found out you had crossed zero by the line appearing *after* you did
-/// it, which is exactly backwards. Once the curve is a long way from zero (more
+/// Zero is kept in frame when it is anywhere near the data, so a curve that has
+/// never been negative still shows the zero line — you see it before you cross
+/// it, not after. Once the curve is a long way from zero (more
 /// than its own span away) it is squashed rather than helped by including it, so
 /// there the axis labels carry the meaning instead.
 fn value_range(rt: &floptle_vfx::Curve, chans: usize, floor: Option<f32>) -> (f32, f32) {
@@ -328,9 +327,8 @@ pub(crate) fn curve_editor(
             *sel_key = None;
             changed = true;
         }
-        // Re-fitting is something you ask for. It used to happen every time the
-        // pointer lifted, which is why the same curve kept being drawn at a
-        // different scale.
+        // Re-fitting is something you ask for: refit on every pointer lift
+        // and the same curve keeps being drawn at a different scale.
         if ui
             .small_button("⛶")
             .on_hover_text("fit the value axis to the curve — it does not do this on its own")
@@ -409,11 +407,9 @@ pub(crate) fn curve_editor(
     };
     // ---- the value axis ----------------------------------------------------
     //
-    // It used to refit every time the pointer lifted, so the same curve was drawn
-    // at a different scale after each edit and a key you dragged upward sprang
-    // back toward the middle. An axis that moves under you is an axis you cannot
-    // read a change against, which was most of "it's hard to tell how my change
-    // will affect it".
+    // An axis that moves under you is an axis you cannot read a change
+    // against: refit on every pointer lift and a key you drag upward springs
+    // back toward the middle.
     //
     // So: fit once, then keep it. It may only grow, and only when the curve has
     // actually left it — that way an edit can never push a key off-screen, and

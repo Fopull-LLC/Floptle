@@ -400,9 +400,8 @@ mod refresh_tests {
 /// multiple of the reported refresh, because the window is on a different output
 /// than `current_monitor()` names, or nothing is pacing to vblank — the raw
 /// scheduler jitter goes straight into the fixed-step accumulator and the render
-/// judders by `velocity x noise`. That used to happen in total silence,
-/// which is the worst possible way for a load-bearing path to
-/// be switched off.
+/// judders by `velocity x noise`. The readout says so: a load-bearing path
+/// that switches off in silence is the worst kind.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
     if p.mean_ms <= 0.0 {
@@ -434,9 +433,8 @@ pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
     }
     // The display pacing the frame, not the scene being slow:
     // `acquire` blocked for a whole multiple of the refresh period while the
-    // frame's own work barely registers. This used to be indistinguishable
-    // from "the scene is heavy" — both numbers were already on screen and
-    // never compared.
+    // frame's own work barely registers. Compared, the two numbers tell it
+    // apart from "the scene is heavy"; on screen side by side they do not.
     if let Some(n) = fifo_pacing_multiple(p.present_wait_ms, p.cost_ms, p.refresh_ms) {
         ui.small(
             egui::RichText::new(format!(

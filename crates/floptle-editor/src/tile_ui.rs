@@ -226,15 +226,12 @@ fn short_texture(tex: &str, page: u32) -> String {
 
 /// The line that stands in for a whole section when the layer has no tileset.
 ///
-/// The sections below the tileset used to vanish entirely without one — no tile
-/// heading, no autotile heading, nothing. Which is indistinguishable from an
-/// engine that does not have per-tile collision or autotiling, and is exactly
-/// what one was reported as: "there isn't a way to build the collision shape for
-/// each tile", "I'm still not seeing any auto tiling settings". Both were built.
-///
-/// So the panel's shape is now constant, and a section that cannot act says what
-/// it would do and what it is waiting for. `what` is the one-sentence version of
-/// the feature, in the words somebody would go looking for it under.
+/// A section that vanishes without a tileset — no tile heading, no autotile
+/// heading — is indistinguishable from an engine that has no per-tile
+/// collision or autotiling. So the panel's shape is constant, and a section
+/// that cannot act says what it would do and what it is waiting for. `what`
+/// is the one-sentence version of the feature, in the words somebody would go
+/// looking for it under.
 fn needs_tileset(ui: &mut egui::Ui, what: &str, cmds: &mut Vec<TileCmd>) {
     ui.small(what);
     ui.horizontal_wrapped(|ui| {
@@ -532,10 +529,10 @@ impl TileCtx<'_> {
 
     fn tileset_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TILESET");
-        // `editing` is what every section below points at, and it used to be set
-        // and never cleared — so selecting a layer with no tileset left the tile
-        // and autotile editors quietly writing to the previous layer's tileset.
-        // It is derived from the layer, so derive it here, every frame, both ways.
+        // `editing` is what every section below points at. It is derived from
+        // the layer, so it is derived here, every frame, both ways: set and
+        // never cleared, selecting a layer with no tileset would leave the tile
+        // and autotile editors writing to the previous layer's tileset.
         let Some(e) = self.tools.layer else {
             self.tools.editing = None;
             return;
@@ -634,10 +631,10 @@ impl TileCtx<'_> {
     /// The tileset's extra sheets.
     ///
     /// A level built out of a ground sheet, a props sheet and a decoration sheet
-    /// used to need three tilemap nodes, and that is not a workaround — a wall on
-    /// one node is not a neighbour of a wall on another, so nothing autotiles
-    /// across the join, the collision merge stops at it, and every grid tool
-    /// stops there too. Pages put them on one layer.
+    /// belongs on one layer: a wall on one node is not a neighbour of a wall on
+    /// another, so across three tilemap nodes nothing autotiles over the join,
+    /// the collision merge stops at it, and every grid tool stops there too.
+    /// Pages put the sheets on one layer.
     fn pages_ui(&mut self, ui: &mut egui::Ui, set: &TileSet) {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
@@ -664,9 +661,9 @@ impl TileCtx<'_> {
             }
         });
         // Page 0 is in this list like any other sheet. It is the tileset's own
-        // `texture`/`sheet_cols`/`sheet_rows`, which used to be unsettable here
-        // and merely "informational" — the reason a tileset could not carry its
-        // own art and every layer needed a Material saying the same thing twice.
+        // `texture`/`sheet_cols`/`sheet_rows`, settable here, so a tileset
+        // carries its own art and no layer needs a Material saying the same
+        // thing twice.
         for (p, tex, c, r) in set.pages_iter().collect::<Vec<_>>() {
             self.sheet_row(ui, p, tex, c, r);
         }
@@ -756,12 +753,11 @@ impl TileCtx<'_> {
         // Which sheet of the tileset we are picking from. A tileset with pages
         // draws a row of tabs; without one there is a single implicit page and
         // nothing extra on screen.
-        // What the brush places, as one row you can see and change without
-        // knowing the rule that used to govern it: clicking a tile that happened
-        // to belong to a group armed the group, clicking one that did not
-        // disarmed it, and nothing on screen said which of those had happened.
-        // Switching between "place this exact tile" and "paint this autotile" is
-        // a thing you do constantly while building a level, so it is a switch.
+        // What the brush places, as one row you can see and change. Switching
+        // between "place this exact tile" and "paint this autotile" is a thing
+        // you do constantly while building a level, so it is a switch — not a
+        // rule about whether the clicked tile happens to belong to a group,
+        // which nothing on screen would say.
         if let Some(s) = set.as_ref()
             && !s.groups.is_empty()
         {
@@ -2032,15 +2028,13 @@ fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKin
         if !corners && (dx != 0 && dy != 0) {
             continue;
         }
-        // `dy` is in ROW space — `-1` is north, which is UP the screen — and
+        // `dy` is in row space — `-1` is north, which is up the screen — and
         // egui's +y is down, so the two agree and the row index is used as-is.
-        //
-        // It used to be negated, which drew the whole diagram upside down: the
-        // dot for "there is more of this group above me" appeared below the
-        // centre. Every tile in a sheet then looked like it answered the
-        // vertically mirrored neighbourhood, so picking tiles by the picture
-        // built an autotile set that was upside down and looked, in a level,
-        // like the art was wrong. `the_diagram_puts_north_at_the_top` pins it.
+        // Negated, the diagram draws upside down: the dot for "there is more of
+        // this group above me" appears below the centre, every tile looks like
+        // it answers the vertically mirrored neighbourhood, and picking tiles by
+        // the picture builds an autotile set that is upside down in a level.
+        // `the_diagram_puts_north_at_the_top` pins it.
         let c = at.min + egui::vec2((dx as f32 + 1.5) * step, (dy as f32 + 1.5) * step);
         if mask & bit != 0 {
             p.circle_filled(c, 1.6, Color32::from_gray(235));
@@ -2389,9 +2383,8 @@ impl crate::Editor {
                 }
             }
             // Page 0 lives in the tileset's own three fields rather than in
-            // `pages`, so it is set here rather than being a missing case. It
-            // used to be one — page 0 was the layer's material and unsettable,
-            // which is why a tileset could not carry its own art at all.
+            // `pages`, so it is set here rather than being a missing case:
+            // that is what lets a tileset carry its own art.
             TileCmd::SetPage(p, texture, cols, rows) => {
                 if p == 0 {
                     set.texture = texture;

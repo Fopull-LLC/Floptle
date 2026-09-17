@@ -1229,8 +1229,8 @@ impl crate::Editor {
     ) -> Result<usize, String> {
         // A fully streamed level has nothing to hand-bake — there is no
         // edit-time geometry to press the Bake button on — so a first splice
-        // with nothing to splice into used to refuse outright, which locked
-        // such a level out of ever getting a navmesh at all.
+        // with nothing to splice into must not refuse, or such a level can
+        // never get a navmesh at all.
         // Bootstrap an empty host from the Nav Mesh node's own settings,
         // anchored at the node, and let the ordinary splice path below fill
         // it in exactly as it would fill in any other region.

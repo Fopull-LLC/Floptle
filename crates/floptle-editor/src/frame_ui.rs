@@ -259,7 +259,7 @@ impl Editor {
         // Dirty tilesets ride the scene's flag here. They are not scene state —
         // they are their own files — but every gate that asks "is there unsaved
         // work" wants one answer, and a tileset's collision shapes and autotile
-        // groups are hours of work that used to leave with the window.
+        // groups are hours of work.
         let scene_dirty_now = self.scene_dirty || !self.tiles.dirty.is_empty();
         // Current theme selections (changes are routed through `cmd`, then saved + applied).
         let engine_theme = self.engine_theme;
@@ -1944,10 +1944,9 @@ impl Editor {
                 });
         }
 
-        // Project Settings used to be a fixed-size modal window here. It's
-        // now the ⚙ Settings dock TAB (see `settings_ui.rs`): draggable,
-        // dockable beside the viewport, searchable, and closed by default.
-
+        // Project Settings is the ⚙ Settings dock tab (see `settings_ui.rs`):
+        // draggable, dockable beside the viewport, searchable, and closed by
+        // default.
     }
 
     /// preferences window (user-wide editor settings)
@@ -2529,8 +2528,8 @@ impl Editor {
                     };
                     ui.horizontal(|ui| {
                         // Save & Quit: save everything, then close (the save runs after
-                        // this closure, then `about_to_wait` exits — a real close, not the
-                        // no-op ViewportCommand this app used to send).
+                        // this closure, then `about_to_wait` exits — a real close, not a
+                        // ViewportCommand, which is a no-op here).
                         let save_label =
                             if image_unnamed { "💾 Save…" } else { "💾 Save & Quit" };
                         if (scene_dirty_now || image_dirty_now)

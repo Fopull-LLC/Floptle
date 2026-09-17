@@ -1046,9 +1046,8 @@ pub(crate) const BONE_BODY_PX: f32 = 7.0;
 /// One bone, as a Blender-style octahedron: a wide "belt" a tenth of the way
 /// along, tapering to a point at each end.
 ///
-/// A bone used to be a bare line between two joints, and the only thing you
-/// could click was a 12-pixel disc on the joint itself. Two things follow from
-/// the octahedron that do not follow from a line. It has a width, so the whole
+/// Two things follow from the octahedron that do not follow from a bare line
+/// between two joints. It has a width, so the whole
 /// body is a target rather than a dart-board dot. And its belt is a real square
 /// in the bone's own frame, so it shows the bone's roll — which way the elbow
 /// bends — where a line is the same picture whatever the rotation about it.
@@ -1091,13 +1090,11 @@ pub(crate) struct RigViz {
 /// anchors nothing, so a bone hanging directly off it (`Head`, `LeftArm`, …
 /// in a flat rig, which is most of them) has no meaningful shape: head and
 /// tail don't bound a limb, they bound "the model's core" and one point on
-/// it. Drawing that as an octahedron is exactly what used to read as a
-/// starburst fanning out from the model's center, competing with every real
-/// bone for clicks — and it happened whether the mesh, a leaf bone, or the
-/// root itself was selected, because the shape was never about selection to
-/// begin with. Never drawn as a bone shape now, in any selection state; the
-/// child's own joint dot — always present in `RigViz::joints` — is the real,
-/// deliberate handle onto it.
+/// it. Drawn as an octahedron, that reads as a starburst fanning out from
+/// the model's center, competing with every real bone for clicks, whatever
+/// is selected. So it is never drawn as a bone shape, in any selection
+/// state; the child's own joint dot — always present in `RigViz::joints` —
+/// is the handle onto it.
 fn is_root_bone(skeleton: &floptle_anim::Skeleton, head_joint: usize) -> bool {
     skeleton.nodes.get(head_joint).is_some_and(|n| n.parent.is_none())
 }

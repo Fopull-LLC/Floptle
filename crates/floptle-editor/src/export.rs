@@ -804,10 +804,9 @@ fn absolute_refs(text: &str) -> Vec<String> {
 
 /// The scene a build boots into, resolved the way `scene.load` resolves names:
 /// a path relative to the project (`scenes/menu.ron`), or a bare scene name
-/// (`menu`). The two conventions used to disagree — `entry_scene` demanded a
-/// path while `scene.load` took a name — so a reasonable-looking `"menu"` fell
-/// back to `scenes/first.ron` with only an stderr line, and what you playtested
-/// was not what shipped.
+/// (`menu`). One rule for both, so a reasonable-looking `"menu"` boots the
+/// menu rather than falling back to `scenes/first.ron`, and what you playtest
+/// is what ships.
 pub(crate) fn resolve_entry_scene(project_root: &Path, entry: &str) -> Option<PathBuf> {
     let entry = entry.trim();
     if entry.is_empty() {

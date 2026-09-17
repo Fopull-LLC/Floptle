@@ -264,8 +264,8 @@ impl Editor {
                 ents.push(e);
             }
         }
-        // A switched-off node is off for physics too. Leaving an invisible wall standing
-        // where a disabled node used to be is the bug people spend an evening on.
+        // A switched-off node is off for physics too. An invisible wall standing
+        // where a disabled node was is the bug people spend an evening on.
         ents.retain(|e| !floptle_core::is_disabled(&self.world, *e));
         for e in ents {
             let wt = floptle_core::world_transform(&self.world, e);
@@ -486,9 +486,9 @@ impl Editor {
             return;
         }
         // Bodies re-seed at their current transforms, but their velocities must
-        // survive the rebuild — terrain streaming in mid-flight used to zero
-        // them, dropping ships out of orbit ("the sun just sucked me up": zero
-        // relative velocity under warp is a plummet straight into the star).
+        // survive the rebuild: terrain streaming in mid-flight would otherwise
+        // zero them and drop ships out of orbit (zero relative velocity under
+        // warp is a plummet straight into the star).
         let saved: Vec<(u32, floptle_core::math::Vec3)> = self
             .sim
             .as_ref()

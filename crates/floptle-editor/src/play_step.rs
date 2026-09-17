@@ -148,7 +148,7 @@ impl Editor {
                     // different questions and an fps number alone cannot tell
                     // "this scene is expensive" from "this display is pacing
                     // us". A scene costing 8 ms and presenting at 20 fps is the
-                    // second, and used to be indistinguishable from the first.
+                    // second.
                     let cost = (self.frame_ms - self.present_wait_ms).max(0.0);
                     // Reaches the Console too, not only the ⏱ panel and the
                     // title — the panel is opt-in and the title is easy not to
@@ -174,9 +174,9 @@ impl Editor {
                     }
                     // The 1% low beside the mean, because a bimodal frame time
                     // is exactly the distribution that feels worst and the only
-                    // one a mean cannot show. The ⏱ panel has always reported a
-                    // worst column for this reason; the title bar is what people
-                    // actually read, and it used to disagree with it.
+                    // one a mean cannot show. The ⏱ panel reports a worst column
+                    // for this reason; the title bar is what people actually
+                    // read, so it says the same.
                     self.frame_low_ms = self.frame_time_low();
                     let low = self.frame_low_ms;
                     window.set_title(&format!(
@@ -231,10 +231,9 @@ impl Editor {
     /// when not playing.
     /// Run a script pass with a wall clock around it, into `Bucket::Scripts`.
     ///
-    /// **The whole pass**, not the hooks in it: the per-instance setup, the ref
-    /// resolution, the write flush. The bucket used to be the sum of the
-    /// per-script hook figures, which accounted 5.3 of a real game's 12.9 ms
-    /// step and hid a whole optimisation pass for a release.
+    /// The whole pass, not the hooks in it: the per-instance setup, the ref
+    /// resolution, the write flush. The sum of the per-script hook figures
+    /// accounts for 5.3 of a real game's 12.9 ms step and hides the rest.
     ///
     /// Net of `Bucket::Mirror`, which the host records from inside `sync_scene`
     /// — nested in this span, so it is subtracted here and the buckets still
@@ -1094,17 +1093,12 @@ impl Editor {
     /// frame.
     ///
     /// This is [`Editor::import_model`], once per changed node, and nothing
-    /// else. It used to be a second copy of that import — rigged first, static
-    /// fallback — that opened the path with a bare `Path::new` instead of
-    /// resolving it against the project root. In the editor the two agree by
-    /// accident: the CWD *is* the project dir, so a project-relative
-    /// `models/items/medkit.glb` happens to open. In an exported build the
-    /// project ships as `assets/` and the CWD is wherever the player launched
-    /// from, so every runtime model swap missed its file and the node rendered
-    /// as nothing at all — the only trace a `swap-import … failed` line on a
-    /// stderr no player ever sees. A model some scene also referenced
-    /// statically was registered at load and still appeared, which is what made
-    /// the failure present as "some models are missing" rather than all of them.
+    /// else — so the path resolves against the project root, not the CWD. In
+    /// the editor the two agree by accident (the CWD is the project dir); in
+    /// an exported build the project ships as `assets/` and the CWD is
+    /// wherever the player launched from, so a bare `Path::new` would miss
+    /// every runtime model swap and the node would render as nothing, with
+    /// only a stderr line no player sees.
     pub(crate) fn load_script_swapped_models(&mut self) {
         for (_eid, path) in self.script_host.take_model_changes() {
             self.import_model(&path);

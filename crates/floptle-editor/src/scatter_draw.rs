@@ -37,9 +37,8 @@ pub(crate) struct ResolvedChunk {
 /// Settling is a raycast per prop, cached per chunk — so the first frame a
 /// chunk comes into range pays for all of its props at once. A third-person
 /// camera swings the eye several metres just from looking around, which crosses
-/// chunk boundaries, which used to drag thousands of fresh raycasts into a
-/// single frame. The report was "it freezes more as I'm looking around", and
-/// that is exactly what that was.
+/// chunk boundaries — uncapped, that drags thousands of fresh raycasts into a
+/// single frame, and the game freezes as you look around.
 ///
 /// The cost of the cap is that ground arriving all at once fills in over a few
 /// frames, furthest last. The cost of not having it is a frame that stops.
@@ -180,9 +179,9 @@ pub(crate) fn build_instances(
             .try_fold(0.0f32, |acc, r| r.map(|r| acc.max(r)))
             .filter(|r| r.is_finite() && *r > 0.0);
         // The key set changes when the eye crosses a chunk boundary, not when
-        // the frame advances. Standing still, or walking
-        // within one chunk, this is a hash lookup — it used to be a square
-        // sweep, allocated and thrown away sixty times a second.
+        // the frame advances. Standing still, or walking within one chunk,
+        // this is a hash lookup, not a square sweep allocated and thrown away
+        // sixty times a second.
         // Everything below happens in the source'S own frame.
         // The eye comes to the region rather than the region going to the world,
         // so a body that orbits at 99 units/s changes exactly one number here —

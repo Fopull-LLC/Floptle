@@ -262,9 +262,9 @@ impl<'a> SettingsCtx<'a> {
         // anywhere, and a panel inside a dock leaf fights the leaf's own layout
         // when the tab is narrow.
         //
-        // **The nav column collapses.** A 146 px sidebar in a 200 px dock leaves
+        // The nav column collapses. A 146 px sidebar in a 200 px dock leaves
         // twenty pixels of settings, which is not a narrow layout — it is a
-        // broken one, and it is what the tab used to do. Below the threshold the
+        // broken one. Below the threshold the
         // sections become a wrapped strip of chips above the content and the
         // content gets the whole panel. Nothing is hidden either way: every
         // section is still one click from here, it is just reading across
@@ -676,9 +676,9 @@ impl<'a> SettingsCtx<'a> {
 
     // --- Rendering ------------------------------------------------------
     fn settings_scripting(&mut self, ui: &mut egui::Ui, project: &mut floptle_scene::ProjectConfigDoc, out: &mut SettingsOut) {
-        // A home of its own: this used to sit under Rendering, whose blurb is
-        // about how scenes draw, and was findable only by search. Anything else
-        // about how scripts run (which VM, hot reload) belongs here too.
+        // A home of its own, rather than under Rendering, whose blurb is about
+        // how scenes draw. Anything else about how scripts run (which VM, hot
+        // reload) belongs here too.
         row(
             ui,
             "Script vec3",

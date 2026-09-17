@@ -56,9 +56,8 @@ pub(crate) fn lit_2d_rank(
 ///
 /// A function for the same reason [`lit_2d_rank`] is one: both gathers ask it,
 /// so a cube cannot look one way in the Scene view and another in the Game
-/// view. It used to be written out twice, and the two copies had already drifted
-/// — the offscreen one never applied vertex paint, so a painted primitive was
-/// painted on screen and plain in every other view.
+/// view — two copies drift, and a painted primitive ends up painted on screen
+/// and plain in every other view.
 ///
 /// `node_paint` is this node's own paint block (`paint_bases`). Every primitive
 /// of a shape shares one MeshId, so the node's block is the only way two cubes
@@ -176,10 +175,8 @@ pub(crate) fn water_draw(
 /// black there would read as the feature having broken the game.
 /// Every flat node on the 2D lighting path this frame, and its sorting rank.
 ///
-/// One function, called by both gathers, because 0122 asks for exactly that:
-/// *the Scene-view and the Game-view gathers make the same decision, by
-/// construction.* It used to be the same nine lines written out twice, which is
-/// the shape this file has already paid for four times — see
+/// One function, called by both gathers, so the Scene-view and the Game-view
+/// gathers make the same decision by construction — see
 /// `tests/offscreen_draws_the_same_world.rs`.
 ///
 /// Empty when nothing can be reached, and empty *without walking the world*:
@@ -238,16 +235,13 @@ pub(crate) fn light2d_uniform(
     view_proj: floptle_core::math::Mat4,
 ) -> floptle_render::Light2dUniform {
     let (n, pos, color, mask, falloff) = (two_d.count, two_d.pos, two_d.color, two_d.mask, two_d.falloff);
-    // The scene's **2D base light**, always — not the 3D ambient, and not a
-    // special case for "no lights placed".
-    //
-    // It used to be white when no 2D light existed and the 3D ambient the moment
-    // one did, which put a cliff exactly where somebody places their first
-    // light: a whole level dropped to 12% brightness and the tilemap read as
-    // having vanished. That is how it was reported, and it is the wrong way
-    // round — **adding a light must only ever add light.** So the base is its
-    // own field, it defaults to white, and turning it down is the deliberate act
-    // that makes a dark room for a torch to carve a circle out of.
+    // The scene's 2D base light, always — not the 3D ambient, and not a
+    // special case for "no lights placed". Adding a light must only ever add
+    // light: switching to the 3D ambient the moment one exists would put a
+    // cliff exactly where somebody places their first light, dropping a whole
+    // level to 12% brightness. So the base is its own field, it defaults to
+    // white, and turning it down is the act that makes a dark room for a torch
+    // to carve a circle out of.
     let a = world
         .query::<floptle_core::Light>()
         .next()
@@ -443,10 +437,9 @@ mod lit_2d_tests {
     }
 }
 
-/// `water_draw` used to build its `MaterialParams` from
-/// scratch and never look at the node's own `Material` — no shader, no
-/// `retro: (exempt: true)`, no way to style it at all. These pin the overlay
-/// rule: absent Material → today's exact numbers; present → its surface
+/// `water_draw` reads the node's own `Material` — its shader, its
+/// `retro: (exempt: true)`, its look. These pin the overlay
+/// rule: absent Material → the built-in numbers; present → its surface
 /// params win, except `alpha`, which only overrides when the material set one
 /// (every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
 /// wearing one for its `retro` flag alone must not go opaque).

@@ -171,8 +171,8 @@ pub struct AnimUiState {
 /// same way.
 ///
 /// `props` carries the property-lane keys (opacity, light intensity, a UI image
-/// swap…) selected in the same gesture, which the clipboard used to drop on the
-/// floor without saying so.
+/// swap…) selected in the same gesture, so the clipboard keeps them with the
+/// pose keys.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CopiedKey {
     pub node: String,
@@ -1334,7 +1334,7 @@ impl EditorTabViewer<'_> {
         };
         // How many states play each clip file. Two states on one file are not two
         // animations — they are one animation with two names, and editing either
-        // edits both. That used to be invisible; now the list says so.
+        // edits both. The list says so.
         let mut clip_users: HashMap<String, usize> = HashMap::new();
         for (_, c) in &states {
             if let Some(k) = self.anim.resolve_clip_key(c) {
@@ -2455,13 +2455,12 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
         } else {
-            // Copy the selection → clipboard. Transform keys AND the selected
-            // property key: a property lane is a keyframe row like any other, and
-            // Ctrl+C over one used to do nothing whatsoever.
+            // Copy the selection → clipboard. Transform keys and the selected
+            // property key: a property lane is a keyframe row like any other.
             //
-            // Keep this selection-local value for Cut.  In particular, an empty Cut
-            // must be a no-op — it must never delete whatever happened to be copied
-            // previously (the old code read `key_clipboard` after a failed copy).
+            // Cut reads this selection-local value, not `key_clipboard`: an empty
+            // Cut is a no-op and never deletes whatever happened to be copied
+            // previously.
             let mut copied_now: Vec<CopiedKey> = Vec::new();
             if flags.copy_keys {
                 let sel = st.sel_keys.clone();
@@ -2616,12 +2615,10 @@ impl EditorTabViewer<'_> {
                             false
                         }
                     }
-                    // Presence used to be a hand-written list of three
-                    // special cases, so a text field not on it could never
-                    // be added as a lane at all. The string mirror answers
-                    // it the same way the number mirror does — is the field
-                    // there — and records the live value for keying while it
-                    // is at it.
+                    // The string mirror answers presence the same way the
+                    // number mirror does — is the field there — so any text
+                    // field can become a lane, and it records the live value
+                    // for keying while it is at it.
                     PropKind::Text => {
                         if let Some(v) = strs.get(*comp).and_then(|m| m.get(*f)) {
                             live_strs.insert(
@@ -2762,11 +2759,10 @@ fn timeline_header(ui: &mut egui::Ui, st: &mut AnimUiState, live: &TimelineLive,
         // you *why* nothing is going to happen before you press it.
         let has_sel = !st.sel_keys.is_empty() || st.sel_prop.is_some();
         let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
-        // The `if has_sel { … } else { … }` shape these used to have could
-        // never show its second half: egui opens `on_hover_text` only for an
-        // Enabled response, so the "…select some keyframes first" branch —
-        // the only one anybody needs — was unreachable by construction. The
-        // reason a button is greyed out belongs on `on_disabled_hover_text`.
+        // The reason a button is greyed out goes on `on_disabled_hover_text`:
+        // egui opens `on_hover_text` only for an enabled response, so a
+        // "…select some keyframes first" hint on the enabled path can never
+        // show.
         if ui.add_enabled(has_sel, egui::Button::new("⎘"))
             .on_hover_text(format!("Copy {} (Ctrl+C)", plural_keys(n_sel)))
             .on_disabled_hover_text("Copy keys (Ctrl+C) — select some keyframes first")
@@ -4429,11 +4425,9 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
         // --- property diff → auto-key any animatable field that changed since
         // the baseline, creating the lane on first touch. ---
         //
-        // Numbers, text and whole sprite frames. Text used to be skipped
-        // outright (`if kind != Float { continue }`), which is why recording a
+        // Numbers, text and whole sprite frames. Text counts: recording a
         // sprite animation the obvious way — press ● Record, change the
-        // material's texture — wrote nothing at all, with no lane, no key and
-        // no message. The feature was unreachable by its own front door.
+        // material's texture — writes a lane and a key.
         let mir = floptle_script::mirror_components(world, *e);
         let strs = floptle_script::mirror_component_strings(world, *e);
 
@@ -4892,13 +4886,6 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
     }
 }
 
-// (There used to be a `sample_channel_key` here: it read a channel's full TRS
-// at a key time, filling any lane with no key there from the identity pose.
-// That is what copy/cut/duplicate used, and it is what made pasting a
-// rotation-only key teleport the object to the world origin at unit scale.
-// `copy_transform_keys` reports the missing lanes as missing instead, and
-// nothing else wanted the lossy read.)
-
 /// Materialize a key selection for copy/cut. Invalid channel indices are
 /// ignored, which makes a selection safely stale after an undo, retime, or channel
 /// cleanup rather than letting a later command target a different key.
@@ -4936,8 +4923,7 @@ fn copy_transform_keys(doc: &AnimClipDoc, selection: &[(usize, f32)]) -> Vec<Cop
 }
 
 /// Materialize a property-lane key for copy/cut: `(channel, track, key index)`,
-/// the shape `sel_prop` holds. Property keys used to be invisible to the
-/// clipboard — Ctrl+C on one did nothing at all and said nothing about it.
+/// the shape `sel_prop` holds.
 fn copy_property_key(doc: &AnimClipDoc, sel: (usize, usize, usize)) -> Option<CopiedKey> {
     let (ci, ti, ki) = sel;
     let ch = doc.channels.get(ci)?;

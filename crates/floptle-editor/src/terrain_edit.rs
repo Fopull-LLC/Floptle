@@ -390,12 +390,12 @@ const ON_BODY_RADII: f64 = 3.0;
 /// Where a chunk sits in the meshing queue: **metres from the camera**, so that
 /// chunks belonging to different terrains can be compared at all.
 ///
-/// One queue is shared by every resident terrain. The key used to be chunk
-/// distance in each terrain's own local frame, so a chunk three chunks from the
-/// camera on the planet under your feet tied with one three chunks from the
-/// camera on a planet twelve thousand units away — and which of them got the
-/// worker slot was whatever order a `HashMap` happened to iterate in. Distances
-/// in different terrains are only comparable once they are in the same units.
+/// One queue is shared by every resident terrain. Keyed on chunk distance in
+/// each terrain's own local frame, a chunk three chunks from the camera on the
+/// planet under your feet would tie with one three chunks from the camera on a
+/// planet twelve thousand units away, and `HashMap` order would pick the
+/// worker slot. Distances in different terrains are only comparable once they
+/// are in the same units.
 pub(crate) fn chunk_priority(
     coord: [i32; 3],
     chunk_world: f32,
@@ -651,14 +651,11 @@ impl Editor {
             // Queue position, in metres, so chunks from different terrains can
             // be compared at all.
             //
-            // One queue is shared by every resident terrain, and the sort key
-            // used to be `dist_of` — chunk distance in each terrain's own local
-            // frame. A chunk three chunks away on the planet under your feet
-            // therefore tied with one three chunks away on a planet twelve
-            // thousand units off, and the winner was whatever order the
-            // `terrains` map happened to iterate in. The report was "I can see
-            // through unloaded terrain and it needs to prioritize loading what's
-            // right under me".
+            // One queue is shared by every resident terrain, so the key is not
+            // `dist_of` (chunk distance in each terrain's own local frame): that
+            // ties a chunk three chunks away on the planet under your feet with
+            // one three chunks away on a planet twelve thousand units off, and
+            // lets `terrains` map order pick which loads.
             // …and the ground you are standing on outranks everything, before any
             // per-chunk comparison. Two bodies can otherwise interleave when you
             // are between them, which is the one case metres alone gets wrong:

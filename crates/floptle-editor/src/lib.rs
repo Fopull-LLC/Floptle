@@ -756,15 +756,10 @@ struct EditorCmd {
 
 /// Lowercase name for a key, for the script `input` API (`input.key("w")`).
 ///
-/// Derived from the action layer's table rather than written out again. It used to be its own
-/// list and had quietly fallen a long way behind: no function key, no numpad, no bracket,
-/// nothing beyond the arrows. A script asking for `input.pressed("f9")` got a permanent
-/// `false` — the key never had a name to match against — while the *same* key was bindable in
-/// the Settings tab, because that path went through [`action_key`]. Two tables answering the
-/// same question is how that happens, so now there is one.
-///
-/// The overlapping subset is byte-identical by construction (`script_name` documents that
-/// contract), so no existing script changes meaning.
+/// Derived from the action layer's table rather than written out again: one table answers
+/// both "is this key bindable in Settings" ([`action_key`]) and "does this key have a script
+/// name", so a key a script can ask for is a key the Settings tab can bind, function keys,
+/// numpad and brackets included. The script spelling is the one `script_name` documents.
 fn key_name(code: KeyCode) -> Option<&'static str> {
     crate::input_actions::action_key(code).map(|k| k.script_name())
 }
@@ -2039,9 +2034,8 @@ struct Editor {
     /// A scatter prototype's bounding radius at scale 1, by the same asset
     /// string — measured while baking, from the same import bounds the mesh path
     /// uses. Needed so a field can be frustum-culled per prop and not just by
-    /// distance: a full disc used to submit everything behind
-    /// you. A prototype with no measurable size is absent here, which reads as
-    /// "never cull it".
+    /// distance, which would submit everything behind you. A prototype with no
+    /// measurable size is absent here, which reads as "never cull it".
     scatter_proto_radius: HashMap<String, f32>,
     /// Per-entity vertex buffers for CPU-skinned parts (two characters sharing
     /// a model must not bake their poses into one buffer).
@@ -3421,9 +3415,9 @@ struct Editor {
     /// Snapping goes inert whenever the measured frame time stops landing near a
     /// whole multiple of the reported refresh period — a window on a different
     /// output than the one `current_monitor()` names, or a present mode that
-    /// isn't pacing to vblank. It used to do that in total silence, so a
-    /// load-bearing anti-jitter path could be switched off for a whole session
-    /// with nothing to notice. The ⏱ panel reads this.
+    /// isn't pacing to vblank. The ⏱ panel reads this, so a load-bearing
+    /// anti-jitter path cannot be switched off for a whole session with
+    /// nothing to notice.
     dt_snap_rate: f32,
     /// Smoothed milliseconds spent blocked waiting for a display image, kept
     /// apart from the frame's own cost so the title can report the two
@@ -4450,10 +4444,8 @@ impl Editor {
                     self.anim_ui.drag_from = None;
                 }
                 // …and when there is nothing to cancel, Escape does
-                // nothing. It used to quit the editor, which is a
-                // catastrophic default for a key every tool binds to
-                // "back out of this": one stray press while a map mode
-                // was already disarmed closed the app. Quitting lives
+                // nothing. Every tool binds it to "back out of this", so
+                // a stray press must never close the app. Quitting lives
                 // where quitting belongs — the window's close button,
                 // File ⏵ Exit, Ctrl+Q.
 

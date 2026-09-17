@@ -295,13 +295,10 @@ impl Editor {
     /// Frame the selected object in the viewport (the F key): keep the view angle,
     /// move the camera so the object is centered at a size-appropriate distance.
     ///
-    /// **Reads the node's world placement, not its local `Transform`.** A local
-    /// translation is an offset from a parent, so pressing `F` on a door inside
-    /// a building used to fly to wherever `(0.4, 0, 1.2)` happens to be in the
-    /// world — usually the origin, occasionally somewhere with nothing in it.
-    /// It looked like the key had missed rather than like it had gone to the
-    /// wrong place, which is why it survived this long: every unparented node in
-    /// every test scene works perfectly.
+    /// Reads the node's world placement, not its local `Transform`. A local
+    /// translation is an offset from a parent, so framing it would fly `F` on a
+    /// door inside a building to wherever `(0.4, 0, 1.2)` happens to be in the
+    /// world — usually the origin — and look like the key had missed.
     pub(crate) fn focus_selected(&mut self) {
         let Some(e) = self.selection.last().copied() else { return };
         if self.world.get::<Transform>(e).is_none() {
@@ -622,7 +619,7 @@ impl Editor {
                     let factor = 1.0 + cursor_delta.dot(n) * SCALE_SENS;
                     let mut sc = start.scale;
                     // Floor the magnitude, keep the sign — a mirrored (negative-scale)
-                    // node must stay mirrored (`.max(0.01)` used to snap -1 to +0.01).
+                    // node must stay mirrored (a bare `.max(0.01)` snaps -1 to +0.01).
                     let s = start.scale[i] * factor;
                     sc[i] = s.abs().max(0.01).copysign(if s == 0.0 { start.scale[i] } else { s });
                     let xf = Transform { scale: sc, ..start };

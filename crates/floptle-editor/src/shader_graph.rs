@@ -64,8 +64,8 @@ pub(crate) struct ShaderGraphState {
     pub(crate) ir: Option<ShaderIr>,
     /// Bumped every time the IR changes. The preview driver keys its compile
     /// off this: re-checking and re-transpiling the whole graph every frame
-    /// (which is what it used to do) is real work on a hundred-node sky, and
-    /// on an idle frame it can't produce a different answer.
+    /// is real work on a hundred-node sky, and on an idle frame it can't
+    /// produce a different answer.
     pub(crate) ir_rev: u64,
     ck: Option<Checked>,
     pub(crate) view: Vec<GNode>,
@@ -706,10 +706,10 @@ impl EditorTabViewer<'_> {
     pub(crate) fn shader_graph_ui(&mut self, ui: &mut egui::Ui) {
         // Arm the preview driver for next frame + keep animated previews live.
         //
-        // Only animated ones. This tab used to ask for a repaint every frame it
-        // was open, which pins the whole editor — Scene view and all — at full
-        // framerate for the sake of a picture that, in a shader with no `time`
-        // in it, cannot change until you touch something.
+        // Only animated ones. A repaint every frame the tab is open pins the
+        // whole editor — Scene view and all — at full framerate for the sake
+        // of a picture that, in a shader with no `time` in it, cannot change
+        // until you touch something.
         self.shader_graph.tab_visible = true;
         let compile_pending = self.shader_preview.rev
             != self.shader_graph.path.clone().map(|p| (p, self.shader_graph.ir_rev));
@@ -1317,9 +1317,9 @@ impl EditorTabViewer<'_> {
         // ---- wire-drag resolution (release over a compatible port) ----
         let released = ui.input(|i| i.pointer.any_released());
         if released && self.shader_graph.wire.is_some() {
-            // A wire let go over nothing used to just vanish. Now it opens the
-            // palette where it landed and connects whatever you pick — the node
-            // editor idiom, and the fastest way to build a chain.
+            // A wire let go over nothing opens the palette where it landed and
+            // connects whatever you pick — the node editor idiom, and the
+            // fastest way to build a chain.
             let mut loose: Option<Link> = None;
             match self.shader_graph.wire.take() {
                 Some(WireDrag::FromOut(src)) => match hover_in {
