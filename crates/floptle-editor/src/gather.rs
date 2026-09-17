@@ -121,6 +121,18 @@ pub(crate) struct FrameInstances {
     pub(crate) blobs: Vec<(DVec3, f32, MaterialParams)>,
 }
 
+/// The frame's view, as every gizmo pass reads it: the camera, its
+/// view-projection, the target's aspect and size, and which kinds are on.
+#[derive(Clone, Copy)]
+struct GizmoView<'a> {
+    cam: &'a RenderCamera,
+    view_proj: Mat4,
+    aspect: f32,
+    gw: f32,
+    gh: f32,
+    filter: crate::GizmoFilter,
+}
+
 impl Editor {
     /// Gather the World for this frame. `None` when the renderer has not been
     /// created yet, in which case there is nothing to draw.
@@ -654,6 +666,21 @@ impl Editor {
             return;
         }
         let (gw, gh) = gpu_size;
+        let v = GizmoView { cam, view_proj, aspect, gw, gh, filter: self.gizmo_filter };
+        self.node_gizmos(v);
+        self.rig_gizmos(v);
+        self.sun_gizmo(v);
+        self.body_gizmos(v);
+        self.terrain_collider_gizmo(v);
+        self.navmesh_gizmo(v);
+        self.collider_gizmos(v);
+        self.particle_gizmo(v);
+    }
+
+    /// Cameras, lights, gravity and other volumes, audio reach, and nav links — every
+    /// node whose kind has a gizmo.
+    fn node_gizmos(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, aspect, gw, gh, filter, .. } = v;
         // Only cameras and point lights get gizmos — gather the few Copy fields we
         // need (no per-frame Matter clone over the whole world).
         enum Giz {
@@ -669,7 +696,6 @@ impl Editor {
             /// it can be crossed both ways.
             Link([f32; 3], bool),
         }
-        let filter = self.gizmo_filter;
         let gizmos: Vec<(Entity, Giz)> = self
             .world
             .query::<Matter>()
@@ -814,6 +840,11 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// The rig of a selected mesh: the sticks you click to pose it.
+    fn rig_gizmos(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // The rig of a selected mesh — the sticks you click to pose it.
         //
         // Only for a mesh that is selected, or whose bone is: every rig in
@@ -851,6 +882,11 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// The directional sun's direction, anchored at the star or in front of the camera.
+    fn sun_gizmo(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // The directional "sun" Light has no world position, so its direction gizmo
         // only shows when the Lighting node is selected — anchored in front of the
         // editor camera so it's always framed, pointing along the light direction.
@@ -883,6 +919,11 @@ impl Editor {
                 self.light_gizmos.push(lines);
             }
         }
+    }
+
+    /// Rigidbody collider outlines, live during Play, and the contact crosses.
+    fn body_gizmos(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // Rigidbody collider outlines, so physics bodies are visible/placeable.
         let bodies: Vec<(Entity, floptle_core::RigidBody)> = if filter.physics {
             self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect()
@@ -947,6 +988,11 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// The terrain collider wireframe: the surface physics collides with.
+    fn terrain_collider_gizmo(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // Terrain collider wireframes: the surface physics actually collides
         // with. For a terrain set to collide with the drawn surface (the
         // default) that is every drawn triangle, from the same extraction
@@ -1000,6 +1046,12 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// The baked navmesh as a surface, coloured per region, while its node is selected
+    /// or a game walks it.
+    fn navmesh_gizmo(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // The baked navmesh. Drawn when its node is selected — the same rule
         // the collider wireframes use, so verifying the thing you are
         // editing costs nothing — or whenever the View toggle is on.
@@ -1226,6 +1278,12 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Mesh and primitive collider wireframes: every Collidable when the toggle is on,
+    /// plus the selected one.
+    fn collider_gizmos(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // Mesh collider wireframes. Every Mesh node flagged Collidable or (legacy)
         // MeshCollider when the global toggle is on, plus the selected one always (so
         // you can verify it). Both markers build a static triangle-mesh collider, so
@@ -1315,7 +1373,11 @@ impl Editor {
             };
             self.mesh_wire_gizmo.extend(lines);
         }
+    }
 
+    /// The selected particle track's emitter: birth shape, emit direction, and forces.
+    fn particle_gizmo(&mut self, v: GizmoView) {
+        let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // Selected particle track: draw its emitter birth shape + emit direction +
         // force arrows, so authoring a VFX has spatial feedback. The node is the
         // Particles-tab preview anchor, or a selected ParticleSystem node; the edited
