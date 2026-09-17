@@ -244,6 +244,22 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
 
+    bind_text(scope, slot, &t)?;
+    bind_buttons(scope, slot, &t)?;
+    bind_entry(scope, slot, &t)?;
+    bind_layout(scope, slot, fonts, &t)?;
+    bind_feedback(scope, slot, &t)?;
+    bind_painting(scope, slot, &t)?;
+    bind_input(scope, slot, &t)?;
+    Ok(t)
+}
+
+/// Labels, headings, hover text, and links.
+fn bind_text<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- text -------------------------------------------------------------
     // Hover text is a trailing argument rather than a `gui.tooltip()` that
     // attaches to "the last widget": an immediate-mode call that silently
@@ -297,7 +313,15 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             with(slot, |ui| ui.link(text).clicked())
         })?,
     )?;
+    Ok(())
+}
 
+/// Buttons, toggles, and radio choices.
+fn bind_buttons<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- buttons and toggles ----------------------------------------------
     t.set(
         "button",
@@ -352,7 +376,15 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             with(slot, |ui| ui.selectable_label(selected, text).clicked())
         })?,
     )?;
+    Ok(())
+}
 
+/// Number and text entry, with the keyboard focus rule.
+fn bind_entry<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- numbers and text entry -------------------------------------------
     t.set(
         "slider",
@@ -472,7 +504,16 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             Ok(t)
         })?,
     )?;
+    Ok(())
+}
 
+/// Rows, columns, groups, faces, spacing, and the painting origin.
+fn bind_layout<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    fonts: &'env FontScope<'env>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- layout ------------------------------------------------------------
     t.set(
         "horizontal",
@@ -698,7 +739,15 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             Ok(t)
         })?,
     )?;
+    Ok(())
+}
 
+/// Progress, the spinner, and boxed notes.
+fn bind_feedback<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- feedback ----------------------------------------------------------
     t.set(
         "progress",
@@ -734,7 +783,15 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             })
         })?,
     )?;
+    Ok(())
+}
 
+/// Lines, rects, circles, polygons, text at a point, and measuring.
+fn bind_painting<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- painting ----------------------------------------------------------
     // Enough to draw a heatmap, a radar chart or a chat bubble without inventing
     // a widget for each. Coordinates are pixels within the panel: (0,0) is its
@@ -944,7 +1001,15 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             })
         })?,
     )?;
+    Ok(())
+}
 
+/// The pointer, the modifiers, and the keys that went down this frame.
+fn bind_input<'scope, 'env: 'scope>(
+    scope: &'scope Scope<'scope, 'env>,
+    slot: &'env RefCell<UiSlot>,
+    t: &Table,
+) -> mlua::Result<()> {
     // ---- input -------------------------------------------------------------
     t.set(
         "mouse",
@@ -1010,6 +1075,5 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             with(slot, |ui| ui.ctx().input(|i| i.pointer.primary_clicked()))
         })?,
     )?;
-
-    Ok(t)
+    Ok(())
 }
