@@ -1861,7 +1861,34 @@ impl Editor {
         ui_flsl_cache: &crate::shaders::UiFlslCache,
         styles: &floptle_ui::StyleSheet,
     ) -> bool {
-        let mut changed = false;
+        let changed = ui_layer_inspector(world, e, ui);
+        let Some(mut spec) = world.get::<ElementSpec>(e).cloned() else {
+            return changed;
+        };
+        let mut c = false;
+        ui.separator();
+        ui.label("▭ UI Element");
+        c |= spec_layout_ui(ui, e, &mut spec);
+        c |= spec_interaction_ui(ui, &mut spec);
+        c |= spec_look_ui(ui, e, &mut spec, styles);
+        c |= spec_shape_ui(ui, &mut spec);
+        c |= spec_text_ui(ui, e, &mut spec, asset_tree, project_root);
+        c |= spec_image_ui(ui, e, &mut spec, asset_tree, project_root, texture_settings);
+        c |= spec_slider_ui(ui, e, &mut spec, world);
+        c |= spec_effect_ui(ui, e, &mut spec, asset_tree, project_root, ui_flsl_cache);
+        c |= spec_clip_ui(ui, e, &mut spec, world);
+        if c {
+            world.insert(e, spec);
+        }
+        changed || c
+    }
+}
+
+/// The 🖼 UI Layer section: space, scale mode, canvas size, and the layer
+/// switches. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn ui_layer_inspector(world: &mut floptle_core::World, e: Entity, ui: &mut egui::Ui) -> bool {
+    let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
             use floptle_ui::{UiScaleMode, UiSpace};
             ui.separator();
@@ -2040,1233 +2067,1286 @@ impl Editor {
                 world.insert(e, layer);
             }
         }
-        let Some(mut spec) = world.get::<ElementSpec>(e).cloned() else {
-            return changed;
+    changed
+}
+
+/// Placement, size, and the min/max clamps. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_layout_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec) -> bool {
+    let mut c = false;
+    // --- placement (Free / Pin / Stretch) ---
+    ui.horizontal(|ui| {
+        ui.label("placement");
+        let cur = match spec.place {
+            Place::Free { .. } => "free",
+            Place::Pin { .. } => "pin",
+            Place::Stretch { .. } => "stretch",
         };
-        let mut c = false;
-        ui.separator();
-        ui.label("▭ UI Element");
-        // --- placement (Free / Pin / Stretch) ---
-        ui.horizontal(|ui| {
-            ui.label("placement");
-            let cur = match spec.place {
-                Place::Free { .. } => "free",
-                Place::Pin { .. } => "pin",
-                Place::Stretch { .. } => "stretch",
-            };
-            egui::ComboBox::from_id_salt(("ui_place_mode", e.index()))
-                .selected_text(cur)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(cur == "free", "free").on_hover_text("a fixed position from the parent's top-left").clicked()
-                        && !matches!(spec.place, Place::Free { .. }) {
-                        spec.place = Place::Free { pos: [40.0, 40.0] };
-                        c = true;
-                    }
-                    if ui.selectable_label(cur == "pin", "pin").on_hover_text("stick to one of 9 parent points + an offset (HUD corners)").clicked()
-                        && !matches!(spec.place, Place::Pin { .. }) {
-                        spec.place = Place::Pin { anchor: Anchor::TopLeft, offset: [0.0, 0.0] };
-                        c = true;
-                    }
-                    if ui.selectable_label(cur == "stretch", "stretch").on_hover_text("anchor to a box between two parent fractions and STRETCH with it — the responsive mode").clicked()
-                        && !matches!(spec.place, Place::Stretch { .. }) {
-                        spec.place = Place::fill(16.0);
-                        c = true;
-                    }
-                });
-        });
-        // Stretch quick-presets: the shapes designers actually reach for.
-        if matches!(spec.place, Place::Stretch { .. }) {
-            ui.horizontal(|ui| {
-                ui.small("fill:");
-                let presets: [(&str, [f32; 2], [f32; 2]); 5] = [
-                    ("all", [0.0, 0.0], [1.0, 1.0]),
-                    ("top", [0.0, 0.0], [1.0, 0.0]),
-                    ("bottom", [0.0, 1.0], [1.0, 1.0]),
-                    ("left", [0.0, 0.0], [0.0, 1.0]),
-                    ("right", [1.0, 0.0], [1.0, 1.0]),
-                ];
-                for (lbl, mn, mx) in presets {
-                    if ui.small_button(lbl).clicked()
-                        && let Place::Stretch { min, max, .. } = &mut spec.place {
-                        *min = mn;
-                        *max = mx;
-                        c = true;
-                    }
+        egui::ComboBox::from_id_salt(("ui_place_mode", e.index()))
+            .selected_text(cur)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur == "free", "free").on_hover_text("a fixed position from the parent's top-left").clicked()
+                    && !matches!(spec.place, Place::Free { .. }) {
+                    spec.place = Place::Free { pos: [40.0, 40.0] };
+                    c = true;
+                }
+                if ui.selectable_label(cur == "pin", "pin").on_hover_text("stick to one of 9 parent points + an offset (HUD corners)").clicked()
+                    && !matches!(spec.place, Place::Pin { .. }) {
+                    spec.place = Place::Pin { anchor: Anchor::TopLeft, offset: [0.0, 0.0] };
+                    c = true;
+                }
+                if ui.selectable_label(cur == "stretch", "stretch").on_hover_text("anchor to a box between two parent fractions and STRETCH with it — the responsive mode").clicked()
+                    && !matches!(spec.place, Place::Stretch { .. }) {
+                    spec.place = Place::fill(16.0);
+                    c = true;
                 }
             });
-        }
-        match &mut spec.place {
-            Place::Free { pos } => {
-                ui.horizontal(|ui| {
-                    ui.label("pos");
-                    c |= ui.add(egui::DragValue::new(&mut pos[0]).speed(1.0)).changed();
-                    c |= ui.add(egui::DragValue::new(&mut pos[1]).speed(1.0)).changed();
-                });
+    });
+    // Stretch quick-presets: the shapes designers actually reach for.
+    if matches!(spec.place, Place::Stretch { .. }) {
+        ui.horizontal(|ui| {
+            ui.small("fill:");
+            let presets: [(&str, [f32; 2], [f32; 2]); 5] = [
+                ("all", [0.0, 0.0], [1.0, 1.0]),
+                ("top", [0.0, 0.0], [1.0, 0.0]),
+                ("bottom", [0.0, 1.0], [1.0, 1.0]),
+                ("left", [0.0, 0.0], [0.0, 1.0]),
+                ("right", [1.0, 0.0], [1.0, 1.0]),
+            ];
+            for (lbl, mn, mx) in presets {
+                if ui.small_button(lbl).clicked()
+                    && let Place::Stretch { min, max, .. } = &mut spec.place {
+                    *min = mn;
+                    *max = mx;
+                    c = true;
+                }
             }
-            Place::Stretch { min, max, margin } => {
-                ui.horizontal(|ui| {
-                    ui.label("anchor min");
-                    c |= ui.add(egui::DragValue::new(&mut min[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut min[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("anchor max");
-                    c |= ui.add(egui::DragValue::new(&mut max[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut max[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("margin");
-                    c |= ui.add(egui::DragValue::new(&mut margin[0]).speed(1.0).prefix("L ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut margin[1]).speed(1.0).prefix("T ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut margin[2]).speed(1.0).prefix("R ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut margin[3]).speed(1.0).prefix("B ")).changed();
-                });
-                ui.small("axes where max>min stretch (size ignored there); equal = a point anchor keeping its size");
-            }
-            Place::Pin { anchor, offset } => {
-                ui.horizontal(|ui| {
-                    ui.label("anchor");
-                    egui::ComboBox::from_id_salt(("ui_anchor", e.index()))
-                        .selected_text(format!("{anchor:?}"))
-                        .show_ui(ui, |ui| {
-                            for a in [
-                                Anchor::TopLeft, Anchor::Top, Anchor::TopRight,
-                                Anchor::Left, Anchor::Center, Anchor::Right,
-                                Anchor::BottomLeft, Anchor::Bottom, Anchor::BottomRight,
-                            ] {
-                                c |= ui.selectable_value(anchor, a, format!("{a:?}")).changed();
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("offset");
-                    c |= ui.add(egui::DragValue::new(&mut offset[0]).speed(1.0)).changed();
-                    c |= ui.add(egui::DragValue::new(&mut offset[1]).speed(1.0)).changed();
-                });
-            }
-        }
-        // --- size (Fixed/Pct simplified to a number + % toggle; Fit/Grow via menu) ---
-        for (axis, label) in [(0usize, "width"), (1usize, "height")] {
+        });
+    }
+    match &mut spec.place {
+        Place::Free { pos } => {
             ui.horizontal(|ui| {
-                ui.label(label);
-                let current = spec.size[axis];
-                let kind = match current {
-                    Size::Fixed(_) => "px",
-                    Size::Pct(_) => "%",
-                    Size::Fit => "fit",
-                    Size::Grow(_) => "grow",
-                };
-                egui::ComboBox::from_id_salt(("ui_size", e.index(), axis))
-                    .selected_text(kind)
-                    .width(56.0)
+                ui.label("pos");
+                c |= ui.add(egui::DragValue::new(&mut pos[0]).speed(1.0)).changed();
+                c |= ui.add(egui::DragValue::new(&mut pos[1]).speed(1.0)).changed();
+            });
+        }
+        Place::Stretch { min, max, margin } => {
+            ui.horizontal(|ui| {
+                ui.label("anchor min");
+                c |= ui.add(egui::DragValue::new(&mut min[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut min[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("anchor max");
+                c |= ui.add(egui::DragValue::new(&mut max[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut max[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("margin");
+                c |= ui.add(egui::DragValue::new(&mut margin[0]).speed(1.0).prefix("L ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut margin[1]).speed(1.0).prefix("T ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut margin[2]).speed(1.0).prefix("R ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut margin[3]).speed(1.0).prefix("B ")).changed();
+            });
+            ui.small("axes where max>min stretch (size ignored there); equal = a point anchor keeping its size");
+        }
+        Place::Pin { anchor, offset } => {
+            ui.horizontal(|ui| {
+                ui.label("anchor");
+                egui::ComboBox::from_id_salt(("ui_anchor", e.index()))
+                    .selected_text(format!("{anchor:?}"))
                     .show_ui(ui, |ui| {
-                        for (k, v) in [
-                            ("px", Size::Fixed(100.0)),
-                            ("%", Size::Pct(0.5)),
-                            ("fit", Size::Fit),
-                            ("grow", Size::Grow(1.0)),
+                        for a in [
+                            Anchor::TopLeft, Anchor::Top, Anchor::TopRight,
+                            Anchor::Left, Anchor::Center, Anchor::Right,
+                            Anchor::BottomLeft, Anchor::Bottom, Anchor::BottomRight,
                         ] {
-                            if ui.selectable_label(kind == k, k).clicked()
-                                && std::mem::discriminant(&spec.size[axis])
-                                    != std::mem::discriminant(&v)
-                            {
-                                spec.size[axis] = v;
-                                c = true;
-                            }
-                        }
-                    });
-                match &mut spec.size[axis] {
-                    Size::Fixed(v) => c |= ui.add(egui::DragValue::new(v).speed(1.0)).changed(),
-                    Size::Pct(v) => {
-                        c |= ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=1.0)).changed()
-                    }
-                    Size::Grow(v) => c |= ui.add(egui::DragValue::new(v).speed(0.1)).changed(),
-                    Size::Fit => {}
-                }
-            });
-        }
-        // --- min/max size clamps (0 = unbounded) ---
-        ui.horizontal(|ui| {
-            ui.label("min size").on_hover_text("floor on the resolved size (design units, 0 = none) — keeps %/fit/stretch from collapsing");
-            c |= ui.add(egui::DragValue::new(&mut spec.min_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
-            c |= ui.add(egui::DragValue::new(&mut spec.min_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("max size").on_hover_text("cap on the resolved size (design units, 0 = none) — keeps it from ballooning on huge/ultrawide screens");
-            c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
-            c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
-        });
-        ui.horizontal(|ui| {
-            c |= ui
-                .checkbox(&mut spec.toggle, "toggle")
-                .on_hover_text(
-                    "clicking flips `selected` — a checkbox, a mute button, a filter chip. \
-                     What ON looks like is your style's `selected` block.",
-                )
-                .changed();
-            ui.label("group").on_hover_text(
-                "radio behaviour: clicking selects this and deselects everything else with \
-                 the same group name in this layer. Tabs, difficulty pickers, weapon slots. \
-                 Empty = not a group.",
-            );
-            c |= ui.text_edit_singleline(&mut spec.group).changed();
-        });
-        ui.horizontal(|ui| {
-            c |= ui
-                .checkbox(&mut spec.focusable, "focusable")
-                .on_hover_text(
-                    "reachable by keyboard and gamepad: a direction press can move the focus \
-                     here, and a submit press fires this element's `clicked` hook. What focus \
-                     LOOKS like is your style's `focus` block — the engine draws no ring.",
-                )
-                .changed();
-            if spec.focusable {
-                let has_nav = spec.nav.is_some();
-                if ui
-                    .selectable_label(has_nav, "nav ⏵")
-                    .on_hover_text(
-                        "name the element each direction goes to, when the geometry gets it \
-                         wrong (a grid that wraps, a Back button reachable from anywhere). \
-                         Blank = work it out from the solved rects.",
-                    )
-                    .clicked()
-                {
-                    spec.nav = if has_nav { None } else { Some(Default::default()) };
-                    c = true;
-                }
-            }
-        });
-        if spec.focusable && let Some(nav) = spec.nav.as_mut() {
-            ui.indent("ui_nav", |ui| {
-                for (label, field) in [
-                    ("up", &mut nav.up),
-                    ("down", &mut nav.down),
-                    ("left", &mut nav.left),
-                    ("right", &mut nav.right),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        c |= ui.text_edit_singleline(field).changed();
-                    });
-                }
-            });
-        }
-        // --- drag & drop -----------------------------------------------------
-        ui.horizontal(|ui| {
-            c |= ui
-                .checkbox(&mut spec.draggable, "draggable")
-                .on_hover_text(
-                    "can be picked up: fires `dragStart` / `dragMove` / `dropped` (or \
-                     `dragCancel`). The engine does NOT move it and draws no ghost — what a \
-                     drag looks like is your script's, because a card that tilts and an item \
-                     that snaps to a grid are both drags.",
-                )
-                .changed();
-            c |= ui
-                .checkbox(&mut spec.drop_target, "drop target")
-                .on_hover_text(
-                    "can receive one: `dragEnter` / `dragOver` / `dragLeave` / `dropped`. \
-                     Read `ui.dragging()` in the hook to see what arrived.",
-                )
-                .changed();
-        });
-        // --- repeater --------------------------------------------------------
-        let mut has_rep = spec.repeater.is_some();
-        if ui
-            .checkbox(&mut has_rep, "repeat a row")
-            .on_hover_text(
-                "keep this element's children matching `count`, one copy of a prefab each. \
-                 The engine spawns and destroys only the difference, so a list that gains \
-                 a row keeps the others' state. Rows read `node.index`. Runs during Play.",
-            )
-            .changed()
-        {
-            spec.repeater = has_rep.then(floptle_ui::RepeatSpec::default);
-            c = true;
-        }
-        if let Some(r) = &mut spec.repeater {
-            ui.indent("ui_repeat", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("row prefab").on_hover_text("the same name `spawn()` takes");
-                    c |= ui.text_edit_singleline(&mut r.template).changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("count").on_hover_text(
-                        "usually driven from Lua — `ui.bind(list, \"count\", function() \
-                         return #items end)`",
-                    );
-                    c |= ui.add(egui::DragValue::new(&mut r.count).speed(0.2).range(0..=4096)).changed();
-                });
-            });
-        }
-        // --- tooltip ---------------------------------------------------------
-        ui.horizontal(|ui| {
-            ui.label("tooltip").on_hover_text(
-                "shown after a moment's hover, in this layer's tooltip element. Empty = none.",
-            );
-            c |= ui.text_edit_singleline(&mut spec.tooltip).changed();
-        });
-        c |= ui
-            .checkbox(&mut spec.tooltip_box, "is this layer's tooltip")
-            .on_hover_text(
-                "this element IS the tooltip: the engine hides it when nothing is hovered, \
-                 writes the hovered element's text into its first label, and moves it to \
-                 follow the pointer. What it looks like is entirely yours.",
-            )
-            .changed();
-        ui.horizontal(|ui| {
-            ui.label("depth").on_hover_text(
-                "sort key among siblings — lower draws first (further back), and inside a stack \
-                 lower comes first in the flow. Ties keep scene order. The ◫ UI tab's outline \
-                 drag writes this.",
-            );
-            c |= ui.add(egui::DragValue::new(&mut spec.order).speed(0.2)).changed();
-        });
-        ui.horizontal(|ui| {
-            c |= ui.checkbox(&mut spec.visible, "visible").changed();
-            ui.label("opacity");
-            c |= ui
-                .add(egui::Slider::new(&mut spec.opacity, 0.0..=1.0))
-                .on_hover_text("multiplies this element AND its children — fade a whole menu with one number")
-                .changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("group tint")
-                .on_hover_text("multiplies every colour in this subtree — damage flashes, disabled washes");
-            c |= ui.color_edit_button_rgba_unmultiplied(&mut spec.tint).changed();
-            if spec.tint != [1.0; 4] && ui.small_button("reset").clicked() {
-                spec.tint = [1.0; 4];
-                c = true;
-            }
-        });
-        // --- transform (visual only — layout never sees it) ---
-        ui.horizontal(|ui| {
-            ui.label("rotate");
-            c |= ui
-                .add(egui::DragValue::new(&mut spec.rotation).speed(0.5).suffix("°"))
-                .changed();
-            ui.label("scale");
-            c |= ui
-                .add(egui::DragValue::new(&mut spec.scale[0]).speed(0.01).range(0.01..=8.0).prefix("x "))
-                .changed();
-            c |= ui
-                .add(egui::DragValue::new(&mut spec.scale[1]).speed(0.01).range(0.01..=8.0).prefix("y "))
-                .changed();
-        })
-        .response
-        .on_hover_text(
-            "visual only — the element keeps its layout rect, so a hover pop or a press dip \
-             can never shove its siblings around",
-        );
-        if spec.rotation != 0.0 || spec.scale != [1.0, 1.0] {
-            ui.horizontal(|ui| {
-                ui.label("  pivot");
-                c |= ui
-                    .add(egui::DragValue::new(&mut spec.pivot[0]).speed(0.01).range(-2.0..=3.0).prefix("x "))
-                    .changed();
-                c |= ui
-                    .add(egui::DragValue::new(&mut spec.pivot[1]).speed(0.01).range(-2.0..=3.0).prefix("y "))
-                    .changed();
-                if ui.small_button("reset").clicked() {
-                    spec.rotation = 0.0;
-                    spec.scale = [1.0, 1.0];
-                    spec.pivot = [0.5, 0.5];
-                    c = true;
-                }
-            })
-            .response
-            .on_hover_text("fraction of the element's own rect — 0.5, 0.5 is its centre");
-        }
-        c |= ui
-            .checkbox(&mut spec.button, "button (clickable)")
-            .on_hover_text(
-                "the pointer can hover/press/click this element — its scripts get hoverStart / hoverEnd / pressed / released / clicked hooks.",
-            )
-            .changed();
-        ui.horizontal(|ui| {
-            c |= ui
-                .checkbox(&mut spec.disabled, "disabled")
-                .on_hover_text("stops responding and picks the style's `disabled` block")
-                .changed();
-            c |= ui
-                .checkbox(&mut spec.selected, "selected")
-                .on_hover_text("\"this is the current one\" — a menu cursor, a chosen tab")
-                .changed();
-        });
-        // --- style (at most one; the element's own properties still win) ---
-        ui.horizontal(|ui| {
-            ui.label("style");
-            let current = if spec.style.is_empty() { "(none)" } else { spec.style.as_str() };
-            egui::ComboBox::from_id_salt(("ui_style_pick", e.index()))
-                .selected_text(current)
-                .width(180.0)
-                .show_ui(ui, |ui| {
-                    let mut none = String::new();
-                    if ui.selectable_value(&mut none, String::new(), "(none)").clicked() {
-                        spec.style.clear();
-                        c = true;
-                    }
-                    for name in styles.styles.keys() {
-                        if ui.selectable_label(&spec.style == name, name).clicked() {
-                            spec.style = name.clone();
-                            c = true;
-                        }
-                    }
-                });
-            if !spec.style.is_empty() && styles.get(&spec.style).is_none() {
-                ui.colored_label(egui::Color32::from_rgb(255, 140, 90), "⚠ missing")
-                    .on_hover_text(
-                        "no style by that name in any .uistyle.ron — the element keeps \
-                         its authored look",
-                    );
-            }
-        })
-        .response
-        .on_hover_text(
-            "one named style from the project's .uistyle.ron files. Whatever the style \
-             doesn't set stays exactly as authored here — no cascade, no specificity.",
-        );
-        if styles.styles.is_empty() {
-            ui.small("no .uistyle.ron in this project yet — styles are how hover/pressed stop being per-button Lua");
-        }
-        // --- stack (opt-in flow) ---
-        let mut has_stack = spec.stack.is_some();
-        if ui
-            .checkbox(&mut has_stack, "stack children")
-            .on_hover_text("opt-in auto-layout: children flow in a row/column with gap + padding")
-            .changed()
-        {
-            spec.stack = has_stack.then(StackCfg::default);
-            c = true;
-        }
-        if let Some(s) = &mut spec.stack {
-            ui.horizontal(|ui| {
-                c |= ui.selectable_value(&mut s.dir, Dir::Row, "row").changed();
-                c |= ui.selectable_value(&mut s.dir, Dir::Column, "column").changed();
-                ui.label("gap");
-                c |= ui.add(egui::DragValue::new(&mut s.gap).speed(0.5)).changed();
-                ui.label("pad");
-                c |= ui.add(egui::DragValue::new(&mut s.pad).speed(0.5)).changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("align");
-                for (v, l) in [(Align::Start, "start"), (Align::Center, "center"), (Align::End, "end"), (Align::Stretch, "stretch")] {
-                    c |= ui.selectable_value(&mut s.align, v, l).changed();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("justify");
-                for (v, l) in [(Justify::Start, "start"), (Justify::Center, "center"), (Justify::End, "end"), (Justify::SpaceBetween, "between")] {
-                    c |= ui.selectable_value(&mut s.justify, v, l).changed();
-                }
-            });
-        }
-        // --- shape ---
-        let mut has = spec.shape.is_some();
-        if ui.checkbox(&mut has, "shape").changed() {
-            spec.shape = has.then(ShapeSpec::default);
-            c = true;
-        }
-        if let Some(s) = &mut spec.shape {
-            ui.horizontal(|ui| {
-                ui.label("fill");
-                c |= ui.color_edit_button_rgba_unmultiplied(&mut s.fill).changed();
-                // A gradient is one checkbox away from any flat fill, because
-                // "this panel reads as a slab" should be a ten-second fix and
-                // not a reason to go write a `stage ui` shader.
-                let mut on = s.gradient.is_some();
-                if ui
-                    .checkbox(&mut on, "gradient")
-                    .on_hover_text("fade this fill into a second colour")
-                    .changed()
-                {
-                    s.gradient = on.then(|| floptle_ui::Gradient {
-                        // Start from the fill, darkened: the element keeps the
-                        // look it already had at one end, so ticking the box
-                        // never throws away what you had.
-                        to: [s.fill[0] * 0.55, s.fill[1] * 0.55, s.fill[2] * 0.55, s.fill[3]],
-                        ..Default::default()
-                    });
-                    c = true;
-                }
-            });
-            if let Some(g) = &mut s.gradient {
-                ui.horizontal(|ui| {
-                    ui.label("  to");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut g.to).changed();
-                    egui::ComboBox::from_id_salt("ui_grad_kind")
-                        .selected_text(match g.kind {
-                            floptle_ui::GradientKind::Linear => "linear",
-                            floptle_ui::GradientKind::Radial => "radial",
-                            floptle_ui::GradientKind::Angular => "angular",
-                        })
-                        .show_ui(ui, |ui| {
-                            for (k, label) in [
-                                (floptle_ui::GradientKind::Linear, "linear"),
-                                (floptle_ui::GradientKind::Radial, "radial"),
-                                (floptle_ui::GradientKind::Angular, "angular"),
-                            ] {
-                                c |= ui.selectable_value(&mut g.kind, k, label).changed();
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("  angle");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut g.angle).speed(1.0).suffix("°"))
-                        .changed();
-                    ui.label("mid");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut g.mid).speed(0.01).range(0.0..=1.0))
-                        .on_hover_text("where the two colours meet")
-                        .changed();
-                    if g.kind == floptle_ui::GradientKind::Radial {
-                        ui.label("extent");
-                        c |= ui
-                            .add(egui::DragValue::new(&mut g.radius).speed(0.02).range(0.01..=4.0))
-                            .changed();
-                    }
-                });
-            }
-            c |= quad_row(ui, "radius", &mut s.radius.0, ["TL", "TR", "BR", "BL"], 512.0, "ui_r");
-            ui.horizontal(|ui| {
-                ui.label("border colour");
-                c |= ui.color_edit_button_rgba_unmultiplied(&mut s.border_color).changed();
-            });
-            c |= quad_row(ui, "border", &mut s.border.0, ["L", "T", "R", "B"], 64.0, "ui_b");
-            // Soft shadow — behind the rect, or inside it.
-            let mut has_shadow = s.shadow.is_some();
-            if ui
-                .checkbox(&mut has_shadow, "shadow")
-                .on_hover_text("a soft shadow behind the panel (or inside it, for a recess)")
-                .changed()
-            {
-                s.shadow = has_shadow.then(floptle_ui::ShadowSpec::default);
-                c = true;
-            }
-            if let Some(sh) = &mut s.shadow {
-                ui.horizontal(|ui| {
-                    ui.label("  color");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
-                    ui.label("blur");
-                    c |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.5).range(0.0..=128.0)).changed();
-                    c |= ui
-                        .checkbox(&mut sh.inset, "inset")
-                        .on_hover_text("draw it inside the shape — a recessed well")
-                        .changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("  offset");
-                    c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.5).prefix("x ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.5).prefix("y ")).changed();
-                    ui.label("spread");
-                    c |= ui.add(egui::DragValue::new(&mut sh.spread).speed(0.5).range(0.0..=128.0)).changed();
-                });
-            }
-            // Glow — light spilling out from under the element.
-            let mut has_glow = s.glow.is_some();
-            if ui
-                .checkbox(&mut has_glow, "glow")
-                .on_hover_text("an additive bloom around the element")
-                .changed()
-            {
-                s.glow = has_glow.then(floptle_ui::GlowSpec::default);
-                c = true;
-            }
-            if let Some(g) = &mut s.glow {
-                ui.horizontal(|ui| {
-                    ui.label("  color");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut g.color).changed();
-                    ui.label("radius");
-                    c |= ui.add(egui::DragValue::new(&mut g.radius).speed(0.5).range(0.0..=128.0)).changed();
-                    ui.label("spread");
-                    c |= ui.add(egui::DragValue::new(&mut g.spread).speed(0.5).range(0.0..=128.0)).changed();
-                });
-            }
-            // Grain — the cheapest thing on this panel, and often the one that
-            // stops a screen looking machine-made.
-            let mut has_grain = s.grain.is_some();
-            if ui
-                .checkbox(&mut has_grain, "grain")
-                .on_hover_text("a little noise over the fill — kills the plastic look")
-                .changed()
-            {
-                s.grain = has_grain.then(floptle_ui::GrainSpec::default);
-                c = true;
-            }
-            if let Some(g) = &mut s.grain {
-                ui.horizontal(|ui| {
-                    ui.label("  amount");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut g.amount).speed(0.005).range(0.0..=1.0))
-                        .changed();
-                    ui.label("cell");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut g.scale).speed(0.1).range(1.0..=32.0))
-                        .on_hover_text("noise cell size in px — higher is chunkier")
-                        .changed();
-                });
-            }
-            ui.horizontal(|ui| {
-                ui.label("blend");
-                egui::ComboBox::from_id_salt("ui_blend")
-                    .selected_text(s.blend.label())
-                    .show_ui(ui, |ui| {
-                        for b in floptle_ui::Blend::ALL {
-                            c |= ui.selectable_value(&mut s.blend, b, b.label()).changed();
-                        }
-                    });
-            });
-        }
-        // --- text ---
-        let mut has = spec.text.is_some();
-        if ui.checkbox(&mut has, "text").changed() {
-            spec.text = has.then(TextSpec::default);
-            c = true;
-        }
-        if let Some(t) = &mut spec.text {
-            c |= ui.text_edit_singleline(&mut t.text).changed();
-            ui.horizontal(|ui| {
-                ui.label("size");
-                ui.add_enabled_ui(!t.fit, |ui| {
-                    c |= ui
-                        .add(egui::DragValue::new(&mut t.size).speed(0.5).range(4.0..=256.0))
-                        .changed();
-                });
-                c |= ui
-                    .checkbox(&mut t.fit, "fit")
-                    .on_hover_text(
-                        "dynamic sizing: the text scales to fill the element's rect (largest size that fits) — size is ignored",
-                    )
-                    .changed();
-                c |= ui.color_edit_button_rgba_unmultiplied(&mut t.color).changed();
-            });
-            ui.horizontal(|ui| {
-                for (v, l) in [(Align::Start, "left"), (Align::Center, "center"), (Align::End, "right")] {
-                    c |= ui.selectable_value(&mut t.align, v, l).changed();
-                }
-                ui.separator();
-                for (v, l) in [(Align::Start, "top"), (Align::Center, "middle"), (Align::End, "bottom")] {
-                    c |= ui.selectable_value(&mut t.valign, v, l).changed();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("font");
-                let current = if t.font.is_empty() {
-                    "(default)".to_string()
-                } else {
-                    t.font.rsplit('/').next().unwrap_or(&t.font).to_string()
-                };
-                if let Some(pick) = crate::ui_widgets::asset_picker(
-                    ui,
-                    egui::Id::new(("ui_font_pick", e.index())),
-                    project_root,
-                    &current,
-                    Some("(default)"),
-                    asset_tree,
-                    crate::assets::is_font,
-                    170.0,
-                ) {
-                    t.font = pick.unwrap_or_default();
-                    c = true;
-                }
-            })
-            .response
-            .on_hover_text("any .ttf/.otf in your assets — drop font files into the project and they appear here");
-            ui.horizontal(|ui| {
-                ui.label("tracking");
-                c |= ui
-                    .add(egui::DragValue::new(&mut t.tracking).speed(0.05).range(-8.0..=32.0))
-                    .on_hover_text("letter spacing — wide tracking is what makes a title look set")
-                    .changed();
-                ui.label("line");
-                c |= ui
-                    .add(egui::DragValue::new(&mut t.line_height).speed(0.02).range(0.0..=4.0))
-                    .on_hover_text("line height multiplier (0 = the font's own metrics)")
-                    .changed();
-                egui::ComboBox::from_id_salt("ui_case")
-                    .selected_text(match t.case {
-                        floptle_ui::Case::AsIs => "as-is",
-                        floptle_ui::Case::Upper => "UPPER",
-                        floptle_ui::Case::Lower => "lower",
-                        floptle_ui::Case::Title => "Title",
-                    })
-                    .show_ui(ui, |ui| {
-                        for (v, l) in [
-                            (floptle_ui::Case::AsIs, "as-is"),
-                            (floptle_ui::Case::Upper, "UPPER"),
-                            (floptle_ui::Case::Lower, "lower"),
-                            (floptle_ui::Case::Title, "Title"),
-                        ] {
-                            c |= ui.selectable_value(&mut t.case, v, l).changed();
+                            c |= ui.selectable_value(anchor, a, format!("{a:?}")).changed();
                         }
                     });
             });
             ui.horizontal(|ui| {
-                c |= ui
-                    .checkbox(&mut t.wrap, "wrap")
-                    .on_hover_text("break lines at the element's width")
-                    .changed();
-                ui.label("max lines");
-                c |= ui
-                    .add(egui::DragValue::new(&mut t.max_lines).speed(0.2).range(0..=64))
-                    .on_hover_text("0 = unlimited")
-                    .changed();
-                egui::ComboBox::from_id_salt("ui_overflow")
-                    .selected_text(match t.overflow {
-                        floptle_ui::Overflow::Show => "show",
-                        floptle_ui::Overflow::Clip => "clip",
-                        floptle_ui::Overflow::Ellipsis => "ellipsis",
-                    })
-                    .show_ui(ui, |ui| {
-                        for (v, l) in [
-                            (floptle_ui::Overflow::Show, "show"),
-                            (floptle_ui::Overflow::Clip, "clip"),
-                            (floptle_ui::Overflow::Ellipsis, "ellipsis"),
-                        ] {
-                            c |= ui.selectable_value(&mut t.overflow, v, l).changed();
-                        }
-                    });
-            });
-            // Outline and shadow: what lets a label survive an arbitrary
-            // background without a panel behind it.
-            let mut has_stroke = t.stroke.is_some();
-            if ui
-                .checkbox(&mut has_stroke, "outline")
-                .on_hover_text("an outline around the glyphs — legibility over anything")
-                .changed()
-            {
-                t.stroke = has_stroke.then(floptle_ui::TextStroke::default);
-                c = true;
-            }
-            if let Some(st) = &mut t.stroke {
-                ui.horizontal(|ui| {
-                    ui.label("  color");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut st.color).changed();
-                    ui.label("width");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut st.width).speed(0.1).range(0.0..=8.0))
-                        .changed();
-                });
-            }
-            let mut has_tsh = t.shadow.is_some();
-            if ui.checkbox(&mut has_tsh, "text shadow").changed() {
-                t.shadow = has_tsh.then(floptle_ui::TextShadow::default);
-                c = true;
-            }
-            if let Some(sh) = &mut t.shadow {
-                ui.horizontal(|ui| {
-                    ui.label("  color");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
-                    c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.2).prefix("x ")).changed();
-                    c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.2).prefix("y ")).changed();
-                });
-            }
-        }
-        // --- text field ---
-        // Lives under `text` because a field's value is its text: everything
-        // above (font, alignment, tracking, stroke, the style's `text_color`)
-        // applies unchanged, and a script reads it the way it reads any label.
-        let mut has_field = spec.field.is_some();
-        if ui
-            .checkbox(&mut has_field, "editable (text field)")
-            .on_hover_text(
-                "the player can type into this element; the value IS its text above. \
-                 Implicitly focusable. Fires `changed` and `submitted`.",
-            )
-            .changed()
-        {
-            spec.field = has_field.then(floptle_ui::FieldSpec::default);
-            // A field with no text has nothing to edit and nothing to draw.
-            if spec.field.is_some() {
-                spec.text.get_or_insert_with(TextSpec::default);
-            }
-            c = true;
-        }
-        if let Some(f) = &mut spec.field {
-            ui.indent("ui_field", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("placeholder")
-                        .on_hover_text("shown while empty — never submits, never reads back as a value");
-                    c |= ui.text_edit_singleline(&mut f.placeholder).changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("max").on_hover_text("cap in CHARACTERS (0 = none)");
-                    c |= ui
-                        .add(egui::DragValue::new(&mut f.max_len).speed(0.2).range(0..=1024))
-                        .changed();
-                    c |= ui
-                        .checkbox(&mut f.numeric, "numeric")
-                        .on_hover_text("digits, one leading -, one .")
-                        .changed();
-                    c |= ui
-                        .checkbox(&mut f.upper, "UPPER")
-                        .on_hover_text("shout as you type — lobby codes, initials, licence keys")
-                        .changed();
-                });
-                ui.horizontal(|ui| {
-                    c |= ui
-                        .checkbox(&mut f.mask, "mask")
-                        .on_hover_text(
-                            "draw every character as a dot. Copy and cut are refused while \
-                             this is on — a password field that fills the clipboard is a bug.",
-                        )
-                        .changed();
-                    if f.mask {
-                        let mut s = f.mask_char.to_string();
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut s).desired_width(24.0))
-                            .changed()
-                            && let Some(ch) = s.chars().next()
-                        {
-                            f.mask_char = ch;
-                            c = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("caret");
-                    c |= ui.add(egui::DragValue::new(&mut f.caret_width).speed(0.1).range(0.5..=16.0)).changed();
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.caret_color).changed();
-                    ui.label("sel");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.selection_color).changed();
-                    ui.label("hint");
-                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.placeholder_color).changed();
-                })
-                .response
-                .on_hover_text(
-                    "leave a colour fully transparent and it follows the text colour \
-                     (caret: as-is, selection: 30%, placeholder: 45%). Derived from the design \
-                     you already made, rather than picked by the engine.",
-                );
-            });
-        }
-        // --- image ---
-        let mut has = spec.image.is_some();
-        if ui.checkbox(&mut has, "image").on_hover_text("any texture from your assets — the engine ships no UI art").changed() {
-            spec.image = has.then(ImageSpec::default);
-            c = true;
-        }
-        if let Some(img) = &mut spec.image {
-            ui.horizontal(|ui| {
-                ui.label("texture");
-                let current = if img.texture.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    img.texture.rsplit('/').next().unwrap_or(&img.texture).to_string()
-                };
-                if let Some(pick) = crate::ui_widgets::asset_picker(
-                    ui,
-                    egui::Id::new(("ui_tex_pick", e.index())),
-                    project_root,
-                    &current,
-                    Some("(none)"),
-                    asset_tree,
-                    crate::assets::is_texture,
-                    170.0,
-                ) {
-                    let new = pick.unwrap_or_default();
-                    // Inherit the texture's spritesheet grid (set in its asset
-                    // settings) so a picked sheet slices without extra steps.
-                    let (sc, sr) =
-                        crate::assets::tex_setting(texture_settings, project_root, &new).sheet();
-                    img.cols = sc;
-                    img.rows = sr;
-                    img.cell = 0;
-                    img.texture = new;
-                    c = true;
-                }
-            });
-            // --- spritesheet cell picker (when the texture is a sheet) ---
-            let (sc, sr) =
-                crate::assets::tex_setting(texture_settings, project_root, &img.texture).sheet();
-            // Keep the image's grid in sync if the asset's split changed.
-            if (img.cols, img.rows) != (sc, sr) {
-                img.cols = sc;
-                img.rows = sr;
-                img.cell = img.cell.min((sc * sr).saturating_sub(1));
-                c = true;
-            }
-            c |= crate::ui_widgets::sheet_cell_picker(
-                ui,
-                egui::Id::new(("cells", e.index())),
-                &img.texture,
-                sc,
-                sr,
-                &mut img.cell,
-            );
-            ui.horizontal(|ui| {
-                ui.label("tint");
-                c |= ui.color_edit_button_rgba_unmultiplied(&mut img.tint).changed();
-                ui.label("fit");
-                egui::ComboBox::from_id_salt("ui_img_fit")
-                    .selected_text(match img.fit {
-                        floptle_ui::ImageFit::Stretch => "stretch",
-                        floptle_ui::ImageFit::Contain => "contain",
-                        floptle_ui::ImageFit::Cover => "cover",
-                    })
-                    .show_ui(ui, |ui| {
-                        for (v, l, tip) in [
-                            (floptle_ui::ImageFit::Stretch, "stretch", "fill the rect, ignore aspect"),
-                            (floptle_ui::ImageFit::Contain, "contain", "fit inside, letterboxed"),
-                            (floptle_ui::ImageFit::Cover, "cover", "fill the rect, crop the overflow"),
-                        ] {
-                            c |= ui.selectable_value(&mut img.fit, v, l).on_hover_text(tip).changed();
-                        }
-                    });
-            });
-            // 9-slice: the thing that makes your panel art usable at any size.
-            let mut sliced = img.slice.iter().any(|v| *v > 0.0);
-            if ui
-                .checkbox(&mut sliced, "9-slice")
-                .on_hover_text(
-                    "keep the corners unstretched and stretch only the edges and middle — \
-                     how one small frame texture dresses a panel at any size",
-                )
-                .changed()
-            {
-                // A sensible starting frame beats four zeroes: ticking the box
-                // should show you the effect, not nothing.
-                img.slice = if sliced { [0.25; 4] } else { [0.0; 4] };
-                c = true;
-            }
-            if sliced {
-                c |= quad_row(
-                    ui,
-                    "  insets",
-                    &mut img.slice,
-                    ["L", "T", "R", "B"],
-                    0.49,
-                    "ui_slice",
-                );
-                ui.small("fractions of the image — 0.25 means the outer quarter is the frame");
-            }
-            ui.horizontal(|ui| {
-                ui.label("tiling");
-                c |= ui
-                    .add(egui::DragValue::new(&mut img.tiling[0]).speed(0.05).range(0.01..=64.0).prefix("x "))
-                    .changed();
-                c |= ui
-                    .add(egui::DragValue::new(&mut img.tiling[1]).speed(0.05).range(0.01..=64.0).prefix("y "))
-                    .changed();
                 ui.label("offset");
-                c |= ui.add(egui::DragValue::new(&mut img.offset[0]).speed(0.01).prefix("u ")).changed();
-                c |= ui.add(egui::DragValue::new(&mut img.offset[1]).speed(0.01).prefix("v ")).changed();
-            })
-            .response
-            .on_hover_text("repeat the image across the rect; animate the offset to scroll it");
-        }
-        // --- slider (value-driven bar: this element is the track) ---
-        let mut has = spec.slider.is_some();
-        if ui
-            .checkbox(&mut has, "slider")
-            .on_hover_text(
-                "value-driven bar (health, progress…): child elements marked as Fill scale with the value, Handle children ride its position — the parts stay ordinary elements you retexture and arrange freely",
-            )
-            .changed()
-        {
-            spec.slider = has.then(SliderSpec::default);
-            c = true;
-        }
-        if let Some(s) = &mut spec.slider {
-            ui.horizontal(|ui| {
-                ui.label("value");
-                let lo = s.min.min(s.max);
-                let hi = s.max.max(s.min);
-                c |= ui.add(egui::Slider::new(&mut s.value, lo..=hi)).changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("min");
-                c |= ui.add(egui::DragValue::new(&mut s.min).speed(1.0)).changed();
-                ui.label("max");
-                c |= ui.add(egui::DragValue::new(&mut s.max).speed(1.0)).changed();
-                c |= ui.selectable_value(&mut s.dir, Dir::Row, "↔").on_hover_text("horizontal").changed();
-                c |= ui.selectable_value(&mut s.dir, Dir::Column, "↕").on_hover_text("vertical").changed();
-                c |= ui
-                    .checkbox(&mut s.flip, "flip")
-                    .on_hover_text("the handle rides from the far end back toward the start")
-                    .changed();
-                c |= ui
-                    .checkbox(&mut s.interact, "draggable")
-                    .on_hover_text(
-                        "the player can click/drag the track to set the value (settings sliders); off = display-only (health bars)",
-                    )
-                    .changed();
+                c |= ui.add(egui::DragValue::new(&mut offset[0]).speed(1.0)).changed();
+                c |= ui.add(egui::DragValue::new(&mut offset[1]).speed(1.0)).changed();
             });
         }
-        // --- slider part (role under a slider parent) ---
-        if world
-            .get::<Parent>(e)
-            .and_then(|p| world.get::<ElementSpec>(p.0))
-            .is_some_and(|ps| ps.slider.is_some())
-        {
-            ui.horizontal(|ui| {
-                ui.label("slider part");
-                let cur = match spec.part {
-                    None => "none",
-                    Some(SliderPart::Fill) => "fill",
-                    Some(SliderPart::Handle) => "handle",
-                };
-                egui::ComboBox::from_id_salt(("ui_part", e.index()))
-                    .selected_text(cur)
-                    .width(90.0)
-                    .show_ui(ui, |ui| {
-                        for (label, v) in [
-                            ("none", None),
-                            ("fill", Some(SliderPart::Fill)),
-                            ("handle", Some(SliderPart::Handle)),
-                        ] {
-                            if ui.selectable_label(cur == label, label).clicked() && spec.part != v
-                            {
-                                spec.part = v;
-                                c = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "fill scales with the parent slider's value; handle rides its position — its authored size is the full-value size",
-                    );
-            });
-        }
-        // --- ✨ effect (a `stage ui` .flsl face drawn over the shape) ---
-        ui.separator();
+    }
+    // --- size (Fixed/Pct simplified to a number + % toggle; Fit/Grow via menu) ---
+    for (axis, label) in [(0usize, "width"), (1usize, "height")] {
         ui.horizontal(|ui| {
-            ui.label("✨ effect");
-            // One-click built-in effects: pick one and it assigns the shader +
-            // resets params to that effect's defaults. "Custom…" keeps whatever is
-            // set (use the picker below); "None" removes the shader.
-            let cur_name = crate::ui_shader_lib::effect_label(&spec.shader);
-            egui::ComboBox::from_id_salt(("ui_effect", e.index()))
-                .selected_text(cur_name)
-                .width(150.0)
+            ui.label(label);
+            let current = spec.size[axis];
+            let kind = match current {
+                Size::Fixed(_) => "px",
+                Size::Pct(_) => "%",
+                Size::Fit => "fit",
+                Size::Grow(_) => "grow",
+            };
+            egui::ComboBox::from_id_salt(("ui_size", e.index(), axis))
+                .selected_text(kind)
+                .width(56.0)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(spec.shader.is_empty(), "None").clicked()
-                        && !spec.shader.is_empty()
-                    {
-                        spec.shader.clear();
-                        spec.shader_params.clear();
-                        c = true;
-                    }
-                    for (label, stem, _) in crate::ui_shader_lib::UI_EFFECTS {
-                        let path = crate::ui_shader_lib::effect_path(stem);
-                        if ui.selectable_label(spec.shader == path, *label).clicked()
-                            && spec.shader != path
+                    for (k, v) in [
+                        ("px", Size::Fixed(100.0)),
+                        ("%", Size::Pct(0.5)),
+                        ("fit", Size::Fit),
+                        ("grow", Size::Grow(1.0)),
+                    ] {
+                        if ui.selectable_label(kind == k, k).clicked()
+                            && std::mem::discriminant(&spec.size[axis])
+                                != std::mem::discriminant(&v)
                         {
-                            spec.shader = path;
-                            spec.shader_params.clear(); // fall back to the effect's defaults
+                            spec.size[axis] = v;
                             c = true;
                         }
                     }
-                })
-                .response
-                .on_hover_text(
-                    "built-in procedural effects (outline, gloss, glow, wobble, …). \
-                     They draw over the element's shape and follow its rounded corners. \
-                     Pick 'Custom' below to point at your own .flsl.",
-                );
+                });
+            match &mut spec.size[axis] {
+                Size::Fixed(v) => c |= ui.add(egui::DragValue::new(v).speed(1.0)).changed(),
+                Size::Pct(v) => {
+                    c |= ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=1.0)).changed()
+                }
+                Size::Grow(v) => c |= ui.add(egui::DragValue::new(v).speed(0.1)).changed(),
+                Size::Fit => {}
+            }
         });
-        // Custom .flsl picker (any stage-ui shader in your assets).
+    }
+    // --- min/max size clamps (0 = unbounded) ---
+    ui.horizontal(|ui| {
+        ui.label("min size").on_hover_text("floor on the resolved size (design units, 0 = none) — keeps %/fit/stretch from collapsing");
+        c |= ui.add(egui::DragValue::new(&mut spec.min_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
+        c |= ui.add(egui::DragValue::new(&mut spec.min_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("max size").on_hover_text("cap on the resolved size (design units, 0 = none) — keeps it from ballooning on huge/ultrawide screens");
+        c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
+        c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+    });
+    ui.horizontal(|ui| {
+        c |= ui
+            .checkbox(&mut spec.toggle, "toggle")
+            .on_hover_text(
+                "clicking flips `selected` — a checkbox, a mute button, a filter chip. \
+                 What ON looks like is your style's `selected` block.",
+            )
+            .changed();
+        ui.label("group").on_hover_text(
+            "radio behaviour: clicking selects this and deselects everything else with \
+             the same group name in this layer. Tabs, difficulty pickers, weapon slots. \
+             Empty = not a group.",
+        );
+        c |= ui.text_edit_singleline(&mut spec.group).changed();
+    });
+    ui.horizontal(|ui| {
+        c |= ui
+            .checkbox(&mut spec.focusable, "focusable")
+            .on_hover_text(
+                "reachable by keyboard and gamepad: a direction press can move the focus \
+                 here, and a submit press fires this element's `clicked` hook. What focus \
+                 LOOKS like is your style's `focus` block — the engine draws no ring.",
+            )
+            .changed();
+        if spec.focusable {
+            let has_nav = spec.nav.is_some();
+            if ui
+                .selectable_label(has_nav, "nav ⏵")
+                .on_hover_text(
+                    "name the element each direction goes to, when the geometry gets it \
+                     wrong (a grid that wraps, a Back button reachable from anywhere). \
+                     Blank = work it out from the solved rects.",
+                )
+                .clicked()
+            {
+                spec.nav = if has_nav { None } else { Some(Default::default()) };
+                c = true;
+            }
+        }
+    });
+    if spec.focusable && let Some(nav) = spec.nav.as_mut() {
+        ui.indent("ui_nav", |ui| {
+            for (label, field) in [
+                ("up", &mut nav.up),
+                ("down", &mut nav.down),
+                ("left", &mut nav.left),
+                ("right", &mut nav.right),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    c |= ui.text_edit_singleline(field).changed();
+                });
+            }
+        });
+    }
+    c
+}
+
+/// Drag and drop, the repeater, and the tooltip. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_interaction_ui(ui: &mut egui::Ui, spec: &mut ElementSpec) -> bool {
+    let mut c = false;
+    // --- drag & drop -----------------------------------------------------
+    ui.horizontal(|ui| {
+        c |= ui
+            .checkbox(&mut spec.draggable, "draggable")
+            .on_hover_text(
+                "can be picked up: fires `dragStart` / `dragMove` / `dropped` (or \
+                 `dragCancel`). The engine does NOT move it and draws no ghost — what a \
+                 drag looks like is your script's, because a card that tilts and an item \
+                 that snaps to a grid are both drags.",
+            )
+            .changed();
+        c |= ui
+            .checkbox(&mut spec.drop_target, "drop target")
+            .on_hover_text(
+                "can receive one: `dragEnter` / `dragOver` / `dragLeave` / `dropped`. \
+                 Read `ui.dragging()` in the hook to see what arrived.",
+            )
+            .changed();
+    });
+    // --- repeater --------------------------------------------------------
+    let mut has_rep = spec.repeater.is_some();
+    if ui
+        .checkbox(&mut has_rep, "repeat a row")
+        .on_hover_text(
+            "keep this element's children matching `count`, one copy of a prefab each. \
+             The engine spawns and destroys only the difference, so a list that gains \
+             a row keeps the others' state. Rows read `node.index`. Runs during Play.",
+        )
+        .changed()
+    {
+        spec.repeater = has_rep.then(floptle_ui::RepeatSpec::default);
+        c = true;
+    }
+    if let Some(r) = &mut spec.repeater {
+        ui.indent("ui_repeat", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("row prefab").on_hover_text("the same name `spawn()` takes");
+                c |= ui.text_edit_singleline(&mut r.template).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("count").on_hover_text(
+                    "usually driven from Lua — `ui.bind(list, \"count\", function() \
+                     return #items end)`",
+                );
+                c |= ui.add(egui::DragValue::new(&mut r.count).speed(0.2).range(0..=4096)).changed();
+            });
+        });
+    }
+    // --- tooltip ---------------------------------------------------------
+    ui.horizontal(|ui| {
+        ui.label("tooltip").on_hover_text(
+            "shown after a moment's hover, in this layer's tooltip element. Empty = none.",
+        );
+        c |= ui.text_edit_singleline(&mut spec.tooltip).changed();
+    });
+    c |= ui
+        .checkbox(&mut spec.tooltip_box, "is this layer's tooltip")
+        .on_hover_text(
+            "this element IS the tooltip: the engine hides it when nothing is hovered, \
+             writes the hovered element's text into its first label, and moves it to \
+             follow the pointer. What it looks like is entirely yours.",
+        )
+        .changed();
+    ui.horizontal(|ui| {
+        ui.label("depth").on_hover_text(
+            "sort key among siblings — lower draws first (further back), and inside a stack \
+             lower comes first in the flow. Ties keep scene order. The ◫ UI tab's outline \
+             drag writes this.",
+        );
+        c |= ui.add(egui::DragValue::new(&mut spec.order).speed(0.2)).changed();
+    });
+    ui.horizontal(|ui| {
+        c |= ui.checkbox(&mut spec.visible, "visible").changed();
+        ui.label("opacity");
+        c |= ui
+            .add(egui::Slider::new(&mut spec.opacity, 0.0..=1.0))
+            .on_hover_text("multiplies this element AND its children — fade a whole menu with one number")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("group tint")
+            .on_hover_text("multiplies every colour in this subtree — damage flashes, disabled washes");
+        c |= ui.color_edit_button_rgba_unmultiplied(&mut spec.tint).changed();
+        if spec.tint != [1.0; 4] && ui.small_button("reset").clicked() {
+            spec.tint = [1.0; 4];
+            c = true;
+        }
+    });
+    c
+}
+
+/// The visual transform, the style sheet entry, and the stack flow. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_look_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, styles: &floptle_ui::StyleSheet) -> bool {
+    let mut c = false;
+    // --- transform (visual only — layout never sees it) ---
+    ui.horizontal(|ui| {
+        ui.label("rotate");
+        c |= ui
+            .add(egui::DragValue::new(&mut spec.rotation).speed(0.5).suffix("°"))
+            .changed();
+        ui.label("scale");
+        c |= ui
+            .add(egui::DragValue::new(&mut spec.scale[0]).speed(0.01).range(0.01..=8.0).prefix("x "))
+            .changed();
+        c |= ui
+            .add(egui::DragValue::new(&mut spec.scale[1]).speed(0.01).range(0.01..=8.0).prefix("y "))
+            .changed();
+    })
+    .response
+    .on_hover_text(
+        "visual only — the element keeps its layout rect, so a hover pop or a press dip \
+         can never shove its siblings around",
+    );
+    if spec.rotation != 0.0 || spec.scale != [1.0, 1.0] {
         ui.horizontal(|ui| {
-            ui.label("  shader");
-            let current = if spec.shader.is_empty() {
-                "(none)".to_string()
+            ui.label("  pivot");
+            c |= ui
+                .add(egui::DragValue::new(&mut spec.pivot[0]).speed(0.01).range(-2.0..=3.0).prefix("x "))
+                .changed();
+            c |= ui
+                .add(egui::DragValue::new(&mut spec.pivot[1]).speed(0.01).range(-2.0..=3.0).prefix("y "))
+                .changed();
+            if ui.small_button("reset").clicked() {
+                spec.rotation = 0.0;
+                spec.scale = [1.0, 1.0];
+                spec.pivot = [0.5, 0.5];
+                c = true;
+            }
+        })
+        .response
+        .on_hover_text("fraction of the element's own rect — 0.5, 0.5 is its centre");
+    }
+    c |= ui
+        .checkbox(&mut spec.button, "button (clickable)")
+        .on_hover_text(
+            "the pointer can hover/press/click this element — its scripts get hoverStart / hoverEnd / pressed / released / clicked hooks.",
+        )
+        .changed();
+    ui.horizontal(|ui| {
+        c |= ui
+            .checkbox(&mut spec.disabled, "disabled")
+            .on_hover_text("stops responding and picks the style's `disabled` block")
+            .changed();
+        c |= ui
+            .checkbox(&mut spec.selected, "selected")
+            .on_hover_text("\"this is the current one\" — a menu cursor, a chosen tab")
+            .changed();
+    });
+    // --- style (at most one; the element's own properties still win) ---
+    ui.horizontal(|ui| {
+        ui.label("style");
+        let current = if spec.style.is_empty() { "(none)" } else { spec.style.as_str() };
+        egui::ComboBox::from_id_salt(("ui_style_pick", e.index()))
+            .selected_text(current)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                let mut none = String::new();
+                if ui.selectable_value(&mut none, String::new(), "(none)").clicked() {
+                    spec.style.clear();
+                    c = true;
+                }
+                for name in styles.styles.keys() {
+                    if ui.selectable_label(&spec.style == name, name).clicked() {
+                        spec.style = name.clone();
+                        c = true;
+                    }
+                }
+            });
+        if !spec.style.is_empty() && styles.get(&spec.style).is_none() {
+            ui.colored_label(egui::Color32::from_rgb(255, 140, 90), "⚠ missing")
+                .on_hover_text(
+                    "no style by that name in any .uistyle.ron — the element keeps \
+                     its authored look",
+                );
+        }
+    })
+    .response
+    .on_hover_text(
+        "one named style from the project's .uistyle.ron files. Whatever the style \
+         doesn't set stays exactly as authored here — no cascade, no specificity.",
+    );
+    if styles.styles.is_empty() {
+        ui.small("no .uistyle.ron in this project yet — styles are how hover/pressed stop being per-button Lua");
+    }
+    // --- stack (opt-in flow) ---
+    let mut has_stack = spec.stack.is_some();
+    if ui
+        .checkbox(&mut has_stack, "stack children")
+        .on_hover_text("opt-in auto-layout: children flow in a row/column with gap + padding")
+        .changed()
+    {
+        spec.stack = has_stack.then(StackCfg::default);
+        c = true;
+    }
+    if let Some(s) = &mut spec.stack {
+        ui.horizontal(|ui| {
+            c |= ui.selectable_value(&mut s.dir, Dir::Row, "row").changed();
+            c |= ui.selectable_value(&mut s.dir, Dir::Column, "column").changed();
+            ui.label("gap");
+            c |= ui.add(egui::DragValue::new(&mut s.gap).speed(0.5)).changed();
+            ui.label("pad");
+            c |= ui.add(egui::DragValue::new(&mut s.pad).speed(0.5)).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("align");
+            for (v, l) in [(Align::Start, "start"), (Align::Center, "center"), (Align::End, "end"), (Align::Stretch, "stretch")] {
+                c |= ui.selectable_value(&mut s.align, v, l).changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("justify");
+            for (v, l) in [(Justify::Start, "start"), (Justify::Center, "center"), (Justify::End, "end"), (Justify::SpaceBetween, "between")] {
+                c |= ui.selectable_value(&mut s.justify, v, l).changed();
+            }
+        });
+    }
+    c
+}
+
+/// The shape: fill, border, corner radius, and shadow. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_shape_ui(ui: &mut egui::Ui, spec: &mut ElementSpec) -> bool {
+    let mut c = false;
+    // --- shape ---
+    let mut has = spec.shape.is_some();
+    if ui.checkbox(&mut has, "shape").changed() {
+        spec.shape = has.then(ShapeSpec::default);
+        c = true;
+    }
+    if let Some(s) = &mut spec.shape {
+        ui.horizontal(|ui| {
+            ui.label("fill");
+            c |= ui.color_edit_button_rgba_unmultiplied(&mut s.fill).changed();
+            // A gradient is one checkbox away from any flat fill, because
+            // "this panel reads as a slab" should be a ten-second fix and
+            // not a reason to go write a `stage ui` shader.
+            let mut on = s.gradient.is_some();
+            if ui
+                .checkbox(&mut on, "gradient")
+                .on_hover_text("fade this fill into a second colour")
+                .changed()
+            {
+                s.gradient = on.then(|| floptle_ui::Gradient {
+                    // Start from the fill, darkened: the element keeps the
+                    // look it already had at one end, so ticking the box
+                    // never throws away what you had.
+                    to: [s.fill[0] * 0.55, s.fill[1] * 0.55, s.fill[2] * 0.55, s.fill[3]],
+                    ..Default::default()
+                });
+                c = true;
+            }
+        });
+        if let Some(g) = &mut s.gradient {
+            ui.horizontal(|ui| {
+                ui.label("  to");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut g.to).changed();
+                egui::ComboBox::from_id_salt("ui_grad_kind")
+                    .selected_text(match g.kind {
+                        floptle_ui::GradientKind::Linear => "linear",
+                        floptle_ui::GradientKind::Radial => "radial",
+                        floptle_ui::GradientKind::Angular => "angular",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (k, label) in [
+                            (floptle_ui::GradientKind::Linear, "linear"),
+                            (floptle_ui::GradientKind::Radial, "radial"),
+                            (floptle_ui::GradientKind::Angular, "angular"),
+                        ] {
+                            c |= ui.selectable_value(&mut g.kind, k, label).changed();
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("  angle");
+                c |= ui
+                    .add(egui::DragValue::new(&mut g.angle).speed(1.0).suffix("°"))
+                    .changed();
+                ui.label("mid");
+                c |= ui
+                    .add(egui::DragValue::new(&mut g.mid).speed(0.01).range(0.0..=1.0))
+                    .on_hover_text("where the two colours meet")
+                    .changed();
+                if g.kind == floptle_ui::GradientKind::Radial {
+                    ui.label("extent");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut g.radius).speed(0.02).range(0.01..=4.0))
+                        .changed();
+                }
+            });
+        }
+        c |= quad_row(ui, "radius", &mut s.radius.0, ["TL", "TR", "BR", "BL"], 512.0, "ui_r");
+        ui.horizontal(|ui| {
+            ui.label("border colour");
+            c |= ui.color_edit_button_rgba_unmultiplied(&mut s.border_color).changed();
+        });
+        c |= quad_row(ui, "border", &mut s.border.0, ["L", "T", "R", "B"], 64.0, "ui_b");
+        // Soft shadow — behind the rect, or inside it.
+        let mut has_shadow = s.shadow.is_some();
+        if ui
+            .checkbox(&mut has_shadow, "shadow")
+            .on_hover_text("a soft shadow behind the panel (or inside it, for a recess)")
+            .changed()
+        {
+            s.shadow = has_shadow.then(floptle_ui::ShadowSpec::default);
+            c = true;
+        }
+        if let Some(sh) = &mut s.shadow {
+            ui.horizontal(|ui| {
+                ui.label("  color");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
+                ui.label("blur");
+                c |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.5).range(0.0..=128.0)).changed();
+                c |= ui
+                    .checkbox(&mut sh.inset, "inset")
+                    .on_hover_text("draw it inside the shape — a recessed well")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("  offset");
+                c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.5).prefix("x ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.5).prefix("y ")).changed();
+                ui.label("spread");
+                c |= ui.add(egui::DragValue::new(&mut sh.spread).speed(0.5).range(0.0..=128.0)).changed();
+            });
+        }
+        // Glow — light spilling out from under the element.
+        let mut has_glow = s.glow.is_some();
+        if ui
+            .checkbox(&mut has_glow, "glow")
+            .on_hover_text("an additive bloom around the element")
+            .changed()
+        {
+            s.glow = has_glow.then(floptle_ui::GlowSpec::default);
+            c = true;
+        }
+        if let Some(g) = &mut s.glow {
+            ui.horizontal(|ui| {
+                ui.label("  color");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut g.color).changed();
+                ui.label("radius");
+                c |= ui.add(egui::DragValue::new(&mut g.radius).speed(0.5).range(0.0..=128.0)).changed();
+                ui.label("spread");
+                c |= ui.add(egui::DragValue::new(&mut g.spread).speed(0.5).range(0.0..=128.0)).changed();
+            });
+        }
+        // Grain — the cheapest thing on this panel, and often the one that
+        // stops a screen looking machine-made.
+        let mut has_grain = s.grain.is_some();
+        if ui
+            .checkbox(&mut has_grain, "grain")
+            .on_hover_text("a little noise over the fill — kills the plastic look")
+            .changed()
+        {
+            s.grain = has_grain.then(floptle_ui::GrainSpec::default);
+            c = true;
+        }
+        if let Some(g) = &mut s.grain {
+            ui.horizontal(|ui| {
+                ui.label("  amount");
+                c |= ui
+                    .add(egui::DragValue::new(&mut g.amount).speed(0.005).range(0.0..=1.0))
+                    .changed();
+                ui.label("cell");
+                c |= ui
+                    .add(egui::DragValue::new(&mut g.scale).speed(0.1).range(1.0..=32.0))
+                    .on_hover_text("noise cell size in px — higher is chunkier")
+                    .changed();
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("blend");
+            egui::ComboBox::from_id_salt("ui_blend")
+                .selected_text(s.blend.label())
+                .show_ui(ui, |ui| {
+                    for b in floptle_ui::Blend::ALL {
+                        c |= ui.selectable_value(&mut s.blend, b, b.label()).changed();
+                    }
+                });
+        });
+    }
+    c
+}
+
+/// The text and, under it, the text field. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_text_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, asset_tree: &[crate::assets::AssetEntry], project_root: &std::path::Path) -> bool {
+    let mut c = false;
+    // --- text ---
+    let mut has = spec.text.is_some();
+    if ui.checkbox(&mut has, "text").changed() {
+        spec.text = has.then(TextSpec::default);
+        c = true;
+    }
+    if let Some(t) = &mut spec.text {
+        c |= ui.text_edit_singleline(&mut t.text).changed();
+        ui.horizontal(|ui| {
+            ui.label("size");
+            ui.add_enabled_ui(!t.fit, |ui| {
+                c |= ui
+                    .add(egui::DragValue::new(&mut t.size).speed(0.5).range(4.0..=256.0))
+                    .changed();
+            });
+            c |= ui
+                .checkbox(&mut t.fit, "fit")
+                .on_hover_text(
+                    "dynamic sizing: the text scales to fill the element's rect (largest size that fits) — size is ignored",
+                )
+                .changed();
+            c |= ui.color_edit_button_rgba_unmultiplied(&mut t.color).changed();
+        });
+        ui.horizontal(|ui| {
+            for (v, l) in [(Align::Start, "left"), (Align::Center, "center"), (Align::End, "right")] {
+                c |= ui.selectable_value(&mut t.align, v, l).changed();
+            }
+            ui.separator();
+            for (v, l) in [(Align::Start, "top"), (Align::Center, "middle"), (Align::End, "bottom")] {
+                c |= ui.selectable_value(&mut t.valign, v, l).changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("font");
+            let current = if t.font.is_empty() {
+                "(default)".to_string()
             } else {
-                spec.shader.rsplit('/').next().unwrap_or(&spec.shader).to_string()
+                t.font.rsplit('/').next().unwrap_or(&t.font).to_string()
             };
             if let Some(pick) = crate::ui_widgets::asset_picker(
                 ui,
-                egui::Id::new(("ui_shader_pick", e.index())),
+                egui::Id::new(("ui_font_pick", e.index())),
+                project_root,
+                &current,
+                Some("(default)"),
+                asset_tree,
+                crate::assets::is_font,
+                170.0,
+            ) {
+                t.font = pick.unwrap_or_default();
+                c = true;
+            }
+        })
+        .response
+        .on_hover_text("any .ttf/.otf in your assets — drop font files into the project and they appear here");
+        ui.horizontal(|ui| {
+            ui.label("tracking");
+            c |= ui
+                .add(egui::DragValue::new(&mut t.tracking).speed(0.05).range(-8.0..=32.0))
+                .on_hover_text("letter spacing — wide tracking is what makes a title look set")
+                .changed();
+            ui.label("line");
+            c |= ui
+                .add(egui::DragValue::new(&mut t.line_height).speed(0.02).range(0.0..=4.0))
+                .on_hover_text("line height multiplier (0 = the font's own metrics)")
+                .changed();
+            egui::ComboBox::from_id_salt("ui_case")
+                .selected_text(match t.case {
+                    floptle_ui::Case::AsIs => "as-is",
+                    floptle_ui::Case::Upper => "UPPER",
+                    floptle_ui::Case::Lower => "lower",
+                    floptle_ui::Case::Title => "Title",
+                })
+                .show_ui(ui, |ui| {
+                    for (v, l) in [
+                        (floptle_ui::Case::AsIs, "as-is"),
+                        (floptle_ui::Case::Upper, "UPPER"),
+                        (floptle_ui::Case::Lower, "lower"),
+                        (floptle_ui::Case::Title, "Title"),
+                    ] {
+                        c |= ui.selectable_value(&mut t.case, v, l).changed();
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            c |= ui
+                .checkbox(&mut t.wrap, "wrap")
+                .on_hover_text("break lines at the element's width")
+                .changed();
+            ui.label("max lines");
+            c |= ui
+                .add(egui::DragValue::new(&mut t.max_lines).speed(0.2).range(0..=64))
+                .on_hover_text("0 = unlimited")
+                .changed();
+            egui::ComboBox::from_id_salt("ui_overflow")
+                .selected_text(match t.overflow {
+                    floptle_ui::Overflow::Show => "show",
+                    floptle_ui::Overflow::Clip => "clip",
+                    floptle_ui::Overflow::Ellipsis => "ellipsis",
+                })
+                .show_ui(ui, |ui| {
+                    for (v, l) in [
+                        (floptle_ui::Overflow::Show, "show"),
+                        (floptle_ui::Overflow::Clip, "clip"),
+                        (floptle_ui::Overflow::Ellipsis, "ellipsis"),
+                    ] {
+                        c |= ui.selectable_value(&mut t.overflow, v, l).changed();
+                    }
+                });
+        });
+        // Outline and shadow: what lets a label survive an arbitrary
+        // background without a panel behind it.
+        let mut has_stroke = t.stroke.is_some();
+        if ui
+            .checkbox(&mut has_stroke, "outline")
+            .on_hover_text("an outline around the glyphs — legibility over anything")
+            .changed()
+        {
+            t.stroke = has_stroke.then(floptle_ui::TextStroke::default);
+            c = true;
+        }
+        if let Some(st) = &mut t.stroke {
+            ui.horizontal(|ui| {
+                ui.label("  color");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut st.color).changed();
+                ui.label("width");
+                c |= ui
+                    .add(egui::DragValue::new(&mut st.width).speed(0.1).range(0.0..=8.0))
+                    .changed();
+            });
+        }
+        let mut has_tsh = t.shadow.is_some();
+        if ui.checkbox(&mut has_tsh, "text shadow").changed() {
+            t.shadow = has_tsh.then(floptle_ui::TextShadow::default);
+            c = true;
+        }
+        if let Some(sh) = &mut t.shadow {
+            ui.horizontal(|ui| {
+                ui.label("  color");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
+                c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.2).prefix("x ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.2).prefix("y ")).changed();
+            });
+        }
+    }
+    // --- text field ---
+    // Lives under `text` because a field's value is its text: everything
+    // above (font, alignment, tracking, stroke, the style's `text_color`)
+    // applies unchanged, and a script reads it the way it reads any label.
+    let mut has_field = spec.field.is_some();
+    if ui
+        .checkbox(&mut has_field, "editable (text field)")
+        .on_hover_text(
+            "the player can type into this element; the value IS its text above. \
+             Implicitly focusable. Fires `changed` and `submitted`.",
+        )
+        .changed()
+    {
+        spec.field = has_field.then(floptle_ui::FieldSpec::default);
+        // A field with no text has nothing to edit and nothing to draw.
+        if spec.field.is_some() {
+            spec.text.get_or_insert_with(TextSpec::default);
+        }
+        c = true;
+    }
+    if let Some(f) = &mut spec.field {
+        ui.indent("ui_field", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("placeholder")
+                    .on_hover_text("shown while empty — never submits, never reads back as a value");
+                c |= ui.text_edit_singleline(&mut f.placeholder).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("max").on_hover_text("cap in CHARACTERS (0 = none)");
+                c |= ui
+                    .add(egui::DragValue::new(&mut f.max_len).speed(0.2).range(0..=1024))
+                    .changed();
+                c |= ui
+                    .checkbox(&mut f.numeric, "numeric")
+                    .on_hover_text("digits, one leading -, one .")
+                    .changed();
+                c |= ui
+                    .checkbox(&mut f.upper, "UPPER")
+                    .on_hover_text("shout as you type — lobby codes, initials, licence keys")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                c |= ui
+                    .checkbox(&mut f.mask, "mask")
+                    .on_hover_text(
+                        "draw every character as a dot. Copy and cut are refused while \
+                         this is on — a password field that fills the clipboard is a bug.",
+                    )
+                    .changed();
+                if f.mask {
+                    let mut s = f.mask_char.to_string();
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut s).desired_width(24.0))
+                        .changed()
+                        && let Some(ch) = s.chars().next()
+                    {
+                        f.mask_char = ch;
+                        c = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("caret");
+                c |= ui.add(egui::DragValue::new(&mut f.caret_width).speed(0.1).range(0.5..=16.0)).changed();
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut f.caret_color).changed();
+                ui.label("sel");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut f.selection_color).changed();
+                ui.label("hint");
+                c |= ui.color_edit_button_rgba_unmultiplied(&mut f.placeholder_color).changed();
+            })
+            .response
+            .on_hover_text(
+                "leave a colour fully transparent and it follows the text colour \
+                 (caret: as-is, selection: 30%, placeholder: 45%). Derived from the design \
+                 you already made, rather than picked by the engine.",
+            );
+        });
+    }
+    c
+}
+
+/// The image: which texture, its grid cell, tint and fit. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_image_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, asset_tree: &[crate::assets::AssetEntry], project_root: &std::path::Path, texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>) -> bool {
+    let mut c = false;
+    // --- image ---
+    let mut has = spec.image.is_some();
+    if ui.checkbox(&mut has, "image").on_hover_text("any texture from your assets — the engine ships no UI art").changed() {
+        spec.image = has.then(ImageSpec::default);
+        c = true;
+    }
+    if let Some(img) = &mut spec.image {
+        ui.horizontal(|ui| {
+            ui.label("texture");
+            let current = if img.texture.is_empty() {
+                "(none)".to_string()
+            } else {
+                img.texture.rsplit('/').next().unwrap_or(&img.texture).to_string()
+            };
+            if let Some(pick) = crate::ui_widgets::asset_picker(
+                ui,
+                egui::Id::new(("ui_tex_pick", e.index())),
                 project_root,
                 &current,
                 Some("(none)"),
                 asset_tree,
-                crate::assets::is_shader,
-                150.0,
+                crate::assets::is_texture,
+                170.0,
             ) {
-                spec.shader = pick.unwrap_or_default();
-                spec.shader_params.clear();
+                let new = pick.unwrap_or_default();
+                // Inherit the texture's spritesheet grid (set in its asset
+                // settings) so a picked sheet slices without extra steps.
+                let (sc, sr) =
+                    crate::assets::tex_setting(texture_settings, project_root, &new).sheet();
+                img.cols = sc;
+                img.rows = sr;
+                img.cell = 0;
+                img.texture = new;
                 c = true;
             }
         });
-        // Live params for the assigned shader (compile error surfaced in red).
-        if !spec.shader.is_empty() {
-            if let Some(entry) = ui_flsl_cache.get(&spec.shader) {
-                if let Some(err) = &entry.error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), format!("⚠ {err}"));
-                }
-                if let Some((compiled, _)) = &entry.compiled {
-                    if compiled.uniforms.is_empty() {
-                        ui.small("this shader exposes no parameters");
-                    } else {
-                        egui::Grid::new(("ui_shader_params", e.index()))
-                            .num_columns(2)
-                            .spacing([8.0, 4.0])
-                            .show(ui, |ui| {
-                                c |= crate::inspector::shader_uniform_rows(
-                                    ui,
-                                    &compiled.uniforms,
-                                    &mut spec.shader_params,
-                                );
-                            });
-                    }
-                }
-            } else {
-                ui.small("compiling…");
-            }
-        }
-        // --- scroll view (children shift by the wheel + clip to this rect) ---
-        let mut has = spec.scroll.is_some();
-        if ui
-            .checkbox(&mut has, "scroll view")
-            .on_hover_text(
-                "children keep their authored layout but scroll vertically with the wheel (clipped to this element's rect) — put more content inside than fits and it just works; scripts read/write UiElement.scrollY",
-            )
-            .changed()
-        {
-            spec.scroll = has.then(floptle_ui::ScrollSpec::default);
+        // --- spritesheet cell picker (when the texture is a sheet) ---
+        let (sc, sr) =
+            crate::assets::tex_setting(texture_settings, project_root, &img.texture).sheet();
+        // Keep the image's grid in sync if the asset's split changed.
+        if (img.cols, img.rows) != (sc, sr) {
+            img.cols = sc;
+            img.rows = sr;
+            img.cell = img.cell.min((sc * sr).saturating_sub(1));
             c = true;
         }
-        if let Some(sc) = &mut spec.scroll {
-            ui.horizontal(|ui| {
-                ui.label("wheel speed");
-                c |= ui
-                    .add(egui::DragValue::new(&mut sc.speed).range(4.0..=400.0))
-                    .on_hover_text("design units per wheel notch")
-                    .changed();
-                c |= ui
-                    .checkbox(&mut sc.drag, "drag to scroll")
-                    .on_hover_text(
-                        "dragging the background pans the content. Off by default: in a view \
-                         full of buttons a drag that scrolled would fight every press",
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("offset").on_hover_text(
-                    "current scroll position in design units. Both axes scroll — the wheel \
-                     drives whichever one has travel (shift forces sideways)",
-                );
-                c |= ui.add(egui::DragValue::new(&mut sc.offset_x).prefix("x ")).changed();
-                c |= ui.add(egui::DragValue::new(&mut sc.offset).prefix("y ")).changed();
-            });
-        }
-        // --- scrollbar (drives a named scroll view; your two elements) ---
-        let mut has = spec.scrollbar.is_some();
-        if ui
-            .checkbox(&mut has, "scrollbar")
-            .on_hover_text(
-                "this element becomes a scrollbar TRACK for a named scroll view, and its \
-                 `part: Handle` child becomes the thumb — sized to how much of the content \
-                 is visible. The engine draws no scrollbar of its own; these are your two \
-                 elements, styled however you like",
-            )
-            .changed()
-        {
-            spec.scrollbar = has.then(floptle_ui::ScrollBar::default);
-            c = true;
-        }
-        if let Some(sb) = &mut spec.scrollbar {
-            ui.horizontal(|ui| {
-                ui.label("drives");
-                c |= ui
-                    .text_edit_singleline(&mut sb.target)
-                    .on_hover_text("the scroll view's node name, within this layer")
-                    .changed();
-                let vertical = sb.axis == floptle_ui::Dir::Column;
-                let mut v = vertical;
-                if ui.selectable_label(v, "↕").on_hover_text("vertical").clicked() {
-                    v = true;
-                }
-                if ui.selectable_label(!v, "↔").on_hover_text("horizontal").clicked() {
-                    v = false;
-                }
-                if v != vertical {
-                    sb.axis =
-                        if v { floptle_ui::Dir::Column } else { floptle_ui::Dir::Row };
-                    c = true;
-                }
-            });
-        }
-        // --- mask (clip other elements to this element's rounded rect) ---
-        let mut has = spec.mask.is_some();
-        if ui
-            .checkbox(&mut has, "mask")
-            .on_hover_text(
-                "clip the chosen elements (and everything inside them) to this element's rounded rect — pick targets by node name below",
-            )
-            .changed()
-        {
-            spec.mask = has.then(MaskSpec::default);
-            c = true;
-        }
-        if let Some(mask) = &mut spec.mask {
-            // Candidates: every UI element node's name (this element excluded —
-            // masking yourself is targeting your own name, allowed via Other).
-            let mut names: Vec<String> = world
-                .query::<ElementSpec>()
-                .filter_map(|(oe, _)| world.get::<floptle_core::Name>(oe).map(|n| n.0.clone()))
-                .collect();
-            names.sort();
-            names.dedup();
-            let mut remove: Option<usize> = None;
-            for (i, target) in mask.targets.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.button("✖").on_hover_text("remove this target").clicked() {
-                        remove = Some(i);
-                    }
-                    if let Some(pick) = crate::ui_widgets::searchable_picker(
-                        ui,
-                        egui::Id::new(("ui_mask_target", e.index(), i)),
-                        if target.is_empty() { "(pick element)" } else { target },
-                        None,
-                        &names,
-                        170.0,
-                    ) {
-                        *target = pick.unwrap_or_default();
-                        c = true;
-                    }
-                    // Conflict: the first mask in scene order claiming a name
-                    // wins — warn when that isn't this one.
-                    if !target.is_empty() {
-                        let winner = world
-                            .query::<ElementSpec>()
-                            .find(|(_, os)| {
-                                os.mask.as_ref().is_some_and(|m| m.targets.contains(target))
-                            })
-                            .map(|(oe, _)| oe);
-                        if let Some(w) = winner
-                            && w != e
-                        {
-                            let wname = world
-                                .get::<floptle_core::Name>(w)
-                                .map(|n| n.0.clone())
-                                .unwrap_or_default();
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
-                                "⚠",
-                            )
-                            .on_hover_text(format!(
-                                "'{wname}' (earlier in the scene) also masks this element                                  — the earliest mask wins"
-                            ));
-                        }
+        c |= crate::ui_widgets::sheet_cell_picker(
+            ui,
+            egui::Id::new(("cells", e.index())),
+            &img.texture,
+            sc,
+            sr,
+            &mut img.cell,
+        );
+        ui.horizontal(|ui| {
+            ui.label("tint");
+            c |= ui.color_edit_button_rgba_unmultiplied(&mut img.tint).changed();
+            ui.label("fit");
+            egui::ComboBox::from_id_salt("ui_img_fit")
+                .selected_text(match img.fit {
+                    floptle_ui::ImageFit::Stretch => "stretch",
+                    floptle_ui::ImageFit::Contain => "contain",
+                    floptle_ui::ImageFit::Cover => "cover",
+                })
+                .show_ui(ui, |ui| {
+                    for (v, l, tip) in [
+                        (floptle_ui::ImageFit::Stretch, "stretch", "fill the rect, ignore aspect"),
+                        (floptle_ui::ImageFit::Contain, "contain", "fit inside, letterboxed"),
+                        (floptle_ui::ImageFit::Cover, "cover", "fill the rect, crop the overflow"),
+                    ] {
+                        c |= ui.selectable_value(&mut img.fit, v, l).on_hover_text(tip).changed();
                     }
                 });
-            }
-            if let Some(i) = remove {
-                mask.targets.remove(i);
-                c = true;
-            }
-            if ui.button("✚ add target").clicked() {
-                mask.targets.push(String::new());
-                c = true;
-            }
+        });
+        // 9-slice: the thing that makes your panel art usable at any size.
+        let mut sliced = img.slice.iter().any(|v| *v > 0.0);
+        if ui
+            .checkbox(&mut sliced, "9-slice")
+            .on_hover_text(
+                "keep the corners unstretched and stretch only the edges and middle — \
+                 how one small frame texture dresses a panel at any size",
+            )
+            .changed()
+        {
+            // A sensible starting frame beats four zeroes: ticking the box
+            // should show you the effect, not nothing.
+            img.slice = if sliced { [0.25; 4] } else { [0.0; 4] };
+            c = true;
         }
-        if c {
-            world.insert(e, spec);
+        if sliced {
+            c |= quad_row(
+                ui,
+                "  insets",
+                &mut img.slice,
+                ["L", "T", "R", "B"],
+                0.49,
+                "ui_slice",
+            );
+            ui.small("fractions of the image — 0.25 means the outer quarter is the frame");
         }
-        changed || c
+        ui.horizontal(|ui| {
+            ui.label("tiling");
+            c |= ui
+                .add(egui::DragValue::new(&mut img.tiling[0]).speed(0.05).range(0.01..=64.0).prefix("x "))
+                .changed();
+            c |= ui
+                .add(egui::DragValue::new(&mut img.tiling[1]).speed(0.05).range(0.01..=64.0).prefix("y "))
+                .changed();
+            ui.label("offset");
+            c |= ui.add(egui::DragValue::new(&mut img.offset[0]).speed(0.01).prefix("u ")).changed();
+            c |= ui.add(egui::DragValue::new(&mut img.offset[1]).speed(0.01).prefix("v ")).changed();
+        })
+        .response
+        .on_hover_text("repeat the image across the rect; animate the offset to scroll it");
     }
+    c
+}
+
+/// The slider track, and the part role when the parent is a slider. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_slider_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, world: &floptle_core::World) -> bool {
+    let mut c = false;
+    // --- slider (value-driven bar: this element is the track) ---
+    let mut has = spec.slider.is_some();
+    if ui
+        .checkbox(&mut has, "slider")
+        .on_hover_text(
+            "value-driven bar (health, progress…): child elements marked as Fill scale with the value, Handle children ride its position — the parts stay ordinary elements you retexture and arrange freely",
+        )
+        .changed()
+    {
+        spec.slider = has.then(SliderSpec::default);
+        c = true;
+    }
+    if let Some(s) = &mut spec.slider {
+        ui.horizontal(|ui| {
+            ui.label("value");
+            let lo = s.min.min(s.max);
+            let hi = s.max.max(s.min);
+            c |= ui.add(egui::Slider::new(&mut s.value, lo..=hi)).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("min");
+            c |= ui.add(egui::DragValue::new(&mut s.min).speed(1.0)).changed();
+            ui.label("max");
+            c |= ui.add(egui::DragValue::new(&mut s.max).speed(1.0)).changed();
+            c |= ui.selectable_value(&mut s.dir, Dir::Row, "↔").on_hover_text("horizontal").changed();
+            c |= ui.selectable_value(&mut s.dir, Dir::Column, "↕").on_hover_text("vertical").changed();
+            c |= ui
+                .checkbox(&mut s.flip, "flip")
+                .on_hover_text("the handle rides from the far end back toward the start")
+                .changed();
+            c |= ui
+                .checkbox(&mut s.interact, "draggable")
+                .on_hover_text(
+                    "the player can click/drag the track to set the value (settings sliders); off = display-only (health bars)",
+                )
+                .changed();
+        });
+    }
+    // --- slider part (role under a slider parent) ---
+    if world
+        .get::<Parent>(e)
+        .and_then(|p| world.get::<ElementSpec>(p.0))
+        .is_some_and(|ps| ps.slider.is_some())
+    {
+        ui.horizontal(|ui| {
+            ui.label("slider part");
+            let cur = match spec.part {
+                None => "none",
+                Some(SliderPart::Fill) => "fill",
+                Some(SliderPart::Handle) => "handle",
+            };
+            egui::ComboBox::from_id_salt(("ui_part", e.index()))
+                .selected_text(cur)
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for (label, v) in [
+                        ("none", None),
+                        ("fill", Some(SliderPart::Fill)),
+                        ("handle", Some(SliderPart::Handle)),
+                    ] {
+                        if ui.selectable_label(cur == label, label).clicked() && spec.part != v
+                        {
+                            spec.part = v;
+                            c = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "fill scales with the parent slider's value; handle rides its position — its authored size is the full-value size",
+                );
+        });
+    }
+    c
+}
+
+/// The ✨ effect: a `stage ui` .flsl face and its live params. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_effect_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, asset_tree: &[crate::assets::AssetEntry], project_root: &std::path::Path, ui_flsl_cache: &crate::shaders::UiFlslCache) -> bool {
+    let mut c = false;
+    // --- ✨ effect (a `stage ui` .flsl face drawn over the shape) ---
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("✨ effect");
+        // One-click built-in effects: pick one and it assigns the shader +
+        // resets params to that effect's defaults. "Custom…" keeps whatever is
+        // set (use the picker below); "None" removes the shader.
+        let cur_name = crate::ui_shader_lib::effect_label(&spec.shader);
+        egui::ComboBox::from_id_salt(("ui_effect", e.index()))
+            .selected_text(cur_name)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(spec.shader.is_empty(), "None").clicked()
+                    && !spec.shader.is_empty()
+                {
+                    spec.shader.clear();
+                    spec.shader_params.clear();
+                    c = true;
+                }
+                for (label, stem, _) in crate::ui_shader_lib::UI_EFFECTS {
+                    let path = crate::ui_shader_lib::effect_path(stem);
+                    if ui.selectable_label(spec.shader == path, *label).clicked()
+                        && spec.shader != path
+                    {
+                        spec.shader = path;
+                        spec.shader_params.clear(); // fall back to the effect's defaults
+                        c = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "built-in procedural effects (outline, gloss, glow, wobble, …). \
+                 They draw over the element's shape and follow its rounded corners. \
+                 Pick 'Custom' below to point at your own .flsl.",
+            );
+    });
+    // Custom .flsl picker (any stage-ui shader in your assets).
+    ui.horizontal(|ui| {
+        ui.label("  shader");
+        let current = if spec.shader.is_empty() {
+            "(none)".to_string()
+        } else {
+            spec.shader.rsplit('/').next().unwrap_or(&spec.shader).to_string()
+        };
+        if let Some(pick) = crate::ui_widgets::asset_picker(
+            ui,
+            egui::Id::new(("ui_shader_pick", e.index())),
+            project_root,
+            &current,
+            Some("(none)"),
+            asset_tree,
+            crate::assets::is_shader,
+            150.0,
+        ) {
+            spec.shader = pick.unwrap_or_default();
+            spec.shader_params.clear();
+            c = true;
+        }
+    });
+    // Live params for the assigned shader (compile error surfaced in red).
+    if !spec.shader.is_empty() {
+        if let Some(entry) = ui_flsl_cache.get(&spec.shader) {
+            if let Some(err) = &entry.error {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 110), format!("⚠ {err}"));
+            }
+            if let Some((compiled, _)) = &entry.compiled {
+                if compiled.uniforms.is_empty() {
+                    ui.small("this shader exposes no parameters");
+                } else {
+                    egui::Grid::new(("ui_shader_params", e.index()))
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            c |= crate::inspector::shader_uniform_rows(
+                                ui,
+                                &compiled.uniforms,
+                                &mut spec.shader_params,
+                            );
+                        });
+                }
+            }
+        } else {
+            ui.small("compiling…");
+        }
+    }
+    c
+}
+
+/// Scroll view, scrollbar, and mask. Returns true when something changed.
+#[cfg(feature = "editor-ui")]
+fn spec_clip_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, world: &floptle_core::World) -> bool {
+    let mut c = false;
+    // --- scroll view (children shift by the wheel + clip to this rect) ---
+    let mut has = spec.scroll.is_some();
+    if ui
+        .checkbox(&mut has, "scroll view")
+        .on_hover_text(
+            "children keep their authored layout but scroll vertically with the wheel (clipped to this element's rect) — put more content inside than fits and it just works; scripts read/write UiElement.scrollY",
+        )
+        .changed()
+    {
+        spec.scroll = has.then(floptle_ui::ScrollSpec::default);
+        c = true;
+    }
+    if let Some(sc) = &mut spec.scroll {
+        ui.horizontal(|ui| {
+            ui.label("wheel speed");
+            c |= ui
+                .add(egui::DragValue::new(&mut sc.speed).range(4.0..=400.0))
+                .on_hover_text("design units per wheel notch")
+                .changed();
+            c |= ui
+                .checkbox(&mut sc.drag, "drag to scroll")
+                .on_hover_text(
+                    "dragging the background pans the content. Off by default: in a view \
+                     full of buttons a drag that scrolled would fight every press",
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("offset").on_hover_text(
+                "current scroll position in design units. Both axes scroll — the wheel \
+                 drives whichever one has travel (shift forces sideways)",
+            );
+            c |= ui.add(egui::DragValue::new(&mut sc.offset_x).prefix("x ")).changed();
+            c |= ui.add(egui::DragValue::new(&mut sc.offset).prefix("y ")).changed();
+        });
+    }
+    // --- scrollbar (drives a named scroll view; your two elements) ---
+    let mut has = spec.scrollbar.is_some();
+    if ui
+        .checkbox(&mut has, "scrollbar")
+        .on_hover_text(
+            "this element becomes a scrollbar TRACK for a named scroll view, and its \
+             `part: Handle` child becomes the thumb — sized to how much of the content \
+             is visible. The engine draws no scrollbar of its own; these are your two \
+             elements, styled however you like",
+        )
+        .changed()
+    {
+        spec.scrollbar = has.then(floptle_ui::ScrollBar::default);
+        c = true;
+    }
+    if let Some(sb) = &mut spec.scrollbar {
+        ui.horizontal(|ui| {
+            ui.label("drives");
+            c |= ui
+                .text_edit_singleline(&mut sb.target)
+                .on_hover_text("the scroll view's node name, within this layer")
+                .changed();
+            let vertical = sb.axis == floptle_ui::Dir::Column;
+            let mut v = vertical;
+            if ui.selectable_label(v, "↕").on_hover_text("vertical").clicked() {
+                v = true;
+            }
+            if ui.selectable_label(!v, "↔").on_hover_text("horizontal").clicked() {
+                v = false;
+            }
+            if v != vertical {
+                sb.axis =
+                    if v { floptle_ui::Dir::Column } else { floptle_ui::Dir::Row };
+                c = true;
+            }
+        });
+    }
+    // --- mask (clip other elements to this element's rounded rect) ---
+    let mut has = spec.mask.is_some();
+    if ui
+        .checkbox(&mut has, "mask")
+        .on_hover_text(
+            "clip the chosen elements (and everything inside them) to this element's rounded rect — pick targets by node name below",
+        )
+        .changed()
+    {
+        spec.mask = has.then(MaskSpec::default);
+        c = true;
+    }
+    if let Some(mask) = &mut spec.mask {
+        // Candidates: every UI element node's name (this element excluded —
+        // masking yourself is targeting your own name, allowed via Other).
+        let mut names: Vec<String> = world
+            .query::<ElementSpec>()
+            .filter_map(|(oe, _)| world.get::<floptle_core::Name>(oe).map(|n| n.0.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        let mut remove: Option<usize> = None;
+        for (i, target) in mask.targets.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                if ui.button("✖").on_hover_text("remove this target").clicked() {
+                    remove = Some(i);
+                }
+                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                    ui,
+                    egui::Id::new(("ui_mask_target", e.index(), i)),
+                    if target.is_empty() { "(pick element)" } else { target },
+                    None,
+                    &names,
+                    170.0,
+                ) {
+                    *target = pick.unwrap_or_default();
+                    c = true;
+                }
+                // Conflict: the first mask in scene order claiming a name
+                // wins — warn when that isn't this one.
+                if !target.is_empty() {
+                    let winner = world
+                        .query::<ElementSpec>()
+                        .find(|(_, os)| {
+                            os.mask.as_ref().is_some_and(|m| m.targets.contains(target))
+                        })
+                        .map(|(oe, _)| oe);
+                    if let Some(w) = winner
+                        && w != e
+                    {
+                        let wname = world
+                            .get::<floptle_core::Name>(w)
+                            .map(|n| n.0.clone())
+                            .unwrap_or_default();
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "⚠",
+                        )
+                        .on_hover_text(format!(
+                            "'{wname}' (earlier in the scene) also masks this element                                  — the earliest mask wins"
+                        ));
+                    }
+                }
+            });
+        }
+        if let Some(i) = remove {
+            mask.targets.remove(i);
+            c = true;
+        }
+        if ui.button("✚ add target").clicked() {
+            mask.targets.push(String::new());
+            c = true;
+        }
+    }
+    c
 }
 
 #[cfg(test)]
