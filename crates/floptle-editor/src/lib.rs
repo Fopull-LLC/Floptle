@@ -1998,8 +1998,8 @@ struct Editor {
     ext_mirror_selection: usize,
     /// The last grid built for each tilemap node, so a scene revision bump
     /// from something ELSE in the level does not cost a copy of a map that
-    /// has not itself changed (the same fix an earlier task
-    /// made for the game-script mirror). Survives a mirror rebuild — the
+    /// has not itself changed (the same fix the game-script mirror has).
+    /// Survives a mirror rebuild — the
     /// mirror itself is rebuilt fresh every time; this is what it reuses
     /// from. Pruned in `Editor::fill_mirror_tilemaps` so a despawned map's
     /// buffer is not held forever.
@@ -3334,13 +3334,11 @@ struct Editor {
     /// second, so more than one means a script or a hand-edited scene made it —
     /// and then "the" ambient a script writes and "the" ambient the renderer
     /// reads are whichever the ECS yielded first, which is precisely the
-    /// order-dependence an earlier task just finished taking out of the light
-    /// list. Nothing is guessed on the game's behalf; it is told.
+    /// order-dependence the light list no longer has. Nothing is guessed on the game's behalf; it is told.
     lighting_nodes_warned: usize,
     /// How many point lights the last warning was about, so a scene past the
     /// sixteen-light cap says so once per count rather than every frame — the
-    /// same latch as `lighting_nodes_warned` just above, for the cap
-    /// an earlier task/an earlier task are both about. Reset to `0` once the
+    /// same latch as `lighting_nodes_warned` just above, for the cap. Reset to `0` once the
     /// scene drops back under the cap, so going over it again re-warns.
     lights_dropped_warned: usize,
     /// The `frame_no` the light-cap check last ran for. `render_world_into`

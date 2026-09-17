@@ -41,7 +41,7 @@ use mlua::{Lua, Table, Value};
 use crate::{LogLevel, ScriptLog};
 
 /// Every key `voice.attach` / `voice.source(...)` options tables read
-/// (an earlier task — a misspelled option must not silently do nothing).
+/// (a misspelled option must not silently do nothing).
 pub(crate) const ATTACH_KEYS: &[&str] =
     &["mode", "falloff", "minDistance", "maxDistance", "volume", "track"];
 

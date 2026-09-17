@@ -2261,8 +2261,8 @@ mod tests {
     /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
     /// blend interpolates. This is the math that makes a vertex-skinned mesh animate.
-    /// The CPU skinning cost, at a stated character count — the "before" number
-    /// for an earlier task, kept because it is still the FALLBACK path's cost.
+    /// The CPU skinning cost, at a stated character count: still the fallback
+    /// path's cost.
     ///
     /// Nothing draws through this any more unless the skinning store refused the
     /// part or a custom `.flsl` material owns the draw. The number below is what
@@ -2328,7 +2328,7 @@ mod tests {
         assert!(!out.is_empty());
     }
 
-    /// The after number for an earlier task, as a ratio rather than a duration.
+    /// GPU skinning's cost against CPU skinning, as a ratio rather than a duration.
     ///
     /// Moving the deform to the vertex shader does not make the CPU's share
     /// *zero* — every skinned draw still builds a bone palette, one

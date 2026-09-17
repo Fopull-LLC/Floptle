@@ -410,8 +410,8 @@ mod tests {
     /// While off, times read as ABSENT rather than zero — so a smoke test
     /// asserting a budget cannot pass because nothing was measured.
     ///
-    /// This is the task's own API held to an earlier task: the failure mode being
-    /// designed out is a number that means "no data" and looks like "free".
+    /// The failure mode designed out here is a number that means "no data"
+    /// and looks like "free".
     #[test]
     fn a_disabled_profile_answers_nothing_rather_than_zero() {
         let mut p = FrameProfile::default();

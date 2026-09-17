@@ -2251,7 +2251,7 @@ pub(crate) fn apply_rich_sets(
             RichSet::MatterSpriteBatch { size } => {
                 world.insert(e, Matter::SpriteBatch { size: size.max(1e-4) });
             }
-            // an earlier task. Absent = the default layer at order 0, which is
+            // Absent = the default layer at order 0, which is
             // also how the component is stored: a node back at the default
             // carries no Sorting at all, so its scene mentions none.
             RichSet::MatterSorting { layer, order, mode } => {
@@ -2406,7 +2406,7 @@ pub(crate) fn apply_rich_sets(
                 c.shake(amount, seconds);
                 world.insert(e, c);
             }
-            // an earlier task. Same rule: `auto` with no layer list IS the
+            // Same rule: `auto` with no layer list is the
             // default, so a node put back to it stops carrying the component and
             // its scene stops mentioning 2D lighting.
             RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows } => {
@@ -2443,7 +2443,7 @@ pub(crate) fn apply_rich_sets(
                     }
                 }
             }
-            // an earlier task. Omitted fields keep what the node had, so this is
+            // Omitted fields keep what the node had, so this is
             // both "make a light" and "retune this one"; a node that was not a
             // light yet starts from the same defaults the editor's Add gives.
             RichSet::MatterPointLight { color, intensity, range } => {
@@ -2687,8 +2687,8 @@ pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
 /// `flipY` is here even though there is no vertical-mirror bit, because it is
 /// what somebody will write. It composes to `flipX` plus a half-turn — the eight
 /// orientations are the square's symmetries and a vertical mirror is one of them,
-/// just not an independent one. Refusing it would be pedantry; silently ignoring
-/// it would be an earlier task all over again. See `floptle_core::TileXform`.
+/// just not an independent one. Refusing it would be pedantry; silently
+/// ignoring it would be a typo that does nothing. See `floptle_core::TileXform`.
 pub(crate) const TILE_XFORM_KEYS: &[&str] = &["rot", "flipX", "flipY"];
 
 /// Every key `tm:resize{...}` reads.
@@ -5564,8 +5564,8 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                     Some(list) => {
                         let mut v = Vec::with_capacity(list.raw_len());
                         for i in 1..=list.raw_len() {
-                            // Lua is 1-based; a nil hole — and, since
-                            // an earlier task, any negative — is an empty tile.
+                            // Lua is 1-based; a nil hole, and any negative,
+                            // is an empty tile.
                             v.push(tile_cell(&list.raw_get::<Value>(i)?)?);
                         }
                         v
@@ -5805,8 +5805,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 let e: u32 = this.raw_get("__id")?;
                 crate::opts::check_keys(&t, LIGHTING_2D_KEYS, "node:setLighting2D")?;
                 // Both enums answer through their own parsers, so a typo
-                // names the accepted set instead of silently meaning `auto`
-                // — the exact bug an earlier task was filed for.
+                // names the accepted set instead of silently meaning `auto`.
                 let mode = match t.get::<Option<String>>("mode")? {
                     None => None,
                     Some(s) => Some(floptle_core::Lit2D::parse(&s).ok_or_else(|| {

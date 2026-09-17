@@ -16,7 +16,7 @@ use floptle_script::{NetCmd, NetRoleState, NetState};
 use crate::{anim, Editor};
 
 /// Line of sight against the level, for interest management
-/// (`net.host{ interestOcclusion = "Level" }`, an earlier task).
+/// (`net.host{ interestOcclusion = "Level" }`).
 ///
 /// The ray stops a hair short of the target: a node standing on the floor, or
 /// with a collider of its own, would otherwise be blocked by the very surface

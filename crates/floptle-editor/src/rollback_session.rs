@@ -43,7 +43,7 @@ use crate::Editor;
 /// A free function, like [`crate::net::plan_client_side`] and for the same
 /// reason: the sequence that produces this state spans a scene switch, a
 /// client-side setup and a rollback start, and it cannot be driven through an
-/// `Editor` in a test. an earlier task is what that costs.
+/// `Editor` in a test.
 pub(crate) fn orphaned_rollback_nodes(
     reps: &[(floptle_core::Entity, bool)],
     driven: &std::collections::HashSet<u32>,
@@ -194,7 +194,7 @@ impl Editor {
         // which no driver replays, and nothing else ever removes them. The
         // fight then runs normally (the driver bypasses filters) while the
         // cosmetic pass is silently dead on the client only — which is why
-        // an earlier task looked fixed from the host and was reported three times.
+        // this looked fixed from the host and was reported three times.
         self.script_host.shrink_filters(d.eids());
         self.script_host.extend_filters(d.eids());
         // And tell the SESSION which nodes the driver owns, so its snapshot
@@ -349,7 +349,7 @@ impl Editor {
     /// The refusal is correct. Reaching this code at all is not: it means the
     /// ingest guard let a sample through, which means the two answers to "is
     /// this node locally driven" disagreed at the moment it arrived. This is
-    /// the detector an earlier task asked for, and it fires on the machine that
+    /// the detector for that, and it fires on the machine that
     /// has the problem, while it has it.
     pub(crate) fn net_report_driven_drops(&mut self) {
         let mut drops: Vec<(u32, u64)> = Vec::new();
@@ -742,7 +742,7 @@ impl Editor {
         // return, deliberately. An exit that skips the restore DROPS the driver
         // — and a dropped driver leaves its fighters in the script filters with
         // nothing running them, for the rest of the match, with no error. That
-        // is an earlier task: the fighters ticked exactly once, then the driver
+        // is a match that freezes: the fighters ticked exactly once, then the driver
         // fell out of the editor at the end of its own first tick. If you need
         // to bail below, set a flag and bail after the restore.
         let step = self.game_tick.step;
@@ -821,7 +821,7 @@ impl Editor {
     /// simply never ticks. Its scripts' state stays at whatever the loader left
     /// it, cross-script calls into it read `nil` forever, and nothing anywhere
     /// says why. That is a match that looks frozen with a clean console — the
-    /// state an earlier task was reported in.
+    /// state such a match is reported in.
     ///
     /// Checked once per session rather than per tick: the condition is
     /// structural, so repeating it sixty times a second would only bury it.
@@ -1100,7 +1100,7 @@ pub(crate) struct RollbackStats {
     /// Per peer: `(peer, their reported frontier, applied ticks we are still
     /// holding for them)`. Empty on a client, which only knows about itself.
     ///
-    /// This is the readout an earlier task cost a replay-file autopsy for want of.
+    /// This readout replaces a replay-file autopsy.
     /// A peer whose frontier has stopped moving while its backlog grows is the
     /// starved one, and it says so on the host's screen the moment it happens.
     pub peers: Vec<(floptle_net::PeerId, u64, usize)>,
@@ -1297,7 +1297,7 @@ mod tests {
     /// without a live `Editor`, and the cost of missing it is not a crash but
     /// silence: the fighters keep their place in the script filters, nothing
     /// runs them, and the match freezes with a clean console. That is exactly
-    /// how an earlier task shipped — a `return` was not added, a re-`take()` was,
+    /// how the freeze once shipped — a `return` was not added, a re-`take()` was,
     /// and the single restore that used to follow it went away in the edit.
     #[test]
     fn the_rollback_tick_always_puts_its_driver_back() {

@@ -46,8 +46,7 @@ fn a_menu_opens_showing_the_settings_the_game_actually_has() {
 /// are not things a Lua call can touch — so if `app.vsync()` answered the
 /// old value until then, every control in a Video tab would snap back to its
 /// previous position for a frame after being clicked. That reads as a
-/// control that did not work, which is the whole failure an earlier task is
-/// about (that task's lesson, one layer up).
+/// control that did not work.
 #[test]
 fn a_settings_menu_reads_back_what_it_just_set() {
     let dir = std::env::temp_dir().join("floptle_script_test_app_settings");

@@ -287,7 +287,7 @@ impl crate::Editor {
     ///
     /// A mesh file is one part at identity — what scatter has always drawn. A
     /// **prefab** is each of its `Mesh` nodes at its authored place inside the
-    /// prop, which is the point of an earlier task: a game whose props are
+    /// prop, which is the point: a game whose props are
     /// generated (Solar's plants are a trunk and a handful of fronds, assembled
     /// by a script) had nothing to hand scatter, because scatter took a file
     /// path and a plant is not a file.

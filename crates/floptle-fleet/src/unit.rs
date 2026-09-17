@@ -2,8 +2,8 @@
 //!
 //! ## Why systemd rather than child processes
 //!
-//! an earlier task asks for "a separate unprivileged systemd unit per deployment
-//! with the plan's memory cap". That is not only a packaging preference: the
+//! Each deployment is a separate unprivileged systemd unit with the plan's
+//! memory cap. That is not only a packaging preference: the
 //! memory cap, the CPU quota and the restart backoff are all things systemd
 //! already does correctly, per-unit, in the kernel — and a cap the agent
 //! enforced itself would be a cap that vanished the moment the agent was
@@ -162,8 +162,8 @@ pub fn render(plan: &UnitPlan<'_>) -> String {
         s.push_str(&format!("CPUQuota={pct}%\n"));
     }
 
-    // Restart with backoff, which is what an earlier task asks for and what
-    // systemd does better than a loop in this agent would. The burst limit is
+    // Restart with backoff, which systemd does better than a loop in this
+    // agent would. The burst limit is
     // deliberately not `always`: a build that cannot start must eventually stop
     // trying and sit in `failed`, where the agent reports it and a developer
     // sees a reason, rather than restarting forever and filling the journal
@@ -315,9 +315,9 @@ mod tests {
 
     /// **The status file is in a directory the server's own user owns.**
     ///
-    /// an earlier task, defect one: the server runs `DynamicUser=yes` under
-    /// `ProtectSystem=strict`, and the file used to be pointed at the AGENT's
-    /// runtime directory — root-owned, `0755` — so it was never written, and
+    /// The server runs `DynamicUser=yes` under `ProtectSystem=strict`; a file
+    /// pointed at the agent's runtime directory — root-owned, `0755` — is never
+    /// written, and
     /// every deployment reported zero players, zero uptime and no lobby code
     /// forever. The portal showed a running server nobody could join. The unit
     /// now declares its own `RuntimeDirectory=`, which systemd creates owned by
@@ -340,7 +340,7 @@ mod tests {
 
     /// **`StartLimitIntervalSec` and `StartLimitBurst` are `[Unit]` keys.**
     ///
-    /// an earlier task, defect three: in `[Service]` systemd logs "Unknown key
+    /// In `[Service]` systemd logs "Unknown key
     /// name … ignoring" and the documented give-up-after-five-starts never
     /// happens, so a build that cannot start restarts forever, writing the
     /// same traceback into a journal the agent then ships every ten seconds.

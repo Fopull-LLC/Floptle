@@ -2,8 +2,8 @@
 //!
 //! Two decisions are waiting on one number nobody has: whether the free tier can
 //! go to 100 CCU, and whether the relay stays on a `VM.Standard.E2.1.Micro`
-//! (1 OCPU, 954 MB, **0.48 Gbps**). an earlier task gave the relay instruments;
-//! this points something at them.
+//! (1 OCPU, 954 MB, 0.48 Gbps). The relay has instruments; this points
+//! something at them.
 //!
 //! ⚠ **This drives the real client and host legs against a real relay.** The
 //! thing being measured is the forwarding loop and the link, and a mock
@@ -24,8 +24,8 @@
 //!
 //! The host in the loop does as little as it can: it echoes each ping to its
 //! sender and — because a game host tells every player what the others did —
-//! sends the same bytes to each other member of the lobby (an earlier task;
-//! `--echo-only` for the older shape). Anything more spent here is noise in a
+//! sends the same bytes to each other member of the lobby (`--echo-only` for
+//! the older shape). Anything more spent here is noise in a
 //! relay measurement.
 //!
 //! ⚠ **A ceiling is read off a CLEAN step only.** The first run of this tool

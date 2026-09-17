@@ -1197,8 +1197,8 @@ mod tests {
     }
 }
 
-/// Live checks against the real Floptle Cloud API on `fopull.com`
-/// (floptle-platform `tasks/an earlier task`). `#[ignore]`d: they need the
+/// Live checks against the real Floptle Cloud API on `fopull.com`.
+/// `#[ignore]`d: they need the
 /// network, so CI never runs them — `cargo test -p floptle-script -- --ignored
 /// --nocapture live_` when you want to prove the chain by hand.
 /// Where a request may go — proved against a real socket on this machine, not

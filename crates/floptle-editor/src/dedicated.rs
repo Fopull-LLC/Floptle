@@ -551,7 +551,7 @@ fn signalled() -> bool {
 /// **The p95 rather than the mean is the point.** A server whose average tick
 /// is 4 ms and whose worst one in twenty is 40 ms is a server players describe
 /// as stuttering, and a mean hides that completely. The fleet agent ships this
-/// number to the control plane (an earlier task §3) and it is what a developer
+/// number to the control plane and it is what a developer
 /// looks at when a match "felt bad" — so it has to be the statistic that can
 /// actually say so.
 ///
@@ -1281,7 +1281,7 @@ mod server_tests {
     /// A mean cannot: a server whose ticks are 4 ms with one in ten at 40 ms is
     /// one players describe as stuttering, and its mean is a healthy-looking
     /// 7.6 ms. The fleet agent ships this number to the control plane
-    /// (an earlier task §3) and it is what a developer looks at when a match
+    /// and it is what a developer looks at when a match
     /// "felt bad", so it has to be the statistic that can actually say so.
     ///
     /// Note what p95 does not promise, because the first version of this test

@@ -11,7 +11,7 @@
 //! exact grey or strongly saturated, which rules out a torch, a lamp, a fire and
 //! a muzzle flash.
 //!
-//! **The subject moved in an earlier task.** Posterize now quantizes the palette —
+//! Posterize quantizes the palette —
 //! the art — and runs before the light, so a light is never quantized at all and
 //! cannot band into anything (`light2d_smooth_probe` is the assertion for that).
 //! What is still quantized, and still has to keep its hue, is warm *art*: a

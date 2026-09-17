@@ -682,8 +682,8 @@ mod tests {
         assert!(sys.motion(0, "qcf", None), "still inside the window when the button lands");
     }
 
-    /// Two local players on one keyboard, each with their own quarter-circle. This is
-    /// the end of an earlier task: the motion recogniser reads the map-level `Move` axis,
+    /// Two local players on one keyboard, each with their own quarter-circle.
+    /// The motion recogniser reads the map-level `Move` axis,
     /// and before per-player bindings that axis was player 1's for everyone — so P2's
     /// `dir()` and every motion answered with P1's stick, silently.
     #[test]

@@ -2211,7 +2211,7 @@ mod tests {
     /// field's actual sequence: a long menu/lobby phase on the ordinary
     /// predicted path, then the scene switch, then the match.
     ///
-    /// Reapplied from the an earlier task field report — this was the one
+    /// From a field report — this was the one
     /// transport no rollback test covered, and the report was right that it
     /// deserved one even though the transport turned out to be innocent. The
     /// bug was above it (`session.rs`'s shared window), which is exactly why a

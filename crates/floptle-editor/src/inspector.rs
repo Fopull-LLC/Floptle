@@ -444,7 +444,7 @@ fn pins(declared: Option<&str>, stored: &str) -> Option<String> {
 /// The "this scene is pinning the script's number" badge. Returns whether the
 /// reset was clicked.
 ///
-/// This is the half of an earlier task the Console cannot catch: the name is
+/// This is the half of a stale-parameter report the Console cannot catch: the name is
 /// legitimate, the value is legitimate, and the only wrong thing about it is
 /// its AGE. From the outside it is indistinguishable from a script whose
 /// numbers do nothing — you edit one, press Play, and nothing happens.

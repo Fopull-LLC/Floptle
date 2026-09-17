@@ -25,7 +25,7 @@ pub(crate) struct ConsoleState {
     /// Also write warnings and errors to stderr, because there is no Console tab
     /// to read them in: `--play` and every exported build.
     ///
-    /// This is the whole of an earlier task. A malformed `.uistyle.ron` was
+    /// A malformed `.uistyle.ron` was once
     /// *diagnosed* correctly and then filed somewhere the running game could not
     /// show it, which is indistinguishable from "the restyle didn't help" — the
     /// worst failure mode a look-lives-in-two-files feature could have. Gating

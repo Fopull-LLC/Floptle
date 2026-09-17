@@ -46,8 +46,8 @@
 //! ## Reading the output
 //!
 //! **p95, not mean.** A collector pause is exactly the thing this migration is
-//! meant to remove, and averaging hides it — an earlier task reports 2415 frames
-//! of ~5100 over 8 ms, which is a tail, not a mean. The max is printed for the
+//! meant to remove, and averaging hides it — a run with 2415 frames of ~5100
+//! over 8 ms is a tail, not a mean. The max is printed for the
 //! same reason.
 //!
 //! ## What it measured (frame p95, ms, release)

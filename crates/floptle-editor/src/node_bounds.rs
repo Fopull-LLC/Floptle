@@ -25,10 +25,10 @@ const PRIMITIVE_RADIUS: f32 = crate::matter_catalog::PRIMITIVE_HALF * 1.732_050_
 
 /// What the last gather submitted, and what it skipped.
 ///
-/// Counts, not times. an earlier task — a scatter field asking for 117,000 props,
-/// reported as "currently unplayable" — was diagnosable from a count alone, and
-/// the engine kept none. an earlier task extends this with per-subsystem times and
-/// a Lua surface; these are the numbers frustum culling moves, so they start here.
+/// Counts, not times. A scatter field asking for 117,000 props, reported as
+/// "currently unplayable", is diagnosable from a count alone. The profiler adds
+/// per-subsystem times and a Lua surface; these are the numbers frustum culling
+/// moves, so they start here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     /// Nodes the gather walked.

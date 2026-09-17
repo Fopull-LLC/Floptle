@@ -29,7 +29,7 @@ pub(super) fn write_script(dir: &Path, name: &str, body: &str) {
     f.write_all(body.as_bytes()).unwrap();
 }
 
-/// The two-material floor a an earlier task test needs: `x < 0` is "Grass",
+/// The two-material floor the surface-label tests need: `x < 0` is "Grass",
 /// `x > 0` is "Boards", tagged as node 7.
 pub(super) fn labelled_floor(eid: u32) -> floptle_physics::AnchoredCollider {
     let verts = [
@@ -53,8 +53,7 @@ pub(super) fn labelled_floor(eid: u32) -> floptle_physics::AnchoredCollider {
 }
 
 /// A collider that counts how many times anything asked it for a surface
-/// label. The whole of criterion 5 in an earlier task is that this stays at
-/// zero for a query nobody asks.
+/// label. This stays at zero for a query nobody asks.
 pub(super) struct CountsLabelAsks {
     inner: floptle_physics::TriMeshCollider,
     asks: std::sync::atomic::AtomicU32,

@@ -1944,7 +1944,7 @@ end\n";
         assert!(d.faults.is_empty(), "the audit must not re-report: {:?}", d.faults);
     }
 
-    /// field regression (an earlier task Symptom B): a restart that binds nothing
+    /// A field regression: a restart that binds nothing
     /// must not leave the previous driver's nodes in the script filters.
     ///
     /// `net_rollback_start` takes the running driver, rebinds it, and abandons

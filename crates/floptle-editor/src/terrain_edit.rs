@@ -2903,7 +2903,7 @@ mod tests {
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
 
-    /// The wait and the flag are the same question (an earlier task + `0158`).
+    /// The wait and the flag are the same question.
     ///
     /// `terrain.busy()` answers a game; `settle_world_streaming` waits before a
     /// shot. When the wait watched only the streaming half, a planet that was
@@ -3070,8 +3070,8 @@ mod tests {
     /// Surface chunks of a sphere of `radius`, and how many of them the rings
     /// would queue at full detail from a camera standing on it.
     ///
-    /// The count is what an earlier task asks for: on a walkable planet the whole
-    /// body used to sit inside ring 0, so arriving meant surface-net meshing all
+    /// The count is the point: with the whole body of a walkable planet inside
+    /// ring 0, arriving would mean surface-net meshing all
     /// of it through a 16-deep queue — the hitch, and then the pop-in as the
     /// queue drained.
     fn lod0_chunks(radius: f64, chunk: f64, rings: [i32; 3]) -> (usize, usize) {

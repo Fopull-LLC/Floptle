@@ -414,8 +414,8 @@ impl HubApp {
                 }
             };
             // The plan is secondary: a failed fetch shows "unknown" (not a wrong "free") and is
-            // reconciled on the next refresh. an earlier task made that the rule everywhere
-            // rather than this one call site's good instinct.
+            // reconciled on the next refresh. That is the rule everywhere, not
+            // this one call site's good instinct.
             let ent = provider
                 .entitlements(&tokens.access_token)
                 .unwrap_or_else(|_| auth::Entitlements::unknown());

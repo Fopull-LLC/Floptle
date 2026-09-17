@@ -1,5 +1,5 @@
-//! What it costs a script to build a level — the measurement an earlier task asks
-//! for, and the guard that keeps the answer.
+//! What it costs a script to build a level: the measurement, and the guard
+//! that keeps the answer.
 //!
 //! A streamer, a procedural dungeon, a voxel game and a destructible building
 //! are all the same thing: a script that spawns and destroys nodes in bursts.
@@ -153,7 +153,7 @@ fn temp(tag: &str) -> std::path::PathBuf {
     d
 }
 
-/// The table an earlier task asks for, printed rather than asserted.
+/// The spawn-cost table, printed rather than asserted.
 ///
 /// Kept as a test rather than an example because the spawn path lives in the
 /// editor, and the editor is a binary — there is nowhere else it can be run
@@ -309,7 +309,7 @@ fn streamed_ring(ed: &mut crate::Editor, chunks: usize) {
     }
 }
 
-/// The measurement an earlier task asks for: what it costs to re-measure one
+/// What it costs to re-measure one
 /// 32 m chunk of a ring, against re-measuring the ring.
 ///
 /// `cargo test -p floptle-editor --bin floptle rebake_a_chunk -- --nocapture`

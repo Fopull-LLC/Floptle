@@ -144,7 +144,7 @@ pub(crate) struct SplitLights {
     pub two_d: LightSlots,
     /// How many lights qualified but were ranked out of the sixteen, both sides
     /// together. Reported through `perf.counts().lightsDropped`: a cap nobody
-    /// can see is the whole complaint in an earlier task, and "my seventeenth
+    /// can see is the whole complaint, and "my seventeenth
     /// torch does nothing" is not a thing anybody should have to guess.
     pub dropped: usize,
 }
@@ -195,8 +195,7 @@ pub(crate) fn split_point_lights(
         // one that is. `Disabled` takes a node out of physics and stops its
         // scripts, and a water volume beside this one already goes with it —
         // a lamp prefab you disabled still lighting the room is the reading
-        // nobody expects. It costs a slot too, which is exactly the pool
-        // exhaustion an earlier task is about.
+        // nobody expects. It costs a slot too, which is pool exhaustion.
         if floptle_core::is_disabled(world, e) {
             continue;
         }

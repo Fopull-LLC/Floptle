@@ -220,10 +220,9 @@ pub enum Msg {
     ///
     /// The whole subtree travels because every avatar a real game has is a
     /// hierarchy — a capsule with a camera child, an arms mesh, a bone-attached
-    /// item socket. Sending only the root (which is what this carried before
-    /// an earlier task) meant a game could not spawn its own player, so projects
-    /// authored fixed slots into the map scene instead and capped their player
-    /// count at authoring time.
+    /// item socket. Sending only the root would mean a game could not spawn its
+    /// own player, and projects would author fixed slots into the map scene and
+    /// cap their player count at authoring time.
     ///
     /// `id` numbers the root. A descendant that carries its own `Networked`
     /// component is replicated in its own right, and its NetId is
@@ -307,8 +306,8 @@ pub enum Msg {
     ///
     /// Ordered **oldest first**, and built from every peer's ring separately,
     /// so the tick a starved peer is waiting for is always in the packet and no
-    /// peer's traffic can crowd out another's. Both were true only by accident
-    /// before an earlier task, and stopped being true the moment anyone stalled.
+    /// peer's traffic can crowd out another's. One input per packet made both
+    /// true only by accident, until somebody stalled.
     Inputs { entries: Vec<(PeerId, InputCmd)> },
     /// Any peer → host → all: the state checksum for a confirmed tick (§6).
     ///

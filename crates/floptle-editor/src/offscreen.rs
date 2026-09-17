@@ -353,9 +353,8 @@ impl Editor {
             matches!(self.world.get::<Matter>(ce), Some(Matter::Camera { ortho: true, .. }))
         });
         // one split, both halves — the 3D slots the globals want and the 2D ones
-        // the gather filters by. This path used to walk the scene's lights twice
-        // (`collect_point_lights` here, and again to build the 2D uniform at the
-        // pass), which is half of what an earlier task measured.
+        // the gather filters by, walked once rather than here and again at the
+        // pass that builds the 2D uniform.
         let off_split = crate::shading::split_point_lights(
             &self.world,
             cam.world_position,
@@ -474,9 +473,9 @@ impl Editor {
         // exactly like the main gather — so offscreen views animate skinned meshes too.
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
         // How much the frustum cull skipped, published below alongside the rest
-        // of this gather's counts — see an earlier task: this whole gather used
-        // to publish nothing, so a Game-view session's `perf.counts()` was
-        // whatever the Scene view had last computed, or all zero if it never
+        // of this gather's counts. Without them a Game-view session's
+        // `perf.counts()` would be whatever the Scene view last computed, or all
+        // zero if it never
         // ran this session.
         let mut culled_nodes = 0usize;
         for (ent, matter) in &ents {
@@ -793,10 +792,9 @@ impl Editor {
                 &mut instances,
             );
         }
-        // …and the counts a game can read via `perf.counts()` (an earlier task,
-        // an earlier task). This gather used to publish none of this: every view
-        // that comes through it — the docked or split Game view, `floptle
-        // shot`, a render target — left the profile holding whatever the
+        // …and the counts a game can read via `perf.counts()`. Every view that
+        // comes through this gather — the docked or split Game view, `floptle
+        // shot`, a render target — would otherwise leave the profile holding whatever the
         // Scene-view gather in `render()` had last written, or all zero if that
         // gather never ran this session. That is exactly why a real 40-light
         // scene read `lights=0` in one session and correctly in another: the
@@ -1078,8 +1076,8 @@ impl Editor {
             );
             // The palette quantize, before the light — the same order the surface
             // path uses, and it has to be the same or a docked Game view would
-            // posterize its lighting while the Scene view did not (an earlier task,
-            // and the two gathers have drifted over exactly this shape before).
+            // posterize its lighting while the Scene view did not; the two
+            // gathers have drifted over exactly this shape before.
             if let Some(q) = palette {
                 raster.quantize_palette(gpu, color, (size.0.max(1), size.1.max(1)), q);
             }

@@ -525,9 +525,9 @@ impl Editor {
     ///
     /// Prefer this to [`Self::register_scene_meshes`] whenever the caller knows
     /// which models arrived. Registering "everything in the scene" to account for
-    /// one new prop is an earlier task: spawning a desk into a room holding two
-    /// thousand props cloned two thousand asset paths and re-imported all of
-    /// them, per desk.
+    /// one new prop means spawning a desk into a room holding two thousand
+    /// props clones two thousand asset paths and re-imports all of them, per
+    /// desk.
     pub(crate) fn register_meshes<'a>(&mut self, paths: impl IntoIterator<Item = &'a str>) {
         let mut seen = std::collections::HashSet::new();
         let wanted: Vec<String> =
@@ -2445,7 +2445,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Scenes in a subfolder that have a same-named file sitting at `scenes/` root.
 ///
-/// That pair is the signature of an earlier task: before the fix, editing
+/// That pair is the signature of an old save bug: editing
 /// `scenes/<sub>/<name>.ron` wrote `scenes/<name>.ron` instead. A project
 /// carrying both has edits in the root copy that the game has never loaded, and
 /// the root one is almost certainly the newer, wanted work.

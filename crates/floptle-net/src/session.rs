@@ -3276,7 +3276,7 @@ impl NetSession {
             //
             // Two questions, deliberately: the DRIVER's set (which cannot get
             // out of step with the driver) and the session flag (which can, and
-            // once did — an earlier task). Either one is enough to refuse.
+            // once did). Either one is enough to refuse.
             let driven = self.locally_driven.contains(&e.index())
                 || (self.rollback
                     && world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback()));
@@ -3607,7 +3607,7 @@ mod tests {
     }
 
     /// A sample that gets past the ingest guard is REPORTED, not silently
-    /// dropped — the detector an earlier task asked for. It fires on the machine
+    /// dropped. It fires on the machine
     /// that has the problem, while it has it, naming the node.
     #[test]
     fn a_snapshot_that_slips_past_the_guard_is_reported_once() {

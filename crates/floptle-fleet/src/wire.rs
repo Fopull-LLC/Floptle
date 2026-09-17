@@ -1,4 +1,4 @@
-//! What the control plane says, and what this box says back (an earlier task §3).
+//! What the control plane says, and what this box says back.
 //!
 //! These types are written against the **live** payloads W generated from a real
 //! production row, not against the §6 draft — the draft is missing three fields
@@ -76,7 +76,7 @@ pub struct DeployArgs {
 
 /// The plan's caps.
 ///
-/// ⚠ **Zero means "not entitled yet", not "no memory"** (an earlier task §3).
+/// Zero means "not entitled yet", not "no memory".
 /// `billing.server_slots_available` is off on production today and zeroes the
 /// slot entitlement everywhere by design, so `/desired` currently answers
 /// `{"cpu_quota_pct":0,"memory_max_mb":0}`. Writing `MemoryMax=0` into a unit
@@ -271,9 +271,9 @@ pub struct DeploymentStatus {
     /// limit rather than as merely large.
     /// **The ceiling the engine is actually enforcing**.
     ///
-    /// ⚠ **Third time this seam has been wrong in one direction**: `port` and
-    /// `relay` were written by the server and dropped here too (an earlier task,
-    /// an earlier task). The server has written `max_players` into its status
+    /// This seam has been wrong in one direction three times: `port` and
+    /// `relay` were written by the server and dropped here too. The server has
+    /// written `max_players` into its status
     /// file all along and the agent parsed the file without carrying this one
     /// field, so the control plane stored null while the box knew the answer.
     ///
@@ -399,8 +399,8 @@ pub struct ServerStatus {
     /// The player ceiling the engine is enforcing, as the server reports it.
     #[serde(default)]
     pub max_players: Option<u32>,
-    /// **Where this server is actually reachable** (forwarded
-    /// by an earlier task): the UDP port it bound, or `None` when it listens on
+    /// Where this server is actually reachable: the UDP port it bound, or
+    /// `None` when it listens on
     /// nothing because it went out through a relay.
     #[serde(default)]
     pub port: Option<u16>,
@@ -419,8 +419,8 @@ mod tests {
 
     /// **The real `/desired` payload parses**, field for field.
     ///
-    /// Copied from an earlier task §3, which W generated from the live
-    /// production row rather than writing by hand — so this is the one fixture
+    /// Copied from a payload the website generated from the live production
+    /// row rather than writing by hand — so this is the one fixture
     /// in the crate that is known to match what the endpoint emits.
     #[test]
     fn the_live_desired_payload_parses() {

@@ -2053,7 +2053,7 @@ impl ScriptHost {
             sim_origin,
             layer_table,
         } = install_world_queries(&lua, &logs);
-        // `water.*` — the volume half of an earlier task. The engine floats
+        // `water.*` — the engine floats
         // things; a game still decides what being wet means, and every one of
         // those decisions is the same question with a different answer.
         let water_volumes: Rc<RefCell<Vec<crate::water_api::WaterInfo>>> =
@@ -2527,9 +2527,8 @@ impl ScriptHost {
     /// frame cannot be read off [`lua_used_memory`](Self::lua_used_memory)
     /// while the collector runs: an incremental step inside the window frees
     /// part of what the window allocated, and the difference then reads far
-    /// below the truth — an earlier task records chasing exactly that artefact,
-    /// and a hand-rolled Lua harness in a real project under-reported by 60x
-    /// against this. Stop it, run a fixed number of frames, take the
+    /// below the truth; a hand-rolled Lua harness in a real project
+    /// under-reported by 60x against this. Stop it, run a fixed number of frames, take the
     /// difference, start it again.
     ///
     /// The heap grows unchecked while it is stopped, so keep the window short
@@ -3786,9 +3785,9 @@ impl ScriptHost {
     ///
     /// **`new` is the entities this spawn created, and only those.** This used to
     /// re-mirror the whole scene per spawn, which is fine for a bullet and
-    /// quadratic for a script that builds a level: an earlier task, where a
-    /// streamer spawning ~800 nodes a chunk into a 7,000-node scene rebuilt a
-    /// twenty-collection table 800 times to add 800 rows to it.
+    /// quadratic for a script that builds a level: a streamer spawning ~800
+    /// nodes a chunk into a 7,000-node scene would rebuild a twenty-collection
+    /// table 800 times to add 800 rows to it.
     /// The full write flush runs (not just transforms): a `createNode` callback
     /// configures its node with the construction API (`setTerrain`/`setCelestial`/
     /// `setPrimitive`/…), and those are RichSet-queued — in the play loop the next
@@ -4214,8 +4213,8 @@ impl ScriptHost {
         let Ok(Some(declared)) = env.raw_get::<Option<Table>>("replicated") else {
             // No `replicated` table: `synced` has no vars, which is correct and
             // common (transform-only replication). Bind a proxy that says so on
-            // the first touch rather than leaving nil for Lua to trip over —
-            // an earlier task, and the docs on the proxy itself.
+            // the first touch rather than leaving nil for Lua to trip over; see
+            // the docs on the proxy itself.
             if let Ok(proxy) = crate::net_api::build_undeclared_synced_proxy(&self.lua, &key.1) {
                 let _ = env.set("synced", proxy);
             }
@@ -7718,7 +7717,7 @@ mod host_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The counter-example that made an earlier task take forty minutes, kept.
+    /// The counter-example that once cost forty minutes, kept.
     ///
     /// `door` declares `replicated` and `barrel` does not. They sat in the same
     /// generated scene, on nodes given identical `net` blocks by the same

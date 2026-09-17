@@ -111,8 +111,7 @@ const HIT_MT: &str = "floptle_hit_mt";
 /// this engine: a flag you can forget, whose forgotten form answers `nil`
 /// rather than failing, is the silent-failure pattern this codebase keeps
 /// paying for. A line-of-sight ray that never touches `hit.material` pays
-/// nothing here, and a footstep check that does pays one closest-point search,
-/// which is the cost split an earlier task asked for.
+/// nothing here, and a footstep check that does pays one closest-point search.
 ///
 /// Registered once per host, not per hit: `overlapSphere` can return dozens of
 /// hits in a frame and building a closure for each would cost more than the

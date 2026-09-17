@@ -197,9 +197,9 @@ fn main() {
 
     // ---- an authored alpha is the alpha that reaches the screen ------------
     //
-    // an earlier task. The composite used to write `albedo × light` over the
-    // frame at the surface's own alpha — but the raster pass had already blended
-    // that same sprite in, so a translucent one arrived twice and landed at an
+    // A composite that writes `albedo × light` over the frame at the surface's
+    // own alpha, after the raster pass has already blended that same sprite in,
+    // lands a translucent one twice, at an
     // effective `1 - (1-a)²`. 0.5 drew at 0.75; 0.72 drew at 0.92. In every 2D
     // project, with no light placed, invisible everywhere an author could look.
     //

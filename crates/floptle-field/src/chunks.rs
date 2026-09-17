@@ -233,8 +233,7 @@ impl ChunkField {
     ///
     /// `None` for untextured voxels (slot 0, and the legacy 255 sentinel), so a
     /// caller can tell "plain rock" from "slot 255". The read half of what
-    /// `paint_texture` writes: until an earlier task the palette was write-only
-    /// from script, so a mining game could not ask what it had just dug.
+    /// `paint_texture` writes, so a mining game can ask what it has just dug.
     pub fn slot_at(&self, p: Vec3) -> Option<u8> {
         match self.color(p)[3] {
             0 | 255 => None,

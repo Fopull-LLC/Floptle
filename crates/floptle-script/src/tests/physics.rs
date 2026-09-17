@@ -93,8 +93,6 @@ fn script_can_raycast() {
     assert!(y.abs() < 0.1, "raycast should have set y to the ground (≈0), got {y}");
 }
 
-/// **The whole of an earlier task, from a script.**
-///
 /// A first-person game asks "what am I standing on" to pick a footstep. It
 /// got two wrong answers. `raycast` returned no `hit.node` at all for static
 /// geometry — so the level, which is all static geometry, was invisible to

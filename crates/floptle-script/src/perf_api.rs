@@ -30,8 +30,7 @@
 //! profiler stays switched on. But that makes "off" and "free" the same shape, and
 //! a smoke test asserting `perf.ms("scripts") < 4` would then pass by measuring
 //! nothing. So every getter raises while collection is off and says to call
-//! `perf.enable(true)`. Same reasoning as an earlier task, applied to this task's
-//! own API.
+//! `perf.enable(true)`.
 
 use mlua::Lua;
 

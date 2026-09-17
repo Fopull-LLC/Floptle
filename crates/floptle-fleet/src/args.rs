@@ -33,7 +33,7 @@ pub struct Args {
     /// Seconds between polls.
     pub interval: u64,
     /// The relay a dedicated server hosts through, so players still join by a
-    /// six-character code (an earlier task §3 — W built for exactly this).
+    /// six-character code.
     pub relay: Option<String>,
     /// Do one cycle and exit. What CI and a first run on a box use.
     pub once: bool,

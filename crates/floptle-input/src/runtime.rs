@@ -309,8 +309,8 @@ fn own_pad(source: crate::source::Source, player: Option<u8>, slot: u8) -> crate
 ///
 /// A divide-by-zero guard and nothing else. Deliberately absurd (10 000 fps) so
 /// that every frame a real machine produces divides by its own true `dt` and a
-/// script's `* dt` cancels exactly — an earlier task is what a floor inside the
-/// real range does instead.
+/// script's `* dt` cancels exactly. A floor inside the real range changes a
+/// pointer's speed with the frame rate.
 const MIN_RATE_DT: f32 = 1.0 / 10_000.0;
 
 /// The most pixels-per-second a mouse axis will report.
@@ -1039,8 +1039,8 @@ mod tests {
         // Stated against [`MAX_MOUSE_RATE`], which is where the bound now comes
         // from. It used to be a bare `< 100.0` — a number that was really
         // `40 px x 0.006 x 240`, i.e. a restatement of the `1/240 s` floor
-        // rather than of the property. The floor had to move to fix
-        // an earlier task, and the assertion moved with it, which is exactly the
+        // rather than of the property. When the floor moved, the assertion
+        // moved with it, which is exactly the
         // situation where a guard written around an implementation stops
         // guarding anything. The property is: finite, and bounded by a stated
         // ceiling.

@@ -1031,7 +1031,7 @@ fn known_doc_fields() -> &'static [&'static str] {
         // linkage between nodes. A package addresses a node by the id `scene.*`
         // gave it and re-parents with `scene.setParent`; letting one write these
         // would let it point a node at a position in a list it cannot see
-        // (an earlier task — that moved a whole match HUD onto a line of help text).
+        // (that once moved a whole match HUD onto a line of help text).
     ]
 }
 
@@ -1440,8 +1440,8 @@ mod tests {
         (ed, e.index())
     }
 
-    /// **The property an earlier task exists to protect, on the editor's own
-    /// mirror this time.** A grid that has not changed must come back as the
+    /// The same property the game-script mirror holds, on the editor's own
+    /// mirror this time: a grid that has not changed must come back as the
     /// same allocation across a rebuild, not a fresh copy — an `Rc::clone`,
     /// not a `Vec` realloc, however big the map.
     #[test]

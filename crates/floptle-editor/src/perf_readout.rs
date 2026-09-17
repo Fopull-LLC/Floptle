@@ -39,8 +39,8 @@ pub(crate) struct Pacing {
     /// Share of recent frames the dt snap actually applied to, 0..1.
     pub(crate) snap_rate: f32,
     /// Smoothed time blocked inside `acquire` (`Editor::present_wait_ms`) —
-    /// the display path, not the scene. an earlier task: the piece the ⏱ panel
-    /// had the numbers for and never compared.
+    /// the display path, not the scene. The piece the ⏱ panel had the numbers
+    /// for and never compared.
     pub(crate) present_wait_ms: f32,
     /// `mean_ms - present_wait_ms`: what the frame cost apart from waiting on
     /// the display. The same subtraction the window-title `cost` figure does.
@@ -73,7 +73,7 @@ impl PerfSnapshot {
 mod readout_tests {
     /// **The readout has to smooth frame time, not its reciprocal.**
     ///
-    /// The acceptance case from an earlier task: a frame sequence alternating
+    /// The acceptance case: a frame sequence alternating
     /// 2 ms and 30 ms. Sixty-two frames a second are genuinely arriving (16 ms
     /// mean), and an EMA over `1.0 / dt` reports something near 265 — it spends
     /// half its samples at 500 fps and a reciprocal does not average.

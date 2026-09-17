@@ -19,8 +19,8 @@
 //! Nothing. A failed poll leaves every running server running and tries again
 //! next cycle. The alternative — treating "I could not ask" as "nothing should
 //! be running" — would take a whole region down on a bad minute at the website,
-//! which is the same mistake an earlier task records on the entitlements
-//! endpoint and the same answer: absent is not revoked.
+//! which is the same mistake the entitlements endpoint once made and the
+//! same answer: absent is not revoked.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -587,9 +587,9 @@ mod tests {
     ///
     /// The status file lives at `<run>/<id>/status.json` — inside the
     /// directory the unit declares as its own — and the agent reads it from
-    /// there. Before an earlier task the agent read `<run>/<id>.json`, a file
-    /// the server could never create, so the report carried a structural zero
-    /// for peers and uptime and `null` for the lobby code on every deployment.
+    /// there. Reading `<run>/<id>.json` instead, a file the server can never
+    /// create, made the report carry a structural zero for peers and uptime and
+    /// `null` for the lobby code on every deployment.
     /// Seeded at the new path; a reader still looking at the old one reports
     /// zeros here.
     #[test]

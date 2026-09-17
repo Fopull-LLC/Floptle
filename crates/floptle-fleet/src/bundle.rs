@@ -61,8 +61,8 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 /// Where one tar entry may be written, relative to the destination — or why it
 /// may not be written at all.
 ///
-/// **Both real bundles carry a `./` prefix on every entry** (an earlier task
-/// §2), which is normal tar and which broke W's PHP reader outright. Rust's tar
+/// Both real bundles carry a `./` prefix on every entry, which is normal tar
+/// and which broke the website's PHP reader outright. Rust's tar
 /// handles it; it is normalised here anyway so that the traversal check below
 /// is comparing what it thinks it is comparing.
 ///
@@ -166,8 +166,8 @@ pub fn ensure_readable(dir: &Path) -> Result<bool, String> {
 /// **The archive's own mode bits are an accident of the machine it was made
 /// on**, not a statement about the box. `tar` carries a developer's umask
 /// faithfully, and a `0600` file that was fine on their laptop is unreadable
-/// to the server, which runs as a different user. an earlier task, defect two,
-/// and it was live: the Forgery server on `us-east-1` ran without its input
+/// to the server, which runs as a different user. This was live once: the
+/// Forgery server on `us-east-1` ran without its input
 /// bindings and four of its scripts, half-working, and nothing reported it.
 /// Equivalent to `chmod -R a+rX`, which is also what the upload endpoint tells
 /// a developer to run — the agent does it here so nobody has to.
@@ -204,8 +204,8 @@ fn normalise_modes(dir: &Path) -> Result<(), String> {
 
 /// Print one line to stdout for the journal.
 ///
-/// The fleet agent logs to stdout and nowhere else — an earlier task asks for no
-/// file logging on the box, because the journal is what gets shipped to the
+/// The fleet agent logs to stdout and nowhere else: no file logging on the
+/// box, because the journal is what gets shipped to the
 /// control plane and a second copy would be a second thing to rotate.
 pub fn log_line(msg: &str) {
     floptle_say::say!("{msg}");
@@ -405,7 +405,7 @@ mod tests {
 
     /// **The bundle's own mode bits are not trusted.**
     ///
-    /// an earlier task, defect two, and it was live: the Forgery server on
+    /// This was live once: the Forgery server on
     /// `us-east-1` ran without its input bindings and four of its Lua scripts,
     /// because those files were `0600` on the developer's laptop, `tar` carried
     /// the bit, and the server — a different user — could not read them. It

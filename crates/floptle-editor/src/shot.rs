@@ -946,7 +946,7 @@ mod tests {
         assert!(parse_size(&format!("64x{}", max + 1)).is_err());
     }
 
-    /// **The failure an earlier task was about.** A scene holding nothing but a
+    /// A scene holding nothing but a
     /// `MapMesh` box and a camera renders, unfixed, as a perfectly flat clear
     /// color: nothing else in the frame varies it, so "not one uniform color"
     /// is exactly the pixel-coverage floor the card asked for — any pixel that

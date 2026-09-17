@@ -1685,7 +1685,7 @@ impl Editor {
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
         let mut culled_nodes = 0usize;
-        // Scatter props submitted this frame — the count an earlier task needed.
+        // Scatter props submitted this frame.
         let mut scatter_props = 0usize;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
@@ -2093,9 +2093,8 @@ impl Editor {
             let chunks: usize =
                 self.terrain_render.values().map(|r| r.slots.len()).sum();
             let particles = self.vfx.live_particles();
-            // an earlier task and an earlier task: how many one-shots and lights
-            // are live, and how many of each a ceiling refused. A cap nobody can
-            // see is the thing both cards are actually about — `effects` is what
+            // How many one-shots and lights are live, and how many of each a
+            // ceiling refused. A cap nobody can see is the complaint — `effects` is what
             // it costs, `effectsDropped` is what it cut.
             let (effects, effects_dropped) = self.vfx.detached_counts();
             let (lights, lights_dropped) = self.light_counts;
@@ -2110,7 +2109,7 @@ impl Editor {
             // over the whole submission — worth its cost only when collection
             // is actually on and something will read the number. `set_counts`
             // already no-ops while off; this keeps the SUM ahead of it off too
-            // ("off means off", an earlier task, applied to the one count here
+            // ("off means off", applied to the one count here
             // pricier than a `.sum()` over an existing small collection).
             let draws = if prof.enabled() {
                 count_draw_batches(&instances, &flsl_draws, &skin_draws)

@@ -44,7 +44,7 @@ use mlua::{Lua, RegistryKey, Table};
 /// uniform name, vec4 lanes). The material is `None` for the node's own — the
 /// UI element, sky, post chain or `Material` component, as it always was — or
 /// `Some(part)` for one part's override under `ObjectMaterials`
-/// (`node:material("Head#2"):setShaderParam(...)`, an earlier task).
+/// (`node:material("Head#2"):setShaderParam(...)`).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, Option<String>, String, [f32; 4])>>>;
 /// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, which
 /// material, slot name, texture ref). The ref is a project-relative image path,
@@ -1226,7 +1226,7 @@ pub(crate) struct SceneMirror {
     /// UI elements' current style name (so a script can read `node.style`).
     ui_styles: HashMap<u32, String>,
     /// UI images' current texture path (so a script can read `node.texture`,
-    /// not just write it — the asymmetry was half of an earlier task).
+    /// not just write it).
     ui_textures: HashMap<u32, String>,
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
@@ -1308,8 +1308,8 @@ pub enum FindScope {
 impl FindScope {
     /// Every spelling the options table accepts, and the list an error prints.
     ///
-    /// One list read by the parser and the message, per an earlier task — a
-    /// defaulted bad value is how `pin = "topCenter"` silently meant top-left.
+    /// One list read by the parser and the message: a defaulted bad value is
+    /// how `pin = "topCenter"` silently meant top-left.
     pub(crate) const ACCEPTS: &'static [&'static str] = &["enabled", "all", "disabled", "any"];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {

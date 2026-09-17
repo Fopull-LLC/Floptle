@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     /// A HUD described with `ui.make`, over two Play sessions with a Stop in
-    /// between — the shape of the report in an earlier task: "after playing the
+    /// between — the shape of the report: "after playing the
     /// game in the editor once, when I try to play again the UI does not show".
     ///
     /// Two sessions is the whole test. One session passes trivially and always

@@ -44,7 +44,7 @@
 //! draws them. `draws`, `instances`, `lights`, `nodes` and the rest of the
 //! render-gather counts stay `0`, for the same reason nothing above draws:
 //! there is no gather to have counted them. That is a real "not measured
-//! here", not the bug an earlier task was — a project asserting a script or
+//! here", not a bug — a project asserting a script or
 //! physics budget in CI gets a real answer from `run`; one asserting on draw
 //! calls or light counts wants `floptle shot` or `--play` instead.
 //!
@@ -136,14 +136,14 @@ impl Span {
 /// What the steps cost, in real milliseconds.
 ///
 /// Built from every sample rather than kept as a running mean, because the
-/// percentiles are the point: an earlier task describes 2415 frames out of ~5100
-/// over 8 ms, which a mean of the same run reports as comfortable.
+/// percentiles are the point: a run with 2415 frames out of ~5100 over 8 ms
+/// is one a mean reports as comfortable.
 ///
 /// ## Why a paused step is not a sample
 ///
 /// A step is not a frame. A session held at the start of Play while the terrain
 /// worker builds the ground steps happily with `dt = 0` — that is the same
-/// stepped-but-not-simulated gap an earlier task was, and `summary_line` already
+/// stepped-but-not-simulated gap, and `summary_line` already
 /// says it out loud. Those steps are cheap and they are not gameplay, so
 /// counting them here would answer "what does a frame of this game cost" with a
 /// distribution a third of which is the loading screen.
@@ -1182,8 +1182,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **The acceptance test an earlier task was written to make possible**, and
-    /// the one that says the number above measures what it claims to.
+    /// The acceptance test `floptle run` exists to make possible, and the one
+    /// that says the number above measures what it claims to.
     ///
     /// `net.setRelevant(node, peer, false)` is that task's whole promise —
     /// the cheat-resistance of a hidden-role game is *defined* by what a client
@@ -1325,7 +1325,7 @@ mod tests {
 
     /// **p95 is not the mean, and that is the whole reason it is reported.**
     ///
-    /// The distribution here is the shape an earlier task describes: mostly
+    /// The distribution here is the shape a real game has: mostly
     /// cheap, with a tail. A mean reads as comfortable; p95 does not, and a VM
     /// comparison that averaged its frames would call a collector pause a pass.
     #[test]
@@ -1358,8 +1358,7 @@ mod tests {
         assert!(line.contains("mean 1.93 ms"), "{line}");
     }
 
-    /// **A step the clock did not move is not a frame** (an earlier task again,
-    /// one layer down).
+    /// A step the clock did not move is not a frame, one layer down.
     ///
     /// The Play-start terrain hold steps with `dt = 0`. Those steps are cheap,
     /// and worse, how many of them there are depends on the terrain worker — so

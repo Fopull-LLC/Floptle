@@ -1500,7 +1500,7 @@ mod tests {
     ///
     /// The same off-by-one, on the side that a player actually feels: at a
     /// ceiling of N, a dedicated server was seating N−1 people and turning the
-    /// Nth away — which is the exact moment an earlier task is trying to turn
+    /// Nth away — the exact moment the seat-limit message is trying to turn
     /// into good news, spoiled by arriving one player early.
     #[test]
     fn a_dedicated_server_does_not_spend_a_seat_at_the_ceiling() {
@@ -1658,9 +1658,8 @@ mod tests {
             panic!("the 21st player must be refused");
         };
 
-        // **This sentence turned around in an earlier task, and the negative is
-        // the point.** It used to name the game, the number, the plan and the
-        // price page. The person reading it is a friend of the developer
+        // The negative is the point. Naming the game, the number, the plan
+        // and the price page is wrong here: The person reading it is a friend of the developer
         // holding a lobby code: they are not the customer, they cannot upgrade
         // anything, and every one of those four is noise to them and
         // embarrassing for the developer.

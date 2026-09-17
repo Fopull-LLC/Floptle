@@ -30,8 +30,8 @@ const ACROSS: u32 = 4;
 
 /// A sky that visibly PROGRESSES, so the sheet has something to show: a dark
 /// void that catches fire from the horizon up as `burn` runs 0 → 1. Uses
-/// `atan2` for the azimuth, which is the thing an earlier task added and the
-/// reason a shader can lay anything out around a horizon at all.
+/// `atan2` for the azimuth, which is what lets a shader lay anything out
+/// around a horizon at all.
 const DEMO_FLSL: &str = r#"shader ashfallDemo {
   stage sky
   uniform burn: float = 0.0 range(0, 1)

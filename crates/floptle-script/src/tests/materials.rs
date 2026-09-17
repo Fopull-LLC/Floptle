@@ -764,8 +764,8 @@ fn set_shader_param_reaches_the_sky() {
     );
 }
 
-/// an earlier task + an earlier task: sorting layers and 2D lighting shipped
-/// with no script access at all, which rules out the ordinary 2D moves — a
+/// Sorting layers and 2D lighting without script access would rule out the
+/// ordinary 2D moves — a
 /// character stepping behind a counter, a torch that stops lighting the
 /// background. A misspelled enum has to name the accepted set rather than
 /// quietly meaning `auto`.
@@ -827,7 +827,7 @@ fn a_script_drives_sorting_and_2d_lighting() {
     );
 }
 
-/// an earlier task, the other half: the post chain is typed knobs rather than
+/// The other half: the post chain is typed knobs rather than
 /// a shader's uniforms, so it comes through the component route. A cutscene
 /// pushing a vignette is the reported want.
 #[test]

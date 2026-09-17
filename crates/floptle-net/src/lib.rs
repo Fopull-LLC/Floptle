@@ -1272,7 +1272,7 @@ mod tests {
         }
     }
 
-    /// field regression (an earlier task Symptom A): a live relay match froze on
+    /// A field regression: a live relay match froze on
     /// round one, the joiner stalled at warmup+depth having never received a
     /// host input, and every layer test passed.
     ///

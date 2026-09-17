@@ -545,7 +545,7 @@ impl Editor {
                 anim_cmds,
             );
             // ANIMATION: clip sampling, blending, pose composition and CPU
-            // skinning. The number an earlier task needs before and after.
+            // skinning.
             self.profile_record(floptle_core::profile::Bucket::Animation, anim_t.ms());
             for (eid, func) in fired {
                 self.script_host.call_function(&mut self.world, eid, &func);
