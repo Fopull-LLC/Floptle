@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.94.0-rc1 — "Squash And Stretch"** (beta). Particles gain a **squash**
+property — width times, height over, animated over each particle's life —
+plus stretch by speed for velocity-aligned sprites and a box emit shape; and
+they fade where they meet a floor or a wall. The Animating tab has a curve
+view, keys that ease, smooth or hold, rows that open into their lanes and pack
+to any height. Underneath, the editor's largest functions are outlines now,
+verified pixel-for-pixel against the previous build.
+
 **v0.93.1 — "Clear Skies".** The sky-flicker bug: a straight-edged wedge
 of the sky flashing a flat colour for one frame while you looked around. The
 renderer built each pixel's ray out to a far plane hundreds of thousands of
