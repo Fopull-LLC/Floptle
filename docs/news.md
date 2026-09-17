@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.94.0 — "Leaves A Trail"** (stable). The two betas, promoted: particles
+that squash and stretch and leave trails behind anything that moves — a
+sword trail is one still particle whose trail follows the emitter, or a
+`draw.quad` ribbon from a script; the Animating tab's curve view and easing
+keys; a spawn that survives a client's scene change; `floptle run --join`
+keeping real time, `floptle shot` telling its scripts the viewport, and
+`floptle serve` passing every flag it takes.
+
 **v0.94.0-rc2 — "Leaves A Trail"** (beta). A particle trail can **follow the
 emitter**, so one still particle at a blade tip is a sword trail in one
 effect asset, and scripts have `draw.quad` for a textured ribbon in the
