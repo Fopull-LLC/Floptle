@@ -764,6 +764,10 @@ pub(crate) const VERBS: &[Verb] = &[
                        transport rather than the loopback hub, so it is the only way to test \
                        the wire itself. The project's OWN scripts run as the client, so \
                        net.isServer() answers false and the game does its own asserting. \
+                       A joined run keeps REAL time — each step waits for its tick, so the \
+                       client stays in step with the server for the whole span instead of \
+                       racing ahead and being dropped; --seconds is wall seconds here, and \
+                       --timing still reports the step's own cost. \
                        Cannot be combined with --ghosts, which hosts",
             },
             Arg {
@@ -1623,14 +1627,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             // ignoring them. Handing it the shape it expects means `serve` and
             // `--server` cannot disagree about what a flag means.
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
-            let mut argv: Vec<String> =
-                vec!["--server".into(), project.to_string_lossy().into_owned()];
-            for flag in ["scene", "port", "relay", "tick", "interest", "budget"] {
-                if let Some(v) = text(a, flag) {
-                    argv.push(format!("--{flag}"));
-                    argv.push(v);
-                }
-            }
+            let argv = serve_argv(&project, |flag| text(a, flag));
             // **Somewhere to listen is a command-line question, so it is asked
             // here.** The server answers it with the same code it uses for "this
             // scene cannot be served", and those are 2 and 1 in this command
@@ -1708,6 +1705,28 @@ fn run(m: &clap::ArgMatches) -> Outcome {
         }
         _ => Outcome::Legacy,
     }
+}
+
+/// The `--server` command line `serve` hands the runtime's own parser: the
+/// project, then every value flag the verb table declares that was given.
+/// Read off the table rather than a list written here, so a flag added to
+/// `serve` cannot be accepted by this command line and dropped on the way —
+/// which is how `--status-file` and `--max-players` were once taken and
+/// ignored, exit 0.
+fn serve_argv(project: &Path, given: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["--server".into(), project.to_string_lossy().into_owned()];
+    let serve = VERBS.iter().find(|v| v.name == "serve").expect("the serve verb");
+    for arg in serve.args {
+        let Some(flag) = arg.name.strip_prefix("--") else { continue };
+        if matches!(arg.value, Value::Flag) {
+            continue;
+        }
+        if let Some(v) = given(flag) {
+            argv.push(arg.name.into());
+            argv.push(v);
+        }
+    }
+    argv
 }
 
 /// The title an export takes when none was given: the project directory's name.
@@ -1812,6 +1831,49 @@ mod tests {
 
     fn argv(rest: &[&str]) -> Vec<String> {
         std::iter::once("floptle".to_string()).chain(rest.iter().map(|s| s.to_string())).collect()
+    }
+
+    /// **Every flag `serve` takes reaches the server.** The verb table is what
+    /// `floptle help serve` and the CLI feed publish, and the runtime's parser
+    /// is what acts; a flag on the first and not on the way to the second is
+    /// accepted and dropped, exit 0 — `--status-file` and `--max-players` were.
+    /// Every value flag on the table, given, must land in `ServerArgs`.
+    #[test]
+    fn serve_hands_the_runtime_every_flag_its_table_declares() {
+        let serve = VERBS.iter().find(|v| v.name == "serve").expect("the serve verb");
+        let flags: Vec<&str> = serve
+            .args
+            .iter()
+            .filter(|a| !matches!(a.value, Value::Flag))
+            .filter_map(|a| a.name.strip_prefix("--"))
+            .collect();
+        assert!(flags.len() >= 8, "the scrape found only {flags:?}");
+        // A value each flag parses: a number for the numeric ones, a path or
+        // word otherwise.
+        let value = |flag: &str| -> String {
+            match flag {
+                "port" | "tick" | "max-players" | "script-budget-ms" | "budget" => "7".into(),
+                "interest" => "40".into(),
+                other => format!("v-{other}"),
+            }
+        };
+        let argv = serve_argv(Path::new("/proj"), |f| flags.contains(&f).then(|| value(f)));
+        let parsed = crate::dedicated::ServerArgs::parse(&argv).unwrap_or_else(|e| {
+            panic!("the runtime refused the command line serve built ({e}): {argv:?}")
+        });
+        // Each flag's own field, read back — a flag missing from `serve_argv`
+        // leaves its default here.
+        assert_eq!(parsed.status_file, Some(PathBuf::from("v-status-file")));
+        assert_eq!(parsed.max_players, Some(7));
+        assert_eq!(parsed.lobby_code.as_deref(), Some("V-LOBBY-CODE"));
+        assert_eq!(parsed.tick_hz, 7.0);
+        assert_eq!(parsed.port, Some(7));
+        assert_eq!(parsed.relay.as_deref(), Some("v-relay"));
+        assert_eq!(parsed.scene.as_deref(), Some("v-scene"));
+        // …and every flag the table declares is on the command line at all.
+        for f in &flags {
+            assert!(argv.iter().any(|a| a == &format!("--{f}")), "--{f} never reached the server: {argv:?}");
+        }
     }
 
     /// **The parser the table builds has to be a valid one.** `clap` panics on

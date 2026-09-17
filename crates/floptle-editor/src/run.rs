@@ -265,7 +265,7 @@ fn pump_ghosts(ed: &mut crate::Editor, ghosts: &mut Vec<Ghost>, want: usize) {
             Some(doc) => {
                 g.world = floptle_core::World::default();
                 floptle_scene::spawn_into(&doc, &mut g.world);
-                g.session.rebind_scene(&g.world);
+                g.session.rebind_scene(&mut g.world);
             }
             None => floptle_say::say_err!("ghost {i}: could not load \"{scene}\" — it is now out of the game"),
         }
@@ -441,7 +441,16 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // …and which scripts made it: bytes per frame per script kind, from the
     // same window, sampled around each hook call while the collector is off.
     let mut by_script: Vec<(String, f64)> = Vec::new();
+    // **A client runs in real time.** A regression run steps as fast as the
+    // CPU allows, which is right for a run that answers only to itself; a run
+    // that has joined a server is a peer of something ticking on the wall
+    // clock, and stepping ahead of it is an input clock racing the server's
+    // until the server drops the peer. So with `--join` each step waits for its
+    // tick period, the way the dedicated server paces its own loop: sleep to
+    // the next tick, and give up lost time rather than sprint to catch up.
+    let mut pacer = Pacer::new(join.is_some().then(|| std::time::Duration::from_secs_f32(DT)));
     for step in 0..asked {
+        pacer.wait();
         if let Some(w) = &window {
             if step == w.start {
                 ed.script_host.gc_collect();
@@ -604,6 +613,34 @@ fn ghosts_line(ghosts: &[Ghost]) -> String {
         ghosts.len(),
         seen.join(", ")
     )
+}
+
+/// Holds a loop to one step per `period` of wall time — the dedicated server's
+/// own pacing, for a run that has joined one. `None` paces nothing, which is the
+/// regression run: as fast as the CPU allows.
+struct Pacer {
+    period: Option<std::time::Duration>,
+    next: std::time::Instant,
+}
+
+impl Pacer {
+    fn new(period: Option<std::time::Duration>) -> Self {
+        Self { period, next: std::time::Instant::now() + period.unwrap_or_default() }
+    }
+
+    /// Wait for the next tick. Behind schedule, the lost time is given up rather
+    /// than sprinted after, which would run the world faster than real time and
+    /// make the server's picture of this client wrong all at once.
+    fn wait(&mut self) {
+        let Some(period) = self.period else { return };
+        let now = std::time::Instant::now();
+        if self.next > now {
+            std::thread::sleep(self.next - now);
+            self.next += period;
+        } else {
+            self.next = now + period;
+        }
+    }
 }
 
 /// The line `--timing` adds.
@@ -1072,6 +1109,38 @@ mod tests {
             assert!(!e.contains(CANARY), "loader {i} quoted the file: {e}");
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A joined run keeps real time; a plain run keeps none.** Five paced
+    /// waits at 20 ms take at least the four periods between them; five unpaced
+    /// waits take nothing.
+    #[test]
+    fn the_pacer_holds_a_step_to_its_period_and_an_unpaced_loop_to_nothing() {
+        let period = std::time::Duration::from_millis(20);
+        let mut paced = Pacer::new(Some(period));
+        let began = std::time::Instant::now();
+        for _ in 0..5 {
+            paced.wait();
+        }
+        let took = began.elapsed();
+        assert!(took >= period * 4, "five paced waits took {took:?}, under four periods");
+
+        let mut free = Pacer::new(None);
+        let began = std::time::Instant::now();
+        for _ in 0..5 {
+            free.wait();
+        }
+        assert!(began.elapsed() < period, "an unpaced loop slept");
+
+        // Behind schedule — a step that took three periods — the pacer gives
+        // the time up rather than firing three steps back to back.
+        let mut late = Pacer::new(Some(period));
+        std::thread::sleep(period * 3);
+        let began = std::time::Instant::now();
+        late.wait();
+        assert!(began.elapsed() < period / 2, "a late wait blocked");
+        late.wait();
+        assert!(began.elapsed() >= period, "the step after a late one did not wait its period");
     }
 
     /// `run` could host a real session and nothing could join
