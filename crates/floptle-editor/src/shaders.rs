@@ -1,4 +1,4 @@
-//! Custom `.flsl` shader materials in the editor (ADR-0007, Phase 2).
+//! Custom `.flsl` shader materials in the editor.
 //!
 //! The pipeline: a Material's `shader` names a project `.flsl` file; this
 //! module compiles it (parse → check → transpile → naga against the real
@@ -719,7 +719,7 @@ pub(crate) struct UiFlslBind {
 }
 
 pub(crate) type UiFlslCache = HashMap<String, UiFlslEntry>;
-/// Keyed by entity INDEX — the id the UI draw list carries per quad.
+/// Keyed by entity index — the id the UI draw list carries per quad.
 pub(crate) type UiFlslBinds = HashMap<u32, UiFlslBind>;
 
 impl Editor {

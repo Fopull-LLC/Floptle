@@ -1657,7 +1657,7 @@ fn reviews_section(
                 "opens fopull.com to review this package — it appears here once it is posted",
             ),
         };
-        // An ORDINARY button. It was the loudest control on a package — a
+        // An ordinary button. It was the loudest control on a package — a
         // solid accent slab for editing a review you had already written, next
         // to an outlined Install — which is precisely backwards. There is one
         // primary action here and it is Install, further up.

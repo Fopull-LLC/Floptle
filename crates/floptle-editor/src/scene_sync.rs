@@ -15,7 +15,7 @@ impl Editor {
         // Terrain volumes render per-volume, each at native resolution: moving a
         // terrain needs no GPU work at all — its f64 anchor is read fresh every frame
         // when the globals are built. Only structural changes (add/edit/delete/resize)
-        // re-upload the volume set into the shared 3D atlas. Static collider MESHES
+        // re-upload the volume set into the shared 3D atlas. Static collider meshes
         // join the same atlas as shadow-only occluder volumes (they cast, never draw).
         let occluders_changed = self.refresh_mesh_occluders();
         if self.terrain_gpu_dirty || occluders_changed {
@@ -125,7 +125,7 @@ impl Editor {
                 if let Some(raymarch) = self.raymarch.as_mut() {
                     raymarch.set_terrain_textures(gpu, &layers);
                 }
-                // Meshed terrain (P2/P6) draws in the RASTER pass, so it needs its own copy
+                // Meshed terrain (P2/P6) draws in the raster pass, so it needs its own copy
                 // of the palette + the same per-slot nearest mask.
                 if let Some(raster) = self.raster.as_mut() {
                     raster.set_terrain_palette(gpu, &layers, mask);
@@ -170,7 +170,7 @@ impl Editor {
             return;
         };
         // Asset-tree paths already carry the root ("assets/shaders/…") — joining
-        // project_root onto them gave assets/assets/… ENOENT, so no picked sky
+        // project_root onto them gave assets/assets/… enoent, so no picked sky
         // shader ever loaded (the Material-shader double-join bug, same fix).
         let abs = self.resolve_asset_path(&path);
         let mtime = floptle_vfs::modified(&abs)
@@ -242,7 +242,7 @@ impl Editor {
         }
         self.record();
         for &e in targets {
-            // "Default" is the ABSENCE of the component, not a value of it —
+            // "Default" is the absence of the component, not a value of it —
             // so putting a node back on Default has to remove it, or the scene
             // file grows a layer entry that means nothing.
             if layer == floptle_core::layers::DEFAULT_LAYER {
@@ -303,7 +303,7 @@ impl Editor {
                 .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
                 .filter(|p| !self.texture_registry.contains_key(p)),
         );
-        // The surface MAPS too — normal, roughness, metallic, occlusion. They go
+        // The surface maps too — normal, roughness, metallic, occlusion. They go
         // through the same registry lookup as the base texture and had the same
         // silence on a miss: a material with a normal map it could not resolve
         // drew flat, and the only sign was that it looked like every other flat

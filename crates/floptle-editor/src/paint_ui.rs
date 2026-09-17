@@ -70,7 +70,7 @@ impl BlendMode {
     ];
 
     /// Combine `cur` with the brush color `src` (both 0..255 per channel). The result
-    /// is the FULL-strength target; the brush weight lerps toward it afterwards, so
+    /// is the full-strength target; the brush weight lerps toward it afterwards, so
     /// every mode responds to strength/falloff the same way.
     pub(crate) fn apply(self, cur: f32, src: f32) -> f32 {
         match self {
@@ -101,7 +101,7 @@ pub(crate) struct VertexBrush {
     pub(crate) spacing: f32,
     pub(crate) blend: BlendMode,
     /// Per-channel write mask. Off-channels are left untouched — which is what makes
-    /// paint usable as SHADER DATA (paint a mask into red without disturbing the
+    /// paint usable as shader data (paint a mask into red without disturbing the
     /// color you already laid down in green/blue).
     pub(crate) channels: [bool; 4],
     /// Paint vertices whose normal faces away from the camera too. Off by default:

@@ -45,7 +45,7 @@ pub(crate) struct TilePageGpu {
 /// from — so a map that hasn't changed isn't rebuilt sixty times a second.
 ///
 /// One mesh **per page**. The seam argument that makes a tilemap one mesh is
-/// about GEOMETRY — neighbouring quads sharing a bit-identical edge coordinate
+/// about geometry — neighbouring quads sharing a bit-identical edge coordinate
 /// — and splitting the draw by which sheet a square samples does not touch it:
 /// the coordinates are still computed once, by the same expression, in the same
 /// builder. What a split costs is one draw call per sheet the layer actually
@@ -83,7 +83,7 @@ fn signature(
     texel[0].to_bits().hash(&mut h);
     texel[1].to_bits().hash(&mut h);
     data.hash(&mut h);
-    // The animation STEP, not the clock: a map with animated tiles rebuilds when
+    // The animation step, not the clock: a map with animated tiles rebuilds when
     // the frame it shows changes, not sixty times a second. A tilemap with nothing
     // animated reports step 0 forever and is never rebuilt at all — which is what
     // keeps this feature free for the maps that do not use it.
@@ -181,7 +181,7 @@ impl Editor {
             return; // no GPU yet — try again next frame
         };
 
-        // Animated tiles advance on the EDIT clock as well as the play clock, so a
+        // Animated tiles advance on the edit clock as well as the play clock, so a
         // torch flickers while you are placing torches. That is the whole point of
         // authoring animation in the editor rather than discovering it in Play.
         let now = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
@@ -190,7 +190,7 @@ impl Editor {
             let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
             let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
 
-            // Page 0 comes from the TILESET, and the node's Material is the
+            // Page 0 comes from the tileset, and the node's Material is the
             // fallback for a layer whose tileset names no sheet of its own.
             //
             // It used to be the other way round — the material was the
@@ -524,12 +524,12 @@ pub(crate) fn sprite_one_draw(
         mp.tile_rotation = packed.tile_rotation;
     }
 
-    // Flipping is a negative SCALE on the QUAD, not on the node: a negative node
+    // Flipping is a negative scale on the quad, not on the node: a negative node
     // scale would mirror the node's children and invert its normals too, and
     // "face the other way" must not do either.
     let sx = if flip_x { -w } else { w };
     let sy = if flip_y { -h } else { h };
-    // The pivot moves the QUAD, not the node — the node's origin is where the
+    // The pivot moves the quad, not the node — the node's origin is where the
     // author put it and where a Y-sort reads from. `0.5, 0.5` is the centre and
     // shifts nothing.
     let off = Vec3::new((0.5 - pivot[0]) * w, (0.5 - pivot[1]) * h, 0.0);
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn the_selection_outline_is_the_same_quad_as_the_sprite() {
         // A 16x2 sheet on a 512x64 image: one cell is 32x32, so at 32 px per
-        // unit the sprite is one unit square — and the whole IMAGE would be
+        // unit the sprite is one unit square — and the whole image would be
         // sixteen units by two.
         let mat = floptle_core::Material {
             texture: Some("art/hero.png".into()),
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(drawn_extent(&centre), drawn_extent(&feet));
     }
 
-    /// Flipping mirrors the picture. It is a negative scale on the QUAD and not
+    /// Flipping mirrors the picture. It is a negative scale on the quad and not
     /// on the node, because a negative node scale would mirror the node's
     /// children and invert its normals as well.
     #[test]
@@ -686,7 +686,7 @@ mod tests {
         assert!(x_of(&plain) > 0.0 && x_of(&flipped) < 0.0, "the quad's X axis must invert");
     }
 
-    /// A tilemap's page draws the sheet the PAGE names, and page 0 falls back
+    /// A tilemap's page draws the sheet the page names, and page 0 falls back
     /// to the node's material only when the tileset names none.
     ///
     /// This is what "I have to assign a texture to the material for the tileset
@@ -895,7 +895,7 @@ pub(crate) fn draw_offsets(
     // **Flat nodes with no `Sorting` component are in this too**, on the default
     // layer at order 0 — which is exactly what they are. Leaving them out was a
     // real bug: the ranked branch below re-spaces a layer by ordinal position,
-    // so a node left at z = 0 sat in the MIDDLE of the span its neighbours were
+    // so a node left at z = 0 sat in the middle of the span its neighbours were
     // spread across, and a sprite authored at `order = -1` could come out in
     // front of the ground tilemap it was meant to be behind. Nothing about the
     // tilemap had changed; somebody had switched one node in the layer to Y.
@@ -1083,7 +1083,7 @@ mod sort_tests {
         let mut second = World::default();
         let b: Vec<_> = places.iter().rev().map(|&(x, y)| put(&mut second, x, y)).collect();
         let (za, zb) = (zs(&first, &project), zs(&second, &project));
-        // Compare by PLACE, not by handle: `b` is in reverse place order.
+        // Compare by place, not by handle: `b` is in reverse place order.
         for (i, _) in places.iter().enumerate() {
             let (ea, eb) = (a[i], b[places.len() - 1 - i]);
             assert_eq!(
@@ -1120,7 +1120,7 @@ mod sort_tests {
         // Right at the bottom of the screen (so Y wants it in front of
         // everything) but on the order below.
         let shadow = put(&mut world, -100.0, -1);
-        // Right at the top (so Y wants it at the BACK) but on the order above.
+        // Right at the top (so Y wants it at the back) but on the order above.
         let hat = put(&mut world, 100.0, 1);
         let body = put(&mut world, 0.0, 0);
         let z = zs(&world, &project);
@@ -1157,7 +1157,7 @@ mod sort_tests {
         let half = (floptle_core::SORT_LAYER_STEP * 0.5) as f64;
         let mut seen: Vec<f64> = es.iter().map(|e| z[e]).collect();
         seen.sort_by(f64::total_cmp);
-        // **Separated by the MEASURED floor, not merely distinct as f64.** The
+        // **Separated by the measured floor, not merely distinct as f64.** The
         // first version of this asserted `w[1] > w[0]`, which is true for ten
         // thousand nodes in a layer and says nothing at all about whether the
         // depth buffer can tell them apart. `sort_precision_probe` measured the
@@ -1178,7 +1178,7 @@ mod sort_tests {
     /// still has to stay behind the things authored behind it.
     ///
     /// The bug: the ranked branch re-spaces a layer by ordinal position, so a
-    /// node left out of the ranking sat in the MIDDLE of the span everything
+    /// node left out of the ranking sat in the middle of the span everything
     /// else was spread across. Switching one node in the layer to Y-sorting
     /// therefore pushed a sprite at `order = -1` in front of the tilemap it was
     /// authored behind — with nothing about either of them having changed.
@@ -1293,7 +1293,7 @@ mod sort_tests {
             sorting_layers: vec!["Characters".into()],
             ..Default::default()
         };
-        // Far up the screen (so it sorts to the BACK of its own layer), but on
+        // Far up the screen (so it sorts to the back of its own layer), but on
         // the front layer.
         let front = world.spawn();
         let mut t = floptle_core::Transform::default();

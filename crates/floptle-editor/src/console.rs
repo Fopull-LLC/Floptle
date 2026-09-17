@@ -342,7 +342,7 @@ fn mirror_line(line: &str) {
     floptle_say::say_err!("{line}");
     // The page's transcript first (`window.floptleLog`, which also echoes to
     // the browser console): that is what `tools/web/shot.py` collects, and a
-    // spawn that failed or a shader a browser refused has to be READABLE from
+    // spawn that failed or a shader a browser refused has to be readable from
     // a headless run — two bugs once sat behind an empty transcript.
     // A page without the hook still gets the browser console.
     #[cfg(target_arch = "wasm32")]

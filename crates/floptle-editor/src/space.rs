@@ -16,15 +16,15 @@ use floptle_core::math::DVec3;
 
 use crate::Editor;
 
-/// Physics LOD for a DISTANT compound craft (a deployed satellite, a spent
+/// Physics LOD for a distant compound craft (a deployed satellite, a spent
 /// stage, a parked rover half a planet away). Far from the camera the full
-/// contact sim is wasted heat: landed/slow craft FREEZE (anchored — pinned,
+/// contact sim is wasted heat: landed/slow craft freeze (anchored — pinned,
 /// carried with their planet's frame), in-flight craft coast on an analytic
 /// Kepler conic (drift-free orbits at any warp, for any number of craft).
 /// Both wake to live physics when approached.
 #[derive(Clone, Copy)]
 pub(crate) enum CompoundLod {
-    /// Anchored in place; `was_anchored` remembers a GAMEPLAY anchor (launch
+    /// Anchored in place; `was_anchored` remembers a gameplay anchor (launch
     /// clamps) so waking doesn't silently release it.
     Frozen { was_anchored: bool },
     /// On rails around dominant celestial `dom` with cached elements.
@@ -111,7 +111,7 @@ impl Editor {
             let old = floptle_core::world_transform(&self.world, *e).translation;
             deltas.push(wp - old);
             if i != root {
-                // `wp` is WORLD-space but `Transform.translation` is parent-local:
+                // `wp` is world-space but `Transform.translation` is parent-local:
                 // a body under a scene group (generators build a "<Star> System"
                 // folder) must convert through the parent's frame, or the world
                 // position would be re-offset by the group. Top-level bodies
@@ -136,7 +136,7 @@ impl Editor {
                 soi: sys.bodies[i].soi,
             });
         }
-        // Dominant-frame CARRY (the patched-conic frame, made physical): every
+        // Dominant-frame carry (the patched-conic frame, made physical): every
         // dynamic body inside a moving celestial's sphere of influence shifts
         // by that body's rails delta this tick — stand on an orbiting moon and
         // you ride it instead of it sliding out from under you; orbit inside
@@ -144,7 +144,7 @@ impl Editor {
         // untouched (positions are the frame); crossing an SOI boundary swaps
         // frames with a small world-velocity step — the v1 patched-conic seam.
         //
-        // WARP COASTING (S4): while warp > 1 every IN-FLIGHT body (off the
+        // Warp coasting (S4): while warp > 1 every in-flight body (off the
         // ground, clear of the surface, actually moving relative to its
         // dominant celestial) snaps to its own Kepler rails — its conic is
         // captured once on warp engage and evaluated analytically each tick,
@@ -168,7 +168,7 @@ impl Editor {
                 let mut dom: Option<(usize, f64)> = None; // (index, soi)
                 for (i, sb) in sys.bodies.iter().enumerate() {
                     // Containment against the old center: `pos` is the body's
-                    // PRE-tick position while `bodies[i].pos` already moved by
+                    // Pre-tick position while `bodies[i].pos` already moved by
                     // this tick's rails delta. Testing the new center strands
                     // a body when its planet jumps (worst on the first tick,
                     // where authored scene positions can differ from the rails
@@ -183,15 +183,15 @@ impl Editor {
                 }
                 let Some((i, _)) = dom else { continue };
                 let (mut vel, grounded) = states.get(&eid).copied().unwrap_or_default();
-                // frame CONVENTION: a dynamic body's sim velocity is measured
-                // in its DOMINANT celestial's carried frame — the carry moves
+                // frame convention: a dynamic body's sim velocity is measured
+                // in its dominant celestial's carried frame — the carry moves
                 // positions only, so a landed ship reads v ≈ 0 while its
                 // planet orbits the star at full speed. Everything below (and
                 // `space.elements`) treats velocities as frame-relative;
                 // subtracting the center's world velocity here again was the
                 // bug that bent trajectories the moment warp engaged.
                 //
-                // SOI SEAM: crossing into a different dominant frame must keep
+                // SOI seam: crossing into a different dominant frame must keep
                 // the world velocity continuous, so the sim velocity jumps by
                 // (old frame vel − new frame vel) — leave a planet's SOI and
                 // you carry its orbital velocity into the star's frame.
@@ -229,12 +229,12 @@ impl Editor {
                     && rel.length() > cb[i].1.body_radius + 8.0
                     && vel.as_dvec3().length_squared() > 0.01;
                 if flying && cb[i].1.mu > 0.0 {
-                    // Capture on engage only. An EXISTING coast keeps its conic
+                    // Capture on engage only. An existing coast keeps its conic
                     // even when this tick's sampled dominant differs — the
                     // crossing walk below hands frames off at the exact
                     // boundary time instead of the tick boundary.
                     self.space_coast.entry(eid).or_insert_with(|| {
-                        // Capture the conic from the PRE-TICK state (old center,
+                        // Capture the conic from the pre-tick state (old center,
                         // old time) — from here on the cached elements are truth.
                         // The sim velocity is the frame-relative velocity.
                         (dom_key, Kepler::from_state(rel, vel.as_dvec3(), cb[i].1.mu, t_old))
@@ -245,7 +245,7 @@ impl Editor {
                         (root_pos + p, v)
                     };
                     // Smallest containing SOI at τ — the patched-conic rule,
-                    // evaluated on the ANALYTIC rails (exact at any warp).
+                    // evaluated on the analytic rails (exact at any warp).
                     let dom_at = |wp: DVec3, tau: f64| -> usize {
                         let mut best = root;
                         let mut best_soi = f64::INFINITY;
@@ -333,7 +333,7 @@ impl Editor {
                         );
                         continue;
                     }
-                    // Surface proximity KILLS warp (the KSP rule): a conic
+                    // Surface proximity kills warp (the KSP rule): a conic
                     // whose next sample dips near the ground would teleport
                     // the ship into rock at 1000×. Drop to realtime and let
                     // physics take it from the last on-conic state.
@@ -356,12 +356,12 @@ impl Editor {
                     }
                 }
             }
-            // COMPOUNDS ride their dominant frame too. Skipping them was the
+            // Compounds ride their dominant frame too. Skipping them was the
             // launch-day fling: the spawn planet orbits its star at ~90 u/s,
             // every carried body (the astronaut) rode along, and the freshly
             // assembled vessel — never shifted — watched its planet sail away,
             // which read as "my ship got sucked into space the moment it
-            // spawned". Same containment-vs-old-center rule, same SOI-seam
+            // spawned". Same containment-vs-old-center rule, same soi-seam
             // velocity step; no warp coasting yet (v0 vessels fly realtime —
             // grounded compounds are contact-pinned, which is what makes
             // warping while parked safe, same as single bodies).
@@ -398,7 +398,7 @@ impl Editor {
                     sim.shift_compound(eid, deltas[i]);
                 }
             }
-            // surface STRUCTURES ride their planet: a Static-bodied node
+            // surface structures ride their planet: a Static-bodied node
             // parented (at any depth) under a celestial follows it visually
             // through the transform hierarchy for free — but its baked
             // collider blob would stay behind in space. Shift the colliders
@@ -437,7 +437,7 @@ impl Editor {
                 }
                 best.map(|(i, _)| i)
             };
-            // COMPOUND WARP COASTING: while warp > 1, every live in-flight
+            // Compound warp coasting: while warp > 1, every live in-flight
             // compound (the piloted vessel above all) snaps to its own Kepler
             // conic, exactly like single bodies — captured on engage,
             // evaluated analytically at rails time, velocity kept current so
@@ -517,7 +517,7 @@ impl Editor {
                 // realtime physics resumes exactly where the rails left off.
                 self.compound_coast.clear();
             }
-            // DISTANT-CRAFT LOD (hundreds of deployed craft, cheaply): far
+            // Distant-craft LOD (hundreds of deployed craft, cheaply): far
             // compounds leave live physics — landed/slow ones freeze in the
             // carried frame, in-flight ones snap to their own Kepler rails —
             // and wake on approach. The active camera is "near".
@@ -595,7 +595,7 @@ impl Editor {
                             let (r, v) = k.pos_vel(cb[i].1.mu, t);
                             let target = DVec3::from(bodies[i].pos) + r;
                             sim.shift_compound(eid, target - com);
-                            // Keep the REPORTED velocity on the conic every tick
+                            // Keep the reported velocity on the conic every tick
                             // (not only on wake): a LOD-anchored craft has its
                             // real linvel zeroed, but `assembly.info().vel` — read
                             // by the map/HUD to draw the vessel's orbit — must stay
@@ -688,8 +688,7 @@ mod tests {
         let local = world_to_parent_local(&w, body, rails_wp);
         w.get_mut::<Transform>(body).unwrap().translation = local;
         let got = floptle_core::world_transform(&w, body).translation;
-        // Tolerance: rotation quats are f32 (ADR-0015 keeps only translation
-        // f64), so a rotated parent leaves f32-epsilon × lever-arm residue
+        // Tolerance: rotation quats are f32, so a rotated parent leaves f32-epsilon × lever-arm residue
         // (~1e-7 × 5000 units). Millimeter-scale at system scale is exact
         // for our purposes — and generator groups are identity anyway.
         assert!((got - rails_wp).length() < 1e-3, "world pos drifted: {got:?}");

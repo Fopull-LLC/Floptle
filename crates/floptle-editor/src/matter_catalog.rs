@@ -559,7 +559,7 @@ fn new_nav_area() -> MatterDoc {
     MatterDoc::from(&Matter::default_nav_area())
 }
 
-/// A `MatterDoc`'s VARIANT name — not its human label.
+/// A `MatterDoc`'s variant name — not its human label.
 ///
 /// Exhaustive on purpose: adding a variant to `MatterDoc` stops compiling here,
 /// which is the first place the author is asked "and where does it live in the
@@ -605,7 +605,7 @@ mod new_menu_tests {
         ("Camera", "offered at the top level, not inside a group"),
         ("MapMesh", "offered as the seven ▦ Model shape entries, which spawn geometry as well"),
         // Every scene already has one, self-healed on load — and `delete_node`
-        // REFUSES to remove a PostProcess node. Offering it in the menu made an
+        // Refuses to remove a PostProcess node. Offering it in the menu made an
         // undeletable duplicate one click away, which is a dead end rather than
         // a feature.
         ("PostProcess", "every scene already has one, and a second cannot be deleted"),
@@ -709,7 +709,7 @@ mod new_menu_tests {
         ("PostProcess", "every scene already has exactly one, and it refuses to be deleted"),
     ];
 
-    /// A `Matter`'s VARIANT name — the runtime twin of [`matter_doc_variant`],
+    /// A `Matter`'s variant name — the runtime twin of [`matter_doc_variant`],
     /// and exhaustive for the same reason: a new variant stops compiling here,
     /// which is where the author is asked "and can a node be switched into it?".
     fn matter_variant(m: &Matter) -> &'static str {
@@ -790,7 +790,7 @@ mod new_menu_tests {
         for (label, m) in type_catalog() {
             let set = icons_of.entry(key(&m)).or_default();
             set.insert(label.split_whitespace().next().unwrap_or_default());
-            // The Inspector header's glyph counts too, and it is per TYPE rather
+            // The Inspector header's glyph counts too, and it is per type rather
             // than per menu entry: a spot light's row says ◤ and its header says
             // ●, and both have to be unique against every other type.
             set.insert(matter_icon(&m));
@@ -858,7 +858,7 @@ mod new_menu_tests {
         for e in NEW_TOP_LEVEL {
             assert!(!e.hover.is_empty(), "{} has no hover text", e.label);
         }
-        // …and every ITEM, which is what the ▦ Model shapes were missing while
+        // …and every item, which is what the ▦ Model shapes were missing while
         // this test passed: it checked the groups and the top level and never
         // the entries inside a group.
         for g in NEW_CATALOG {

@@ -422,7 +422,7 @@ impl Editor {
     }
 
     /// Take off everything a node document can put on, so that writing a
-    /// document to a live node LEAVES it saying what the document says.
+    /// document to a live node leaves it saying what the document says.
     ///
     /// The exhaustive `let NodeDoc { .. }` below is the point of this function:
     /// a field added to `NodeDoc` stops this compiling, and whoever adds it has
@@ -502,7 +502,7 @@ impl Editor {
         self.world.remove::<floptle_core::Parallax>(e);
         self.world.remove::<floptle_core::Lighting2D>(e);
         self.world.remove::<floptle_core::Shadow2D>(e);
-        // `paint`, `tex_paint` and `terrain_gen` are KEYS into per-scene stores
+        // `paint`, `tex_paint` and `terrain_gen` are keys into per-scene stores
         // and not components; `id`, `parent_id`, `parent` and `attachment` are
         // the scene file's linkage, owned by save/load. None of them is a
         // package's to clear, and `insert_doc` does not write them either.
@@ -789,7 +789,7 @@ impl Editor {
     }
 
     /// Selected entities minus the PostProcess node — a scene has exactly one, so
-    /// copy/duplicate never clone it (copy its VALUES via the Type header instead).
+    /// copy/duplicate never clone it (copy its values via the Type header instead).
     pub(crate) fn selected_matter_duplicable(&self) -> Vec<Entity> {
         let mut v = self.selected_matter();
         v.retain(|&e| !matches!(self.world.get::<Matter>(e), Some(Matter::PostProcess { .. })));
@@ -942,7 +942,7 @@ impl Editor {
         let nodes = self.subtree_docs(&self.selected_matter_duplicable());
         if !nodes.is_empty() {
             // Mirror onto the OS clipboard as tagged RON: paste then works in
-            // ANOTHER scene, another editor window, even another project —
+            // Another scene, another editor window, even another project —
             // and you can read/share the copied nodes as plain text.
             #[cfg(feature = "editor-ui")]
             if let Ok(ron) = ron::ser::to_string_pretty(&nodes, ron::ser::PrettyConfig::default())
@@ -1100,7 +1100,7 @@ impl Editor {
     }
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.
@@ -1190,7 +1190,7 @@ mod subtree_tests {
         assert_eq!(layer(&ed, child).as_deref(), Some("Prop"), "and now it comes along");
     }
 
-    /// Setting a collision layer has to reach every SELECTED node.
+    /// Setting a collision layer has to reach every selected node.
     ///
     /// The Inspector says "an edit here applies to all of them" in the panel
     /// itself; the layer picker addressed one entity, so twenty crates and one

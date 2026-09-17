@@ -54,7 +54,7 @@ pub(crate) fn draw_tool_icon(p: &Painter, r: Rect, tool: ImgTool, col: Color32) 
 
     match tool {
         // A pencil: a shaft, a sharpened nib, and a shaded ferrule at the butt.
-        // (An earlier version drew the ferrule as a crossing LINE — at 18 px it
+        // (An earlier version drew the ferrule as a crossing line — at 18 px it
         // read as an X. A perpendicular filled band reads as a ferrule; that is
         // the difference between a pencil and a kitchen knife.)
         ImgTool::Pencil => {
@@ -62,7 +62,7 @@ pub(crate) fn draw_tool_icon(p: &Painter, r: Rect, tool: ImgTool, col: Color32) 
             tri((0.26, 0.66), (0.38, 0.78), (0.12, 0.92));
             shade((0.60, 0.32), (0.72, 0.44), (0.84, 0.32), (0.72, 0.20), 0.5);
         }
-        // A brush: a handle, a shaded ferrule, and a WEDGE of bristles. The
+        // A brush: a handle, a shaded ferrule, and a wedge of bristles. The
         // round-headed version of this was indistinguishable from the
         // eyedropper two rows down in the strip.
         ImgTool::Brush => {
@@ -155,7 +155,7 @@ pub(crate) fn draw_tool_icon(p: &Painter, r: Rect, tool: ImgTool, col: Color32) 
                 );
             }
         }
-        // A lasso: a WIDE rope loop with the ends crossed and a tail hanging
+        // A lasso: a wide rope loop with the ends crossed and a tail hanging
         // off it. (A round loop with a straight tail is a magnifying glass.)
         ImgTool::Lasso => {
             let c = u(0.5, 0.36);
@@ -191,7 +191,7 @@ pub(crate) fn draw_tool_icon(p: &Painter, r: Rect, tool: ImgTool, col: Color32) 
             tri((0.92, 0.5), (0.76, 0.4), (0.76, 0.6));
         }
         // An eyedropper: a squeeze bulb, a thin tapered shaft, a drop leaving
-        // the tip. Mirrored against the brush (bulb top-LEFT, tip bottom-right)
+        // the tip. Mirrored against the brush (bulb top-left, tip bottom-right)
         // so the two never read as the same object in the strip.
         ImgTool::Eyedropper => {
             p.circle_filled(u(0.25, 0.23), r.width() * 0.18, col);
@@ -244,7 +244,7 @@ pub(crate) fn draw_tool_icon(p: &Painter, r: Rect, tool: ImgTool, col: Color32) 
 #[cfg(test)]
 pub(crate) fn render_icon_sheet(path: &std::path::Path, cell: u32, cols: u32) -> Vec<u8> {
     let ctx = crate::icons::test_context();
-    // Feathering emits triangles whose outer vertices are fully TRANSPARENT —
+    // Feathering emits triangles whose outer vertices are fully transparent —
     // with it on, an anti-aliased stroke tessellates into shapes this rasterizer
     // reads as invisible, and the sheet comes out blank while the test still
     // passes. Geometry, not gradients, is what we're inspecting here.
@@ -264,7 +264,7 @@ pub(crate) fn render_icon_sheet(path: &std::path::Path, cell: u32, cols: u32) ->
         }
     });
     let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-    // An OPAQUE dark ground, because the icons are drawn in white: on a
+    // An opaque dark ground, because the icons are drawn in white: on a
     // transparent background every viewer shows them against white paper, i.e.
     // shows nothing at all, and the sheet looks empty when it isn't.
     let mut px = vec![0u8; (w * h) as usize * 4];
@@ -307,7 +307,7 @@ mod tests {
     /// cell actually has ink in it.
     ///
     /// The file-exists version of this test passed while the sheet was very
-    /// nearly BLANK (feathered strokes tessellate to triangles with transparent
+    /// nearly blank (feathered strokes tessellate to triangles with transparent
     /// corners, and the rasterizer was reading those as invisible). A harness
     /// you can't fail is not a harness, so the per-cell coverage is the
     /// assertion now.

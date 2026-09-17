@@ -141,7 +141,7 @@ impl Editor {
     /// Per-frame driver (before the main GPU destructure): while the ◈
     /// Shaders tab is visible with a checked shader open, keep the preview
     /// atlas compiled, bound and rendered. The compile is keyed on the graph's
-    /// revision, so an idle frame costs three buffer writes; the PIPELINE only
+    /// revision, so an idle frame costs three buffer writes; the pipeline only
     /// rebuilds when the WGSL changes, and live literal/knob drags stream
     /// through the lane array without touching either.
     pub(crate) fn update_shader_graph_preview(&mut self, elapsed: f32) {
@@ -688,7 +688,7 @@ mod tests {
     }
 
     /// …and the reason it can no longer arise: the cached compile is keyed on
-    /// the DOCUMENT as well as the revision, so two shaders that are both on
+    /// the document as well as the revision, so two shaders that are both on
     /// revision 1 are still two different compiles.
     #[test]
     fn two_shaders_on_the_same_revision_are_different_compiles() {

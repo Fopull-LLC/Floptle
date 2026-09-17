@@ -172,7 +172,7 @@ impl IdeState {
 
 /// Byte ranges of every occurrence of `needle` in `hay`; ASCII case-insensitive
 /// unless `match_case`. Offsets are valid byte indices into `hay` (an ASCII
-/// needle only matches at ASCII byte positions, so multi-byte UTF-8 in `hay` is
+/// needle only matches at ASCII byte positions, so multi-byte utf-8 in `hay` is
 /// never split).
 pub(crate) fn find_ranges(hay: &str, needle: &str, match_case: bool) -> Vec<(usize, usize)> {
     if needle.is_empty() {
@@ -290,8 +290,8 @@ fn find_definition_line(text: &str, word: &str) -> Option<usize> {
 
 // ---- text-buffer editing helpers (char-indexed API over byte-precise edits) ----
 
-/// Helpers for whole-line editing. The editor's cursor speaks CHAR indices; all
-/// splicing is done on BYTE ranges so multi-byte UTF-8 never splits.
+/// Helpers for whole-line editing. The editor's cursor speaks char indices; all
+/// splicing is done on byte ranges so multi-byte utf-8 never splits.
 mod line_edit {
     /// Byte offset of char index `c` (== len when past the end).
     pub fn byte_of_char(text: &str, c: usize) -> usize {
@@ -472,7 +472,7 @@ fn auto_indent_newline(text: &mut String, a: usize, b: usize) -> usize {
         || t.ends_with('{')
         || t.ends_with('(')
         || (t.ends_with(')') && t.contains("function"));
-    // Auto-close: pressing Enter on an UNCLOSED block header (function/if/for/
+    // Auto-close: pressing Enter on an unclosed block header (function/if/for/
     // while) also inserts its matching `end` on the next line — the caret lands
     // on the indented body line between them (Roblox-Studio style). Only when
     // the buffer actually has more openers than `end`s, so retyping inside a
@@ -605,7 +605,7 @@ fn defaults_keys(text: &str) -> Vec<String> {
 }
 
 /// Fields of the live component handles (`node:getcomponent(…)`), keyed by
-/// component. A variable whose type is INFERRED (see [`infer_var_types`]) only
+/// component. A variable whose type is inferred (see [`infer_var_types`]) only
 /// offers its own component's fields; unknown variables offer all of them.
 const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("RigidBody", "friction", "Grip. A ramp holds while tan(angle) <= friction: 0 is ice, 1 holds 45 degrees, above 1 is grippier still."),
@@ -791,7 +791,7 @@ fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
             set(&mut out, lhs.to_string(), ty);
         }
     }
-    // `defaults` reference declarations type the PARAM: hp = componentref("X")
+    // `defaults` reference declarations type the param: hp = componentref("X")
     // → `params.hp` completes X's fields.
     if let Some(start) = text.find("defaults")
         && let Some(open) = text[start..].find('{')
@@ -847,7 +847,7 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
     let sep = token.rfind(['.', ':']);
 
     // Plain words match full labels: by prefix first, then by substring.
-    // (Separator tokens use ONLY member matching below — a full-label insert
+    // (Separator tokens use only member matching below — a full-label insert
     // would duplicate the row, and `anim:*` inserts are member-shaped.)
     if sep.is_none() {
         for e in LUA_API {
@@ -879,7 +879,7 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
         let base = &lower[..s];
         let member = &lower[s + 1..];
         // Inferred type for this base (case-sensitive, so use the raw token):
-        // a KNOWN type completes exactly its own members and suppresses the
+        // a known type completes exactly its own members and suppresses the
         // generic guesses — misnamed fields never make the list.
         let raw_base = &token[..s];
         let types = infer_var_types(file_text);
@@ -1108,7 +1108,7 @@ impl EditorTabViewer<'_> {
         self.ide.refs_word = word.to_string();
     }
 
-    /// Populate the references list with every LINE containing `needle` (substring,
+    /// Populate the references list with every line containing `needle` (substring,
     /// honoring the find bar's match-case) across open buffers + project scripts.
     fn gather_text_matches(&mut self, needle: &str) {
         let case = self.ide.find_case;
@@ -1319,7 +1319,7 @@ impl EditorTabViewer<'_> {
     /// the same complaint the API browser was rebuilt for, one page over.
     ///
     /// So: chapters down the left, the page itself on the right, and the search
-    /// box narrows the CONTENTS rather than expanding every matching section in
+    /// box narrows the contents rather than expanding every matching section in
     /// place. Searching does not change what is on the right until you pick
     /// something — a list that reflows under you as you type is not a list you
     /// can click.
@@ -1340,11 +1340,11 @@ impl EditorTabViewer<'_> {
         // a page was removed.
         let mut open = self.ide.docs_guide.min(DOC_SECTIONS.len().saturating_sub(1));
 
-        // Two columns need room for BOTH of them. A dock panel is whatever width
+        // Two columns need room for both of them. A dock panel is whatever width
         // it was dragged to, and at 200 px a contents column at its own minimum
         // leaves the page fifty pixels — which is the overflow this layout would
         // otherwise introduce, in the tab whose whole job is reading. Narrow, the
-        // contents go ABOVE the page instead: shrink, then wrap, then stack.
+        // contents go above the page instead: shrink, then wrap, then stack.
         let side = docs_contents_width(ui.available_width());
         let render = |ui: &mut egui::Ui, this: &mut Self, open: &mut usize| {
             // ---- contents ----
@@ -1501,7 +1501,7 @@ impl EditorTabViewer<'_> {
                  name or an example to copy it.",
             );
             ui.add_space(6.0);
-            // SEARCHING is a different job from browsing. Grouped results make
+            // Searching is a different job from browsing. Grouped results make
             // you scan every category for the one row you wanted, and with 500+
             // entries a doc-text match in the first group buries an exact name
             // match in the last. So while there's a query, rank everything into
@@ -1526,7 +1526,7 @@ impl EditorTabViewer<'_> {
                 }
             }
             // …and with no query, the grouped browse. Groups open by default:
-            // this is a BROWSER, and a wall of closed headers is a table of
+            // this is a browser, and a wall of closed headers is a table of
             // contents, not a reference.
             if !searching {
                 for cat in API_CATEGORIES {
@@ -1551,7 +1551,7 @@ impl EditorTabViewer<'_> {
           if page == DocsPage::Shaders {
             ui.strong("Shader stdlib (.flsl)");
             ui.small(
-                "Custom material looks (ADR-0007): Assets → right-click → ◈ New Shader, then \
+                "Custom material looks: Assets → right-click → ◈ New Shader, then \
                  Inspector → Material → Shader to assign. `uniform`s become Inspector knobs, \
                  `texture` slots take drag-and-drop textures, and every op below can be wired \
                  by name — also editable in VSCode.",
@@ -1885,17 +1885,17 @@ impl EditorTabViewer<'_> {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        // While the completion popup is open (last frame) it owns ENTER (accept),
+        // While the completion popup is open (last frame) it owns enter (accept),
         // the arrow keys (choose) and Esc (dismiss) — eaten *before* the editor
         // runs so they don't insert a newline / move the caret.
         //
-        // Enter accepts and TAB NEVER DOES (v0.17.0): Tab is indentation, always,
+        // Enter accepts and TAB never does (v0.17.0): Tab is indentation, always,
         // which is the one key you press without looking. The popup only opens on
         // its own after `.` or `:` — where you're asking "what fields does this
         // have?" — so an Enter it intercepts is an Enter you aimed at it. Ctrl+Space
         // summons it anywhere, including for a plain word.
         let ac_id = egui::Id::new(("ide_ac_open", editor_id));
-        // …but only while the EDITOR still has the keyboard. The open flag is last
+        // …but only while the editor still has the keyboard. The open flag is last
         // frame's; if focus has since moved to the find bar or the go-to-line
         // prompt, the popup is about to close and its keys belong to whatever is
         // focused now. Without this check there is a one-frame window where Enter
@@ -1929,7 +1929,7 @@ impl EditorTabViewer<'_> {
         let goto = self.ide.goto.take();
         let find_hl = (self.ide.find_open && !self.ide.find_query.is_empty())
             .then(|| (self.ide.find_query.clone(), self.ide.find_case, self.ide.find_idx));
-        // Selected-text occurrences: highlight the OTHER instances of a short,
+        // Selected-text occurrences: highlight the other instances of a short,
         // single-line selection (standard IDE behavior). Skipped while the find
         // bar has a query so the two highlights never fight.
         let occ_hl = if find_hl.is_none() {
@@ -1972,7 +1972,7 @@ impl EditorTabViewer<'_> {
                             .show(ui)
                     })
                     .inner;
-                // All galley-space painting happens HERE, inside the scroll area, so
+                // All galley-space painting happens here, inside the scroll area, so
                 // it's clipped to the code viewport (never over toolbars or panels).
                 let painter = ui.painter();
                 let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
@@ -1992,7 +1992,7 @@ impl EditorTabViewer<'_> {
                             painter.rect_filled(rect, 0.0, theme.cur_line32());
                         }
                     }
-                // Find matches: all in amber, the CURRENT one brighter + outlined.
+                // Find matches: all in amber, the current one brighter + outlined.
                 if let Some((query, case, idx)) = &find_hl {
                     let hl = egui::Color32::from_rgba_unmultiplied(255, 210, 0, 45);
                     let cur = egui::Color32::from_rgba_unmultiplied(255, 160, 40, 90);
@@ -2080,7 +2080,7 @@ impl EditorTabViewer<'_> {
 
         // Right-click an identifier → Go to definition / Find all references. Capture
         // the word at the moment of the click (from the pointer position over the
-        // code) and hold it: reading the LIVE hover each frame flickers, because once
+        // code) and hold it: reading the live hover each frame flickers, because once
         // the menu opens the pointer sits over the menu, not the word.
         if output.response.response.secondary_clicked() {
             self.ide.rc_word = output
@@ -2184,7 +2184,7 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// The find & replace bar. Typing NEVER moves focus into the editor — the
+    /// The find & replace bar. Typing never moves focus into the editor — the
     /// current match is selected in the editor's stored state + scrolled into
     /// view, and Enter / Shift+Enter (or F3 / ▶ ◀) step through matches while
     /// you keep typing. Esc closes and returns to the code.
@@ -2299,7 +2299,7 @@ impl EditorTabViewer<'_> {
                 let t = &mut self.ide.open[i].text;
                 t.replace_range(bs..be, &self.ide.replace_buf);
                 self.ide.open[i].dirty = true;
-                // Select the replacement; the SAME index now points at the next match.
+                // Select the replacement; the same index now points at the next match.
                 let a = line_edit::char_of_byte(&self.ide.open[i].text, bs);
                 let b = line_edit::char_of_byte(
                     &self.ide.open[i].text,
@@ -2308,7 +2308,7 @@ impl EditorTabViewer<'_> {
                 set_ide_selection(ui.ctx(), editor_id, a, b);
                 self.ide.goto = Some(self.ide.open[i].text[..bs].matches('\n').count() + 1);
             } else if nav != 0 || changed {
-                // Select + scroll to the current match — WITHOUT stealing focus, so
+                // Select + scroll to the current match — without stealing focus, so
                 // typing in the find field keeps flowing.
                 let (bs, be) = ranges[self.ide.find_idx];
                 let a = line_edit::char_of_byte(&text, bs);
@@ -2452,7 +2452,7 @@ impl EditorTabViewer<'_> {
             set_ide_caret(ui.ctx(), editor_id, new_caret);
         }
         // Alt+Shift+F → format this document (VS Code's binding). The caret is
-        // restored by LINE + COLUMN rather than by byte offset: re-indenting moves
+        // restored by line + column rather than by byte offset: re-indenting moves
         // every offset after the first change, so a byte-restored caret would jump
         // somewhere else on every format.
         if is_lua
@@ -2488,7 +2488,7 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// Format file `i`, keeping the caret on its LINE and COLUMN rather than its
+    /// Format file `i`, keeping the caret on its line and column rather than its
     /// byte offset — re-indenting shifts every offset after the first change, so a
     /// byte-restored caret lands somewhere else on every format.
     ///
@@ -2507,7 +2507,7 @@ impl EditorTabViewer<'_> {
     }
 
     /// Render a doc body with light structure instead of one monospace slab:
-    /// headings, wrapped prose, bullets, and CODE BLOCKS in the editor's own
+    /// headings, wrapped prose, bullets, and code blocks in the editor's own
     /// syntax highlighting inside a framed panel.
     ///
     /// The markup is deliberately tiny — indented lines (4 spaces) or ``` fences
@@ -2713,7 +2713,7 @@ impl EditorTabViewer<'_> {
         }
         let cursor = range.primary.index.0;
         let (start, token) = current_token(&self.ide.open[i].text, cursor);
-        // when the POPUP opens on its own: only for MEMBER ACCESS — after a `.`
+        // when the popup opens on its own: only for member access — after a `.`
         // or `:`, which is exactly the moment you're asking what fields a thing
         // has, and where the answer is short-lived. A plain identifier does not
         // summon it (that was the intrusive case: a popup over your code every
@@ -2806,7 +2806,7 @@ impl EditorTabViewer<'_> {
 
 // ---- templates, snippets & docs ---------------------------------------------
 
-/// A starter Lua script body (ADR-0003) — named after the file it lands in.
+/// A starter Lua script body — named after the file it lands in.
 pub(crate) fn script_template(name: &str) -> String {
     format!(
         "-- {name}.lua\n\
@@ -3541,7 +3541,7 @@ struct ApiEntry {
     doc: &'static str,
 }
 
-/// Worked EXAMPLES for the API entries people actually reach for, shown under the
+/// Worked examples for the API entries people actually reach for, shown under the
 /// entry on the Docs page, in its hover tooltip, and in the completion popup.
 ///
 /// A separate table rather than a field on [`ApiEntry`] so an example can be added
@@ -3771,7 +3771,7 @@ const API_EXAMPLES: &[(&str, &str)] = &[
 /// used to handle. The cases that matter are the ones people actually write:
 /// `target:lookAt` (the receiver is a variable, not literally `node`),
 /// `v:flatten` (the reference calls it `vec3:flatten`), `player.worldPos`. So:
-/// try the literal word, then fall back to the MEMBER name — with the same
+/// try the literal word, then fall back to the member name — with the same
 /// separator, and only when that is unambiguous. A hover that guesses wrong is
 /// worse than no hover.
 fn api_entry_for(word: &str) -> Option<&'static ApiEntry> {
@@ -3999,7 +3999,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "node.yaw", insert: "node.yaw", doc: "Heading about Y, in radians." },
     ApiEntry { label: "node.pitch", insert: "node.pitch", doc: "Pitch about X, in radians." },
     ApiEntry { label: "node.roll", insert: "node.roll", doc: "Roll about Z, in radians." },
-    // The VECTOR reads/writes (v0.17.0) — the scalar triplets below them still
+    // The vector reads/writes (v0.17.0) — the scalar triplets below them still
     // work, but these are what the docs teach: one write, no hand-rolled maths.
     ApiEntry { label: "node.vel", insert: "node.vel", doc: "The body's velocity as a vec3 (read/write). `node.vel = node.vel + node.up * jump` replaces three vx/vy/vz lines, and it accepts anything with x/y/z." },
     ApiEntry { label: "node.up", insert: "node.up", doc: "The body's up as a vec3 — minus gravity, so Y on flat ground and RADIAL on a planet. The direction to jump in, wherever the player is standing." },
@@ -5548,7 +5548,7 @@ mod tests {
 
     /// **Every method a node handle answers to must have a reference entry.**
     ///
-    /// `api_surface()` walks the GLOBALS, and the annotation test below
+    /// `api_surface()` walks the globals, and the annotation test below
     /// deliberately excludes `Node` — so between them, `node:` methods were
     /// covered by nothing at all. Six 2D bindings shipped into the reference
     /// only because somebody typed them there, and regenerating the docs would
@@ -5656,7 +5656,7 @@ mod tests {
         out
     }
 
-    /// Everything reachable through a HANDLE must have a reference entry too.
+    /// Everything reachable through a handle must have a reference entry too.
     ///
     /// `api_surface()` walks the globals, so it cannot see a method that lives
     /// on a metatable: every component handle, the sound and particle handles,
@@ -5763,7 +5763,7 @@ mod tests {
         assert_eq!(best("crossfade"), "anim:crossfade");
         // A prefix.
         assert_eq!(best("spherec"), "spherecast");
-        // A word that appears in a lot of PROSE must still lose to the entry
+        // A word that appears in a lot of prose must still lose to the entry
         // actually named that.
         assert_eq!(best("tween"), "tween");
 
@@ -5992,7 +5992,7 @@ Prose with `inline code` in it.
     /// tab is the one people make narrow — it sits beside the code. A contents
     /// column at its own readable minimum inside a 200 px panel leaves the page
     /// fifty pixels, which is not a page; the rule in this codebase is shrink,
-    /// then wrap, then STACK, and this is the stack.
+    /// then wrap, then stack, and this is the stack.
     ///
     /// The width decision is a free function precisely so it can be asserted on:
     /// the layout it drives needs a whole `EditorTabViewer`, and a panel that
@@ -6034,7 +6034,7 @@ Prose with `inline code` in it.
     /// Mechanical, unmissable, and it fails the build the day somebody adds the
     /// twenty-fifth such binding without one.
     ///
-    /// The check is deliberately about PRESENCE and not about wording — a test
+    /// The check is deliberately about presence and not about wording — a test
     /// cannot read English, and one that tried would be a test people route
     /// around. What it can do is refuse to let the question go unanswered.
     #[test]
@@ -6209,7 +6209,7 @@ Prose with `inline code` in it.
         assert_eq!(caret, t.chars().count());
         // Block opener: one level deeper. Unclosed → the matching end appears
         // too (see enter_on_unclosed_block_inserts_end); already-closed → just
-        // the indent. (`do` must be a WORD, not a suffix — tested via avocado.)
+        // the indent. (`do` must be a word, not a suffix — tested via avocado.)
         let mut t = "if x then".to_string();
         let end = t.chars().count();
         auto_indent_newline(&mut t, end, end);
@@ -6311,7 +6311,7 @@ Prose with `inline code` in it.
         let c = auto_indent_newline(&mut t, caret, caret);
         assert_eq!(t, "function update(node, dt)\n  \nend");
         assert_eq!(c, "function update(node, dt)\n  ".chars().count());
-        // Inside an ALREADY balanced block, Enter only indents (no double end).
+        // Inside an already balanced block, Enter only indents (no double end).
         let mut t = String::from("function f()\nend");
         let caret = "function f()".chars().count();
         auto_indent_newline(&mut t, caret, caret);

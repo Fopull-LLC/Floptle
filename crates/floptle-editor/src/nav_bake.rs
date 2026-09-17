@@ -403,7 +403,7 @@ fn push_sphere(out: &mut Vec<Tri>, centre: Vec3, r: f32) {
 ///
 /// `origin` is the world position everything is measured from — the navmesh
 /// node's own translation. Geometry is baked relative to it in `f32`, the same
-/// trade the physics sim makes (ADR-0015): residuals stay small and exact no
+/// trade the physics sim makes: residuals stay small and exact no
 /// matter how far out the level sits.
 pub(crate) fn gather(
     world: &World,
@@ -428,7 +428,7 @@ pub(crate) fn gather(
         let t = floptle_core::world_transform(world, e);
         let local = (t.translation - origin).as_vec3();
         let s = t.scale;
-        // A REGIONAL bake reads only the box it was asked about. Skipping is
+        // A regional bake reads only the box it was asked about. Skipping is
         // conservative — a node whose size cannot be known without opening a
         // file is kept — because leaving geometry out of a bake produces a
         // navmesh that looks right and has a hole in it, and reading one model
@@ -489,7 +489,7 @@ pub(crate) fn gather(
             }
             // Terrain is meshed by the same surface-nets pass the renderer uses,
             // so the navmesh sits on exactly the ground that is drawn.
-            // Terrain is keyed by ENTITY in the editor's store, not by the
+            // Terrain is keyed by entity in the editor's store, not by the
             // `id` on the component — the id keys the file on disk.
             Some(Matter::Terrain { .. }) => {
                 let Some(terrain) = terrains.get(&e) else { continue };
@@ -606,7 +606,7 @@ pub(crate) fn gather_areas(
         let id = if blocks {
             floptle_nav::WALKABLE
         } else {
-            // TRIMMED at registration, because everything that matches against
+            // Trimmed at registration, because everything that matches against
             // this list trims too — a stray space must not mint a second
             // "water " that every filter then misses.
             let name = {
@@ -708,7 +708,7 @@ pub(crate) fn gather_links(
         link.cost = cost;
         link.duration = duration;
         link.enabled = enabled;
-        // A link's area name REGISTERS the area (default cost) rather than
+        // A link's area name registers the area (default cost) rather than
         // silently resolving to plain ground when no volume happens to share
         // the name — "tag twenty links `jump` and exclude them all" has to
         // work without also painting a jump-coloured box somewhere.
@@ -750,7 +750,7 @@ pub(crate) fn gather_links(
 
 /// Cut the gathered triangles down to the volume's box.
 ///
-/// A triangle is kept when its own bounds OVERLAP the box — not when one of its
+/// A triangle is kept when its own bounds overlap the box — not when one of its
 /// corners is inside it. That distinction is the whole of this function, and
 /// getting it wrong ate a level: a floor is often two enormous triangles whose
 /// corners are far outside any box you would draw around a room, and testing
@@ -1455,7 +1455,7 @@ impl crate::Editor {
             (clip(g.tris, half), half, None)
         };
 
-        // The bake is measured around where the node ENDS up — auto bounds may
+        // The bake is measured around where the node ends up — auto bounds may
         // have just moved it — so a world-space question can be turned into a
         // mesh-space one later without anybody having to remember the offset.
         let anchor = match shift {
@@ -1676,7 +1676,7 @@ impl crate::Editor {
             extras.push_str(&format!(" — {drops} drop(s), {jumps} jump(s) found"));
         }
         // Only when there is more than one: "1 separate area" is a level that
-        // works and does not need a line about it. The SHARE comes with it,
+        // works and does not need a line about it. The share comes with it,
         // because a count on its own is not actionable — "155 areas" could be a
         // level with 155 cupboards in it or a bake that has shattered, and the
         // biggest island's share of the ground is what tells them apart.
@@ -1919,7 +1919,7 @@ mod tests {
         }
     }
 
-    /// The three cases, against what PHYSICS does with each — which is the only
+    /// The three cases, against what physics does with each — which is the only
     /// thing that makes any of them right.
     ///
     /// The one worth writing down is the middle: a `MeshCollider` **beside a
@@ -1957,7 +1957,7 @@ mod tests {
             "physics collides this as the body, so the navmesh must too"
         );
 
-        // A DYNAMIC body is an object, not ground — nothing here claims it.
+        // A dynamic body is an object, not ground — nothing here claims it.
         let c = mesh(&mut world);
         world.insert(c, Collidable);
         world.insert(c, RigidBody { mode: BodyMode::Dynamic, ..body });

@@ -196,7 +196,7 @@ pub(crate) struct Shared {
     /// Batches of node documents a package asked for, drained after the frame.
     ///
     /// Separate from the mirror's `docs` on purpose. The mirror carries the
-    /// SELECTION's documents because those are rebuilt whenever the scene
+    /// Selection's documents because those are rebuilt whenever the scene
     /// changes and must stay cheap; this is a one-shot read of whatever ids
     /// were asked for, which costs nothing until somebody asks and is not
     /// repeated on the next frame.
@@ -384,7 +384,7 @@ pub(crate) struct TabReg {
 
 /// The dock key for a package's tab.
 ///
-/// FNV-1a over `<package id>::<title>`. Stable across runs and across machines,
+/// Fnv-1a over `<package id>::<title>`. Stable across runs and across machines,
 /// which a runtime-allocated id is not — a saved layout outlives the session
 /// that wrote it, so the key in it has to mean the same thing tomorrow.
 pub(crate) fn tab_key(pkg_id: &str, title: &str) -> u64 {
@@ -554,7 +554,7 @@ impl Default for ExtHost {
 /// A package is third-party code written against the documented surface, and
 /// `base_globals` copies `bit` out of these globals — so on a VM that spells it
 /// `bit32` the shim has to be in place before the sandbox is built, or every
-/// package that hashes anything silently loses the library (ADR-0028).
+/// package that hashes anything silently loses the library.
 ///
 /// The two call sites are construction and `reload`, and they must not drift:
 /// a reload that skipped this would work until the first package reload.
@@ -703,7 +703,7 @@ impl ExtHost {
         self.shortcuts.clear();
         self.hooks.clear();
         self.timers.clear();
-        // A reload REPLACES the set rather than accumulating: the faces of a
+        // A reload replaces the set rather than accumulating: the faces of a
         // package that has just been switched off must stop being registered.
         // Only mark it dirty if there was something to drop, so a project with
         // no package fonts never rebuilds the atlas.
@@ -849,7 +849,7 @@ impl ExtHost {
                         self.packages.get(pkg).map(|p| p.id.as_str()).unwrap_or("?"),
                         &title,
                     );
-                    // A tab's open-ness lives in the DOCK LAYOUT, not here: the
+                    // A tab's open-ness lives in the dock layout, not here: the
                     // layout is what the user arranged and what was saved, so
                     // asking the host would give a second, disagreeing answer.
                     self.shared.open_state.borrow_mut().insert(id, false);
@@ -1365,7 +1365,7 @@ impl ExtHost {
                 ),
                 // **Play, refused for a different reason and a worse one.**
                 //
-                // Applying this calls `toggle_play`, which CLEARS the Console —
+                // Applying this calls `toggle_play`, which clears the Console —
                 // and outside the editor the Console is the entire report. A
                 // script that logged and then asked to play had its output
                 // deleted by the request and exited 0 saying nothing was raised.

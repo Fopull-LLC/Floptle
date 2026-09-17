@@ -104,7 +104,7 @@ fn build_and_tear(dir: &std::path::Path, n: usize, with_callback: bool) -> (f64,
 
     // One Lua pass to queue the chunk. Not timed: it mirrors the scene once,
     // which is by design and is the same work in every arm — what is being
-    // measured is what the DRAIN costs.
+    // measured is what the drain costs.
     let scripts = dir.join("scripts");
     ed.script_host.run(&mut ed.world, &scripts, 1.0 / 60.0, 0.0);
     assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());

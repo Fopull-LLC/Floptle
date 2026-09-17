@@ -202,7 +202,7 @@ impl Editor {
         // `&mut self`, and the targets it is rendering into live here. Put back
         // at the end, whatever happens in between.
         let Some(probes) = self.reflection_probes.take() else { return };
-        // A capture is six ORDINARY scene renders, so its targets have to be in
+        // A capture is six ordinary scene renders, so its targets have to be in
         // the format the raster pipelines were built against. Windowed rendering
         // runs in HDR while the surface is 8-bit sRGB, so getting this from the
         // surface instead produces a pipeline that cannot be set — and the first

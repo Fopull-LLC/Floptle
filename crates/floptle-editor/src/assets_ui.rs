@@ -240,7 +240,7 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// A folder tile: double-click to descend, and a DROP target — release a
+    /// A folder tile: double-click to descend, and a drop target — release a
     /// dragged asset (or the whole selection) on it to move the files inside,
     /// or a Hierarchy node to save it as a prefab here.
     pub(crate) fn folder_tile(&mut self, ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
@@ -270,7 +270,7 @@ impl<'a> EditorTabViewer<'a> {
     ///
     /// `strong` = a folder target: precise, pointer-gated (bright outline + tip), so
     /// it only claims a drop the cursor is actually over. `!strong` = the panel-wide
-    /// fallback: claims any unclaimed drop REGARDLESS of pointer (so a release always
+    /// fallback: claims any unclaimed drop regardless of pointer (so a release always
     /// lands somewhere sensible even when the cursor position is stale), with a faint
     /// whole-panel cue while hovering.
     fn os_file_drop(&mut self, ui: &egui::Ui, rect: egui::Rect, dir: &Path, strong: bool) {
@@ -503,7 +503,7 @@ impl<'a> EditorTabViewer<'a> {
                      hold one longer, or pull a frame in from another sheet."
                 ))
             } else {
-                // `on_hover_text` does not fire on a DISABLED widget — egui only
+                // `on_hover_text` does not fire on a disabled widget — egui only
                 // opens that tooltip for an enabled response — so the one
                 // explanation that matters here would never have been seen.
                 ui.add_enabled(false, btn).on_disabled_hover_text(

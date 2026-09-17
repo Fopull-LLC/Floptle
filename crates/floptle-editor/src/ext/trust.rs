@@ -83,7 +83,7 @@ pub(crate) fn fingerprint(loaded: &[Loaded]) -> Option<(String, Vec<Ask>)> {
     Some((format!("{:016x}", h.0), asks))
 }
 
-/// FNV-1a. Not a security hash and not meant as one: the store is the user's
+/// Fnv-1a. Not a security hash and not meant as one: the store is the user's
 /// own file, and the fingerprint's job is to notice a manifest that changed.
 struct Fnv(u64);
 

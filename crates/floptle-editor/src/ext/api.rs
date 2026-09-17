@@ -669,7 +669,7 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
     }
     // ---- randomness the OS vouches for --------------------------------------
     //
-    // `math.random` is a PRNG seeded from the clock. It is right for a puff of
+    // `math.random` is a prng seeded from the clock. It is right for a puff of
     // smoke and wrong for anything an attacker gets to guess at — a sign-in
     // challenge, a nonce, a token, an id that must not collide. A package cannot
     // build one out of what it has, so without this the only options are to use
@@ -1219,7 +1219,7 @@ impl FileScope {
         }
     }
 
-    /// Resolve a package-relative path for READING.
+    /// Resolve a package-relative path for reading.
     fn read_path(&self, rel: &str) -> Result<PathBuf, String> {
         if let Some(p) = safe_join(&self.root, rel)
             && p.exists()
@@ -1260,7 +1260,7 @@ impl FileScope {
         self.read_path(rel)
     }
 
-    /// Resolve a project-relative path for WRITING. Writing is `Files`, full
+    /// Resolve a project-relative path for writing. Writing is `Files`, full
     /// stop — including into the package's own folder. A package that edits
     /// itself is a package that survives being reinstalled in a shape nobody
     /// chose.
@@ -1307,7 +1307,7 @@ fn read_fn(lua: &Lua, shared: &Rc<Shared>, state: &PkgState) -> mlua::Result<Fun
 /// `ed.readBytes(path)` — a file's raw bytes as a Lua string, or `nil`.
 ///
 /// `ed.read` is `read_to_string`, so a PNG comes back as **nil** rather than as
-/// an error: not valid UTF-8, `.ok()` swallows it, and the caller sees the same
+/// an error: not valid utf-8, `.ok()` swallows it, and the caller sees the same
 /// answer it would get for a file that is not there. Anything binary — an image
 /// to upload, a font to inspect — was unreachable, and unreachable in the most
 /// confusing available way.
@@ -1528,7 +1528,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
                 rot.set("w", n.rot[3])?;
                 t.set("rot", rot)?;
                 t.set("radius", n.radius)?;
-                // The ORIENTED half-extents, in world units, beside the
+                // The oriented half-extents, in world units, beside the
                 // rotation that turns them. A tool that cares which way a thing
                 // is facing needs the pair, not a box that has forgotten.
                 t.set(
@@ -1680,7 +1680,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     // every project that has such a package installed. The selection is what a
     // tool operates on, it is a handful of nodes, and its documents are free.
     //
-    // A node that is not selected RAISES rather than answering nil: a read that
+    // A node that is not selected raises rather than answering nil: a read that
     // quietly returns nothing is how a tool ends up placing an empty node and
     // reporting success.
     {
@@ -1765,7 +1765,7 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
         t.set(
             "set",
             lua.create_function(move |lua, (id, patch): (u32, Table)| {
-                // PARTIAL, deliberately. A tool that wants to tint a light
+                // Partial, deliberately. A tool that wants to tint a light
                 // should not have to read the whole node back and write it out
                 // again — and a whole-document write is how a tool silently
                 // reverts a field it did not know about.

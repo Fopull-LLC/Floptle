@@ -340,7 +340,7 @@ impl NewForm {
 pub(crate) enum PaintTargetSurface {
     #[default]
     Pixels,
-    /// The brush edits the active layer's MASK instead of its colour.
+    /// The brush edits the active layer's mask instead of its colour.
     Mask,
 }
 
@@ -639,7 +639,7 @@ impl ImageEditState {
 
     // --- undo -------------------------------------------------------------
 
-    /// Begin a CONTINUOUS edit (a dragged opacity slider, a retuned adjustment).
+    /// Begin a continuous edit (a dragged opacity slider, a retuned adjustment).
     ///
     /// The snapshot is taken once at the start of the drag and banked when the
     /// pointer comes up — the shader graph's `pending_undo` pattern — so a
@@ -688,7 +688,7 @@ impl ImageEditState {
 
     /// Commit whatever modal gesture is live (transform, text, filter).
     ///
-    /// Those hold a SNAPSHOT of the document and re-apply themselves onto it, so
+    /// Those hold a snapshot of the document and re-apply themselves onto it, so
     /// anything that changes what they're applying to — switching layer, moving
     /// to another frame — has to settle them first, or the next preview writes
     /// into a layer the session never meant.
@@ -924,7 +924,7 @@ impl ImageEditState {
         true
     }
 
-    /// Paste the clipboard as a FLOATING transform: it lands under the cursor
+    /// Paste the clipboard as a floating transform: it lands under the cursor
     /// (or in the middle), and stays movable until Enter commits it. That way a
     /// paste is never a blind drop in the corner you then have to hunt for.
     pub(crate) fn paste(&mut self) -> bool {
@@ -1069,7 +1069,7 @@ impl ImageEditState {
         if self.tool == ImgTool::Eraser {
             brush.mode = BrushMode::Erase;
         }
-        // Painting a MASK is the same brush over an 8-bit surface: do it by
+        // Painting a mask is the same brush over an 8-bit surface: do it by
         // hand rather than pretending the mask is a layer.
         if self.surface == PaintTargetSurface::Mask {
             let dirty = paint_mask(doc, &brush, x, y, self.tool == ImgTool::Eraser);
@@ -2148,7 +2148,7 @@ impl ImageEditState {
         let off = layer.offset;
         let Some(grid) = layer.grid_mut(frame) else { return };
 
-        // 1. Lift: the source region leaves the layer. A PASTE skips this — its
+        // 1. Lift: the source region leaves the layer. A paste skips this — its
         //    pixels came from the clipboard, and clearing the box they happen to
         //    land in would delete whatever was already there.
         if sess.lift {
@@ -2507,7 +2507,7 @@ impl ImageEditState {
             }
         }
 
-        // The SHEET's cell grid — heavier than the pixel grid, a different
+        // The sheet's cell grid — heavier than the pixel grid, a different
         // colour, and drawn after it so it wins where they coincide. This is the
         // grid a tileset is actually cut on, and drawing it is the difference
         // between laying out a sheet and counting texels by hand.
@@ -3236,7 +3236,7 @@ fn rect_between(a: (f32, f32), b: (f32, f32)) -> Rect {
     )
 }
 
-/// Paint into the active layer's MASK rather than its pixels.
+/// Paint into the active layer's mask rather than its pixels.
 fn paint_mask(doc: &mut Image, brush: &Brush, x: f32, y: f32, erase: bool) -> Rect {
     let (w, h) = (doc.w, doc.h);
     let active = doc.active;
@@ -3571,7 +3571,7 @@ mod tests {
         assert!(!st.can_undo(), "a cancelled transform leaves no undo litter");
     }
 
-    /// A transform lifts only what's SELECTED when there is a selection.
+    /// A transform lifts only what's selected when there is a selection.
     #[test]
     fn a_selection_scopes_the_transform() {
         let mut st = state_with_doc();
@@ -3605,7 +3605,7 @@ mod tests {
         assert!(!st.grab_transform(31.0, 31.0), "outside is not");
     }
 
-    /// Copy → paste puts the pixels down as a FLOATING block: nothing is
+    /// Copy → paste puts the pixels down as a floating block: nothing is
     /// committed until Enter, one undo takes the whole paste back, and what was
     /// underneath survives (a paste doesn't lift, so it must not clear).
     #[test]

@@ -196,7 +196,7 @@ impl ExportTarget {
     }
 
     /// Stamp the build with a resolved artifact: the player binary for a
-    /// native target, the template FOLDER's marker file for the web (what
+    /// native target, the template folder's marker file for the web (what
     /// [`resolve_template`] reports as `Ready` in each case).
     pub(crate) fn stamp(
         &self,
@@ -531,7 +531,7 @@ pub(crate) const NEVER_SHIPS: &[&str] = &[
     "py", "pyc", "pyo",
 ];
 
-/// **What a DEDICATED server never reads**, on top of [`NEVER_SHIPS`].
+/// **What a dedicated server never reads**, on top of [`NEVER_SHIPS`].
 ///
 /// A server bundle is the same project with everything nobody can see or hear
 /// taken out of it. There is no window, no GPU, no audio device and no player
@@ -610,7 +610,7 @@ fn copy_tree(src: &Path, dst: &Path, at_root: bool, skipped: &mut Skipped) -> st
 
 /// [`copy_tree`], with the per-file rule handed in: a player build keeps
 /// everything a runtime can load ([`ships_file`]) and a server bundle keeps the
-/// subset a HEADLESS one can ([`serves_file`]). One walk, so the two cannot
+/// subset a headless one can ([`serves_file`]). One walk, so the two cannot
 /// drift in how they treat dot-entries, runtime dirs or nesting — only in the
 /// one question they actually answer differently.
 #[cfg(feature = "editor-ui")]
@@ -675,7 +675,7 @@ pub(crate) struct Portability {
     /// Files rewritten from an absolute path into the project to a relative one.
     pub(crate) rewritten: usize,
     /// Absolute paths that point outside the project but whose tail names a
-    /// file the build carries — a ref written where the project USED to live —
+    /// file the build carries — a ref written where the project used to live —
     /// rewritten to that copy, as `(from, to)`.
     pub(crate) redirected: Vec<(String, String)>,
     /// Absolute paths that point outside the project — unfixable here, because
@@ -691,7 +691,7 @@ pub(crate) struct Portability {
 /// root's own prefix is safe by construction: that string can only ever be a
 /// path into the project.
 ///
-/// A path outside the project whose TAIL is a file the build carries is a ref
+/// A path outside the project whose tail is a file the build carries is a ref
 /// written where the project used to live (a browser build staged
 /// from a copy shipped 17 files of `/home/…/Forgery/models/…` refs, and every
 /// door and NPC was missing in the tab). The player would rescue it the same
@@ -766,7 +766,7 @@ fn stranded_tail(shipped: &Path, abs: &str) -> Option<String> {
 ///
 /// Either its last segment carries an extension (`tree.glb`, `hit.wav`) or the
 /// path is really there. A route like `/api/v1.2/session` has a dot in the
-/// MIDDLE and none at the end, and points at nothing on disk.
+/// Middle and none at the end, and points at nothing on disk.
 #[cfg(feature = "editor-ui")]
 fn looks_like_a_file(abs: &str) -> bool {
     let last = abs.rsplit(['/', '\\']).next().unwrap_or("");
@@ -821,7 +821,7 @@ pub(crate) fn resolve_entry_scene(project_root: &Path, entry: &str) -> Option<Pa
     [scenes.join(format!("{entry}.ron")), scenes.join(entry)].into_iter().find(|c| floptle_vfs::is_file(c))
 }
 
-/// Copy every LINKED package into the shipped project, under the same
+/// Copy every linked package into the shipped project, under the same
 /// `packages/<id>/` a copied one occupies. Returns how many were bundled.
 ///
 /// A link is a development convenience — read it where it is being written —
@@ -941,7 +941,7 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     let mut skipped = Skipped::default();
     let files =
         copy_tree(proj, &ship_assets, true, &mut skipped).map_err(|e| format!("copy assets: {e}"))?;
-    // A LINKED package is not inside the project, so the copy above missed it —
+    // A linked package is not inside the project, so the copy above missed it —
     // it lives wherever the person writing it keeps it. A build has to carry
     // what it needs, so linked packages are materialised into the shipped
     // `packages/<id>/` here, exactly where a copied one already sits. That is
@@ -1030,7 +1030,7 @@ pub(crate) fn export_server(
     scene: Option<&str>,
     label: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
-    // **every REFUSAL before anything is created.** `prepare_out` makes the
+    // **every refusal before anything is created.** `prepare_out` makes the
     // output directory, so validating after it leaves a bundle-shaped folder
     // behind for a project that was refused — the same trap the native path
     // learned about its binary ("a failed export must never leave a
@@ -1064,7 +1064,7 @@ pub(crate) fn export_server(
     check_server_engine(&engine)?;
 
     // **An archive if that is what was asked for**. A bundle
-    // is UPLOADED, so a directory is never the finished article — every
+    // is uploaded, so a directory is never the finished article — every
     // developer then ran a `tar` line copied off the website, which is the step
     // that assumes a shell, gets `-C` wrong, and is why both bundles that exist
     // were hand-rolled. Asking for `…​.tar.gz` gets the archive itself, and the
@@ -1088,7 +1088,7 @@ pub(crate) fn export_server(
     // Only now does anything land on disk.
     let (_, out_c) = prepare_out(project_root, &staging)?;
 
-    // **A bundle is UPLOADED, so anything left in this folder rides with it.**
+    // **A bundle is uploaded, so anything left in this folder rides with it.**
     // Export a server bundle over a native export — the same "builds" folder,
     // which is what people use — and the native build's `floptle-game.ron` sat
     // there beside ours: a manifest the fleet box does not read, in an artifact
@@ -1302,7 +1302,7 @@ pub(crate) fn export_web(
             ));
         }
     }
-    // **Clear a previous NATIVE export out of this folder.**
+    // **Clear a previous native export out of this folder.**
     //
     // A web build's files all live inside `game.flpk`; a native build leaves a
     // loose `assets/` tree and a `floptle-game.ron` beside its binary. Export
@@ -1411,7 +1411,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> R
     Ok(())
 }
 
-/// A title into the page's HTML, with the five characters that would change
+/// A title into the page's html, with the five characters that would change
 /// its meaning escaped.
 #[cfg(feature = "editor-ui")]
 fn html_escape(text: &str) -> String {
@@ -1471,7 +1471,7 @@ pub(crate) fn rfc3339_utc(unix_secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// The PLATFORM that means "a dedicated-server bundle" rather than a build for
+/// The platform that means "a dedicated-server bundle" rather than a build for
 /// a machine — see [`export_server`], which is what it dispatches to.
 #[cfg(feature = "editor-ui")]
 pub(crate) const SERVER_PLATFORM: &str = "server";
@@ -1742,7 +1742,7 @@ impl Editor {
             return p.to_path_buf();
         }
         // A relative project root (the default `assets/`) would make the result
-        // CWD-relative after all — pin it to the CWD explicitly so the resolved
+        // Cwd-relative after all — pin it to the CWD explicitly so the resolved
         // path we display is the path we actually write.
         let root = if self.project_root.is_absolute() {
             self.project_root.clone()
@@ -2036,7 +2036,7 @@ mod tests {
 
     /// A project a server can host, pinned to an engine a box can fetch.
     ///
-    /// Pinned EXPLICITLY rather than left to `distribution_version()`, because
+    /// Pinned explicitly rather than left to `distribution_version()`, because
     /// that is the workspace version — and the day it is bumped to a `-rc`
     /// for a beta tag, every server-export test would be refused for pinning
     /// a pre-release, which is the refusal working, not the bundle breaking.
@@ -2241,7 +2241,7 @@ mod tests {
         assert!(!floptle_dist::PLATFORMS.contains(&SERVER_PLATFORM));
     }
 
-    /// A typed export folder resolves PREDICTABLY: absolute stays put, relative
+    /// A typed export folder resolves predictably: absolute stays put, relative
     /// lands next to the project (its parent) — never the process CWD, which
     /// depends on how the editor was launched.
     #[test]
@@ -2286,7 +2286,7 @@ mod tests {
         for gone in ["models/tree.fbx", "models/tree.obj", "models/tree.mtl", "models/pack/Rock.uasset", "models/pack/scene.blend", "models/pack/build.py"] {
             assert!(!floptle_vfs::exists(ship.join(gone)), "{gone} must not ship");
         }
-        // And it SAYS so, with the weight — silence would read as a lost folder.
+        // And it says so, with the weight — silence would read as a lost folder.
         assert!(msg.contains("left out 6 authoring file(s)"), "{msg}");
         assert!(msg.contains("0.0 MB") || msg.contains("MB the engine has no loader for"), "{msg}");
         for d in [proj, out] {
@@ -2441,7 +2441,7 @@ mod tests {
         let inside = proj.join("build");
         assert!(export_game_with(&proj, &inside, "x", &me, &EXPORT_TARGETS[0]).is_err());
 
-        // A macOS-target export ships the Gatekeeper README, {exe} filled in.
+        // A macOS-target export ships the Gatekeeper readme, {exe} filled in.
         let out2 = temp("out-mac");
         export_game_with(&proj, &out2, "Sea Game", &me, target("macOS (Apple Silicon)"))
             .expect("mac export");
@@ -2478,7 +2478,7 @@ mod tests {
 
     /// The trap behind "the build opens the editor": a project rooted at
     /// `assets/` exported with the default title on a suffix-less target named
-    /// the exe `assets` — colliding with the shipped assets FOLDER. The exe must
+    /// the exe `assets` — colliding with the shipped assets folder. The exe must
     /// dodge the reserved name, and the binary must ship last so a failed export
     /// never leaves anything runnable.
     #[test]
@@ -2583,7 +2583,7 @@ mod tests {
              endpoint: \"/api/login\", version: \"/api/v1.2/session\")",
         )
         .unwrap();
-        // A ref written where the project USED to live (a copy on another disk,
+        // A ref written where the project used to live (a copy on another disk,
         // a Windows machine): outside this root, but its tail is in the build.
         floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
         floptle_vfs::write(

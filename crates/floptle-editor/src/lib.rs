@@ -10,7 +10,7 @@
 //! # Floptle Editor
 //!
 //! The authoring application — an egui shell over a live wgpu viewport
-//! (ADR-0004). It renders the World **loaded from a `.ron` scene** with the
+//!. It renders the World **loaded from a `.ron` scene** with the
 //! engine's PS1/retro look, and lets you select an object, move it, and save.
 //!
 //! ## Why this is a library
@@ -326,7 +326,7 @@ struct EditorCmd {
     redo: bool,
     /// An inspector widget changed this frame (opens a coalesced undo step).
     inspector_changed: bool,
-    /// A light-probe setting that affects the UPLOAD changed (intensity, leak,
+    /// A light-probe setting that affects the upload changed (intensity, leak,
     /// the box) — re-push the probe texture without re-baking anything.
     gi_changed: bool,
     /// Bake this scene's navmesh, or throw the bake away.
@@ -355,7 +355,7 @@ struct EditorCmd {
     toggle_pause: bool,
     /// Advance exactly one gameplay tick while paused (the ⏭ Step button / F3).
     step_tick: bool,
-    /// Put the simulation BACK one gameplay tick, out of the rollback state
+    /// Put the simulation back one gameplay tick, out of the rollback state
     /// ring (the ⏮ Back button / Shift+F3).
     step_tick_back: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
@@ -406,7 +406,7 @@ struct EditorCmd {
     net_join_local: bool,
     net_play_as_client: bool,
     net_stop_session: bool,
-    /// Host a real session on this UDP port (QUIC — the 🌐 panel / net.host{port}).
+    /// Host a real session on this UDP port (quic — the 🌐 panel / net.host{port}).
     net_host_quic: Option<u16>,
     /// Join a real session at this address (host:port).
     net_join_quic: Option<String>,
@@ -474,7 +474,7 @@ struct EditorCmd {
     set_nav_exclude: Option<(Entity, bool)>,
     /// Toggle the Trigger flag on a Collidable (sensor: events, no blocking).
     set_trigger: Option<(Entity, bool)>,
-    /// A STRUCTURAL physics edit happened (e.g. the Rigidbody mode dropdown) —
+    /// A structural physics edit happened (e.g. the Rigidbody mode dropdown) —
     /// rebuild the live sim so bodies/colliders re-register.
     rebuild_physics: bool,
     /// Put nodes on a named collision/query layer ("Default" removes the
@@ -618,7 +618,7 @@ struct EditorCmd {
     refresh_assets: bool,
     /// Open a script file in the Scripting IDE.
     open_script: Option<String>,
-    /// Open a script in the user's PREFERRED editor (in-engine or external).
+    /// Open a script in the user's preferred editor (in-engine or external).
     open_script_pref: Option<String>,
     /// Open a `.flsl` in the ◈ Shaders graph tab.
     open_shader_graph: Option<String>,
@@ -673,7 +673,7 @@ struct EditorCmd {
     new_shader_in: Option<String>,
     /// Attach a named `.lua` script to an entity (seed params from its defaults).
     attach_named: Option<(String, Entity)>,
-    /// Open this file in the user's external editor (ADR-0011).
+    /// Open this file in the user's external editor.
     open_in_editor: Option<String>,
     /// Persist a new external-editor command (user preference).
     set_external_editor: Option<String>,
@@ -700,7 +700,7 @@ struct EditorCmd {
     instantiate_prefab: Option<(String, Option<Entity>)>,
     /// Move these asset files/folders (absolute paths) into a destination folder.
     move_assets: Option<(Vec<String>, PathBuf)>,
-    /// Import these OS files (absolute source paths) by COPYING them into a project
+    /// Import these OS files (absolute source paths) by copying them into a project
     /// folder — a native file-explorer drag-and-drop onto the Assets panel.
     import_files: Option<(Vec<PathBuf>, PathBuf)>,
     /// Open the native "Import files…" picker, importing the chosen files into this
@@ -720,7 +720,7 @@ struct EditorCmd {
     focus_animating: bool,
     /// Focus (or open) the ◎ Controller graph dock tab.
     focus_anim_graph: bool,
-    /// CONFIRMED asset deletion (from the delete modal) — actually deletes.
+    /// Confirmed asset deletion (from the delete modal) — actually deletes.
     do_delete_asset: Option<Vec<String>>,
     /// The layer-children modal was answered — apply this set, no more asking.
     do_set_layer: Option<SetLayer>,
@@ -745,7 +745,7 @@ struct EditorCmd {
     /// Set an object/bone's rotation pivot (rigged-mesh entity, node name, pivot xyz in
     /// node-local space) — from the Inspector's numeric pivot fields.
     set_object_pivot: Option<(Entity, String, [f32; 3])>,
-    /// Set a model asset's EMBEDDED-texture filter (`None` = back to crisp),
+    /// Set a model asset's embedded-texture filter (`None` = back to crisp),
     /// persisted in its `.rig.ron` sidecar; the model re-imports live.
     set_model_filter: Option<(String, Option<crate::assets::FilterMode>)>,
     /// Attach any scene child below a rigged mesh to one of that mesh's bones.  The
@@ -896,7 +896,7 @@ struct EditorTabViewer<'a> {
     map_xform: &'a mut map_edit::MapXform,
     map_select_hidden: &'a mut bool,
     map_bevel: &'a mut map_edit::BevelWidth,
-    /// True while the ▦ Map TOOL is active — every sub-object op needs it, so
+    /// True while the ▦ Map tool is active — every sub-object op needs it, so
     /// the tab offers to turn it on rather than silently greying out.
     map_tool_on: bool,
     map_playing: bool,
@@ -910,7 +910,7 @@ struct EditorTabViewer<'a> {
     map_keys: &'a mut map_keys::MapKeys,
     map_rebind: &'a mut Option<map_keys::MapCmd>,
     map_rebind_err: &'a mut Option<String>,
-    /// The gizmo the Scene tab should PAINT (the map tool substitutes its own
+    /// The gizmo the Scene tab should paint (the map tool substitutes its own
     /// move/rotate/scale mode — see `Editor::gizmo_tool`).
     gizmo_tool: Tool,
     map_viz: &'a Option<map_edit::MapViz>,
@@ -1096,7 +1096,7 @@ struct EditorTabViewer<'a> {
     aspect: &'a mut AspectMode,
     zoom: &'a mut f32,
     scene_name: &'a str,
-    /// Whether `scene_name` names a PREFAB being edited on its own rather than a
+    /// Whether `scene_name` names a prefab being edited on its own rather than a
     /// scene. The two must not look the same — a save goes
     /// somewhere different.
     editing_prefab: bool,
@@ -1128,7 +1128,7 @@ struct EditorTabViewer<'a> {
     shader_graph: &'a mut shader_graph::ShaderGraphState,
     /// The 🖼 Image tab: the open image document, its view and its tools.
     image: &'a mut image_edit::ImageEditState,
-    /// Tab labels for the 🖼 tab's PARKED documents, in stash order.
+    /// Tab labels for the 🖼 tab's parked documents, in stash order.
     image_parked: &'a [String],
     /// The graph's per-node preview atlas (tiles drawn on the nodes).
     shader_preview: &'a mut shader_preview::ShaderGraphPreview,
@@ -1230,7 +1230,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     // correctly still hands its widgets a width the user cannot see; without
     // that, clamping the width just clips the controls instead of moving them.
     //
-    // A CANVAS keeps both bars. A node graph, a timeline, a code editor and an
+    // A canvas keeps both bars. A node graph, a timeline, a code editor and an
     // image are things you pan around, and their content genuinely is wider than
     // the panel — there is no reflow that would help, and taking the bar away
     // would be the bug. Everything laid out as a form is in the first arm.
@@ -1444,7 +1444,7 @@ pub use player::run_player;
 pub fn run() {
     // The editor's internal log channel is for the editor. A command-line verb
     // reports through its own output — and two of the editor's start-up lines
-    // ("adopt_paint called before gpu/raster exist") are logged at ERROR while
+    // ("adopt_paint called before gpu/raster exist") are logged at error while
     // describing exactly the state a headless verb runs in on purpose, so they
     // read as something having gone wrong when nothing has. Off by default on
     // the verb path; `RUST_LOG=error floptle run …` turns it back on.
@@ -1456,10 +1456,10 @@ pub fn run() {
     // Before anything can crash: a panic leaves a note the next launch offers to file.
     report::install_panic_hook();
     // CLI surface the Hub (docs/updating-the-hub.md) drives. --version / --new / --migrate run
-    // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
+    // Headless (no window or GPU) and exit; a positional path opens that project instead
     // of the default `assets/`.
     let args: Vec<String> = std::env::args().collect();
-    // **Verbs first, flags after** (ADR-0027). `cli::dispatch` claims the
+    // **Verbs first, flags after**. `cli::dispatch` claims the
     // command line only when the first argument is a verb; everything else —
     // a bare path, every flag the Hub and CI have always passed — falls through
     // to the loop below, which is the code that has always served them.
@@ -1547,7 +1547,7 @@ pub fn run() {
                 };
                 std::process::exit(migrate_project(Path::new(p), &stamp));
             }
-            // Re-bake a model's EMBEDDED glTF clips into <project>/animations/<Stem>/
+            // Re-bake a model's embedded glTF clips into <project>/animations/<Stem>/
             // and exit — headless. The fix for clips that went stale against a
             // replaced .glb (extracted placeholders left animating a couple of bones
             // while the real animation is full-body). Hub/CI-friendly.
@@ -1604,7 +1604,7 @@ pub fn run() {
         i += 1;
     }
 
-    // Bake GI on load: the `--bake-gi` FLAG only. The verb of that name renders
+    // Bake GI on load: the `--bake-gi` flag only. The verb of that name renders
     // offscreen and exits (see `bake.rs`) — this is the shipped flag, which
     // opens the editor and bakes in it, kept behaving exactly as it always has.
     let bake_gi_on_load = args.iter().any(|a| a == "--bake-gi");
@@ -1620,7 +1620,7 @@ pub fn run() {
     // this process a game, not an editor — the project rides alongside it.
     let mut game_title = String::new();
     let mut steam_settings: Option<floptle_scene::SteamProjectSettings> = None;
-    // Only a SHIPPED build hands its launch back to Steam when it wasn't
+    // Only a shipped build hands its launch back to Steam when it wasn't
     // started through it — see `steam_boot::boot`.
     let mut shipped = false;
     if !player_mode
@@ -1776,7 +1776,7 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
         engine_version: Some(stamp.to_string()),
         title: chosen.map(|t| t.title.to_string()),
         // `for_new_project`, not `default`: a project being created now starts
-        // at the fast vec3. An EXISTING one is pinned to exact on load instead.
+        // at the fast vec3. An existing one is pinned to exact on load instead.
         ..floptle_scene::ProjectConfigDoc::for_new_project()
     };
     if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
@@ -1834,7 +1834,7 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
         Ok(Some(mut cfg)) => {
             cfg.engine_version = Some(stamp.to_string());
             // An existing project keeps the vector it has always had, written
-            // DOWN: the windowed editor pins this on open, and a project
+            // Down: the windowed editor pins this on open, and a project
             // upgraded from the command line alone never opens there. Left
             // implicit, it is a default a later release may change under a
             // shipped game — which is the one thing the setting exists to
@@ -1871,7 +1871,7 @@ struct FocusAnim {
 
 /// Grab (hide + pin) or release the OS cursor. Prefers a hard lock — the cursor
 /// physically can't move (Wayland/macOS/Windows) — falling back to confining it
-/// to the window (X11, which has no lock). Returns true when only the CONFINE
+/// to the window (X11, which has no lock). Returns true when only the confine
 /// took, so the caller re-centers the cursor every frame to emulate the pin.
 pub(crate) fn grab_cursor(window: &Window, want: bool) -> bool {
     if !want {
@@ -1907,7 +1907,7 @@ struct Editor {
     /// Is the ⏱ Frame panel open? Nothing is submitted for timing while it is
     /// shut, so a profiler that nobody is reading costs nothing at all.
     gpu_timing_open: bool,
-    /// `floptle shot --timing`: mark the passes of the OFFSCREEN render
+    /// `floptle shot --timing`: mark the passes of the offscreen render
     /// (`render_world_into`) so a headless shot can report per-pass GPU cost.
     /// Separate from `gpu_timing_open`, which drives the windowed frame's
     /// panel: the offscreen path also runs inside a windowed frame (a docked
@@ -1925,7 +1925,7 @@ struct Editor {
     /// again when it stops, because this is a full-frame mip chain and it is
     /// the largest thing in this list.
     scene_history: Option<floptle_render::SceneHistory>,
-    /// The same, for the DOCKED Game panel. Its own and not shared: a history
+    /// The same, for the docked Game panel. Its own and not shared: a history
     /// carries the camera it was taken from and the size it was taken at, and
     /// the panel has a different one of each. Sharing would have each view
     /// reprojecting the other's frame, which looks like the reflection tearing.
@@ -1936,7 +1936,7 @@ struct Editor {
     grid_render: Option<Grid>,
     /// The runtime 3D line layer (script `draw.line` — the map's orbit conics).
     line_layer: Option<floptle_render::Lines>,
-    /// The runtime 3D FILLED-triangle layer (script `draw.tri/cone/disc` —
+    /// The runtime 3D filled-triangle layer (script `draw.tri/cone/disc` —
     /// solid gizmos, world markers), drawn alongside the lines.
     tri_layer: Option<floptle_render::Tris>,
     /// This tick's script-drawn line segments (world space, immediate mode).
@@ -1949,7 +1949,7 @@ struct Editor {
     /// Screen-space strings queued this frame (`draw.text`), drawn through the
     /// same game-UI pipeline so they get the real font stack and layout.
     script_texts: Vec<floptle_script::DrawText>,
-    /// The game viewport's top-left in WINDOW physical pixels — the offset that
+    /// The game viewport's top-left in window physical pixels — the offset that
     /// turns `input.mouse()` space (what scripts draw in) into viewport space
     /// (what the UI pass draws in). Zero when the game fills the window.
     game_view_origin: [f32; 2],
@@ -1997,7 +1997,7 @@ struct Editor {
     /// still makes it stale.
     ext_mirror_selection: usize,
     /// The last grid built for each tilemap node, so a scene revision bump
-    /// from something ELSE in the level does not cost a copy of a map that
+    /// from something else in the level does not cost a copy of a map that
     /// has not itself changed (the same fix the game-script mirror has).
     /// Survives a mirror rebuild — the
     /// mirror itself is rebuilt fresh every time; this is what it reuses
@@ -2028,7 +2028,7 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Scatter prototypes resolved to their drawable parts, by asset string —
     /// baked once (see `scatter_prototype`). An empty entry is a remembered
-    /// FAILURE, so a prototype that cannot be drawn is reported once rather
+    /// Failure, so a prototype that cannot be drawn is reported once rather
     /// than every frame it is looked at.
     scatter_protos: HashMap<String, Vec<crate::scatter_draw::Part>>,
     /// Prototypes that baked to nothing only because there was no GPU to
@@ -2083,17 +2083,17 @@ struct Editor {
     /// The ◫ Tiles tool state: which layer, which tool, the armed stamp.
     tile_tools: tile_edit::TileTools,
     /// Live value of the Map tab's size fields while they are being dragged.
-    /// The resize only APPLIES on release — a per-frame resize would push one
+    /// The resize only applies on release — a per-frame resize would push one
     /// undo step per mouse move.
     map_size_buf: Option<Vec3>,
     /// Same, for the Shape panel's step/side counts.
     map_spec_buf: Option<floptle_map::ShapeSpec>,
-    /// The shape ARMED for drawing: while set, a viewport drag lays out a new
+    /// The shape armed for drawing: while set, a viewport drag lays out a new
     /// blockout shape (base rectangle, then height) instead of selecting.
     map_arm: Option<map_edit::MapShape>,
     /// The in-progress draw gesture.
     map_draw: Option<map_edit::MapDraw>,
-    /// Whether the viewport's Map strip shows its shape picker (the Map PANEL
+    /// Whether the viewport's Map strip shows its shape picker (the Map panel
     /// is the full control surface; the strip states the mode).
     map_hud_open: bool,
     /// Sticky quarter-turn for drawn shapes (`,` / `.` / Z) — seeds each new
@@ -2130,7 +2130,7 @@ struct Editor {
     /// Game-UI interaction state: the element the pointer hovers / grabbed.
     ui_hover: Option<u32>,
     ui_active: Option<u32>,
-    /// Does the running game have anything on screen a POINTER drives — a
+    /// Does the running game have anything on screen a pointer drives — a
     /// button, a slider, a text field, a draggable? Recomputed every frame from
     /// the elements the layout actually placed, which is why it can be trusted
     /// where a raw `ElementSpec` query cannot: `visible` doesn't cascade in the
@@ -2236,7 +2236,7 @@ struct Editor {
     /// Last frame's `cmd.ui_hot`: the cursor sat on a Scene-view UI overlay
     /// interact (element rect / Rect handle), so LMB belongs to egui.
     ui_overlay_hot: bool,
-    /// The SELECTED node's reference-param kinds, (script kind, param) → kind —
+    /// The selected node's reference-param kinds, (script kind, param) → kind —
     /// refreshed by `sync_selected_script_params`, read by the Inspector to
     /// filter ref pickers (script/component refs only list valid targets).
     ref_kinds: HashMap<(String, String), floptle_script::RefKind>,
@@ -2251,7 +2251,7 @@ struct Editor {
     /// `.floptle/textures.ron`. Absent ⏵ the crisp tiling default.
     texture_settings: HashMap<String, TexSetting>,
     /// Editable terrains, keyed by their scene node Entity (each field in its node's
-    /// local space). Empty until "New Terrain". Terrain 2.0: the AUTHORITY is the
+    /// local space). Empty until "New Terrain". Terrain 2.0: the authority is the
     /// sparse unbounded [`floptle_field::ChunkField`] (brushes, physics, save, Lua);
     /// each carries a capped-resolution dense shadow proxy feeding the SDF atlas.
     terrains: HashMap<Entity, crate::terrain_edit::EditorTerrain>,
@@ -2259,13 +2259,13 @@ struct Editor {
     /// chosen each frame.
     active_terrain: Option<Entity>,
     /// Atlas slot order: the terrain entities as uploaded to the renderer (sorted by
-    /// terrain id). Each volume renders at its NATIVE resolution from its own slot;
+    /// terrain id). Each volume renders at its native resolution from its own slot;
     /// placement comes from the node's f64 translation, read fresh every frame — so
     /// moving a terrain needs zero GPU work and there is no combined field at all.
     terrain_slots: Vec<Entity>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
-    /// Terrain 2.0 (ADR terrain-mesh): each terrain's PRIMARY-ray rendering is a set of
+    /// Terrain 2.0 (ADR terrain-mesh): each terrain's primary-ray rendering is a set of
     /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
     /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the
     /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =
@@ -2290,7 +2290,7 @@ struct Editor {
     /// In-flight background field loads/generations (entity + body name + start
     /// time + result channel). The shadow proxy derives on the thread too.
     terrain_load_jobs: Vec<crate::terrain_edit::TerrainLoadJob>,
-    /// Terrains that went RESIDENT during Play (cold at Play start): Stop drops
+    /// Terrains that went resident during Play (cold at Play start): Stop drops
     /// the play-DUG ones back to cold (revert) and keeps clean ones resident.
     play_loaded_terrains: std::collections::HashSet<Entity>,
     /// Play is held (auto-paused) while the terrain under the player streams in
@@ -2302,7 +2302,7 @@ struct Editor {
     /// the residency driver must not also stream those bodies (the generation
     /// queue owns them until each fill lands).
     planet_gen_pending: std::collections::HashSet<u32>,
-    /// BACKGROUND CHECKPOINTS (`terrain.flush()`): dirty resident fields queue
+    /// Background checkpoints (`terrain.flush()`): dirty resident fields queue
     /// here (entity + when queued) and drain one at a time through
     /// `step_terrain_checkpoint` — a few chunks of encoding per frame, the file
     /// write on a thread. The old synchronous flush froze the game ~1s per
@@ -2314,7 +2314,7 @@ struct Editor {
     /// Per-terrain edit stamps: (monotonic edit counter, wall time of the last
     /// edit). The counter detects a checkpoint that raced an edit (torn
     /// snapshot → the field stays dirty); the wall time defers checkpoints on
-    /// fields being ACTIVELY dug — saves run in the quiet moments.
+    /// fields being actively dug — saves run in the quiet moments.
     terrain_edit_stamps: HashMap<Entity, (u64, floptle_core::time::Instant)>,
     /// Monotonic source for `terrain_edit_stamps` counters.
     terrain_edit_clock: u64,
@@ -2327,7 +2327,7 @@ struct Editor {
     /// planet has tens of thousands of chunks — each terrain scans every 4th
     /// frame, offset by its entity index).
     terrain_scan_frame: u64,
-    /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
+    /// Shadow-occluder bakes for static collider meshes (Collidable / MeshCollider,
     /// no RigidBody): each level mesh is baked once into an unsigned distance
     /// volume (`bake_occluder`) and uploaded into the same 3D atlas as the
     /// terrains, flagged shadow-only (`vol_center.w = 2`) — so a map casts sun
@@ -2368,7 +2368,7 @@ struct Editor {
     paint_stroke_snapshot: Option<(u32, Vec<Vec<[u8; 4]>>)>,
     /// At least one dab landed during the current paint stroke.
     paint_stroke_dabbed: bool,
-    /// TEXTURE-paint stroke undo: id → pre-stroke images, captured the first time the
+    /// Texture-paint stroke undo: id → pre-stroke images, captured the first time the
     /// stroke touches each node (the sphere brush can cross several). `None` = that node
     /// had no paint before, so undo removes it. Banked as one history step on mouse-up.
     tex_stroke_snapshot: std::collections::HashMap<u32, Option<Vec<Vec<u8>>>>,
@@ -2402,11 +2402,11 @@ struct Editor {
     terrain_voxel: f32,
     /// Terrain texture palette — image paths per slot (empty = unused).
     terrain_textures: Vec<String>,
-    /// Bit i = palette slot i GLOWS (self-lit albedo, bypasses lighting + AO — how
+    /// Bit i = palette slot i glows (self-lit albedo, bypasses lighting + AO — how
     /// magma veins and cave crystals stay visible underground). Persisted in the
     /// `.palette` sidecar as a `|glow` suffix on the slot's line.
     terrain_glow_mask: u32,
-    /// Per-palette-slot triplanar SCALE multiplier (1.0 = the palette's base
+    /// Per-palette-slot triplanar scale multiplier (1.0 = the palette's base
     /// tiling). One entry per slot, same length as `terrain_textures`.
     ///
     /// Per slot because a palette's textures are not authored at one detail
@@ -2453,7 +2453,7 @@ struct Editor {
     script_gizmos: Vec<floptle_script::GizmoCmd>,
     /// Their projected viewport segments (physical px) + color, rebuilt per frame.
     script_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
-    /// The same commands projected through the GAMEPLAY camera into the Game tab's rect
+    /// The same commands projected through the gameplay camera into the Game tab's rect
     /// — a second set, because the Scene view's projection is a different camera.
     game_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
     /// Draw script `gizmo.*` shapes in the game view as well. Off by default: the game
@@ -2492,7 +2492,7 @@ struct Editor {
     /// Show every mesh collider's wireframe (View menu). The selected mesh-collider node
     /// always shows its wireframe regardless (as long as `show_gizmos` is on).
     show_mesh_colliders: bool,
-    /// Cached WORLD-space wireframe of the combined terrain's collision surface; rebuilt
+    /// Cached world-space wireframe of the combined terrain's collision surface; rebuilt
     /// when the terrain changes (cleared on `terrain_gpu_dirty`), projected each frame.
     /// Per terrain entity, in the node's local frame (the f64 anchor is added at
     /// projection, so a moved terrain's wireframe follows for free).
@@ -2504,7 +2504,7 @@ struct Editor {
     /// polygon. Rebuilt per frame like every other gizmo, because the camera
     /// moves and the projection is what changes.
     nav_gizmo: Vec<(Vec2, Vec2, [f32; 3])>,
-    /// The navmesh's FILLED surface for this frame — world-space triangles,
+    /// The navmesh's filled surface for this frame — world-space triangles,
     /// camera-relative, handed to the `Tris` layer. A wireframe alone reads as
     /// scaffolding; the fill is what makes a room look like a floor.
     nav_surface: Vec<floptle_render::TriVertex>,
@@ -2519,7 +2519,7 @@ struct Editor {
     nav_cells: bool,
     /// Draw the navmesh even when its node is not selected.
     show_navmesh: bool,
-    /// MODEL-LOCAL deduped triangle edges per mesh asset path (built once on demand),
+    /// Model-local deduped triangle edges per mesh asset path (built once on demand),
     /// transformed by each node's world matrix + projected per frame for collider wires.
     mesh_wire_cache: HashMap<String, Vec<(Vec3, Vec3)>>,
     /// This frame's projected mesh-collider wireframe segments (screen space).
@@ -2596,7 +2596,7 @@ struct Editor {
     /// `selection` (they're mutually cleared) and drives the Inspector's bone editor.
     bone_selection: Option<(Entity, usize)>,
     /// Pivot-edit mode: while on, a bone/object gizmo drag moves that object's rotation
-    /// PIVOT (its joint) instead of posing it — set from the bone Inspector.
+    /// Pivot (its joint) instead of posing it — set from the bone Inspector.
     pivot_edit: bool,
     /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
     /// with the triangle or Enter on a selected folder.
@@ -2628,17 +2628,17 @@ struct Editor {
     input_buttons_pressed: [bool; 3],
     input_mouse_delta: (f32, f32),
     input_scroll: f32,
-    /// Characters TYPED this frame, resolved by the OS keyboard layout — the
+    /// Characters typed this frame, resolved by the OS keyboard layout — the
     /// Lua `input.typed()` and what a focused UI text field consumes.
     ///
     /// Separate from the key sets because they answer different questions:
-    /// `input.pressed("q")` is a physical key (AZERTY types `q` and gets `a`),
+    /// `input.pressed("q")` is a physical key (azerty types `q` and gets `a`),
     /// and this is what the player meant to write. A paste arrives through
     /// here too, so a game never has to special-case Ctrl-V.
     input_typed: String,
     /// The per-tick twin, drained by `fixedUpdate` like every other edge.
     tick_typed: String,
-    /// Per-GAMEPLAY-TICK input accumulators (docs/multiplayer.md §3): edges and
+    /// Per-gameplay-tick input accumulators (docs/multiplayer.md §3): edges and
     /// deltas bank here in parallel with the per-frame sets above, and are consumed
     /// by each `fixedUpdate` tick — so a key pressed between ticks is never lost,
     /// and the per-tick snapshot is exactly what netcode input commands will carry.
@@ -2647,7 +2647,7 @@ struct Editor {
     tick_buttons_pressed: [bool; 3],
     tick_mouse_delta: (f32, f32),
     tick_scroll: f32,
-    /// The ACTION layer's device truth: physical key levels, mouse, and per-slot
+    /// The action layer's device truth: physical key levels, mouse, and per-slot
     /// pad state. Filled from the same winit events as the string sets above
     /// (both, so raw-key scripts and action scripts always agree), plus the
     /// gamepad pump. See `crate::input_actions`.
@@ -2721,7 +2721,7 @@ struct Editor {
     /// collider copy (no matching terrain collider) — a silent miss here reads
     /// as "standing on an invisible old surface" and is unfindable later.
     terrain_mirror_warned: bool,
-    /// Space time (solar demo S2): seconds of ON-RAILS celestial time, advanced
+    /// Space time (solar demo S2): seconds of on-rails celestial time, advanced
     /// each gameplay tick by `space_warp × tick_dt`. Drives every
     /// `CelestialBody` node's Kepler position.
     space_time: f64,
@@ -2751,7 +2751,7 @@ struct Editor {
     /// body's sim velocity is re-expressed in the new frame so its world
     /// velocity stays continuous across the SOI seam (see space.rs).
     space_frame: std::collections::HashMap<u32, u32>,
-    /// Physics LOD for DISTANT compound craft (root eid → state): far from the
+    /// Physics LOD for distant compound craft (root eid → state): far from the
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).
     compound_lod: std::collections::HashMap<u32, crate::space::CompoundLod>,
@@ -2763,7 +2763,7 @@ struct Editor {
     /// eid + captured conic): while warp > 1 an in-flight vessel is driven
     /// analytically, exactly like single bodies' `space_coast` (see space.rs).
     compound_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
-    /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
+    /// Real hosting (quic): Predicted nodes owned by remote peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.
     net_remote_predicted: Vec<(Entity, u64)>,
@@ -2776,7 +2776,7 @@ struct Editor {
     /// driver behind it is just a local node, which is exactly what local versus
     /// wants.
     net_rollback: Option<rollback::RollbackDriver>,
-    /// Host: the REFEREE (`docs/multiplayer.md` §5) — a second,
+    /// Host: the referee (`docs/multiplayer.md` §5) — a second,
     /// headless simulation of the same match advanced only to the confirmed
     /// frontier. It never guesses and never rolls back, so its state is the
     /// authoritative one and every peer's checksum is judged against it.
@@ -2804,7 +2804,7 @@ struct Editor {
     /// essentially every tick and re-simulates six times the work, correctly
     /// and unplayably.
     net_input_delay: Option<u8>,
-    /// The collision layer that blocks LINE of SIGHT for interest management
+    /// The collision layer that blocks line of sight for interest management
     /// (`net.host{ interestOcclusion = "Level" }`). `None` = distance alone
     /// decides, which is the default and the right answer for most games.
     ///
@@ -2814,12 +2814,12 @@ struct Editor {
     /// editor's.
     net_occlusion_layer: Option<String>,
     /// Voice chat: the microphone, the encoder, and one stream per remote
-    /// speaker. Lives with the SESSION rather than the scene —
+    /// speaker. Lives with the session rather than the scene —
     /// a server switching maps must not cut a conversation off mid-sentence.
     #[cfg(feature = "devices")]
     voice: voice::VoiceChat,
     /// A pending "test voice from a WAV" file pick. Async,
-    /// through `native_dialog`, because rfd's BLOCKING picker kills the editor
+    /// through `native_dialog`, because rfd's blocking picker kills the editor
     /// on Linux — no picker in this editor reaches rfd directly.
     #[cfg(feature = "editor-ui")]
     voice_test_pick: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
@@ -2898,11 +2898,11 @@ struct Editor {
     export_title: String,
     export_target: usize,
     export_status: Option<String>,
-    /// The last SUCCESSFUL export's folder — powers the dialog's "Open folder".
+    /// The last successful export's folder — powers the dialog's "Open folder".
     export_done: Option<PathBuf>,
     /// When the last crash-recovery autosave was written (see `autosave_tick`).
     last_autosave: Option<Instant>,
-    /// An autosave NEWER than the scene file was found at load — the recovery
+    /// An autosave newer than the scene file was found at load — the recovery
     /// prompt is up ("restore unsaved work?"); holds the autosave path.
     autosave_prompt: Option<PathBuf>,
     /// A crash note the previous run left behind (see `report.rs`). Shown once, at
@@ -2921,7 +2921,7 @@ struct Editor {
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
     /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
-    /// free-look. This is the game's STANDING WISH, not the state of the OS grab — see
+    /// free-look. This is the game's standing wish, not the state of the OS grab — see
     /// `cursor_freed`, which defers it. Reset when play ends.
     script_mouse_lock: bool,
     /// The editor has taken the pointer back from a running game (Escape). The
@@ -2934,7 +2934,7 @@ struct Editor {
     /// only way out was to defocus the whole window at the OS level, which is
     /// what people were actually doing.
     cursor_freed: bool,
-    /// The active cursor grab is only a CONFINE (X11 has no OS-level lock): the
+    /// The active cursor grab is only a confine (X11 has no OS-level lock): the
     /// cursor can still wander inside the window, so we re-center it every frame.
     cursor_lock_soft: bool,
     /// The Game viewport has trapped the cursor (clicked into it while playing):
@@ -3104,7 +3104,7 @@ struct Editor {
     /// scene for the session; Stop restores both alongside the snapshot so the
     /// editor's scene saves back to its own file, not the played one's.
     play_scene_name: Option<(String, String)>,
-    /// What an additive layer OWNING the world's environment borrowed, so
+    /// What an additive layer owning the world's environment borrowed, so
     /// `scene.unload` can give it back: `(the layer's tag, the base scene's
     /// Skybox/PostProcess nodes it put to sleep, the base scene's sun + fog)`.
     ///
@@ -3314,7 +3314,7 @@ struct Editor {
     /// Banked (raw − snapped) dt, folded back ≤0.25 ms/frame — keeps long-term
     /// time wall-clock exact under dt snapping.
     dt_snap_error: f32,
-    /// The Lua VM that runs node scripts in play mode (ADR-0003).
+    /// The Lua VM that runs node scripts in play mode.
     script_host: ScriptHost,
     /// Animation: clip/controller registries + live per-entity runtimes.
     anim: anim::AnimSystem,
@@ -3372,7 +3372,7 @@ struct Editor {
     script_defaults_cache: HashMap<String, (Option<SystemTime>, ScriptDefaults)>,
     /// Syntax diagnostic (line, message) for the active IDE file, for red squiggles.
     ide_diag: Option<(usize, String)>,
-    /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
+    /// The external editor command for "Open in IDE"; a user preference.
     external_editor: String,
     /// Prefer the external editor over the in-engine IDE for opening scripts.
     prefer_external_editor: bool,
@@ -3396,7 +3396,7 @@ struct Editor {
     /// told somebody their choppy scene was fine.
     fps: f32,
     fps_timer: f32,
-    /// Smoothed frame TIME in milliseconds — the quantity that is actually
+    /// Smoothed frame time in milliseconds — the quantity that is actually
     /// linear in what it measures, and so the one that can be averaged.
     frame_ms: f32,
     /// The last couple of seconds of raw frame times, milliseconds, as a ring.
@@ -3425,7 +3425,7 @@ struct Editor {
     /// load-bearing anti-jitter path could be switched off for a whole session
     /// with nothing to notice. The ⏱ panel reads this.
     dt_snap_rate: f32,
-    /// Smoothed milliseconds spent BLOCKED waiting for a display image, kept
+    /// Smoothed milliseconds spent blocked waiting for a display image, kept
     /// apart from the frame's own cost so the title can report the two
     /// separately. A frame that costs 8 ms and presents at 20 fps is a display
     /// path pacing the engine, not an engine that is slow — and with only an fps
@@ -3511,7 +3511,7 @@ enum Snapshot {
     /// Entity here would dangle. Undo/redo is a colors swap that never touches the ECS.
     VertexPaint(u32, Vec<Vec<[u8; 4]>>),
     /// A texture-paint stroke: per touched node, `(tex-paint id, pre-stroke images per
-    /// part)`. `None` images = that node had no paint before this stroke, so undo REMOVES
+    /// part)`. `None` images = that node had no paint before this stroke, so undo removes
     /// its paint. A Vec because the world-space brush sphere paints every surface it
     /// touches (that's how you shade a wall-floor corner in one stroke) — and one stroke
     /// must be one undo step, however many nodes it crossed. Keyed by the stable id.
@@ -3715,7 +3715,7 @@ impl Editor {
     /// Shared, because there are two ways in now: the window handler, and
     /// `floptle shot`, which makes a headless device and never opens one. The
     /// part that must not be duplicated is the primitive registration — the
-    /// `Shape → MeshId` mapping is POSITIONAL (`Shape as usize`), so a second
+    /// `Shape → MeshId` mapping is positional (`Shape as usize`), so a second
     /// copy that registered them in a different order, or missed one somebody
     /// added, would draw the wrong primitive rather than fail.
     fn init_gpu_side(&mut self, gpu: &Gpu, raster: &mut Raster) {
@@ -3884,7 +3884,7 @@ impl ApplicationHandler for Editor {
         self.report_scene_wiring(&doc);
         self.adopt_terrain();
         self.adopt_tilesets();
-        // NOTE: adopt_paint/adopt_tex_paint happen after `self.gpu = Some(..)` below —
+        // Note: adopt_paint/adopt_tex_paint happen after `self.gpu = Some(..)` below —
         // both allocate GPU blocks/textures, and at this point gpu/raster are still
         // locals. Calling them here silently no-ops and boot loses all saved paint.
         if !self.player_mode {
@@ -3960,7 +3960,7 @@ impl ApplicationHandler for Editor {
             self.import_model(&p);
         }
         // Saved paint comes back only now that gpu/raster live in `self` (vertex blocks +
-        // texture-paint atlases are GPU allocations — see the NOTE at the scene load above).
+        // texture-paint atlases are GPU allocations — see the note at the scene load above).
         // Maps first: a blockout node's paint is keyed to its triangulation,
         // and the triangulation comes out of the map store — loading paint
         // before the geometry it belongs to would find nothing to attach to
@@ -3995,7 +3995,7 @@ impl ApplicationHandler for Editor {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Always feed egui so its widgets stay live. We deliberately IGNORE the
+        // Always feed egui so its widgets stay live. We deliberately ignore the
         // returned `consumed` flag: egui_dock paints the whole editor in the
         // Background layer, which makes egui report `consumed == true` for mouse
         // input even over the *transparent* Scene tab — so trusting it would (and
@@ -4050,7 +4050,7 @@ impl ApplicationHandler for Editor {
                 self.alt = mods.state().alt_key();
                 self.input.boost = self.shift;
             }
-            // LOSING FOCUS RELEASES everything.
+            // Losing focus releases everything.
             //
             // A key held when the window goes away sends its release to whoever took
             // focus, not to us — hold Ctrl and alt-tab, or press a compositor shortcut,
@@ -4093,7 +4093,7 @@ impl ApplicationHandler for Editor {
                 // Don't trigger shortcuts/tools (or fly the camera) while typing
                 // into a field. `typing` is read live each event.
                 //
-                // **A TEXT field, not any focused widget.** This was
+                // **A text field, not any focused widget.** This was
                 // `egui_wants_keyboard_input()`, which is literally
                 // `memory.focused().is_some()` — and in egui every clickable
                 // widget takes focus when you click it. So one click on a
@@ -4114,16 +4114,16 @@ impl ApplicationHandler for Editor {
                 let game_view = self.game_view();
                 if let PhysicalKey::Code(code) = event.physical_key {
                     // Held movement keys. The bit is `pressed && !typing && !ctrl`:
-                    // a RELEASE (pressed == false) always clears it, so a key can
+                    // a release (pressed == false) always clears it, so a key can
                     // never stick on if the release lands while a field is focused
                     // (e.g. hold W, click into the IDE, release W). C moves down.
                     // Fly-camera keys arm while the pointer is over the Scene
-                    // viewport or while RMB mouse-look is active — WASD in the
+                    // viewport or while RMB mouse-look is active — wasd in the
                     // Animating tab (or any other panel) must not drive the editor
                     // camera. The `looking` clause is load-bearing: entering look
                     // grabs+hides the cursor and nulls `self.cursor`, so
                     // `cursor_over_scene()` can no longer see it. Without it the
-                    // classic hold-RMB + WASD fly combo is impossible and the two
+                    // classic hold-RMB + wasd fly combo is impossible and the two
                     // inputs silently cancel each other (the "camera freezes" bug).
                     let mv =
                         pressed && !typing && !game_view && (self.input.looking || self.cursor_over_scene());
@@ -4151,8 +4151,8 @@ impl ApplicationHandler for Editor {
                             self.tick_keys_released.insert(name.to_string());
                         }
                     }
-                    // What the player TYPED, as opposed to which key they hit.
-                    // Layout-resolved by the OS, so an AZERTY `a` is an `a`.
+                    // What the player typed, as opposed to which key they hit.
+                    // Layout-resolved by the OS, so an azerty `a` is an `a`.
                     // Only while the game owns the keyboard: typing into the
                     // Inspector must not also type into a menu behind it.
                     if pressed && !typing && self.playing && !self.ctrl {
@@ -4188,7 +4188,7 @@ impl ApplicationHandler for Editor {
                             _ => {}
                         }
                     }
-                    // …and the same event into the ACTION layer. Both views of
+                    // …and the same event into the action layer. Both views of
                     // the keyboard are filled here so they can never disagree
                     // within a frame.
                     self.note_action_key(code, pressed);
@@ -4312,7 +4312,7 @@ impl ApplicationHandler for Editor {
                             // Everything else is an editor shortcut — suppressed in the
                             // Game view so it behaves like a real build.
                             _ if !game_view => {
-                                // A focused timeline tab (Animating/Graph/Particles) OWNS
+                                // A focused timeline tab (Animating/Graph/Particles) owns
                                 // Delete, the arrows, F, Space, Home/End for its own
                                 // keyframes/events — so suppress the scene versions here,
                                 // letting the panel's own egui handlers run. App-wide
@@ -4346,7 +4346,7 @@ impl ApplicationHandler for Editor {
                                     matches!(self.focused_tab, Some(EditorTab::ShaderGraph));
                                 // Posing a model object/bone happens through the scene
                                 // viewport (so focus isn't the Animating tab), but the
-                                // CONTEXT is the animator: route undo/redo to the open clip
+                                // Context is the animator: route undo/redo to the open clip
                                 // and keep scene-destructive keys (Delete, copy/paste/dup)
                                 // out — else Ctrl+Z respawns the World (breaking the rig you
                                 // selected) and Delete removes the node you're animating.
@@ -4440,7 +4440,7 @@ impl ApplicationHandler for Editor {
                                 } else if in_image {
                                     crate::image_edit::image_key(&mut self.image, code, self.shift);
                                 } else if !in_timeline {
-                                    // ◫ Tiles letter shortcuts CLAIM their key while the
+                                    // ◫ Tiles letter shortcuts claim their key while the
                                     // tile tool is held, and fall through otherwise. Two
                                     // of them (F, G) are the editor's frame-selection and
                                     // grid toggle everywhere else — claiming beats doing
@@ -4501,7 +4501,7 @@ impl ApplicationHandler for Editor {
                     // Clicking into the Game view while playing traps the cursor there
                     // (Escape or Stop releases it) so playing doesn't let the mouse
                     // wander onto editor panels. `cursor_over_game()` gates it to the
-                    // Game rect, so a click on any panel never grabs. A CURSOR-DRIVEN
+                    // Game rect, so a click on any panel never grabs. A cursor-driven
                     // game must keep its cursor: while any interactive game-UI is on
                     // screen (a main menu's slot buttons, the ship's SAS cluster) the
                     // pointer is the gameplay — trapping it froze the menu dead.
@@ -4600,8 +4600,8 @@ impl ApplicationHandler for Editor {
                                 self.map_knife_click(cursor);
                             }
                         } else if self.tool == Tool::MapEdit {
-                            // Map tool: a gizmo grab drags the SUB-OBJECT selection;
-                            // otherwise the press only ANCHORS, and the release decides
+                            // Map tool: a gizmo grab drags the sub-object selection;
+                            // otherwise the press only anchors, and the release decides
                             // whether the gesture was a click (pick what's under it) or
                             // a drag (box-select). Selecting on press is what used to
                             // confine box-select to empty space — and a blockout that
@@ -4659,7 +4659,7 @@ impl ApplicationHandler for Editor {
                         } else if let (Some(h), Some((mesh, idx, start_xf))) =
                             (hovered, self.bone_gizmo_target())
                         {
-                            // On a gizmo handle while an armature BONE is selected: grab
+                            // On a gizmo handle while an armature bone is selected: grab
                             // it to pose the bone. No begin_edit — the clip has its own
                             // coalesced save (clip_dirty), bones aren't scene undo.
                             self.drag_group.clear(); // bones never group-drag

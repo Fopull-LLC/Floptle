@@ -464,7 +464,7 @@ pub(crate) fn flsl_highlight(
             }
             push(&text[s..i], c_str);
         } else if c == b'#' {
-            // A #RRGGBB[AA] color literal reads as one "number".
+            // A #rrggbb[AA] color literal reads as one "number".
             let s = i;
             i += 1;
             while i < b.len() && (b[i] as char).is_ascii_hexdigit() {

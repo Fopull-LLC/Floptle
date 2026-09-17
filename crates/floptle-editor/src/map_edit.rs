@@ -5,7 +5,7 @@
 //! lives here in [`MapStore`] (ids survive undo's world respawn, exactly like
 //! terrain/vpaint) and persists to `<project>/maps/<scene>.map.ron`. Rendering
 //! rides the normal mesh path: each map mesh registers a `MeshAsset` under the
-//! synthetic key `@map/<id>` whose parts are DYNAMIC meshes (the terrain
+//! synthetic key `@map/<id>` whose parts are dynamic meshes (the terrain
 //! slots — edits are cheap `replace_dynamic` uploads, slots recycle), one part
 //! per material slot with faces, so per-face materials resolve through the
 //! existing `ObjectMaterials`/`part_look` machinery keyed by slot name.
@@ -46,7 +46,7 @@ pub(crate) struct MapStore {
     pub(crate) meshes: HashMap<u32, MapMesh>,
     /// Live dynamic GPU parts per id (parallel to the registry entry's parts,
     /// tagged with the slot index each part draws). This is the authority for
-    /// FREEING: `mesh_registry` is cleared wholesale on scene switches, but
+    /// Freeing: `mesh_registry` is cleared wholesale on scene switches, but
     /// dynamic slots must be returned to the raster free-lists explicitly.
     pub(crate) parts: HashMap<u32, Vec<(MeshId, u16)>>,
     /// Ids whose GPU parts need a rebuild (geometry or slots changed).
@@ -54,11 +54,11 @@ pub(crate) struct MapStore {
     /// Ids rebuilt since paint last looked — the brush's CPU geometry is stale
     /// and any paint on them has to be re-attached. Drained by `sync_map_paint`.
     pub(crate) paint_stale: BTreeSet<u32>,
-    /// What every render vertex/triangle of a PAINTED map mesh was at its last
+    /// What every render vertex/triangle of a painted map mesh was at its last
     /// rebuild, so the paint can follow the surfaces that survived an edit.
     /// Only kept for nodes that actually carry paint — see `map_paint`.
     pub(crate) paint_ident: HashMap<u32, crate::map_paint::MapPaintIdent>,
-    /// Paint an undo/redo is putting BACK, keyed by the durable surface names it
+    /// Paint an undo/redo is putting back, keyed by the durable surface names it
     /// was captured under. Applied by the next `sync_map_paint` (which is where
     /// the new triangulation first exists to attach it to), and only to surfaces
     /// the live paint has nothing for — so undoing an extrude repaints the face
@@ -94,8 +94,8 @@ pub(crate) struct MapOpts {
     pub(crate) rings: u32,
     pub(crate) steps: u32,
     pub(crate) arch_segments: u32,
-    /// Arch opening WIDTH as a fraction of the shape's half-width, and its
-    /// HEIGHT (jamb + arc) as a fraction of the shape's full height.
+    /// Arch opening width as a fraction of the shape's half-width, and its
+    /// Height (jamb + arc) as a fraction of the shape's full height.
     pub(crate) arch_width: f32,
     pub(crate) arch_height: f32,
     /// How far E / the Extrude button pushes (grid size wins when snap is on).
@@ -215,7 +215,7 @@ impl MapShape {
     }
 
     /// The shape built to exact half-extents — the draw tool's output, and what
-    /// the Map tab's spawn buttons use. The mesh comes back TAGGED with the
+    /// the Map tab's spawn buttons use. The mesh comes back tagged with the
     /// spec, so its parameters stay editable until the geometry is touched.
     pub(crate) fn sized(self, half: floptle_core::math::Vec3, opts: MapOpts) -> MapMesh {
         self.spec(half, opts).build()
@@ -626,7 +626,7 @@ impl Editor {
     /// each mint a fresh id + a full copy, and deleted nodes deliberately leave
     /// theirs behind so an undo can resurrect them — over a long session that
     /// piles up). Returns how many entries went. Undo history that references
-    /// them still restores VALUES, so this only ever costs disk, never edits.
+    /// them still restores values, so this only ever costs disk, never edits.
     pub(crate) fn prune_map_orphans(&mut self) -> usize {
         let mut live: BTreeSet<u32> = self
             .world
@@ -636,7 +636,7 @@ impl Editor {
                 _ => None,
             })
             .collect();
-        // Ids any undo/redo step could bring BACK count as live: a scene
+        // Ids any undo/redo step could bring back count as live: a scene
         // snapshot carries the node but not its geometry, so pruning one out
         // from under the history would undo a deletion into a placeholder box.
         for snap in self.history.undo.iter().chain(self.history.redo.iter()) {
@@ -804,7 +804,7 @@ impl Editor {
     pub(crate) fn swap_map_mesh(&mut self, id: u32, mesh: &MapMesh) -> MapMesh {
         let old = self.maps.meshes.insert(id, mesh.clone()).unwrap_or_default();
         self.maps.dirty.insert(id);
-        // The sub-object selection SURVIVES an undo (so extrude / undo / retry
+        // The sub-object selection survives an undo (so extrude / undo / retry
         // works), but the restored mesh may have fewer verts/faces than the
         // selection remembers — drop whatever no longer exists.
         if let Some(sel) = self.map_sel.as_mut().filter(|s| s.id == id) {
@@ -817,7 +817,7 @@ impl Editor {
 // ===== Map sidecars as assets ================================================
 
 /// The scene file a map sidecar belongs to. Sidecars are keyed by the scene's
-/// STEM (`maps/<stem>.map.ron` — see [`Editor::maps_file_path`]), so this looks
+/// Stem (`maps/<stem>.map.ron` — see [`Editor::maps_file_path`]), so this looks
 /// for `<stem>.ron` anywhere under `scenes/`, subfolders included (first match
 /// in sorted order — the stem is the sidecar's whole identity, so two scenes
 /// sharing one already share the sidecar too).
@@ -1081,7 +1081,7 @@ pub(crate) fn map_asset_preview(project_root: &std::path::Path, path: &str) -> M
 // ===== Sub-object editing (Tool::MapEdit) ====================================
 
 /// How far the cursor has to travel between press and release for the gesture
-/// to count as a DRAG rather than a click. Shared by the box-select rectangle
+/// to count as a drag rather than a click. Shared by the box-select rectangle
 /// (which only draws past it) and the release handler (which only applies a box
 /// past it), so what you see and what happens can't disagree.
 pub(crate) const MAP_DRAG_PX: f32 = 4.0;
@@ -1147,7 +1147,7 @@ impl MapSubMode {
 
 /// What a click or a box drag does to the existing sub-object selection.
 ///
-/// Shift adds and Ctrl SUBTRACTS, which is the convention every modeling tool
+/// Shift adds and Ctrl subtracts, which is the convention every modeling tool
 /// shares — and the reason both used to mean "toggle" was that there was only
 /// one code path for them. Toggling is fine for one click and useless for a
 /// box: dragging a box over a region you have half-selected would flip the
@@ -1158,16 +1158,16 @@ pub(crate) enum SelectMode {
     Add,
     Subtract,
     /// Blender's "pick shortest path": take everything on the cheapest route
-    /// from the last thing picked to this one, and add the lot. A CLICK gesture
+    /// from the last thing picked to this one, and add the lot. A click gesture
     /// only — see [`SelectMode::of`].
     Path,
 }
 
 impl SelectMode {
-    /// From the live modifier state, for a CLICK.
+    /// From the live modifier state, for a click.
     ///
     /// Ctrl+click is the shortest path, which is what it means in Blender and
-    /// what it is asked to mean here. Ctrl+DRAG still subtracts — see
+    /// what it is asked to mean here. Ctrl+drag still subtracts — see
     /// [`SelectMode::of_drag`] — because a box that took a path would be
     /// meaningless, and because subtracting a region is exactly what a box is
     /// for. Shift+Ctrl+click subtracts, so dropping a single item without a box
@@ -1181,7 +1181,7 @@ impl SelectMode {
         }
     }
 
-    /// From the live modifier state, for a BOX DRAG. Unchanged: Shift adds,
+    /// From the live modifier state, for a BOX drag. Unchanged: Shift adds,
     /// Ctrl subtracts.
     pub(crate) fn of_drag(shift: bool, ctrl: bool) -> Self {
         match (shift, ctrl) {
@@ -1203,7 +1203,7 @@ pub(crate) enum MapOrient {
     Global,
     /// The node's own axes.
     Local,
-    /// The SELECTION's frame: the average face normal (face mode) or the edge
+    /// The selection's frame: the average face normal (face mode) or the edge
     /// direction (edge mode), falling back to Local when there is no direction
     /// to speak of. The default — pushing a diagonal wall straight out of
     /// itself is the whole point of a modeling gizmo.
@@ -1222,7 +1222,7 @@ impl MapOrient {
 }
 
 /// What the sub-object gizmo does. The global tool stays on ▦ Map (switching
-/// to the Rotate/Scale TOOLS would drop the sub-object selection), so the map
+/// to the Rotate/Scale tools would drop the sub-object selection), so the map
 /// tool carries its own transform mode — G/R/S, as in every modeling package.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MapXform {
@@ -1314,7 +1314,7 @@ impl MapDraw {
         let center = self.point(mid) + (self.normal * (self.height * 0.5)).as_dvec3();
         // Asymmetric shapes (stairs, ramps) are tall at local -Z, so point -Z
         // along the drag: a staircase climbs the way you dragged it. The turn
-        // is a ROTATION of both in-plane axes about the normal — mirroring one
+        // is a rotation of both in-plane axes about the normal — mirroring one
         // axis would invert the winding and turn the shape inside out.
         let q = Quat::from_axis_angle(
             self.normal,
@@ -1500,7 +1500,7 @@ pub(crate) struct MapViz {
     pub(crate) edges: Vec<VizEdge>,
     /// Projected verts — only drawn in Vertex mode.
     pub(crate) verts: Vec<VizVert>,
-    /// Projected outlines of SELECTED faces.
+    /// Projected outlines of selected faces.
     pub(crate) sel_faces: Vec<Vec<floptle_core::math::Vec2>>,
     /// Outline of the hovered element (vert ring / edge / face).
     pub(crate) hover: Vec<(floptle_core::math::Vec2, floptle_core::math::Vec2)>,
@@ -1522,12 +1522,12 @@ pub(crate) struct MapViz {
     /// "which way is up" is never a guess.
     pub(crate) arrow: Option<(floptle_core::math::Vec2, floptle_core::math::Vec2)>,
     /// Knife: where the pending cut starts (`None` before the first click),
-    /// where it would end right now, and whether that end is an existing CORNER
+    /// where it would end right now, and whether that end is an existing corner
     /// (drawn as a ring — a corner cut adds no vertex, and knowing which you're
     /// about to get is the whole difference between a clean cut and a sliver).
     pub(crate) knife_from: Option<floptle_core::math::Vec2>,
     pub(crate) knife_to: Option<(floptle_core::math::Vec2, bool)>,
-    /// Why the cut under the cursor would be REFUSED, or `None` if it would
+    /// Why the cut under the cursor would be refused, or `None` if it would
     /// work. Straight from `knife_refusal`, so the telegraph and the operation
     /// cannot disagree.
     pub(crate) knife_why: Option<String>,
@@ -1610,7 +1610,7 @@ pub(crate) enum MapOp {
     SelectSlot(u16),
     /// Extend an edge selection along its quad loops.
     SelectLoop,
-    /// Extend an edge selection across its quad RINGS — the edges a loop cut
+    /// Extend an edge selection across its quad rings — the edges a loop cut
     /// would run through, which is the other half of "select along this strip".
     SelectRing,
     /// Insert a new edge loop across the ring through the selected edge, at
@@ -1621,7 +1621,7 @@ pub(crate) enum MapOp {
 }
 
 impl Editor {
-    /// The map-mesh node sub-object editing targets: the PRIMARY selected node,
+    /// The map-mesh node sub-object editing targets: the primary selected node,
     /// when it is a `Matter::MapMesh`.
     pub(crate) fn map_target(&self) -> Option<(floptle_core::Entity, u32)> {
         let e = self.primary()?;
@@ -1631,7 +1631,7 @@ impl Editor {
         }
     }
 
-    /// Switch the vertex/edge/face sub-mode, CONVERTING the current selection
+    /// Switch the vertex/edge/face sub-mode, converting the current selection
     /// instead of dropping it (pick a face, press Tab, and you are holding its
     /// four verts — losing the selection on every mode switch made iterating
     /// on a shape impossible).
@@ -1648,7 +1648,7 @@ impl Editor {
 
     /// The gizmo tool the viewport should build/hit-test/paint. The map tool
     /// carries its own move/rotate/scale mode so that switching it can't drop
-    /// the sub-object selection the way switching the global TOOL does.
+    /// the sub-object selection the way switching the global tool does.
     pub(crate) fn gizmo_tool(&self) -> crate::gizmo::Tool {
         if self.tool == crate::gizmo::Tool::MapEdit { self.map_xform.tool() } else { self.tool }
     }
@@ -1700,7 +1700,7 @@ impl Editor {
         let world_of = |p: floptle_core::math::Vec3| {
             t.translation + (t.rotation * (t.scale * p)).as_dvec3()
         };
-        // Occlusion is one raycast per CANDIDATE, and candidates are ranked by
+        // Occlusion is one raycast per candidate, and candidates are ranked by
         // screen distance first — testing every vertex up front was O(verts x
         // faces) on a mesh that can hold thousands of both, every frame.
         let eye = self.map_eye_local(e);
@@ -1746,7 +1746,7 @@ impl Editor {
                     .map(|((a, b), _)| MapHover::Edge(a, b))
             }
             MapSubMode::Face => {
-                // The pick() ray recipe (camera-relative, ADR-0015), pushed into
+                // The pick() ray recipe (camera-relative), pushed into
                 // the node's local frame; unnormalized rd keeps t comparable.
                 let inv = vp.inverse();
                 let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
@@ -1773,7 +1773,7 @@ impl Editor {
     ///
     /// Empty when there is nothing to run from (no anchor yet — a first
     /// Ctrl+click just picks, and sets the anchor for the next one), when the
-    /// anchor is a different KIND of thing (you switched sub-object mode between
+    /// anchor is a different kind of thing (you switched sub-object mode between
     /// the two clicks, so "between them" has no meaning), or when the two lie on
     /// separate shells. In every one of those cases the click degrades to an
     /// ordinary pick rather than doing something surprising.
@@ -1840,7 +1840,7 @@ impl Editor {
             }
         }
         sel.anchor = Some(hit);
-        // Shift adds, Ctrl SUBTRACTS — but a Shift-click on something already
+        // Shift adds, Ctrl subtracts — but a Shift-click on something already
         // in the selection still toggles it off, because that is the only way
         // to drop one item without a box, and every tool does it.
         match hit {
@@ -1962,7 +1962,7 @@ impl Editor {
     // ---- knife ---------------------------------------------------------------
 
     /// The cursor ray in `e`'s object space (origin, direction), camera-relative
-    /// like every other pick in the editor (ADR-0015).
+    /// like every other pick in the editor.
     fn map_local_ray(
         &self,
         e: floptle_core::Entity,
@@ -1998,7 +1998,7 @@ impl Editor {
     /// face wins there depends on the camera angle, which is exactly why turning
     /// around and trying from the other side sometimes "fixed" it.
     ///
-    /// The CORNER snap is done in screen space (within a gizmo handle of a
+    /// The corner snap is done in screen space (within a gizmo handle of a
     /// projected corner), like every other grab in this editor, so aiming at a
     /// corner feels the same here as it does in vertex mode. The edge point is
     /// then solved exactly in object space — projecting the edge and
@@ -2067,7 +2067,7 @@ impl Editor {
         };
         let Some((_, id)) = self.map_target() else { return };
         let Some(pre) = self.maps.meshes.get(&id).cloned() else { return };
-        // The pick above was LOCKED to the pending face, so both ends are on it
+        // The pick above was locked to the pending face, so both ends are on it
         // by construction. The only way `face` differs now is a stale anchor
         // that an undo has outlived — start over there rather than cut something
         // the preview never showed.
@@ -2158,7 +2158,7 @@ impl Editor {
         let mut viz = MapViz { show_verts: self.map_mode == MapSubMode::Vertex, ..Default::default() };
 
         // ---- depth cues ------------------------------------------------------
-        // Which corners and edges are round the BACK, decided in the mesh's own
+        // Which corners and edges are round the back, decided in the mesh's own
         // object space so a rotated or non-uniformly scaled node needs no normal
         // fix-up: put the camera through the parent chain's exact inverse
         // (`inv_mul`, the componentwise TRS one) and compare against the raw
@@ -2270,7 +2270,7 @@ impl Editor {
                 viz.arrow = Some((a, b)); // local -Z is the high end
             }
         }
-        // The rectangle only appears once the press has become a DRAG — every
+        // The rectangle only appears once the press has become a drag — every
         // click now records an anchor (that is what lets a box start on the
         // mesh itself), and drawing a zero-size box on every click would flash.
         if let (Some(anchor), Some(cur)) = (self.map_box, self.cursor)
@@ -2419,7 +2419,7 @@ impl Editor {
         })
     }
 
-    /// The selection's own frame in OBJECT-local space: `(up, along)` — the
+    /// The selection's own frame in object-local space: `(up, along)` — the
     /// direction the gizmo's +Y should take, plus an optional in-plane
     /// reference for +X. `None` when the selection has no direction (loose
     /// vertices).
@@ -2617,7 +2617,7 @@ impl Editor {
             Vec3::Y.cross(normal).normalize()
         };
         let v = u.cross(normal);
-        // Snap in the PLANE only: rounding the normal component too would lift
+        // Snap in the plane only: rounding the normal component too would lift
         // the origin off the surface you aimed at (a wall at x = 2.5 would
         // start building 0.5 units inside or outside itself).
         let snapped = self.map_snap_world(hit);
@@ -2642,7 +2642,7 @@ impl Editor {
         let Some(draw) = self.map_draw.as_ref() else { return };
         match draw.phase {
             DrawPhase::Base => {
-                // Intersect the ray with the FIXED build plane (re-picking
+                // Intersect the ray with the fixed build plane (re-picking
                 // geometry mid-drag would make the footprint jump).
                 let Some((ro, rd)) = self.map_cursor_ray(cursor) else { return };
                 let denom = rd.dot(draw.normal);
@@ -2907,7 +2907,7 @@ impl Editor {
                     changed = false;
                 } else {
                     let mut next = spec.build();
-                    // Keep the material work: slot NAMES always, and the
+                    // Keep the material work: slot names always, and the
                     // per-face assignment when the face count still lines up
                     // (a pure resize, or any knob that doesn't change topology).
                     next.slots = mesh.slots.clone();
@@ -3384,7 +3384,7 @@ impl Editor {
     }
 
     /// One `,` / `.` / Z press: turn whatever the tool is pointed at. While a
-    /// shape is armed or being drawn that's the PREVIEW (and it sticks, so the
+    /// shape is armed or being drawn that's the preview (and it sticks, so the
     /// next shape keeps the facing); otherwise it's the selected node.
     pub(crate) fn map_turn_input(&mut self, quarters: i32) {
         if self.map_draw.is_some() || self.map_arm.is_some() {
@@ -3427,7 +3427,7 @@ impl Editor {
             }
             return;
         }
-        // Nothing armed: retune the SELECTED shape in place.
+        // Nothing armed: retune the selected shape in place.
         let Some((_, id)) = self.map_target() else { return };
         let Some(mut spec) = self.maps.meshes.get(&id).and_then(|m| m.spec) else {
             self.map_note(
@@ -3625,7 +3625,7 @@ mod tests {
         }
     }
 
-    /// Importing a map sidecar into another scene: every shape the OWNING
+    /// Importing a map sidecar into another scene: every shape the owning
     /// scene still shows arrives as a fresh node under one group — names,
     /// relative placement (through parent chains) and geometry intact, ids
     /// minted fresh — and the whole import is one undo step.
@@ -3735,7 +3735,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A sidecar names its scene by STEM; the owning-scene lookup must find it
+    /// A sidecar names its scene by stem; the owning-scene lookup must find it
     /// in a subfolder too, and come back empty rather than guessing wrong.
     #[test]
     fn the_owning_scene_lookup_searches_subfolders() {
@@ -4119,7 +4119,7 @@ mod tests {
         }
     }
 
-    /// Tab must CONVERT the selection, not drop it.
+    /// Tab must convert the selection, not drop it.
     #[test]
     fn sub_mode_switches_convert_the_selection() {
         let mesh = MapShape::Box.mesh(MapOpts::default());

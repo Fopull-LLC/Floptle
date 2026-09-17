@@ -153,17 +153,17 @@ impl Editor {
         // (Scene tab) use the editor's free-fly camera. Works whether or not we're
         // playing, so you can frame the active camera's shot without entering play.
         // (Inlined — self methods can't be called while gpu/egui are borrowed.) A
-        // fullscreened tab overrides which view is front. A DOCKED (non-fullscreen)
+        // fullscreened tab overrides which view is front. A docked (non-fullscreen)
         // Game tab renders through its own offscreen target sized to the tab rect
         // (update_game_viewport + the tab's Image blit), so the surface renders the
         // editor view underneath — this keeps the game framed to its panel instead of
         // spilling the full-window render behind the other tabs. (Cost: a docked Game
         // tab draws the scene once for the offscreen game view and once for the hidden
         // editor surface; double-click the Game tab to fullscreen it for a single
-        // full-window render.) Only a FULLSCREEN Game tab renders the active camera
+        // full-window render.) Only a fullscreen Game tab renders the active camera
         // straight to the surface (it fills the whole window, so that framing is right).
         let game_view = matches!(self.fullscreen_tab, Some(EditorTab::Game));
-        // The active camera's layer cull mask applies to the FULLSCREEN game
+        // The active camera's layer cull mask applies to the fullscreen game
         // view only — the editor Scene view always shows everything.
         let mut game_cull_mask = u32::MAX;
         let cam = {
@@ -189,8 +189,8 @@ impl Editor {
         };
         let view_proj = cam.view_proj(aspect);
         // Feed the map's world→screen picker (`camera.worldToScreen`) when the
-        // FULLSCREEN game view owns the whole surface — its rect matches the
-        // full-window cursor space `input.mouse()` reports. A DOCKED game tab
+        // Fullscreen game view owns the whole surface — its rect matches the
+        // full-window cursor space `input.mouse()` reports. A docked game tab
         // feeds its own sub-rect from update_game_viewport instead.
         if game_view {
             self.game_view_origin = [0.0, 0.0]; // fullscreen play: cursor space IS viewport space
@@ -244,7 +244,7 @@ impl Editor {
             );
         }
         // Fullscreen Game tab: `cam` above already is the active gameplay camera and the
-        // viewport is the whole surface, so the same projection serves. The DOCKED game
+        // viewport is the whole surface, so the same projection serves. The docked game
         // tab fills this from `update_game_viewport`, which has its own camera + rect.
         if game_view {
             self.game_gizmo_lines.clear();
@@ -474,7 +474,7 @@ impl Editor {
                 .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
         };
         // The scene's PostProcess node drives the whole post chain (per scene, not
-        // per project): PostStack settings + the raymarch SDF-AO params.
+        // per project): PostStack settings + the raymarch SDF-ao params.
         let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
         // The player's colour-vision filter rides on top of the scene's chain,
         // and deliberately survives a scene whose PostProcess node is disabled
@@ -611,7 +611,7 @@ impl Editor {
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             // Baked GI. The renderer owns the probe texture; these four lanes
             // are only where the volume is, and they have to be stamped per
-            // view because the field is camera-relative (ADR-0015).
+            // view because the field is camera-relative.
             raymarch.gi().apply(&mut g, cam.world_position.into());
             g
         };
@@ -854,7 +854,7 @@ impl Editor {
         // The directional "sun" Light has no world position, so its direction gizmo
         // only shows when the Lighting node is selected — anchored in front of the
         // editor camera so it's always framed, pointing along the light direction.
-        // A POSITIONAL star instead anchors at the star and points at the camera
+        // A positional star instead anchors at the star and points at the camera
         // (any direction is "toward something" for a point source).
         if filter.lights
             && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
@@ -956,7 +956,7 @@ impl Editor {
         // used to draw the shadow proxy for every terrain, unrotated and
         // unscaled: a wireframe of a surface nothing collided with, in the
         // wrong place — an instrument that lied about the thing it was
-        // for.) Cached per terrain in NODE-LOCAL coords, rebuilt when that
+        // for.) Cached per terrain in node-local coords, rebuilt when that
         // terrain's shape changes; posed here through the node's full
         // transform, so a moved, turned or scaled terrain's wireframe
         // follows for free.
@@ -1010,7 +1010,7 @@ impl Editor {
         // scattered boxes and could not answer the only question the picture
         // is for — *are these two pieces of ground joined?*
         //
-        // `Overlay` (floptle-nav) decides that from the LINKS, so the
+        // `Overlay` (floptle-nav) decides that from the links, so the
         // outline is drawn only where the walkable surface actually ends and
         // the seams of the cut are invisible. `⊞ Cells` puts the old
         // per-rectangle wireframe back when the bake's working is the
@@ -1053,7 +1053,7 @@ impl Editor {
                 let overlay = self.nav_overlay.get_or_insert_with(|| {
                     std::rc::Rc::new(floptle_nav::Overlay::build(mesh, lift))
                 });
-                // A distinct hue per ISLAND, spun by the golden ratio so
+                // A distinct hue per island, spun by the golden ratio so
                 // neighbouring numbers never land on neighbouring colours.
                 //
                 // Per island rather than per region, which is what this was.
@@ -1227,7 +1227,7 @@ impl Editor {
             }
         }
         // Mesh collider wireframes. Every Mesh node flagged Collidable or (legacy)
-        // MeshCollider when the global toggle is on, plus the SELECTED one always (so
+        // MeshCollider when the global toggle is on, plus the selected one always (so
         // you can verify it). Both markers build a static triangle-mesh collider, so
         // both must draw the wireframe (union; dedup a node flagged both).
         let mut collider_ents: Vec<Entity> =
@@ -1271,7 +1271,7 @@ impl Editor {
                 }
             }
         }
-        // Static PRIMITIVE collider wireframes (the "Collidable" switch on a Cube /
+        // Static primitive collider wireframes (the "Collidable" switch on a Cube /
         // Sphere / Capsule) — drawn with the same toggle as mesh colliders, plus the
         // selected one always. Each matches the static collider built at Play.
         let shape_colliders: Vec<(Entity, floptle_core::Shape)> = self
@@ -1485,7 +1485,7 @@ impl Editor {
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
             crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
-        // Proxies are what lets a raster mesh cast at all, and a LAMP marches the
+        // Proxies are what lets a raster mesh cast at all, and a lamp marches the
         // same list now — so the sun's switch alone can no longer decide whether
         // they are collected. A scene with the sun's shadows off and a torch
         // casting would otherwise hand the shader an empty proxy list, and the
@@ -1507,7 +1507,7 @@ impl Editor {
             point_rot: pl_rot,
             point_cone: pl_cone,
             // Meshed terrain reads the triplanar scale + the per-slot nearest /
-            // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
+            // Glow bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
@@ -1632,7 +1632,7 @@ impl Editor {
                 Some((e, b.parts.iter().map(|&(base, _)| base).collect()))
             })
             .collect();
-        // RENDER, first half: turning the scene into instances.
+        // Render, first half: turning the scene into instances.
         // The submission itself is timed separately below and lands in the same
         // bucket — a game asking "what does rendering cost" wants one number, and
         // the two halves are not separable from Lua anyway.
@@ -1643,7 +1643,7 @@ impl Editor {
         // is the whole mitigation for deferred's second draw path: there is no
         // second walk of the world to keep in step.
         let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
-        // GPU-skinned parts, gathered alongside the plain ones and
+        // Gpu-skinned parts, gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
@@ -1673,7 +1673,7 @@ impl Editor {
         // actually culls (the editor Scene view renders with MAX = no table).
         let game_layer_table =
             (game_cull_mask != u32::MAX).then(|| self.project.build_layers());
-        // FRUSTUM CULL. Until this existed, terrain chunks were
+        // Frustum cull. Until this existed, terrain chunks were
         // the only thing in the engine that asked whether it was on screen —
         // every mesh, map mesh, tilemap, batch and primitive became an instance
         // every frame, and roughly half of any scene is behind the camera.
@@ -1737,7 +1737,7 @@ impl Editor {
             // primitive's color (meshes default to white = untinted texture). A
             // material texture (resolved to a registered handle) re-textures the shape.
             let mat = self.world.get::<Material>(*e).cloned();
-            // A texture-painted node also draws its paint OVERLAY: the per-triangle atlas
+            // A texture-painted node also draws its paint overlay: the per-triangle atlas
             // mesh, coplanar over the base, alpha-blended in the transparent pass. The base
             // renders normally below — texture paint never changes how the node looks,
             // it only draws over it.
@@ -1746,7 +1746,7 @@ impl Editor {
                 let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                 crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *e, model, &mp, &mut instances);
             }
-            // The node's texture and its surface EXTRAS index, both resolved by
+            // The node's texture and its surface extras index, both resolved by
             // the renderer: a material with normal/roughness/metallic/occlusion
             // maps comes back as one combined `TexId`, so every arm below (and
             // everything downstream of them) keeps handling a single texture.
@@ -1816,7 +1816,7 @@ impl Editor {
                     );
                     for mut draw in draws {
                         // On the 2D lighting path: the raster pass draws it
-                        // UNLIT, and the composite corrects that by the light's
+                        // Unlit, and the composite corrects that by the light's
                         // difference. The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
@@ -1998,7 +1998,7 @@ impl Editor {
             &mut instances,
         );
 
-        // SCATTER: thousands of props from a seed, resolved to
+        // Scatter: thousands of props from a seed, resolved to
         // instances and drawn through the ordinary raster path — so they get the
         // ordinary lighting, fog and shadows, including the underwater fog that
         // makes a shoreline forest go murky at the same rate as its ground.
@@ -2046,7 +2046,7 @@ impl Editor {
                 let mut mesh_of =
                     |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
                 // Measured at bake time from the same import bounds the mesh path
-                // uses, so a field culls by DIRECTION as well as distance.
+                // uses, so a field culls by direction as well as distance.
                 let proto_radius = &self.scatter_proto_radius;
                 let mut radius_of = |asset: &str| proto_radius.get(asset).copied();
                 // A hard cap, logged nowhere and needing none: a source with a
@@ -2067,7 +2067,7 @@ impl Editor {
                     SCATTER_BUDGET,
                     &mut instances,
                 );
-                // SCATTER. `0071` was filed as "currently unplayable" and was a
+                // Scatter. `0071` was filed as "currently unplayable" and was a
                 // field asking for 117,000 props; `props` in the counts below is
                 // that number, and this is what it cost.
                 scatter_props = instances.len().saturating_sub(before_scatter);
@@ -2170,7 +2170,7 @@ impl Editor {
             return (Vec::new(), Vec::new(), None);
         };
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
-        // Selected GPU-skinned parts: the silhouette has to hug the POSE, so it
+        // Selected GPU-skinned parts: the silhouette has to hug the pose, so it
         // goes through the same skinned pipeline the character shades with.
         let mut mask_skins: Vec<floptle_render::SkinDraw> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
@@ -2241,7 +2241,7 @@ impl Editor {
                                 self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
                             for (i, &mid) in asset.parts.iter().enumerate() {
                                 if let Some(Some(skin)) = rig.skins.get(i) {
-                                    // A SKINNED part draws from `model` alone —
+                                    // A skinned part draws from `model` alone —
                                     // the pose is in the deform, not the matrix.
                                     // Applying node_world here too would transform
                                     // it twice, which is the offset outline that was reported

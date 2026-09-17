@@ -511,7 +511,7 @@ impl EditorTabViewer<'_> {
             egui::Image::new((tex, canvas.size())).paint_at(ui, canvas);
         }
 
-        // The layer's REFERENCE box, when the preview resolution makes the
+        // The layer's reference box, when the preview resolution makes the
         // solvable area a different shape. This is the scaler made visible: the
         // area outside it is what a 21:9 monitor gives you for free (or what an
         // `Expand` layer letterboxes away), and it's the thing that makes the
@@ -1153,7 +1153,7 @@ impl EditorTabViewer<'_> {
             Drag::Move { applied, start } if resp.dragged() => {
                 let Some(now) = ui.input(|i| i.pointer.hover_pos()) else { return };
                 let want = [(now.x - start.x) / ppd, (now.y - start.y) / ppd];
-                // Snap the PRIMARY element, then move the whole selection by
+                // Snap the primary element, then move the whole selection by
                 // the same amount: a multi-selection that snapped per-element
                 // would silently rearrange itself.
                 let primary = sel.first().copied();

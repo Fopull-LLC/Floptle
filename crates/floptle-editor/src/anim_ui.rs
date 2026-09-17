@@ -99,7 +99,7 @@ pub struct AnimUiState {
     /// In-flight property-key drag: (channel, track, original time, previewed time).
     pub prop_key_drag: Option<(usize, usize, f32, f32)>,
     /// Pre-record transforms of the target subtree — restored when ● Record
-    /// turns off, so recording authors the CLIP, never the scene.
+    /// turns off, so recording authors the clip, never the scene.
     pub record_restore: Vec<(Entity, floptle_core::Transform)>,
     /// Last-seen local TRS of the target's descendants (record-mode diffing).
     pub last_scene_local: HashMap<Entity, TransformTRS>,
@@ -114,7 +114,7 @@ pub struct AnimUiState {
     /// …and for whole sprite frames, which are four values at once.
     pub last_scene_frames: HashMap<Entity, floptle_scene::SpriteFrameDoc>,
     /// Pre-record numeric property values, re-applied when ● Record turns off so
-    /// recording authors the CLIP not the scene: (entity, component, field, value).
+    /// recording authors the clip not the scene: (entity, component, field, value).
     pub record_restore_props: Vec<(Entity, String, String, f64)>,
     /// The same, for the path-and-name fields — so ● Record off puts a swapped
     /// texture back rather than leaving the scene edited.
@@ -129,12 +129,12 @@ pub struct AnimUiState {
 
     // ---- Animating tab: undo, multi-select, clipboard ----
     /// Clip-edit undo/redo stacks (whole-doc snapshots). One snapshot per edit
-    /// GESTURE — [`snapshot_clip`] pushes only on the clean→dirty transition, so a
+    /// Gesture — [`snapshot_clip`] pushes only on the clean→dirty transition, so a
     /// held gizmo/DragValue drag is a single undo step. Separate from scene undo
     /// (bones aren't ECS entities); Ctrl+Z/Y in the dopesheet drive these.
     pub clip_undo: Vec<AnimClipDoc>,
     pub clip_redo: Vec<AnimClipDoc>,
-    /// Multi-selected TRANSFORM keys: (channel index, time). Marquee-drag or a
+    /// Multi-selected transform keys: (channel index, time). Marquee-drag or a
     /// click populates it; copy/cut/paste/Delete act on the whole set.
     pub sel_keys: Vec<(usize, f32)>,
     /// Copied keys, pasted at the playhead. See [`CopiedKey`].
@@ -153,7 +153,7 @@ pub struct AnimUiState {
     pub status_note: Option<(String, f32)>,
     /// In-progress marquee box over the dopesheet (screen start, current).
     pub marquee: Option<(Pos2, Pos2)>,
-    /// In-progress STRETCH of the selection: the previewed new time of the right
+    /// In-progress stretch of the selection: the previewed new time of the right
     /// edge (keys scale around the selection's left edge). `Some` while dragging
     /// the stretch grip that appears when ≥2 keys spanning a range are selected.
     pub stretch_drag: Option<f32>,
@@ -162,7 +162,7 @@ pub struct AnimUiState {
 /// One key on the clipboard: the node it came from, the time it sat at, and
 /// **only the lanes that actually held a key there**.
 ///
-/// The optionality is the whole point. A dopesheet key is the UNION of the
+/// The optionality is the whole point. A dopesheet key is the union of the
 /// translation, rotation and scale lanes, and most keys are not all three — a
 /// spinning prop is keyed on rotation alone. Reading the missing lanes back as
 /// their defaults and pasting all three writes position (0,0,0) and scale
@@ -258,7 +258,7 @@ impl Default for AnimUiState {
 
 /// Push the current clip onto the undo stack — but only on the clean→dirty edge, so
 /// one continuous edit gesture (a gizmo/DragValue drag, which holds `clip_dirty`
-/// true until the pointer-up save) becomes a SINGLE undo step. Call this at the top
+/// true until the pointer-up save) becomes a single undo step. Call this at the top
 /// of any clip-mutating path, before it sets `clip_dirty = true`. Also clears redo.
 pub(crate) fn snapshot_clip(st: &mut AnimUiState) {
     if !st.clip_dirty
@@ -307,7 +307,7 @@ use crate::timeline::{draw_ruler, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
 
 impl EditorTabViewer<'_> {
     // =========================================================================
-    // Inspector: selected MODEL asset — list packaged animations + extract.
+    // Inspector: selected model asset — list packaged animations + extract.
     // =========================================================================
     pub fn model_asset_anim_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         let names = self
@@ -356,7 +356,7 @@ impl EditorTabViewer<'_> {
     }
 
     // =========================================================================
-    // Inspector: selected CLIP asset — summary + events hint.
+    // Inspector: selected clip asset — summary + events hint.
     // =========================================================================
     pub fn clip_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         let key = anim::clip_asset_key(Path::new(path), self.project_root);
@@ -393,7 +393,7 @@ impl EditorTabViewer<'_> {
     }
 
     // =========================================================================
-    // Inspector: selected CONTROLLER asset.
+    // Inspector: selected controller asset.
     // =========================================================================
     pub fn ctl_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         let key = anim::asset_key(Path::new(path), self.project_root, floptle_scene::ANIM_CTL_EXT);
@@ -410,7 +410,7 @@ impl EditorTabViewer<'_> {
 }
 
 // =============================================================================
-// Inspector: the Animation Controller COMPONENT section on a node. A free
+// Inspector: the Animation Controller component section on a node. A free
 // function (not a viewer method) so the Inspector can call it while its own
 // `world`/`cmd` reborrows are live.
 // =============================================================================
@@ -435,7 +435,7 @@ pub fn anim_component_ui(
         ui.horizontal_wrapped(|ui| {
             ui.label("controller");
             let label = if missing { format!("⚠ {key}") } else { key.clone() };
-            // A ComboBox's `.width()` is a MINIMUM and its default wrap mode is
+            // A ComboBox's `.width()` is a minimum and its default wrap mode is
             // Extend, so an asset key like `anim/characters/player_locomotion`
             // sized the button to the whole path — off the edge of a panel that
             // has no horizontal scrollbar, leaving the caption and nothing else.
@@ -1311,7 +1311,7 @@ impl EditorTabViewer<'_> {
                 .unwrap_or_default(),
             // Rig without a controller: embedded clip names (the name as key lets the
             // registry's stem-fallback find an extracted `.anim.ron` of the same name
-            // → full editable timeline), PLUS any standalone clip authored FOR this
+            // → full editable timeline), plus any standalone clip authored FOR this
             // model (its `source_model` = this mesh's path) — that's how a "✚ New…"
             // clip on a controller-less rigged model shows up, persists, and edits.
             None => match self.world.get::<Matter>(target) {
@@ -1738,7 +1738,7 @@ impl EditorTabViewer<'_> {
             .find(|(n, _)| *n == sel_anim)
             .map(|(_, c)| c.clone())
             .filter(|c| !c.is_empty());
-        // Resolve to the REGISTRY key (handles stem-fallback for moved files) so
+        // Resolve to the registry key (handles stem-fallback for moved files) so
         // edits save onto the right file, and reload the working copy on change.
         let resolved = clip_key.as_ref().and_then(|k| self.anim.resolve_clip_key(k));
         // A sprite clip is a frame list, not lanes of keys, and the timeline can
@@ -2149,7 +2149,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
             ("jitter", PropKind::Float, "Flags"),
         ],
     ),
-    // `orthoHeight` is a 2D camera's ZOOM; `fovY` is the perspective one. Both
+    // `orthoHeight` is a 2D camera's zoom; `fovY` is the perspective one. Both
     // are offered because a Camera node can be either, and the Inspector says
     // which one it is.
     ("Camera", &[("fovY", PropKind::Float, ""), ("orthoHeight", PropKind::Float, "")]),
@@ -2159,7 +2159,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
     // landing on different frames, which draws a slice of the wrong picture and
     // says nothing.
     //
-    // The rest are the ▫ Sprite NODE's own numbers, under "Node" so the two are
+    // The rest are the ▫ Sprite node's own numbers, under "Node" so the two are
     // not mistaken for each other. They are what the node does with the picture
     // rather than which picture it is, and they only do anything on a Sprite
     // node — where `frame` works on anything wearing a Material.
@@ -2180,7 +2180,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
 /// Is this field one a `Sprite ▸ frame` lane already writes?
 ///
 /// A sprite frame is the texture, the sheet grid and the cell together. Where a
-/// sprite lane exists it OWNS those four, and the individual Material lanes for
+/// sprite lane exists it owns those four, and the individual Material lanes for
 /// them must be neither offered nor recorded — two lanes writing the same values
 /// is not a duplicate but a conflict, settled by whichever happens to be applied
 /// second.
@@ -2213,7 +2213,7 @@ impl EditorTabViewer<'_> {
 
         // ---- selected key: edit its value + time inline (image picker / number) ----
         let mut del_selected: Option<(usize, usize, usize)> = None;
-        // A sprite frame is edited BELOW the header row, not inside it — see the
+        // A sprite frame is edited below the header row, not inside it — see the
         // Frame arm.
         let mut frame_key: Option<(usize, usize, usize)> = None;
         if let Some((ci, ti, ki)) = st.sel_prop {
@@ -2244,7 +2244,7 @@ impl EditorTabViewer<'_> {
                             .add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=dur).suffix("s"))
                             .changed()
                         {
-                            // Through the retime path, which REMOVES and
+                            // Through the retime path, which removes and
                             // re-inserts. Writing the slot in place left the
                             // times unsorted, and the lane is binary-searched:
                             // an unsorted lane plays the wrong frames, and saves
@@ -2388,7 +2388,7 @@ impl EditorTabViewer<'_> {
         // Does the Animating tab own the keyboard right now? Read before the
         // long borrow below; see the transport gate for why it matters.
         let tab_focused = matches!(self.focused_tab, Some(crate::EditorTab::Animation));
-        // Live per-node data for timeline interactions, gathered BEFORE the clip-doc
+        // Live per-node data for timeline interactions, gathered before the clip-doc
         // borrow: current local TRS (double-click / "key pose here"), current numeric
         // field values (keying a property writes what's on the node right now, like
         // record does), and which animatable fields each node actually has (the
@@ -2480,7 +2480,7 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        // Live LOCAL pose of every armature bone (from the bound controller), so
+        // Live local pose of every armature bone (from the bound controller), so
         // "Key all bones" can drop a key holding each bone's current pose, and
         // clicking a bone track can resolve its skeleton index. Bones aren't ECS
         // entities, so this is the only source of their current transform.
@@ -2505,14 +2505,14 @@ impl EditorTabViewer<'_> {
         }
 
         let st = &mut *self.anim_ui;
-        // Read `dur` and run the wheel handler BEFORE borrowing `clip_doc` mutably (the
+        // Read `dur` and run the wheel handler before borrowing `clip_doc` mutably (the
         // handler needs &mut st, which would alias the `doc` borrow).
         let dur = match st.clip_doc.as_ref() {
             Some((_, d)) => d.duration.max(0.01),
             None => return,
         };
         handle_anim_wheel(ui, st, dur);
-        // Undo capture: snapshot the clip BEFORE this frame's edits and commit it at
+        // Undo capture: snapshot the clip before this frame's edits and commit it at
         // the END only if the frame dirtied a previously-clean clip — one undo step
         // per gesture (a held drag stays dirty, so it snapshots once). Undo/redo are
         // deferred (they swap clip_doc, which `doc` borrows) and applied after draw.
@@ -2556,7 +2556,7 @@ impl EditorTabViewer<'_> {
             if ui.add_enabled(!st.clip_redo.is_empty(), egui::Button::new("↷"))
                 .on_hover_text("Redo clip edit (Ctrl+Y)").clicked() { do_redo = true; }
             ui.separator();
-            // The clipboard, as BUTTONS. The shortcuts work, but a shortcut that
+            // The clipboard, as buttons. The shortcuts work, but a shortcut that
             // silently does nothing is indistinguishable from a broken one, and
             // that is exactly how this read. A button that is greyed out tells
             // you *why* nothing is going to happen before you press it.
@@ -2564,7 +2564,7 @@ impl EditorTabViewer<'_> {
             let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
             // The `if has_sel { … } else { … }` shape these used to have could
             // never show its second half: egui opens `on_hover_text` only for an
-            // ENABLED response, so the "…select some keyframes first" branch —
+            // Enabled response, so the "…select some keyframes first" branch —
             // the only one anybody needs — was unreachable by construction. The
             // reason a button is greyed out belongs on `on_disabled_hover_text`.
             if ui.add_enabled(has_sel, egui::Button::new("⎘"))
@@ -2593,10 +2593,10 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
             ui.separator();
-            // KEY-ALL commands (both, deliberately — they serve different needs):
-            // "all bones" drops a key on EVERY armature bone at its current pose (a
+            // Key-all commands (both, deliberately — they serve different needs):
+            // "all bones" drops a key on every armature bone at its current pose (a
             // full-body keyframe, even bones with no track yet); "all tracks" keys
-            // every EXISTING lane (transform + property) at its current value.
+            // every existing lane (transform + property) at its current value.
             if !bone_trs.is_empty()
                 && ui.button("⏺ Key all bones")
                     .on_hover_text("full-body key: every bone gets a key at its current pose, here at the playhead")
@@ -2696,7 +2696,7 @@ impl EditorTabViewer<'_> {
                                         "adds an empty lane — then key it, or ● Record and \
                                          change the value",
                                     )
-                                    // A DISABLED widget never shows `on_hover_text`: egui
+                                    // A disabled widget never shows `on_hover_text`: egui
                                     // opens that tooltip only for an enabled response. So
                                     // the one explanation that matters — why it is greyed
                                     // out — has to go on the other call.
@@ -2778,7 +2778,7 @@ impl EditorTabViewer<'_> {
             st.clip_dirty = true;
         }
 
-        // One lane per channel (its transform union) PLUS one per property track,
+        // One lane per channel (its transform union) plus one per property track,
         // counting only the rows the filter lets through.
         let row_filter = st.row_filter.trim().to_lowercase();
         let row_shown = |node: &str| {
@@ -2883,7 +2883,7 @@ impl EditorTabViewer<'_> {
         }
         let out = area.show(ui, |ui| {
             let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
-            // The body is itself a click target, registered FIRST so every lane/key
+            // The body is itself a click target, registered first so every lane/key
             // widget layered on top wins the pointer — a click that reaches it hit
             // empty space, which deselects (like clicking off in any editor).
             let (full, bg_resp) =
@@ -2893,7 +2893,7 @@ impl EditorTabViewer<'_> {
                 st.sel_event = None;
                 st.sel_keys.clear();
             }
-            // Click-drag on EMPTY sheet = marquee box select (keys layered on top win
+            // Click-drag on empty sheet = marquee box select (keys layered on top win
             // the pointer, so a drag that reaches here started on empty space). While
             // dragging we rebuild sel_keys from the keys inside the box each frame.
             if bg_resp.drag_started()
@@ -3018,7 +3018,7 @@ impl EditorTabViewer<'_> {
             //
             // Lane interactions (registered under the keys, so keys win the pointer):
             //   · double-click a lane strip = key there (pose / current value)
-            //   · right-click a LABEL = the lane's menu (key, add property, step, delete)
+            //   · right-click a label = the lane's menu (key, add property, step, delete)
             //   · single-click empty lane = deselect
             let rows_top = full.top() + ruler_h + event_h;
             let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
@@ -3040,7 +3040,7 @@ impl EditorTabViewer<'_> {
                 }
                 None => (0.0, false),
             };
-            // Live STRETCH factor while dragging the selection's right grip: selected
+            // Live stretch factor while dragging the selection's right grip: selected
             // keys scale around the selection's left edge (`sel_min`).
             let (sel_min, sel_max) = {
                 let mut lo = f32::INFINITY;
@@ -3195,7 +3195,7 @@ impl EditorTabViewer<'_> {
                         }
                     });
                 }
-                // Clicking a track's LABEL selects the bone/node it drives, back in
+                // Clicking a track's label selects the bone/node it drives, back in
                 // the scene (so you can grab its gizmo) — deferred past the borrow.
                 if lresp.clicked() {
                     if let Some(&bi) = bone_idx.get(&chan_name) {
@@ -3221,7 +3221,7 @@ impl EditorTabViewer<'_> {
                 if row_font(lane_h).is_none() {
                     lresp.clone().on_hover_text(label);
                 }
-                // Lane strip: double-click keys the node's CURRENT pose there;
+                // Lane strip: double-click keys the node's current pose there;
                 // right-click inserts a key at the click position; a plain click on
                 // empty lane deselects.
                 let lane_strip = Rect::from_min_size(
@@ -3261,7 +3261,7 @@ impl EditorTabViewer<'_> {
                     let selected =
                         st.sel_keys.iter().any(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6);
                     // A drag previews at the pointer but the doc is only retimed on
-                    // RELEASE — live-resorting mid-drag would hand it to a neighbour.
+                    // Release — live-resorting mid-drag would hand it to a neighbour.
                     // A group move shifts every selected key by the anchor's delta; a
                     // stretch scales selected keys around the selection's left edge.
                     let dragging_this = st
@@ -3360,7 +3360,7 @@ impl EditorTabViewer<'_> {
                             delete_key = Some((ci, t));
                             ui.close();
                         }
-                        // How THIS key reaches the next one — per key, because
+                        // How this key reaches the next one — per key, because
                         // a clip holds on its beats and eases through the rest.
                         ui.separator();
                         let current = channel_key_mode(&doc.channels[ci], t);
@@ -3784,7 +3784,7 @@ impl EditorTabViewer<'_> {
             // too, so the two sides cannot disagree about who is about to act.
             let owns_chord = tab_focused || st.sheet_hovered;
             if !playing && owns_chord && !ui.ctx().text_edit_focused() {
-                // egui turns Ctrl+C/X/V into Copy/Cut/Paste EVENTS (the raw key is
+                // egui turns Ctrl+C/X/V into Copy/Cut/Paste events (the raw key is
                 // consumed), so those must be read from `events`, not key_pressed —
                 // that was why copy/paste "did nothing". Undo/redo have no such event.
                 let (sp, home, end, left, right, del, fit, ctrl, shift, z, y, a, dup, prevk, nextk, copy_ev, cut_ev, paste_ev) =
@@ -3841,7 +3841,7 @@ impl EditorTabViewer<'_> {
                 // the playhead (same path as paste). , / . (or [ / ]) jump the playhead
                 // to the previous / next keyframe across all lanes.
                 if ctrl && a {
-                    // Every key on a SHOWN row: a filtered sheet selects what it shows.
+                    // Every key on a shown row: a filtered sheet selects what it shows.
                     st.sel_keys.clear();
                     for (ci, ch) in doc.channels.iter().enumerate().filter(|(_, ch)| row_shown(&ch.node)) {
                         for t in union_times(ch) {
@@ -4046,7 +4046,7 @@ impl EditorTabViewer<'_> {
         });
         // Remember the offset so next frame's cursor-anchored zoom has an anchor.
         st.scroll_off = out.state.offset;
-        // Is the pointer over the sheet? This is the OTHER half of "who owns
+        // Is the pointer over the sheet? This is the other half of "who owns
         // Ctrl+C" (see the keyboard block below). Dock focus alone is not enough:
         // egui_dock only focuses a tab from a body click when no other egui layer
         // is over that point, so a click that lands under a tooltip, a popup or a
@@ -4095,7 +4095,7 @@ impl EditorTabViewer<'_> {
                     }
                 }
             }
-            // Cut = delete only the keys copied from THIS selection (by node+time,
+            // Cut = delete only the keys copied from this selection (by node+time,
             // robust to reindexing).  A stale clipboard is deliberately irrelevant.
             if cut_keys
                 && !copied_now.is_empty()
@@ -4226,7 +4226,7 @@ pub fn stop_record_ui(world: &mut floptle_core::World, st: &mut AnimUiState) {
     st.last_scene_frames.clear();
 }
 
-/// Record mode (called from the render loop BEFORE the preview applies): any
+/// Record mode (called from the render loop before the preview applies): any
 /// bound descendant whose local transform changed since the last baseline is
 /// keyed at the playhead. Returns true when keys were written.
 pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: Entity) -> bool {
@@ -4258,7 +4258,7 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
         // --- property diff → auto-key any animatable field that changed since
         // the baseline, creating the lane on first touch. ---
         //
-        // Numbers, TEXT and whole sprite frames. Text used to be skipped
+        // Numbers, text and whole sprite frames. Text used to be skipped
         // outright (`if kind != Float { continue }`), which is why recording a
         // sprite animation the obvious way — press ● Record, change the
         // material's texture — wrote nothing at all, with no lane, no key and
@@ -4322,7 +4322,7 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
                             wrote = true;
                         }
                     }
-                    // A sprite lane is only keyed when it EXISTS. Unlike the
+                    // A sprite lane is only keyed when it exists. Unlike the
                     // others it is not auto-created, because it overlaps the
                     // Material fields above: creating one from a texture change
                     // would silently change what the other lanes mean. Adding it
@@ -4364,7 +4364,7 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
     wrote
 }
 
-/// Reset the record baseline to the CURRENT transforms (what the preview just
+/// Reset the record baseline to the current transforms (what the preview just
 /// applied), so the next scan only sees fresh user edits.
 pub fn refresh_record_baseline(
     world: &floptle_core::World,
@@ -4722,7 +4722,7 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
 }
 
 // (There used to be a `sample_channel_key` here: it read a channel's full TRS
-// at a key time, filling any lane with no key there from the IDENTITY pose.
+// at a key time, filling any lane with no key there from the identity pose.
 // That is what copy/cut/duplicate used, and it is what made pasting a
 // rotation-only key teleport the object to the world origin at unit scale.
 // `copy_transform_keys` reports the missing lanes as missing instead, and
@@ -4764,7 +4764,7 @@ fn copy_transform_keys(doc: &AnimClipDoc, selection: &[(usize, f32)]) -> Vec<Cop
         .collect()
 }
 
-/// Materialize a PROPERTY-lane key for copy/cut: `(channel, track, key index)`,
+/// Materialize a property-lane key for copy/cut: `(channel, track, key index)`,
 /// the shape `sel_prop` holds. Property keys used to be invisible to the
 /// clipboard — Ctrl+C on one did nothing at all and said nothing about it.
 fn copy_property_key(doc: &AnimClipDoc, sel: (usize, usize, usize)) -> Option<CopiedKey> {
@@ -4862,7 +4862,7 @@ fn cut_copied_key(ch: &mut floptle_scene::AnimChannelDoc, key: &CopiedKey) {
 }
 
 /// Paste one clipboard key at `t`, touching only the lanes it actually carries.
-/// The counterpart to [`write_key`], which is the RECORDER's path and quite
+/// The counterpart to [`write_key`], which is the recorder's path and quite
 /// rightly writes a whole pose.
 fn write_copied_key(doc: &mut AnimClipDoc, key: &CopiedKey, t: f32) {
     let ci = match doc.channels.iter().position(|c| c.node == key.node) {
@@ -5114,7 +5114,7 @@ fn steps_by_nature(component: &str, field: &str) -> bool {
     )
 }
 
-/// Key a property at `t` with the node's LIVE value when we have one (numeric
+/// Key a property at `t` with the node's live value when we have one (numeric
 /// fields — what record would write), else fall back to carry-forward
 /// ([`key_property_at`]). Returns the key's index so callers can select it.
 fn key_property_current(
@@ -5339,7 +5339,7 @@ mod tests {
     /// reachable from a script and from no clip, which is the wrong way round in
     /// a 2D game where the clip is the character.
     ///
-    /// The flip is asserted STEPPED on purpose: an eased mirror turns the sprite
+    /// The flip is asserted stepped on purpose: an eased mirror turns the sprite
     /// round exactly halfway between two keys, at a moment nobody authored.
     #[test]
     fn recording_a_sprite_nodes_own_numbers_writes_keys() {
@@ -5390,7 +5390,7 @@ mod tests {
         let lane = lane(doc, "Material", "cell").expect("no Material.cell lane");
         assert_eq!(lane.values, vec![AnimPropValueDoc::Float(5.0)]);
 
-        // …and playing it back moves the cell the SPRITE draws, not just the
+        // …and playing it back moves the cell the sprite draws, not just the
         // number the Inspector shows.
         floptle_script::set_sprite_cell(&mut w, e, 0);
         floptle_script::apply_component_field(&mut w, e, "Material", "cell", 5.0);
@@ -5850,7 +5850,7 @@ mod tests {
     #[test]
     fn property_key_write_retime_delete_roundtrip() {
         let mut doc = empty_clip();
-        // Two cell keys auto-create the channel + a STEPPED track (no blending frames).
+        // Two cell keys auto-create the channel + a stepped track (no blending frames).
         write_property_key(&mut doc, "Hand", "UiElement", "cell", 0.5, 3.0);
         write_property_key(&mut doc, "Hand", "UiElement", "cell", 1.0, 5.0);
         assert_eq!(doc.channels.len(), 1);

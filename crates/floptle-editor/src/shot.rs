@@ -71,7 +71,7 @@ fn find_camera(
 /// Play an already-opened project for `seconds`, and leave it playing.
 ///
 /// `None` means it never entered Play at all. Otherwise the answer is `play_t`
-/// — the clock the SCRIPTS read, not `steps × DT`, because a step is not a
+/// — the clock the scripts read, not `steps × DT`, because a step is not a
 /// promise that anything moved: a session held at the Play-start terrain hold
 /// steps happily with `dt = 0`, and reporting the span that was asked for is
 /// how `run` once published sixty seconds of simulation it had not done.
@@ -81,14 +81,14 @@ fn find_camera(
 /// is of the live session.
 fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> {
     // How long this is allowed to spend waiting on the background terrain
-    // threads, in TOTAL — the same budget `shot` already gives its pre-render
+    // threads, in total — the same budget `shot` already gives its pre-render
     // settle, for the same reason: a world that never finishes streaming must
     // end in a picture and a warning rather than in a hang.
     const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
     let deadline = floptle_core::time::Instant::now() + STREAM_BUDGET;
 
     // **Load the world around the view before pressing Play.** Play holds the
-    // fixed tick until the ground exists, and a held session is a PAUSED one:
+    // fixed tick until the ground exists, and a held session is a paused one:
     // it steps happily with `dt = 0`, so scripts see no time pass and nothing
     // moves. Outside Play residency anchors on the editor camera, so settling
     // here is what puts terrain under the session before it starts.
@@ -103,7 +103,7 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> 
     let steps = ((seconds / crate::run::DT).round() as i64).clamp(1, u32::MAX as i64) as u32;
     for _ in 0..steps {
         // In the loop for the reason `run` documents at length: without it the
-        // Play-start terrain hold never lifts, and a held session is a PAUSED
+        // Play-start terrain hold never lifts, and a held session is a paused
         // one — no fixed tick, so no rails, no physics, and a `dt` of zero
         // handed to every script.
         ed.pump_world_streaming();
@@ -145,7 +145,7 @@ pub(crate) struct Args<'a> {
     /// `None` is the authored frame — nothing has moved and no `start` has run,
     /// which is the right answer to "what did my edit do". `Some` is the frame a
     /// player would be looking at, which for a game that builds its world at
-    /// RUNTIME is the only one worth photographing: the solar project's scene
+    /// Runtime is the only one worth photographing: the solar project's scene
     /// file holds a generator, a camera and some UI, so every shot of it was a
     /// bare sphere under a black sky — a true picture of the file and a picture
     /// of nothing anybody plays.
@@ -265,7 +265,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // The same fixed `DT` `run` steps by, off the wall clock, so two runs of one
     // project produce the same picture. `pump_world_streaming` is in the loop
     // for the reason `run` documents at length: without it the Play-start
-    // terrain hold never lifts, and a held session is a PAUSED one that steps
+    // terrain hold never lifts, and a held session is a paused one that steps
     // happily with `dt = 0` — it would report the span and simulate none of it.
     if let Some(seconds) = after {
         if let Some(seed) = seed {
@@ -638,7 +638,7 @@ pub(crate) fn render_frame_pixels(
 }
 
 /// Copy the rendered texture back into RGBA8, un-swizzling if the adapter's
-/// surface format is BGRA.
+/// surface format is bgra.
 fn readback(gpu: &Gpu, tex: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
     // A texture copy's rows are aligned; the image's are not, so the padding
     // has to come off on the way out or every row after the first lands shifted.
@@ -812,7 +812,7 @@ mod tests {
     /// of the file and a picture of nothing anybody plays.
     ///
     /// No GPU here on purpose. `shot::run` installs an uncaptured-error handler
-    /// that EXITS the process, which on a machine with only an OpenGL adapter
+    /// that exits the process, which on a machine with only an OpenGL adapter
     /// (CI has one) would take the whole test binary down with it. What is
     /// under test is the join — play first, then look — and that needs no
     /// renderer.
@@ -1068,8 +1068,8 @@ mod tests {
         let (w, h) = (64u32, 64u32);
         // `render_world_into` draws into an HDR target — the raster pipeline is
         // built for one — so this mirrors `shot::run` exactly: an HDR input
-        // through `PostStack`, tonemapped down into the SRGB texture that gets
-        // read back, rather than drawing straight into an SRGB target the
+        // through `PostStack`, tonemapped down into the sRGB texture that gets
+        // read back, rather than drawing straight into an sRGB target the
         // pipeline was never built to hit (a format mismatch, not the bug this
         // test is about).
         let (color, depth) = crate::viewports::offscreen_textures(

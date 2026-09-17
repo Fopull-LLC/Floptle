@@ -28,7 +28,7 @@
 /// the IDE's own auto-indent.
 pub(crate) const INDENT: &str = "  ";
 
-/// Strip the comment and string CONTENT from a line, leaving structural
+/// Strip the comment and string content from a line, leaving structural
 /// punctuation and keywords — what the depth counter should look at. Comments and
 /// string bodies can contain `end`, `{`, `--` and quotes; counting those is how a
 /// naive re-indenter mangles a file.
@@ -213,7 +213,7 @@ pub(crate) fn line_col_of(text: &str, char_idx: usize) -> (usize, usize) {
 }
 
 /// The inverse of [`line_col_of`]: the char index `col` characters into that
-/// line's CONTENT, clamped to the line (a re-indented line can be shorter than
+/// line's content, clamped to the line (a re-indented line can be shorter than
 /// where you were).
 pub(crate) fn char_of_line_col(text: &str, line: usize, col: usize) -> usize {
     let mut idx = 0usize;

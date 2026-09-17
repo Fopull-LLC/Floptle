@@ -136,7 +136,7 @@ struct Player {
     title: String,
     project: PathBuf,
     fullscreen: bool,
-    /// The active grab is a CONFINE rather than a lock (X11 has no OS-level
+    /// The active grab is a confine rather than a lock (X11 has no OS-level
     /// lock), so the cursor is re-centred every frame.
     grabbed_soft: bool,
     /// The lock state the window was last actually asked for.
@@ -500,7 +500,7 @@ impl Player {
                 self.ed.tick_keys_released.insert(name.to_string());
             }
         }
-        // What the player TYPED, as opposed to which key they hit: layout
+        // What the player typed, as opposed to which key they hit: layout
         // resolved by the OS, control characters left as actions.
         if pressed
             && let Some(text) = text
@@ -692,7 +692,7 @@ pub mod web {
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 // TEXTURE_BINDING as well as the obvious two: the game's UI can
-                // SAMPLE what has been drawn so far (the capture effect behind a
+                // Sample what has been drawn so far (the capture effect behind a
                 // frosted panel), and a target that cannot be sampled makes every
                 // such bind group invalid — a wall of errors, and no picture.
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT

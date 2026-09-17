@@ -131,7 +131,7 @@ fn padded_row(bytes: u32) -> u32 {
     bytes.div_ceil(a) * a
 }
 
-/// One IEEE half decoded to `f32`.
+/// One ieee half decoded to `f32`.
 ///
 /// The scene renders into `Rgba16Float` (that is the whole point of the HDR
 /// chain), and reading a bake back means decoding halves by hand — there is no
@@ -261,7 +261,7 @@ impl crate::Editor {
     /// flag" is a rule five call sites have to keep — this way the only thing
     /// that has to be true is that the numbers are the numbers.
     ///
-    /// What it does is an UPLOAD of a few hundred kilobytes, so intensity, leak
+    /// What it does is an upload of a few hundred kilobytes, so intensity, leak
     /// and the debug view are all immediate; the expensive half — the probes —
     /// is untouched.
     pub(crate) fn refresh_gi(&mut self) {
@@ -414,7 +414,7 @@ impl crate::Editor {
         // tab in front and look around with the Scene view's own camera, in
         // flicks, the way a hand on a mouse does — the condition under which
         // the sky was reported to flicker. Opt-in and separate from the frame
-        // dump, so a person reproducing something by HAND with the dump on is
+        // dump, so a person reproducing something by hand with the dump on is
         // not fought for the camera. Re-asserted every few frames, because
         // pressing Play brings the Game tab forward itself.
         #[cfg(feature = "editor-ui")]

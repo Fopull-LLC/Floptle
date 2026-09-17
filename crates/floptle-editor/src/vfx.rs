@@ -40,7 +40,7 @@ pub(crate) const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
 pub struct VfxGravity<'a> {
     pub field: &'a floptle_physics::GravityField,
     pub colliders: &'a [floptle_physics::AnchoredCollider],
-    /// Sim-frame origin (ADR-0015): field source centers are sim-local, so a world
+    /// Sim-frame origin: field source centers are sim-local, so a world
     /// emitter position converts by `world - origin` before sampling.
     pub origin: DVec3,
 }
@@ -95,7 +95,7 @@ pub struct VfxSystem {
     /// Fire-and-forget one-shots from `spawnEffect(...)` — ticked + reaped each frame.
     ///
     /// A deque rather than a `Vec` so reaching [`Self::max_detached`] can drop the
-    /// OLDEST in O(1). A `Vec::remove(0)` would memmove the whole pool on every
+    /// Oldest in O(1). A `Vec::remove(0)` would memmove the whole pool on every
     /// over-budget spawn, which is precisely the frame that could least afford it.
     pub detached: std::collections::VecDeque<DetachedEffect>,
     /// The ceiling on live one-shots.
@@ -103,7 +103,7 @@ pub struct VfxSystem {
     /// `spawnEffect` had none, so the live particle count was `spawn rate ×
     /// lifetime × particles per effect` — entirely the caller's to decide, with
     /// no way to ask what it currently costs. The reported case is the shape
-    /// that makes this dangerous rather than merely unbounded: a per-FRAME spawn
+    /// that makes this dangerous rather than merely unbounded: a per-frame spawn
     /// budget fires 60·N/s on one machine and 144·N/s on another, so the same
     /// game costs 2.4× more on a better monitor and the engine absorbs it
     /// silently until the frame time moves.
@@ -263,7 +263,7 @@ impl VfxSystem {
             let seed = self.detached_seq.wrapping_add(
                 bits(pos.x) ^ bits(pos.y).rotate_left(11) ^ bits(pos.z).rotate_left(22),
             );
-            // The ceiling. Drop the OLDEST rather than refuse
+            // The ceiling. Drop the oldest rather than refuse
             // the newest: the effect just asked for is the one the player is
             // looking at — the impact they caused, the shot they fired — and the
             // one at the front of the queue is already most of the way through
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn timeline_authored_lane_shapes_the_rate_over_seconds() {
-        // The DAW timeline authors automation keys in SECONDS spanning [0, dur]; the
+        // The DAW timeline authors automation keys in seconds spanning [0, dur]; the
         // bake normalizes that onto the LUT (domain = lifetime). A Rate lane 1→3 over
         // a 2 s effect must therefore read 2× at the mid-timeline. Guards that whole
         // second-domain path from the editor doc through compile.
@@ -1052,13 +1052,13 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// What an effect COSTS
+// What an effect costs
 // ---------------------------------------------------------------------------
 
 /// How many particles an effect has alive over its own lifetime, and where it
 /// ran out of pool.
 ///
-/// Every surface in the Particles tab showed what you AUTHORED and none showed
+/// Every surface in the Particles tab showed what you authored and none showed
 /// what it does — which is the whole of "it's hard to tell how my change is
 /// going to affect it". The one quantity that varies over time is how many
 /// particles exist, and the timeline's axis is already time, so plotting it is
@@ -1177,7 +1177,7 @@ mod profile_tests {
         assert!(p.span >= 1.0, "the span covers the tail, not only the lifetime");
     }
 
-    /// Asking a track for more than its pool holds is REPORTED. It used to be
+    /// Asking a track for more than its pool holds is reported. It used to be
     /// dropped in silence, which is how an effect comes out thinner than it was
     /// authored with nothing to point at.
     #[test]

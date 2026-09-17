@@ -77,7 +77,7 @@ pub(crate) fn late_starved_rollback_nodes(
 }
 
 impl Editor {
-    /// The live driver's node ids — the set that belongs in the DRIVER filter
+    /// The live driver's node ids — the set that belongs in the driver filter
     /// for as long as it is running those nodes' ticks itself. Not the snapshot
     /// filter: that one gates `lateUpdate` too, which no driver replays.
     ///
@@ -122,7 +122,7 @@ impl Editor {
         // eight ticks, which is exactly the six-to-eight skew measured.
         //
         // Nothing downstream ever compares the two clocks: `should_stall` only
-        // stops a peer running past the CONFIRMED frontier, and a peer six
+        // stops a peer running past the confirmed frontier, and a peer six
         // ticks ahead never reaches that cap. So the skew, once taken, is
         // carried for the whole match — the joiner guesses every one of the
         // host's inputs, re-simulates about four ticks per tick, and reads it
@@ -136,7 +136,7 @@ impl Editor {
             }
             None => RollbackDriver::new(local, peers.clone(), delay, seed),
         };
-        // Give back the filters the OUTGOING driver held, before anything can
+        // Give back the filters the outgoing driver held, before anything can
         // abandon it. Every `return` below drops `d`, and a dropped driver whose
         // eids are still in the script filters is a node nothing runs: not the
         // driver (gone) and not the global passes (skipping it). Its scripts
@@ -190,14 +190,14 @@ impl Editor {
         // `net_client_side_setup` ran at join time and again at Welcome, and
         // both of those are structurally before this moment — so
         // `rollback_filter_eids()` was empty for them and every fighter landed
-        // in `script_skip`. That set gates every pass INCLUDING `lateUpdate`,
+        // in `script_skip`. That set gates every pass including `lateUpdate`,
         // which no driver replays, and nothing else ever removes them. The
         // fight then runs normally (the driver bypasses filters) while the
         // cosmetic pass is silently dead on the client only — which is why
         // this looked fixed from the host and was reported three times.
         self.script_host.shrink_filters(d.eids());
         self.script_host.extend_filters(d.eids());
-        // And tell the SESSION which nodes the driver owns, so its snapshot
+        // And tell the session which nodes the driver owns, so its snapshot
         // guards stop depending on a flag a scene message can clear.
         // Refreshed every frame as well; done here too so the
         // opening frame of a match is already right.
@@ -253,7 +253,7 @@ impl Editor {
             return;
         }
         for (tick, label, before, after) in diverged.iter().take(6) {
-            // Once per VALUE per session. The same script reads the same
+            // Once per value per session. The same script reads the same
             // un-restored thing every correction, and sixty identical lines a
             // second is a diagnostic nobody reads.
             if !self.net_replay_audit_reported.insert(label.clone()) {
@@ -294,7 +294,7 @@ impl Editor {
     /// unplayably. A host that has been up long enough to have pinged its peers
     /// already knows the number.
     ///
-    /// Still FIXED for the session and never auto-adjusted mid-match. Adaptive
+    /// Still fixed for the session and never auto-adjusted mid-match. Adaptive
     /// delay hides a bad connection by changing how the game feels while you
     /// are playing it, which a fighting game cannot tolerate. This chooses the
     /// starting value informed; it does not keep choosing.
@@ -640,7 +640,7 @@ impl Editor {
         self.net_rollback_orphans_checked = false;
         self.net_driven_drop_reported.clear();
         // Hand the session's guard set back too, for the same reason the
-        // filters go back: these are entity INDICES, and the allocator reuses
+        // filters go back: these are entity indices, and the allocator reuses
         // them. A stale one here would make the next scene's unrelated node
         // silently refuse its snapshots.
         self.net_publish_driven(&std::collections::HashSet::new());
@@ -713,11 +713,11 @@ impl Editor {
         //
         //    `sample_tick` returns None while stalled — a tick may only ever be
         //    sampled once (see its docs). A stalled frame therefore banks and
-        //    sends nothing, and leaves the pad's edges UNDRAINED on purpose:
+        //    sends nothing, and leaves the pad's edges undrained on purpose:
         //    press something during a stall and it lands on the first tick that
         //    actually runs, instead of being eaten by a frame that went nowhere.
         if let Some(sampled) = self.net_rollback.as_ref().and_then(|d| d.sample_tick()) {
-            // The DEVICE slot, not the roster slot — see
+            // The device slot, not the roster slot — see
             // `RollbackDriver::local_device_slot`. The input is applied to the
             // roster slot on every machine (the driver does that from `local`),
             // but it is read from this machine's own player-one hardware and
@@ -739,7 +739,7 @@ impl Editor {
         // 3. Advance — resolving any banked correction first.
         //
         // ⚠ From this `take` to the restore at the bottom there is no early
-        // return, deliberately. An exit that skips the restore DROPS the driver
+        // return, deliberately. An exit that skips the restore drops the driver
         // — and a dropped driver leaves its fighters in the script filters with
         // nothing running them, for the rest of the match, with no error. That
         // is a match that freezes: the fighters ticked exactly once, then the driver
@@ -1198,7 +1198,7 @@ mod tests {
         let starved = late_starved_rollback_nodes(&reps, &driven, |_| true);
         assert_eq!(starved.len(), 2, "both fighters lose their late pass");
 
-        // A node nobody drives is the ORPHAN case, not this one — the two
+        // A node nobody drives is the orphan case, not this one — the two
         // reports must not double-count the same fault.
         assert!(
             late_starved_rollback_nodes(&reps, &HashSet::new(), |_| true).is_empty(),

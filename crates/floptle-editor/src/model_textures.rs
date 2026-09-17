@@ -40,7 +40,7 @@ fn safe_stem(name: &str) -> String {
 }
 
 /// The file stem one material's texture is written under — derived from the
-/// material name ALONE, so that asking where a texture went and putting it there
+/// material name alone, so that asking where a texture went and putting it there
 /// cannot disagree.
 ///
 /// `safe_stem` maps arbitrary glTF names onto safe file names and is not
@@ -58,7 +58,7 @@ fn unique_stem(material: &str) -> String {
     if base == material {
         return base;
     }
-    // FNV-1a over the original name: stable across runs and machines (a
+    // Fnv-1a over the original name: stable across runs and machines (a
     // `DefaultHasher` is neither), and four bytes is plenty to separate the
     // handful of materials one model has.
     let mut h: u32 = 0x811c_9dc5;
@@ -79,14 +79,14 @@ pub(crate) fn extract_dir(model_rel: &str) -> String {
 }
 
 /// Decode `model_abs`'s embedded base-colour textures and write one PNG per
-/// MATERIAL that has one, under [`extract_dir`].
+/// Material that has one, under [`extract_dir`].
 ///
 /// Returns what was written, project-relative, in the model's own part order.
 /// A material appearing on several parts is written once — it is one image.
 ///
 /// Re-extracting overwrites: the model file is the source of truth for what its
 /// materials look like, and a stale copy of an image somebody re-exported is
-/// worse than no copy. (Anything a dev PAINTS belongs in their own texture, not
+/// worse than no copy. (Anything a dev paints belongs in their own texture, not
 /// in the folder named after the model.)
 pub(crate) fn extract_model_textures(
     model_abs: &Path,
@@ -102,7 +102,7 @@ pub(crate) fn extract_model_textures(
         if out.iter().any(|e| e.material == part.material) {
             continue;
         }
-        // **One file per MATERIAL, even when two materials share an image.**
+        // **One file per material, even when two materials share an image.**
         //
         // The file is found again by material name — that is how the Inspector
         // seeds an override with what a part already wore, and how anybody

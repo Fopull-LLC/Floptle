@@ -150,7 +150,7 @@ impl Editor {
             // true dimensions — shown as the "N×N px" label and used for aspect.
             let dims = [img.width as usize, img.height as usize];
             // A texture larger than the GPU's max 2D dimension (e.g. an 8400px-wide
-            // sprite sheet) would PANIC egui's wgpu upload the instant it's selected.
+            // sprite sheet) would panic egui's wgpu upload the instant it's selected.
             // A preview only ever displays at a few hundred px, so upload a
             // downscaled copy while keeping the true dims for the label.
             const PREVIEW_MAX: u32 = 2048;
@@ -494,7 +494,7 @@ impl Editor {
     /// Game tab's rect, whenever a docked (non-fullscreen) Game tab is front — single-view
     /// or split. The tab then blits this at its exact rect+aspect, so the game view is
     /// always framed to its panel and never spills the full-window render behind other
-    /// tabs. (A FULLSCREEN Game tab renders straight to the surface — it fills the window.)
+    /// tabs. (A fullscreen Game tab renders straight to the surface — it fills the window.)
     #[cfg(feature = "editor-ui")]
     pub(crate) fn update_game_viewport(&mut self, elapsed: f32) {
         if !self.game_offscreen() {
@@ -591,7 +591,7 @@ impl Editor {
         // into — which is the panel's, unless a retro width is pinned. See
         // `ProjectConfigDoc::render_aspect`.
         let aspect = self.project.render_aspect(panel_aspect);
-        // Feed the map's world→screen picker: this target's rect in FULL-WINDOW
+        // Feed the map's world→screen picker: this target's rect in full-window
         // physical pixels, matching the cursor space `input.mouse()` reports.
         if publish_view {
             // Screen-space `draw.rect` arrives in this same cursor space.
@@ -609,7 +609,7 @@ impl Editor {
                 valid: true,
             });
         }
-        // Script `gizmo.*` shapes for the DOCKED game tab, projected through the
+        // Script `gizmo.*` shapes for the docked game tab, projected through the
         // gameplay camera into that tab's own rect (the Scene view's set is projected
         // for a different camera entirely and would land nowhere near).
         self.game_gizmo_lines.clear();
@@ -642,7 +642,7 @@ impl Editor {
         // identical to fullscreen instead of rendering crisp + unprocessed.
         let (cw, ch) = if retro_on { self.project.retro_size(panel_aspect) } else { (w, h) };
         if let Some(gpu) = self.gpu.as_ref() {
-            // The game's own retro pass, sized to the PANEL aspect (the shared `retro` is
+            // The game's own retro pass, sized to the panel aspect (the shared `retro` is
             // window-sized, and same-frame reuse would fight the surface render).
             if retro_on {
                 match self.game_retro.as_mut() {
@@ -767,7 +767,7 @@ impl Editor {
         }
     }
 
-    /// True when the game is drawn into the DOCKED Game tab's own rect (via an
+    /// True when the game is drawn into the docked Game tab's own rect (via an
     /// offscreen target) rather than over the whole window.
     ///
     /// This is "where are the pixels", which is a different question from
@@ -833,7 +833,7 @@ impl Editor {
         None
     }
 
-    /// The docked Game tab's drawing surface in PHYSICAL pixels: its top-left
+    /// The docked Game tab's drawing surface in physical pixels: its top-left
     /// in window space, and its size.
     ///
     /// One `pixels_per_point`, one rounding, one place. The render target, the
@@ -851,7 +851,7 @@ impl Editor {
         ))
     }
 
-    /// True when the Game viewport is the FOCUSED viewport — it renders the active-camera
+    /// True when the Game viewport is the focused viewport — it renders the active-camera
     /// "as a build" view, so editor interactions (pick/select, sculpt, gizmos, editor
     /// keybinds + free-fly camera) are suppressed there; only the game's own inputs run.
     /// When the Scene and Game tabs are split (both visible), focus follows the pointer:
@@ -1059,7 +1059,7 @@ impl Editor {
 
         self.ensure_ui_fonts();
         let mut roots = self.ui_layer_tree(layer_ent);
-        // State preview: forced on the SELECTION, on the tree copies. A state is
+        // State preview: forced on the selection, on the tree copies. A state is
         // a property of one element under one pointer, so "show me hover" means
         // "show me hover on this button" — and doing it on the copies is why it
         // can never reach the saved scene.
@@ -1188,7 +1188,7 @@ impl Editor {
     }
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.
@@ -1215,7 +1215,7 @@ mod tests {
         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
     }
 
-    /// The bug: a docked Game tab is FOCUSED, so the old code asked
+    /// The bug: a docked Game tab is focused, so the old code asked
     /// `game_view()`, got true, and measured the pointer against the whole
     /// window. It has to measure against the tab — offset and all.
     #[test]
@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     /// The fullscreen Game tab and the player own the window. Without a GPU
-    /// there is no window size to report, but the PREDICATE must still say so
+    /// there is no window size to report, but the predicate must still say so
     /// — it is what routes the overlay draw and the pointer.
     #[test]
     fn the_fullscreen_game_tab_and_the_player_own_the_window() {

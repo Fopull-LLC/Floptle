@@ -64,7 +64,7 @@ impl ShadowSim {
     /// is the host; for a replay it is arbitrary — every peer's input is in the
     /// log, so nothing is ever sampled and the choice cannot affect the result.
     ///
-    /// ⚠ Anything that has to AGREE with a live session wants
+    /// ⚠ Anything that has to agree with a live session wants
     /// [`Self::build_with`] and the live session's own `Sim`. See its docs for
     /// what using this instead cost.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -95,7 +95,7 @@ impl ShadowSim {
     /// velocity, so it breaks it visibly.
     ///
     /// The default in [`Self::build`] — no gravity, no static colliders, no
-    /// layers — is a TEST convenience and nothing more. It shipped as the
+    /// layers — is a test convenience and nothing more. It shipped as the
     /// referee's physics, so the referee ran the match in freefall with no floor
     /// while both players stood on a stage under gravity. Both peers therefore
     /// disagreed with the authoritative simulation, and since the referee is the
@@ -438,7 +438,7 @@ end\n";
     /// referee ran the match in freefall with no floor while both players stood
     /// on a stage under gravity. The state checksum hashes body position and
     /// velocity, so the first checksum disagreed — and because the referee is
-    /// the SOLE judge when one is running, both peers were told they had
+    /// the sole judge when one is running, both peers were told they had
     /// desynced, half a second into every online match.
     ///
     /// Every existing test missed it because they compare a shadow to another
@@ -485,7 +485,7 @@ end\n";
             live.advance(&mut ctx);
         }
 
-        // The REFEREE: same scene, same log, its own world — and now its own
+        // The referee: same scene, same log, its own world — and now its own
         // copy of the same physics.
         let mut r = ShadowSim::build_with(&doc, &dir, fighter_map(), log, SERVER, STEP, physics);
         r.advance(Horizon::WholeLog, 10_000);
@@ -561,7 +561,7 @@ end\n";
         r.advance(Horizon::Confirmed, 10_000);
         assert_eq!(r.tick(), 11, "tick 12 is not confirmed, so the referee has not run it");
 
-        // The same log, played as a REPLAY, runs past it — a replay is allowed
+        // The same log, played as a replay, runs past it — a replay is allowed
         // to guess, because by then the match is over and nothing it decides
         // can contradict a peer.
         let mut p = ShadowSim::build(&doc, &dir, fighter_map(), log, SERVER, STEP);

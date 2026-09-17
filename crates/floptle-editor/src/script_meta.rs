@@ -57,7 +57,7 @@ pub(crate) struct ParamMeta {
     /// `--@step n` — drag speed / slider granularity.
     pub(crate) step: Option<f32>,
     /// `--@options a|b|c` — a dropdown. On a string param the labels are the
-    /// values; on a NUMBER param they're indices 0..n-1.
+    /// values; on a number param they're indices 0..n-1.
     pub(crate) options: Vec<String>,
     /// A checkbox: `--@bool`, or inferred from a `true` / `false` default.
     pub(crate) boolean: bool,
@@ -88,7 +88,7 @@ impl ParamMeta {
 /// Everything the Inspector reads out of a script's source.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ScriptMeta {
-    /// `defaults` entries in DECLARATION order — the order they render in.
+    /// `defaults` entries in declaration order — the order they render in.
     pub(crate) params: Vec<ParamMeta>,
     /// `--@editorButton <Label> [fn]` — edit-mode actions.
     pub(crate) buttons: Vec<(String, String)>,

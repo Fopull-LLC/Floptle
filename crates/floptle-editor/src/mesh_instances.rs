@@ -49,7 +49,7 @@ pub(crate) enum PartLook<'a> {
 /// prepass silently does nothing without it — no error, no warning, just a
 /// picture missing something — so a view that forgets one term is a view where
 /// that feature quietly stops existing. The two paths had already drifted: the
-/// window's condition was missing CONTACT SHADOWS, so in a scene made of meshes
+/// window's condition was missing contact shadows, so in a scene made of meshes
 /// with reflections and lamp shadows both off, contact shadows worked in a
 /// docked Game panel and did nothing in the window beside it.
 ///
@@ -104,14 +104,14 @@ pub(crate) fn apply_node_tint(
     instances: &mut [(MeshId, Option<TexId>, InstanceRaw)],
     flsl_draws: &mut [floptle_render::FlslDraw],
     skin_draws: &mut [floptle_render::SkinDraw],
-    // The 2D lighting G-buffer. A flat node on the lit path draws UNLIT in the
+    // The 2D lighting G-buffer. A flat node on the lit path draws unlit in the
     // raster pass and is corrected by the light composite, which reads this
     // copy of the colour — so a tint applied only to the raster instance is
     // corrected back out again by a pass that never heard about it.
     flat2d: &mut [(MeshId, Option<TexId>, floptle_render::Light2dInstance)],
 ) {
     let Some(t) = tint.filter(|t| !t.is_identity()) else { return };
-    // The one place that knows which LANES a tint's rim and ambient live in:
+    // The one place that knows which lanes a tint's rim and ambient live in:
     // `params` is (shininess, rim strength, unlit, ambient) and `rim` is
     // (r, g, b, packed tiling flags) — so only `rim[..3]` may be written, and
     // `rim[3]` must survive, or a tinted node loses its texture tiling.
@@ -173,7 +173,7 @@ pub(crate) fn count_draw_batches(
 pub(crate) fn part_look_rule<'a>(
     obj_mats: Option<&'a floptle_core::ObjectMaterials>,
     override_key: Option<&str>,
-    // The glTF MATERIAL this part was imported with — the other name the same
+    // The glTF material this part was imported with — the other name the same
     // part answers to. See below for why both.
     material_name: Option<&str>,
     node_material: Option<&'a MaterialParams>,
@@ -230,7 +230,7 @@ pub(crate) fn push_mesh_instances(
     // The node-level Material's params (None = the node has no Material — parts
     // fall back to their imported base-color factor, matching runtime builds).
     mp: Option<&MaterialParams>,
-    // Per-SUB-OBJECT material overrides (the `ObjectMaterials` component) + the
+    // Per-sub-object material overrides (the `ObjectMaterials` component) + the
     // texture registry to resolve their texture paths (pre-warmed each frame).
     obj_mats: Option<&floptle_core::ObjectMaterials>,
     texture_registry: &HashMap<String, TexId>,
@@ -244,7 +244,7 @@ pub(crate) fn push_mesh_instances(
     variants: &mut anim::SkinVariants,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
-    // GPU-skinned parts land here instead of `instances`: same
+    // Gpu-skinned parts land here instead of `instances`: same
     // mesh, same material, but drawn through the `vs_skin` pipelines with this
     // draw's bone palette. Several characters of one model stay one draw call,
     // which the CPU path could not manage — it had to give each entity a private
@@ -252,7 +252,7 @@ pub(crate) fn push_mesh_instances(
     skins: &mut Vec<floptle_render::SkinDraw>,
     flsl: Option<floptle_render::FlslBindingId>,
     flsl_out: &mut Vec<floptle_render::FlslDraw>,
-    // Per-PART `.flsl` bindings — an `ObjectMaterials` override that names its
+    // Per-part `.flsl` bindings — an `ObjectMaterials` override that names its
     // own shader, keyed by (this entity, the override's key). Looked up fresh
     // per part rather than threaded in like `flsl`, because unlike the node's
     // shader this can differ part to part.
@@ -281,7 +281,7 @@ pub(crate) fn push_mesh_instances(
     // texture, its maps, its retro flags, and (see `part_flsl` above) its
     // shader. A material is a statement of what a surface looks like, and
     // half-applying one is what made this confusing: the node Material used
-    // to MULTIPLY its colour into each part's imported colour while its
+    // to multiply its colour into each part's imported colour while its
     // texture replaced outright, so "I gave it a new material and it still
     // has the old picture on it, but the emissive works" was the exact and
     // correct description of what the engine did — and a shader that named
@@ -318,14 +318,14 @@ pub(crate) fn push_mesh_instances(
             }
             // `tex` is this node Material's own texture. `None` there does not
             // mean "keep what the part had" — a bind of `None` is what makes the
-            // MESH's texture draw, which is the imported look this material is
+            // Mesh's texture draw, which is the imported look this material is
             // superseding. An untextured material means untextured, so it says
             // so with white.
             PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m, None),
             PartLook::Imported(base) => (tex, MaterialParams::flat(base), None),
         }
     };
-    // Vertex paint is per-PART: import splits a model per-material into parts with
+    // Vertex paint is per-part: import splits a model per-material into parts with
     // their own vertex arrays, so each part owns its own paint block. Instances of a
     // part share its base — same block, same draw call.
     let painted = |raster: &floptle_render::Raster, mid: MeshId, part: usize, base: MaterialParams| {
@@ -370,7 +370,7 @@ pub(crate) fn push_mesh_instances(
             } else {
                 // Fallback: the skinning store refused this part (it is bounded by
                 // the instance lane that addresses it), or a custom shader owns the
-                // draw. CPU-skin into this ENTITY's private clone, as before —
+                // draw. CPU-skin into this entity's private clone, as before —
                 // paint lives in `vpaint`, keyed by vertex_index, so the re-upload
                 // can't stomp it, and paint/texture lookups stay on `mid`.
                 let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);

@@ -431,7 +431,7 @@ fn look_section(
         });
     }
     // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
-    // MESH particles — the billboard pass draws unlit textured quads — so grey them
+    // Mesh particles — the billboard pass draws unlit textured quads — so grey them
     // out for billboards rather than offering a dead knob.
     ui.add_enabled_ui(is_mesh, |ui| {
         ui.horizontal(|ui| {
@@ -661,7 +661,7 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
 }
 
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
-    // Rate / lifetime / burst counts are per CLIP now (a clip is one emission, its length
+    // Rate / lifetime / burst counts are per clip now (a clip is one emission, its length
     // is the particle lifetime). Select a clip on the timeline to edit them; the emit
     // shape below is shared by every clip on the track.
     hint(ui, "Rate, bursts and lifetime belong to each clip — select one on the timeline.");

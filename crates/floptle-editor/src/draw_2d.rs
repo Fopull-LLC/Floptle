@@ -57,7 +57,7 @@ pub(crate) fn lit_2d_rank(
 /// A function for the same reason [`lit_2d_rank`] is one: both gathers ask it,
 /// so a cube cannot look one way in the Scene view and another in the Game
 /// view. It used to be written out twice, and the two copies had already drifted
-/// — the offscreen one never applied vertex PAINT, so a painted primitive was
+/// — the offscreen one never applied vertex paint, so a painted primitive was
 /// painted on screen and plain in every other view.
 ///
 /// `node_paint` is this node's own paint block (`paint_bases`). Every primitive
@@ -281,7 +281,7 @@ mod lit_2d_tests {
     /// texture, but it is still showing the texture of the normal model — and
     /// if I change the emission I can see the object get brighter." That is one
     /// rule applied to three quarters of a material: the node Material's params
-    /// were taken (hence the emission), its colour was MULTIPLIED into the
+    /// were taken (hence the emission), its colour was multiplied into the
     /// part's imported colour, and its texture replaced only if it had one.
     ///
     /// The rule is now: the most specific material wins, entire.
@@ -339,7 +339,7 @@ mod lit_2d_tests {
             {
                 PartLook::Override(k, m) => {
                     assert_eq!(m.color, [0.0, 0.0, 1.0], "{object}");
-                    // Matched by MATERIAL name here (no per-object entry
+                    // Matched by material name here (no per-object entry
                     // exists), so the key handed back is "Clothing", not
                     // the object's own name — that is the string a
                     // per-part shader binding for it is stored under.
@@ -447,7 +447,7 @@ mod lit_2d_tests {
 /// scratch and never look at the node's own `Material` — no shader, no
 /// `retro: (exempt: true)`, no way to style it at all. These pin the overlay
 /// rule: absent Material → today's exact numbers; present → its surface
-/// params win, EXCEPT `alpha`, which only overrides when the material set one
+/// params win, except `alpha`, which only overrides when the material set one
 /// (every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
 /// wearing one for its `retro` flag alone must not go opaque).
 #[cfg(test)]
@@ -578,7 +578,7 @@ mod water_draw_tests {
         // so a material's own picture can also be read raw for its surface
         // maps) — a capability CI's adapter does not have (the same class of
         // gap as "the raster pipeline cannot be built on OpenGL", already
-        // documented in HANDOFF; wgpu's default uncaptured-error handler
+        // documented in handoff; wgpu's default uncaptured-error handler
         // panics, so without this the first test to build a full `Raster` on a
         // headless device anywhere finds that out by crashing the test binary).
         // Same idiom `doctor.rs` uses to answer "can this machine render" at

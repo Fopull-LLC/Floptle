@@ -1,14 +1,14 @@
 //! Lua authoring support written into every project: the default scripts each
-//! project ships with (ADR-0003), and the language-server files (EmmyLua
+//! project ships with, and the language-server files (EmmyLua
 //! annotations + `.luarc.json`) that give external IDEs hover docs and
 //! completion for the engine scripting API.
 
 use std::path::Path;
 
-/// The default Lua scripts every project ships with (ADR-0003): the engine's
+/// The default Lua scripts every project ships with: the engine's
 /// built-in behaviors, now plain hot-reloadable Lua the user can read and edit.
 pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
-    // The default new-scene camera's flycam (hold RMB to look, WASD to move) —
+    // The default new-scene camera's flycam (hold RMB to look, wasd to move) —
     // default_camera_node() attaches `freelook`, so this must ship or a fresh
     // project's camera references a script that doesn't exist.
     ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
@@ -28,13 +28,13 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     // action layer.
     ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
     // A starting point for strategy games: an isometric camera you pan with
-    // WASD or the screen edge, commandable units, and the mouse layer that
+    // Wasd or the screen edge, commandable units, and the mouse layer that
     // selects and orders them.
     ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
     ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
     ("rts_commander.lua", include_str!("../../../assets/scripts/rts_commander.lua")),
     // Talking to a website: the device-code sign-in flow, written against a
-    // configurable `api` param so it points at YOUR server. The worked example
+    // configurable `api` param so it points at your server. The worked example
     // for `http.*` and for the one rule that makes an account-backed game
     // possible at all — the server decides what the player owns.
     ("web_login.lua", include_str!("../../../assets/scripts/web_login.lua")),
@@ -2013,7 +2013,7 @@ mod stub_tests {
     /// **The projects in this repo carry the annotations the engine ships.**
     ///
     /// `.floptle/library/floptle.lua` is generated — the editor rewrites it when
-    /// it opens a project — but the two in this repository are also COMMITTED,
+    /// it opens a project — but the two in this repository are also committed,
     /// and a generated file that is committed goes stale the moment the thing it
     /// is generated from moves. Both had drifted, differently from each other:
     /// neither knew about `node:material`, and the demo project's copy was

@@ -153,7 +153,7 @@ pub(crate) fn vec3_of(v: &Value) -> mlua::Result<[f64; 3]> {
     // that is in fact a position.
     //
     // Asked of `floptle_script` rather than by borrowing a concrete userdata
-    // type: a vec3 has two backings now (ADR-0028 Phase 3), and only one of
+    // type: a vec3 has two backings now, and only one of
     // them is userdata at all. A `borrow::<LuaVec3>()` here would still
     // compile — `AnyUserData::borrow` is bounded on `'static`, not on
     // `UserData` — and would simply stop matching, which is this function's

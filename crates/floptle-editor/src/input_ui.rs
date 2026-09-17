@@ -510,7 +510,7 @@ fn axis2_row(
                 chip_label(ui, &axis2_chip(b));
             }
             let mut socd = ax.socd;
-            // `ComboBox::width` is the TEXT width; egui adds its arrow and the
+            // `ComboBox::width` is the text width; egui adds its arrow and the
             // button's padding outside it, so the box asked for is wider than
             // the number given. Take that off before asking, and break the line
             // first if the whole thing will not fit on what is left of it.

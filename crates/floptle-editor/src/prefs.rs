@@ -1,6 +1,6 @@
 //! Per-user editor preferences — one small plain-text file per setting under
 //! the platform config dir ([`floptle_config_dir`]) — plus the "Open in IDE"
-//! launcher (ADR-0011) those preferences configure, and the viewport grid
+//! launcher those preferences configure, and the viewport grid
 //! settings they persist.
 
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ impl Default for GridConfig {
     }
 }
 
-// ---- "Open in IDE" (ADR-0011): launch the user's external editor ------------
+// ---- "Open in IDE": launch the user's external editor ------------
 
 /// Is `cmd` (a binary name) resolvable on path?
 pub(crate) fn on_path(cmd: &str) -> bool {
@@ -260,7 +260,7 @@ pub(crate) fn save_theme_index(path: Option<PathBuf>, idx: usize) {
 }
 
 /// Launch the external editor on `file`. VSCode-family editors open the project as
-/// the workspace root and jump to `file:line` (ADR-0011); others just open the file.
+/// the workspace root and jump to `file:line`; others just open the file.
 /// `cmd` may include leading args (e.g. "code -n").
 ///
 /// A page cannot launch a program; there, this does nothing, and the ⌘-click

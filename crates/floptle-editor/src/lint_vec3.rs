@@ -120,7 +120,7 @@ fn ident_ending_at(s: &str, end: usize) -> Option<&str> {
     Some(&s[start..end])
 }
 
-/// Byte offsets of every ASSIGNMENT `=` on a line — not the `=` of `==`,
+/// Byte offsets of every assignment `=` on a line — not the `=` of `==`,
 /// `~=`, `<=` or `>=`. All of them, because `if a == b then v = vec3() end`
 /// binds `v` at its second `=`, and a scan that took the first and stopped
 /// missed every binding that shared a line with a comparison.
@@ -291,7 +291,7 @@ fn lua_files(root: &Path) -> Vec<PathBuf> {
 ///
 /// **Exit codes are the answer, not decoration** — the rule this command line
 /// follows is that every failure must be a failure rather than a wrong answer
-/// at 0 (ADR-0027). `0` means there is nothing to change; `1` means there is,
+/// at 0. `0` means there is nothing to change; `1` means there is,
 /// which is what a script wants in order to gate on it; `2` means the scan
 /// could not be run at all and the `0`/`1` distinction is therefore
 /// meaningless. A project with no scripts is a clean `0`, not an error.
@@ -493,7 +493,7 @@ mod tests {
 
     /// **The exit code is the answer.** The rule this command line follows is
     /// that a failure must be a failure rather than a wrong answer at 0
-    /// (ADR-0027), and for a lint that means three distinguishable states:
+    ///, and for a lint that means three distinguishable states:
     /// nothing to do, something to do, and could-not-look. A caller gating a
     /// migration on this reads the code, not the prose.
     #[test]
@@ -517,7 +517,7 @@ mod tests {
             "a directory that is not there must not read as clean"
         );
 
-        // A project with no scripts is CLEAN, not an error: there is genuinely
+        // A project with no scripts is clean, not an error: there is genuinely
         // nothing to change.
         let empty = root.join("empty");
         let _ = std::fs::create_dir_all(empty.join("scripts"));

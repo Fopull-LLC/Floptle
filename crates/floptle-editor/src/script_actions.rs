@@ -1,4 +1,4 @@
-//! editor ACTIONS — Lua tooling that runs in EDIT mode (the Unity
+//! editor actions — Lua tooling that runs in edit mode (the Unity
 //! editor-script analog). A script declares a button:
 //!
 //! ```lua

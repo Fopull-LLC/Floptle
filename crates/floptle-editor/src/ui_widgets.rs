@@ -35,7 +35,7 @@ pub(crate) fn asset_picker(
     // Whatever width the call site asked for, capped at what is still on screen.
     // Every picker in the editor comes through here, so this is the one place
     // that has to know: an inspector field is authored at 160 px and a docked
-    // Inspector is regularly narrower than that. The POPUP is deliberately not
+    // Inspector is regularly narrower than that. The popup is deliberately not
     // capped — it is an overlay, it is allowed to be wider than its panel, and
     // shrinking it would make browsing worse for no gain.
     let width = crate::responsive::fit_here_wrapping(ui, width);
@@ -53,7 +53,7 @@ pub(crate) fn asset_picker(
         .width(pw)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            // A CONSTANT popup size: content used to dictate the height, so
+            // A constant popup size: content used to dictate the height, so
             // the popup grew and shrank between opens (and got uselessly tiny
             // on short lists). Fixed frame, scroll inside.
             ui.set_min_width(pw);
@@ -118,7 +118,7 @@ pub(crate) fn asset_picker(
                 }
             });
         });
-    // The closed button is also a DROP target: drag a matching asset from the
+    // The closed button is also a drop target: drag a matching asset from the
     // Assets tab straight onto it to fill the value (no need to open + search).
     let dropping = btn
         .dnd_hover_payload::<crate::assets::AssetPayload>()
@@ -362,7 +362,7 @@ fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
 /// An image's true size in pixels, decoded once and then cached in egui memory
 /// for the session.
 ///
-/// Separate from [`asset_thumb`] because a thumbnail is CAPPED — asking a
+/// Separate from [`asset_thumb`] because a thumbnail is capped — asking a
 /// 512-px thumbnail how big its sheet is answers 512, and a caller dividing that
 /// into a tile grid gets a plausible wrong number instead of an error. That is
 /// the whole reason this exists rather than `handle.size()`.
@@ -421,7 +421,7 @@ pub(crate) fn sheet_cell_picker(
     let mut changed = false;
     ui.label(format!("sprite cell ({cols}×{rows} sheet)"));
     if let Some(sheet) = asset_thumb(ui, texture, 256) {
-        // The grid is a GRID: row 3 of the sheet has to stay row 3, so it cannot
+        // The grid is a grid: row 3 of the sheet has to stay row 3, so it cannot
         // reflow the way a tool strip does. What it can do is shrink, and it has
         // to shrink all the way — a floor here would be a floor the panel is
         // allowed to go below, and then the right-hand columns are simply not on
@@ -512,7 +512,7 @@ fn downscale_rgba(px: &[u8], w: usize, h: usize, max: usize) -> egui::ColorImage
 }
 
 /// A ComboBox over a long asset list with a search box. The search field
-/// AUTO-FOCUSES when the popup opens (type immediately, no click needed),
+/// Auto-focuses when the popup opens (type immediately, no click needed),
 /// clicking inside the popup does not close it (CloseOnClickOutside), and
 /// picking an entry closes explicitly. Returns `Some(pick)` when something was
 /// chosen this frame — `Some(None)` is the `none_label` entry.

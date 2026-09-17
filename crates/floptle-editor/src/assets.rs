@@ -89,7 +89,7 @@ pub(crate) fn is_vfx(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(floptle_scene::VFX_EXT)
 }
 
-/// A `.flsl` shader — the shader IR's text form (ADR-0007), assignable on a
+/// A `.flsl` shader — the shader IR's text form, assignable on a
 /// Material and editable in the Scripting tab or VSCode.
 pub(crate) fn is_shader(path: &str) -> bool {
     path.to_ascii_lowercase()
@@ -149,7 +149,7 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
     } else if is_prefab(path) {
         ("◇", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
     } else if is_shader(path) {
-        ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader (ADR-0007)
+        ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader
     } else if is_audio(path) {
         ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
     } else if is_map_sidecar(path) {
@@ -230,7 +230,7 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
 /// `Material` was the Inspector's material editor, which runs for the one node
 /// somebody happens to have selected. So slicing a sheet from the Assets panel
 /// left every existing sprite believing its texture was one whole cell: the
-/// sprite drew the entire SHEET stretched across its quad, and came out sized
+/// sprite drew the entire sheet stretched across its quad, and came out sized
 /// from the whole image rather than from one frame. That reads as spritesheets
 /// being broken, which is a long way from one number being stale.
 ///
@@ -405,7 +405,7 @@ mod tests {
                 pivot: [0.5, 0.5],
             },
         );
-        // Referenced ABSOLUTELY, which is a spelling the Assets side hands out.
+        // Referenced absolutely, which is a spelling the Assets side hands out.
         let other = world.spawn();
         world.insert(
             other,
@@ -526,7 +526,7 @@ mod tests {
     }
 
     /// The Inspector selects a texture by its absolute path; a scene references it by a
-    /// PROJECT-RELATIVE one. Both must reach the same settings entry, or a `Pixelated`
+    /// Project-relative one. Both must reach the same settings entry, or a `Pixelated`
     /// pick shows in the Inspector and never reaches the sampler.
     #[test]
     fn texture_settings_resolve_from_either_path_form() {
@@ -662,7 +662,7 @@ pub(crate) fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf 
 
 /// Turn what somebody typed into a filename stem.
 ///
-/// Deliberately permissive about what it ACCEPTS and strict about what it
+/// Deliberately permissive about what it accepts and strict about what it
 /// writes: a person naming an effect types "muzzle flash", and refusing that
 /// with a validation error teaches them nothing except to type underscores.
 /// Spaces become camel humps (the engine's naming convention), and anything a

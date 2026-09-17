@@ -20,7 +20,7 @@ impl Editor {
         if self.playing {
             return;
         }
-        // A selection step is history but not an EDIT: picking a node changes
+        // A selection step is history but not an edit: picking a node changes
         // nothing the scene file would save — so it neither dirties the scene
         // nor clears the redo stack. (Clearing redo on a pick would mean
         // "undo a move, click another node to check something, Ctrl+Y" loses
@@ -30,7 +30,7 @@ impl Editor {
             self.history.redo.clear();
         }
         self.history.undo.push(snap);
-        // The cap counts EDIT steps — selection steps are a few bytes and ride
+        // The cap counts edit steps — selection steps are a few bytes and ride
         // along free (with their own generous total, so a long click spree
         // can't quietly evict real edits or grow without bound).
         let heavy =
@@ -164,7 +164,7 @@ impl Editor {
         // the next history boundary must not turn it into a Selection step.
         self.suppress_sel_step = true;
         // Entities are respawned below — drop animator runtimes keyed by the old ones.
-        // The map sub-object selection is keyed by Entity but ADDRESSES a stable
+        // The map sub-object selection is keyed by Entity but addresses a stable
         // geometry id, so it can be carried across the respawn (undo mid-edit
         // used to dump you out of the shape you were working on).
         let keep_map = self.map_sel.take();
@@ -461,7 +461,7 @@ mod tests {
     }
 
     /// Picks are undo steps — so Ctrl+Z can walk back through what you selected
-    /// — but they are not EDITS: the scene file didn't change.
+    /// — but they are not edits: the scene file didn't change.
     #[test]
     fn a_pick_is_an_undo_step_but_not_an_edit() {
         let mut ed = Editor::default();

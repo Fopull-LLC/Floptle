@@ -69,7 +69,7 @@ pub(crate) fn claim_keys_for_game(raw: &mut egui::RawInput, ctx: &egui::Context)
     }
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.

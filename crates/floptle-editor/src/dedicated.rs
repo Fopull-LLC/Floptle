@@ -500,7 +500,7 @@ extern "C" fn on_stop_signal(_sig: libc::c_int) {
 /// operator sitting at a TTY, which is the one case that matters least.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn install_signal_stop() {
-    // SAFETY: `on_stop_signal` only stores into an atomic, which is
+    // Safety: `on_stop_signal` only stores into an atomic, which is
     // async-signal-safe. Registering a handler is the documented use of this
     // call.
     unsafe {
@@ -823,7 +823,7 @@ pub(crate) fn release_slots(
     }
 }
 
-/// Let an INTERACTIVE operator stop the server with a keypress.
+/// Let an interactive operator stop the server with a keypress.
 ///
 /// Only when stdin is a terminal. A server under systemd, docker or a CI job
 /// has stdin on `/dev/null`, which reads EOF immediately — watching it there
@@ -1111,7 +1111,7 @@ mod tests {
         // Two are deliberately out of the published table, and neither is an
         // oversight:
         //
-        // `--game-key` is a CREDENTIAL. `ps` shows a command line, the journal
+        // `--game-key` is a credential. `ps` shows a command line, the journal
         // echoes it, and the fleet agent ships the last 200 journal lines to the
         // control plane where they are rendered on a web page — which is exactly
         // why the agent passes the key in `Environment=` instead. Publishing a
@@ -1581,7 +1581,7 @@ mod server_tests {
     /// **The status file does not carry the game key.** It sits in a runtime
     /// directory on a box that runs other developers' servers, and the agent
     /// that reads it already holds the key. The prefix says which key is live;
-    /// the whole key is asserted ABSENT — a test that only checked the prefix
+    /// the whole key is asserted absent — a test that only checked the prefix
     /// was present would pass with the key beside it.
     #[test]
     fn the_status_file_names_the_keys_prefix_and_never_the_key() {

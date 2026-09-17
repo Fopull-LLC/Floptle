@@ -522,7 +522,7 @@ mod tests {
     }
 
     /// A hand-edited file can say a node is its own ancestor, and the tool
-    /// somebody reached for to FIND that must not hang on it.
+    /// somebody reached for to find that must not hang on it.
     #[test]
     fn a_parent_cycle_does_not_hang() {
         let d = project(

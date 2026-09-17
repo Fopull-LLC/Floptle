@@ -92,7 +92,7 @@ pub(crate) struct UiDesignState {
     pub layer: Option<u32>,
     pub zoom: f32,
     pub pan: egui::Vec2,
-    /// Set to re-fit the canvas on the next draw. Fitting is on DEMAND, never
+    /// Set to re-fit the canvas on the next draw. Fitting is on demand, never
     /// automatic: a canvas that re-frames itself while you work is exactly the
     /// "things move on their own" failure this editor tries not to have.
     pub want_fit: bool,

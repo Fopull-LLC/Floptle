@@ -129,7 +129,7 @@ impl Span {
 /// caller who sees 400 of 900 steps excluded has learned something true about
 /// the run.
 struct Timing {
-    /// One entry per step that ADVANCED the session clock, in the order they ran.
+    /// One entry per step that advanced the session clock, in the order they ran.
     samples: Vec<f32>,
     /// Steps that were taken without the clock moving. Reported, never averaged in.
     paused: u32,
@@ -190,16 +190,16 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
 /// **`floptle run` could already host a real session** — `net.host{}` with
 /// neither `port` nor `relay` stands up the in-editor loopback harness with no
 /// GPU and no window, and `net.role`, `synced`, `onRpc`, `net.rpc{to = peer}`,
-/// `net.spawn` and `scene.load` all work under it. Nothing could JOIN it. The
+/// `net.spawn` and `scene.load` all work under it. Nothing could join it. The
 /// ghost client existed too (`Editor::net_join_local`), but it hung off the
 /// Editor and was reachable only from the 🌐 panel's button, so everything that
-/// is only true across the WIRE was untestable except by a person clicking in a
+/// is only true across the wire was untestable except by a person clicking in a
 /// GUI or by two machines: a client's mirror, targeted RPCs reaching the peer
 /// they named and only that peer, late joiners receiving current `synced`
 /// values, and — the one that matters most — interest management, whose whole
 /// promise is about what a client is not sent.
 ///
-/// These are owned by the run LOOP rather than by the Editor, deliberately: the
+/// These are owned by the run loop rather than by the Editor, deliberately: the
 /// Editor holds exactly one ghost and one Lua VM, and N of either is a design
 /// question this verb does not need to answer to make the wire observable.
 struct Ghost {
@@ -224,7 +224,7 @@ impl Ghost {
 /// Join up to `want` ghosts once the project is hosting, then tick the ones
 /// that are already in.
 ///
-/// Joining is LAZY because hosting is the project's decision, not this verb's:
+/// Joining is lazy because hosting is the project's decision, not this verb's:
 /// the script calls `net.host{}` on whichever frame its lobby flow reaches, and
 /// a ghost that tried to connect before that would find nothing and be counted
 /// as a client that failed rather than one that had not been invited yet.
@@ -254,7 +254,7 @@ fn pump_ghosts(ed: &mut crate::Editor, ghosts: &mut Vec<Ghost>, want: usize) {
         let _ = g.session.take_synced();
         let _ = g.session.take_anim_updates();
     }
-    // Follow scene switches exactly as a remote client does: reload from DISK
+    // Follow scene switches exactly as a remote client does: reload from disk
     // into the ghost's own world and rebind its NetIds. Without this a ghost
     // holds stale ids after `scene.load` and silently discards every snapshot,
     // which makes a working server look like a broken one.
@@ -284,7 +284,7 @@ fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
                 "ghost": i,
                 "connected": g.session.is_connected(),
                 // The count a relevancy test reads. `net.setRelevant(node, peer,
-                // false)` is verified by this number going DOWN for that peer
+                // false)` is verified by this number going down for that peer
                 // and not for the others — which is that task's whole
                 // promise, and was taken on trust in every project until now.
                 // Nodes actually being sent state, not ids bound locally.
@@ -322,7 +322,7 @@ pub(crate) struct Options {
     /// hosting one.
     ///
     /// The other half of `--ghosts`, and the shape a dedicated-server project
-    /// actually ships in: this is the real QUIC transport rather than the
+    /// actually ships in: this is the real quic transport rather than the
     /// loopback hub, so it is the only way to test the wire itself. It also
     /// gets the ghosts' missing half for free — the run's own Lua is the
     /// client's, so `net.isServer()` answers false and the project's own
@@ -375,7 +375,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // **Take the open phase out, do not count it.** Everything the open said —
     // a scene that arrived with bad wiring, a package that failed to load —
     // belongs in the report: it happened, and it happened before a script ran.
-    // But pressing Play CLEARS the Console (`toggle_play`, so a session shows
+    // But pressing Play clears the Console (`toggle_play`, so a session shows
     // only its own output), which means remembering "the first N entries were
     // the open" both loses them and mislabels the first N of the run as though
     // they were them. Moving them somewhere Play cannot reach is exact.
@@ -392,7 +392,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     if let Some(addr) = join.as_deref() {
         ed.net_join_quic(addr);
         if ed.net_play_client.is_none() {
-            // **the REASON is on the CONSOLE, not in the script LOG.** This used
+            // **the reason is on the console, not in the script LOG.** This used
             // to drain the script host and then say "the reason is in the log
             // above" — but nothing a script wrote is what failed. `net_join_quic`
             // reports its refusals (a transport that would not connect, a peer
@@ -477,7 +477,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         let began = floptle_core::time::Instant::now();
         // The streaming half of a frame, which this loop is otherwise missing.
         // Without it the Play-start terrain hold never lifts, and a held session
-        // is a PAUSED one: no fixed tick, so no rails, no physics, and a `dt` of
+        // is a paused one: no fixed tick, so no rails, no physics, and a `dt` of
         // zero handed to every script. The run still counted its steps and still
         // reported its full span of simulated time — it had simply simulated
         // none of it, which is the one failure a verb built to be believed must
@@ -551,7 +551,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
 ///
 /// Its own function because it is the sentence a caller believes without
 /// checking anything else, and it has to be readable by a test that asserts
-/// what it says. `simulated` is MEASURED off the session clock; `steps × DT` is
+/// what it says. `simulated` is measured off the session clock; `steps × DT` is
 /// only what the loop was asked to step.
 fn summary_line(steps: u32, asked: u32, simulated: f32, errors: usize, warnings: usize) -> String {
     let stepped = steps as f32 * DT;
@@ -654,7 +654,7 @@ fn level_str(l: floptle_script::LogLevel) -> &'static str {
 /// Print what happened. Returns the exit code: 1 if anything raised, in either
 /// phase — a scene that could not be wired is as much a failure as a script
 /// that threw, and a caller checking one exit code has to hear about both.
-/// What a run MEASURED, as opposed to what it did — each half present only
+/// What a run measured, as opposed to what it did — each half present only
 /// when it was asked for, so "not measured" and "measured as zero" stay
 /// different things all the way to the report.
 struct Measured<'a> {
@@ -719,7 +719,7 @@ fn report(
             // would think it got the run it requested.
             "steps": steps,
             "requested": asked,
-            // MEASURED off the session clock, not `steps × DT`: a paused
+            // Measured off the session clock, not `steps × DT`: a paused
             // session steps without advancing, and this field is what a caller
             // reads to know whether anything happened.
             "seconds": simulated,
@@ -815,7 +815,7 @@ fn report(
     // The same collapsing `check` does, for the same reason and through the same
     // function. Opening a real project reports one hidden panel once per child:
     // fifty-two lines saying one thing, in front of the one line that matters.
-    // The Console already merges repeats that are ADJACENT (`ConsoleState::push`);
+    // The Console already merges repeats that are adjacent (`ConsoleState::push`);
     // this catches the ones separated by other output.
     let mut groups: Vec<(&str, String, &crate::console::ConsoleEntry, u32)> = Vec::new();
     for (phase, e) in all() {
@@ -1076,7 +1076,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// `run` could host a real session and nothing could JOIN
+    /// `run` could host a real session and nothing could join
     /// it, so everything that is only true across the wire was untestable
     /// except by a person clicking in a GUI or by two machines.
     ///
@@ -1241,7 +1241,7 @@ mod tests {
         assert_eq!(Span::Seconds(0.0).steps(), 1, "a span nobody can measure is still a step");
     }
 
-    /// **The summary reports time that was SIMULATED**.
+    /// **The summary reports time that was simulated**.
     ///
     /// A run whose session is paused — which is what the Play-start terrain hold
     /// makes it until the ground exists — steps its whole span with `dt = 0`.

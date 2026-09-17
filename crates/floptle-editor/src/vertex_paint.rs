@@ -5,7 +5,7 @@
 //! way brushes behave in this editor rather than two.
 //!
 //! Where it differs from terrain, and why:
-//!   * it raycasts TRIANGLES (`paint_mesh`), not an SDF field;
+//!   * it raycasts triangles (`paint_mesh`), not an SDF field;
 //!   * it is hard-gated off during Play — see `paint_gate` below;
 //!   * blocks are copy-on-write, so painting a duplicated prop forks rather than
 //!     bleeding into the original (proposal §9.0).
@@ -144,7 +144,7 @@ impl Editor {
                 let path = self.resolve_asset_path(&key);
                 match floptle_assets::import(&path) {
                     Ok(m) => m.parts.into_iter().map(|p| p.mesh).collect(),
-                    // Cache the FAILURE too. This runs for every mesh node every frame the
+                    // Cache the failure too. This runs for every mesh node every frame the
                     // Paint tool is active — an uncached failure would re-hit the disk each
                     // frame forever.
                     Err(_) => Vec::new(),
@@ -204,7 +204,7 @@ impl Editor {
             };
             for (p, &n) in counts.iter().enumerate() {
                 let base = match &src {
-                    // FORK: copy the shared block so the original keeps its paint.
+                    // Fork: copy the shared block so the original keeps its paint.
                     Some(sb) if sb.parts.len() > p => {
                         let colors = raster.paint_block(sb.parts[p].0, sb.parts[p].1);
                         raster.paint_alloc_from(gpu, &colors)
@@ -362,7 +362,7 @@ impl Editor {
         self.last_dab_pos = Some(hit_world);
         self.last_dab_time = Some(now);
 
-        // texture target: the dab is a world-space SPHERE, and it paints every paintable
+        // texture target: the dab is a world-space sphere, and it paints every paintable
         // surface it touches — all parts, all nodes — not just the ray hit. That is what
         // makes corner shading work: a stroke along a wall-floor seam shades both surfaces
         // in one pass, darkest at the seam (painted ambient occlusion, the retro baked
@@ -462,7 +462,7 @@ impl Editor {
             (id, per_part)
         });
 
-        // Smooth averages against the PRE-dab colors: sampling as we write would let the
+        // Smooth averages against the pre-dab colors: sampling as we write would let the
         // iteration order bias the result.
         let pre: Vec<[u8; 4]> = if brush.mode == PaintMode::Smooth {
             near.iter().map(|&(i, _)| raster.paint_get(base, i)).collect()
@@ -536,7 +536,7 @@ impl Editor {
     }
 
     /// Flood every part of the selected node with the brush color. With ⊘ Erase active it
-    /// floods NEUTRAL instead — the whole node back to unpainted.
+    /// floods neutral instead — the whole node back to unpainted.
     pub(crate) fn paint_fill_selected(&mut self) {
         if self.playing {
             return;

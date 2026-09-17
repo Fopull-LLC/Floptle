@@ -261,7 +261,7 @@ impl EditorTabViewer<'_> {
             ui.label("Texture palette");
             let mut tex_list = Vec::new();
             collect_texture_paths(asset_tree, &mut tex_list);
-            // Show the ASSIGNED slots plus one empty "add" row — not all 32 at once.
+            // Show the assigned slots plus one empty "add" row — not all 32 at once.
             // Slots keep their index forever (the painted terrain stores it), so a
             // cleared middle slot stays visible until the trailing empties.
             let last_used = terrain_textures.iter().rposition(|t| !t.is_empty());
@@ -303,7 +303,7 @@ impl EditorTabViewer<'_> {
                         crate::assets::is_texture,
                         90.0,
                     ) {
-                        // `asset_picker` already returns the PORTABLE
+                        // `asset_picker` already returns the portable
                         // project-relative form (tree paths embed how the editor
                         // was launched).
                         *tex = pick.unwrap_or_default();
@@ -333,7 +333,7 @@ impl EditorTabViewer<'_> {
                         // several times as often, and until now the only way to
                         // arrange that was to resample the image.
                         //
-                        // Bigger number = SMALLER features, because it scales
+                        // Bigger number = smaller features, because it scales
                         // the sampling coordinate — so the control says what it
                         // does to the picture, not what it does to the maths.
                         let mut tiles = terrain_tex_scale.get(slot).copied().unwrap_or(1.0);
@@ -363,7 +363,7 @@ impl EditorTabViewer<'_> {
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette.");
         }
         ui.separator();
-        // Fill-bounds tool. Sculpting near an edge now grows only the BOUNDS (the
+        // Fill-bounds tool. Sculpting near an edge now grows only the bounds (the
         // surface no longer auto-extends into flat land), so this is the deliberate way
         // to lay flat ground: pour solid up to `height`, from `floor` below, kept
         // `inset` in from the walls.

@@ -238,7 +238,7 @@ impl RollbackDriver {
         self.pending = None;
     }
 
-    /// Audit the bound nodes' SCRIPTS: rollback hooks present, no `synced` vars
+    /// Audit the bound nodes' scripts: rollback hooks present, no `synced` vars
     /// fighting them. Deferred out of [`Self::rebind`] on purpose.
     ///
     /// A driver engages on the same frame the scene switches, which is a frame
@@ -499,7 +499,7 @@ impl RollbackDriver {
         self.stalled = false;
         self.last_checksum = 0;
         self.resimulated_ticks = 0;
-        // `desynced` deliberately SURVIVES a restart. A restart is how a roster
+        // `desynced` deliberately survives a restart. A restart is how a roster
         // change re-syncs the clock, not a fresh install: if the last match
         // forked, the panel keeps saying so until the session actually ends,
         // because "we desynced and then quietly restarted" is exactly the state
@@ -527,12 +527,12 @@ impl RollbackDriver {
     }
 
     /// Record the local player's sampled input. Returns the tick it will
-    /// APPLY on (`sampled + delay`) — which is what goes on the wire, so peers
+    /// Apply on (`sampled + delay`) — which is what goes on the wire, so peers
     /// never have to know our delay.
     pub fn add_local(&mut self, sampled: u64, input: NetInput) -> u64 {
         let applied = self.net.applied_tick(sampled);
         // Our own input arriving for a tick we already ran means that tick was
-        // simulated from a GUESS at our own pad — and nothing will ever correct
+        // simulated from a guess at our own pad — and nothing will ever correct
         // it, because corrections are only raised for other peers. We would
         // ship the real value, everyone else would use it, and we alone would
         // keep the guess. It is a desync with no alarm on it, so put one here.
@@ -689,7 +689,7 @@ impl RollbackDriver {
         out
     }
 
-    /// Step the simulation BACKWARDS one tick, from the state ring
+    /// Step the simulation backwards one tick, from the state ring
     /// (`docs/multiplayer.md` §7 P5 — closes 0024's deferred item).
     ///
     /// Frame-stepping forwards is easy; stepping back is not, because a
@@ -1314,7 +1314,7 @@ end\n";
         }
         let found = b.audit_replay(&mut bad.ctx(), 4, &names);
         assert!(!found.is_empty(), "the leaked counter must be caught");
-        // And NAMED, which is the difference between a ten-minute fix and a
+        // And named, which is the difference between a ten-minute fix and a
         // fortnight: node, script, key.
         assert!(
             found.iter().any(|(_, label, ..)| label.contains("fighter") && label.contains("hp")),
@@ -1482,7 +1482,7 @@ end\n";
             }
             host_d.advance(&mut host.ctx());
             peer_d.advance(&mut peer.ctx());
-            // Counted off the DRIVER's own flag, not off `sample_tick` — the
+            // Counted off the driver's own flag, not off `sample_tick` — the
             // point is that the link stalled, not that we declined to sample.
             stalls += u32::from(host_d.stalled) + u32::from(peer_d.stalled);
             if host_d.net.confirmed() >= target && peer_d.net.confirmed() >= target {
@@ -1499,7 +1499,7 @@ end\n";
             host_d.net.confirmed(),
             peer_d.net.confirmed(),
         );
-        // Compared at a CONFIRMED tick, not at the live frontier. On a link this
+        // Compared at a confirmed tick, not at the live frontier. On a link this
         // slow the newest few ticks on either machine are still provisional —
         // simulated from guesses whose real inputs are literally still in the
         // air — so two peers disagreeing there means nothing. Tick `target` has
@@ -1712,7 +1712,7 @@ end\n";
             host_d.net.corrections > 0 || peer_d.net.corrections > 0,
             "a lossy 4-tick link must have produced at least one mispredict"
         );
-        // Compared at a CONFIRMED tick. The newest few ticks on either machine
+        // Compared at a confirmed tick. The newest few ticks on either machine
         // are still speculation — simulated from guesses whose real inputs are
         // literally still in the air — so two peers differing there is the
         // system working, not failing. Tick `target` holds every peer's real
@@ -1892,7 +1892,7 @@ end\n";
         assert_eq!(d.nodes().len(), 1);
 
         // first: nothing has loaded the scripts yet, which is the state a driver
-        // engaging on a scene switch finds the world in. The audit must DECLINE
+        // engaging on a scene switch finds the world in. The audit must decline
         // to answer rather than answer "no hooks" — the old code answered, and
         // told people a fighter defining both hooks would not be rolled back.
         assert!(

@@ -341,7 +341,7 @@ impl Editor {
     /// subtree + physics). Runs inside the play loop only — edit-time placement
     /// goes through [`Self::instantiate_prefab`].
     pub(crate) fn apply_script_spawns(&mut self) {
-        // Bounded cascade: a spawn/create CALLBACK may itself create more
+        // Bounded cascade: a spawn/create callback may itself create more
         // nodes (a generator building a hierarchy) — keep draining until the
         // queues go quiet so nested requests land the same drain.
         for _pass in 0..8 {
@@ -449,7 +449,7 @@ impl Editor {
                 self.register_meshes(fresh);
             }
             // Optional parenting (`spawn(name, pos, fn, parentNode)`): the
-            // spawned ROOTS go under the parent, keeping their world pose —
+            // spawned roots go under the parent, keeping their world pose —
             // convert into the parent's local frame. Done before physics
             // wiring so ancestry rules (assembly parts) see the hierarchy.
             if let Some(pid) = req.parent {
@@ -491,7 +491,7 @@ impl Editor {
             // The callback runs before physics wiring (its transform writes
             // flush inside call_spawn_callback): a spawned Static prop whose
             // callback orients it (a launchpad aligned to a planet surface)
-            // must bake its collider at the ORIENTED pose, not the authored
+            // must bake its collider at the oriented pose, not the authored
             // one. Velocity writes still land via the body-changes queue.
             if let (Some(cb), Some(root)) = (req.cb, root) {
                 self.script_host.call_spawn_callback(&mut self.world, cb, root.index(), &ents);
@@ -500,7 +500,7 @@ impl Editor {
                 for &e in &ents {
                     sim.add_body_for(e, &self.world);
                 }
-                // A spawned VESSEL prefab (assembly root) registers its whole
+                // A spawned vessel prefab (assembly root) registers its whole
                 // hierarchy as one compound (add_body_for refused the parts).
                 for &e in &ents {
                     sim.add_compound_for(e, &self.world);
@@ -556,7 +556,7 @@ impl Editor {
     }
 
     /// Drain queued `assembly.*` commands: held forces/impulses go to the sim;
-    /// SPLITS are performed here — spawn a fresh vessel root, split the physics
+    /// Splits are performed here — spawn a fresh vessel root, split the physics
     /// compound onto it, re-parent the detached part nodes (world pose kept),
     /// then hand the new root to the script callback.
     pub(crate) fn drain_assembly_cmds(&mut self) {
@@ -992,7 +992,7 @@ mod tests {
 
         // Open it on its own. The world becomes the prefab and nothing else.
         let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
-        // A leftover scene node, to prove the open REPLACES the world rather
+        // A leftover scene node, to prove the open replaces the world rather
         // than adding to it.
         let stale = ed.world.spawn();
         ed.world.insert(stale, Transform::IDENTITY);

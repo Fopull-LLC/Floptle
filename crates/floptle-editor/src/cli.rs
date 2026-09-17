@@ -923,7 +923,7 @@ pub(crate) const VERBS: &[Verb] = &[
         name: "lint",
         summary: "report what a project would have to change to switch its vec3, and exit",
         detail: "Scans every script for the two things that differ between `script_vec3: Exact` \
-                 and `Fast` (ADR-0028): a vec3 component being assigned, which raises in `fast` \
+                 and `Fast`: a vec3 component being assigned, which raises in `fast` \
                  because a native vector is immutable, and a `type()` asked about a vec3, which \
                  answers \"vector\" there instead of \"userdata\" and so silently takes the \
                  other branch. Everything else about the two is identical. This is a textual \
@@ -1183,7 +1183,7 @@ pub(crate) fn dispatch(args: &[String]) -> Outcome {
         return Outcome::Legacy;
     }
     // **A closed pipe is not a crash.** Rust starts every process with SIGPIPE
-    // ignored, so `floptle inspect … | head` makes `println!` return EPIPE,
+    // ignored, so `floptle inspect … | head` makes `println!` return epipe,
     // which panics — and this binary files a crash report on panic, so using
     // `head` ends with a note asking the user to report a bug. Restoring the
     // default disposition makes the process die quietly the way every other
@@ -1229,7 +1229,7 @@ enum SigPipe {
 
 fn sigpipe(#[allow(unused_variables)] how: SigPipe) {
     #[cfg(unix)]
-    // SAFETY: setting a signal disposition on the main thread before any of the
+    // Safety: setting a signal disposition on the main thread before any of the
     // editor's threads exist. `SIG_DFL` is what the process would have had if
     // Rust had not changed it at startup.
     unsafe {

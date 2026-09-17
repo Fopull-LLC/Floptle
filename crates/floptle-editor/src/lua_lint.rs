@@ -1,4 +1,4 @@
-//! Lua LINTS — the mistakes a syntax check can't see.
+//! Lua lints — the mistakes a syntax check can't see.
 //!
 //! Lua's defining hazard is that everything undeclared is a global that reads
 //! `nil`: `local speed = 4` then `sped = speed * dt` compiles, runs, does nothing,
@@ -18,7 +18,7 @@
 //!   with the fix in the message.
 //!
 //! Line-oriented and conservative: a lint fires only when the evidence is on one
-//! line. Everything reports as a WARNING — never blocks a run, never edits code.
+//! line. Everything reports as a warning — never blocks a run, never edits code.
 //! `--@nolint` on a line silences that line; anywhere in the file silences all of it.
 
 /// One lint hit: 1-based line, the message, and whether it's worth a colour.
@@ -63,7 +63,7 @@ const NODE_FIRST_HOOKS: &[&str] =
 const DELTA_NAMES: &[&str] = &["dt", "delta", "deltaTime", "delta_time", "elapsed", "step"];
 
 /// Raw key polls, and the named action that does the same job on every device.
-/// Keyed by the SHIPPED starter map, so the advice names something that already
+/// Keyed by the shipped starter map, so the advice names something that already
 /// exists in the project rather than something to go and invent.
 const RAW_INPUT_ADVICE: &[(&str, &str, &str)] = &[
     // (raw call, key literal, the suggestion)
@@ -297,7 +297,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 }
             }
         }
-        // A bare `name = …` at file SCOPE publishes a global deliberately —
+        // A bare `name = …` at file scope publishes a global deliberately —
         // unless we're inside an open bracket, where it's a table field.
         if depth == 0
             && open_before == 0
@@ -343,7 +343,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     let is_declared = |name: &str| declared.iter().any(|(d, _)| d == name);
     let is_known = |name: &str| is_declared(name) || published.iter().any(|p| p == name);
 
-    // Pass 2: accidental globals. An ASSIGNMENT (`name =`, not `==`) to a name
+    // Pass 2: accidental globals. An assignment (`name =`, not `==`) to a name
     // that is not declared, not a hook, and not engine API.
     let mut bracket = 0i32;
     for (n, raw) in src.lines().enumerate() {
@@ -364,7 +364,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
         let lhs = &code[..eq];
         for target in lhs.split(',') {
             let target = target.trim();
-            // Only a BARE name can be an accidental global: `t.x = 1` and
+            // Only a bare name can be an accidental global: `t.x = 1` and
             // `t[k] = 1` are writes into an existing table.
             if target.is_empty() || !target.chars().all(is_ident_char) {
                 continue;
@@ -444,7 +444,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     // The count is the engine's, so the squiggle here and the Console line at
     // load can never disagree about how close a script is.
     //
-    // Where the VM has no such ceiling — Luau does not, measured (ADR-0028) —
+    // Where the VM has no such ceiling — Luau does not, measured —
     // there is nothing to warn about, and a squiggle would be advice to
     // restructure a script to avoid a wall that is not in front of it.
     if let (Some(limit), Some(warn)) = (UPVALUE_LIMIT, UPVALUE_WARN) {
@@ -468,7 +468,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     // reads its own keys as neutral. So the advice comes to the code, with the
     // exact replacement line, at the place that needs it.
     for (n, raw) in src.lines().enumerate() {
-        // The RAW line: this lint is about the string ARGUMENT, which `code_of`
+        // The RAW line: this lint is about the string argument, which `code_of`
         // (rightly, for every other pass) strips out.
         if raw.contains("--@nolint") {
             continue;
@@ -574,7 +574,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     out
 }
 
-/// The byte index of a top-level `=` that is an ASSIGNMENT, not a comparison and
+/// The byte index of a top-level `=` that is an assignment, not a comparison and
 /// not inside brackets/parens. None when the line assigns nothing.
 fn find_assignment(code: &str) -> Option<usize> {
     let b = code.as_bytes();
@@ -734,7 +734,7 @@ print(used)
                 .iter()
                 .any(|l| l.kind == LintKind::ReservedKey)
         );
-        // Tab is the key the whole task is about, and it now ARRIVES. Flagging
+        // Tab is the key the whole task is about, and it now arrives. Flagging
         // it would be telling a developer to work around a bug that is fixed.
         assert!(
             !lint("if input.pressed(\"tab\") then bag() end\n", &api)
@@ -752,7 +752,7 @@ print(used)
     /// Exporting a name a `findScript` handle keeps is flagged on the line that
     /// exports it.
     ///
-    /// The runtime message for this points at the CALLER — "attempt to call
+    /// The runtime message for this points at the caller — "attempt to call
     /// field 'kind' (a string value)" — in a different file from the mistake,
     /// and only once something calls it. The export is the decidable half, and
     /// this is where it is decidable.
@@ -822,7 +822,7 @@ print(used)
         }
     }
 
-    /// …and where the VM has no ceiling (Luau — ADR-0028), the squiggle must not
+    /// …and where the VM has no ceiling (Luau), the squiggle must not
     /// appear at all. Stated in both directions rather than `#[cfg]`-skipped: a
     /// skipped test asserts nothing about the VM that skipped it, and a lint
     /// pointing at a wall that is not there is advice to break up a working
@@ -899,7 +899,7 @@ print(used)
         assert!(noisy.is_empty(), "the lint is too noisy on real code:\n{}", noisy.join("\n"));
     }
 
-    /// An unused PARAMETER is not a finding. A lifecycle hook's signature is
+    /// An unused parameter is not a finding. A lifecycle hook's signature is
     /// the engine's — `function update(node, dt)` that doesn't need `dt` is
     /// correct code, and nagging about it is how a warnings strip becomes
     /// something people switch off. An unused `local` still reports.
@@ -923,7 +923,7 @@ end
         assert!(hits.iter().any(|l| l.message.contains("unused")), "{hits:?}");
     }
 
-    /// The scripts we SHIP as examples must be lint-clean — all of them, every
+    /// The scripts we ship as examples must be lint-clean — all of them, every
     /// kind, zero hits.
     ///
     /// They are the first Lua anyone reads, they get copied into real projects,

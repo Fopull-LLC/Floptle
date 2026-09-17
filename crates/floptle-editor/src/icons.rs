@@ -56,7 +56,7 @@ pub(crate) const MENU: &str = "▾";
 pub(crate) const SETTINGS: &str = "⚙";
 
 /// Selection lock, on the Inspector's name row. Drawn faded when the lock is
-/// off and opaque when it is on — the STATE is the glyph's alpha, so there is
+/// off and opaque when it is on — the state is the glyph's alpha, so there is
 /// one thing to look at rather than an icon plus a label saying which it is.
 pub(crate) const LOCK: &str = "🔒";
 

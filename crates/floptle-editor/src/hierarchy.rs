@@ -189,7 +189,7 @@ impl EditorTabViewer<'_> {
     ///
     /// [`crate::Editor::reparent_many`] already filters a node dropped onto
     /// itself or onto its own descendant, and filtering it there is right — but
-    /// it filters SILENTLY, and a row that lights up green and then does nothing
+    /// it filters silently, and a row that lights up green and then does nothing
     /// is this engine's commonest bug shape. The row refuses in red instead.
     fn drop_target_ok(&self, sources: &[Entity], target: Entity) -> bool {
         !sources.contains(&target) && !sources.iter().any(|&s| self.is_under(target, s))
@@ -214,7 +214,7 @@ impl EditorTabViewer<'_> {
 }
 impl<'a> EditorTabViewer<'a> {
     pub(crate) fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
-        // Scene name + save at the top of the hierarchy. A PREFAB open on its
+        // Scene name + save at the top of the hierarchy. A prefab open on its
         // own says so, in its own colour and with its own glyph: the editing
         // surface is identical, and a save goes somewhere completely different,
         // so the one place that names what you are editing has to be unambiguous
@@ -255,7 +255,7 @@ impl<'a> EditorTabViewer<'a> {
 
         // ---- search ----------------------------------------------------------
         //
-        // The scope only bites while SEARCHING, and that is deliberate. Hiding
+        // The scope only bites while searching, and that is deliberate. Hiding
         // switched-off nodes from the tree itself would take away the only place
         // you can switch them back on — the disease, not the cure. But a search
         // is you asking "where is the thing I am working on", and the thing you
@@ -318,7 +318,7 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
-        // FOLD every parent, once, on the first draw after a scene load. Done here
+        // Fold every parent, once, on the first draw after a scene load. Done here
         // rather than at load time because this is where the parent⏵children map
         // exists — and doing it from the six places that replace the world would be
         // six chances to forget.
@@ -575,7 +575,7 @@ impl EditorTabViewer<'_> {
         }
         resp.dnd_set_drag_payload(NodePayload(e));
 
-        // Follow the selection: when the PRIMARY changes (a viewport pick, a
+        // Follow the selection: when the primary changes (a viewport pick, a
         // paste, a duplicate…), scroll its row into view — once, not per frame.
         if selected
             && self.selection.last() == Some(&e)
@@ -980,7 +980,7 @@ mod tests {
         assert!(p.offset < down, "a drag at the top edge did not scroll back up: {}", p.offset);
     }
 
-    /// The edge scroll belongs to the DRAG. A pointer resting at the bottom of
+    /// The edge scroll belongs to the drag. A pointer resting at the bottom of
     /// the panel with nothing in hand is just a pointer, and the tree under it
     /// must not run away.
     #[test]

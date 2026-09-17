@@ -51,7 +51,7 @@ pub(crate) struct VfxUiState {
     /// Bumped on every edit; the preview recompiles when it trails behind.
     doc_rev: u64,
     preview_rev: u64,
-    /// What the effect COSTS, re-measured whenever the doc changes.
+    /// What the effect costs, re-measured whenever the doc changes.
     /// Cached against `doc_rev` because profiling
     /// re-simulates the whole effect and an edit-per-frame would feel it.
     pub profile: crate::vfx::VfxProfile,
@@ -95,11 +95,11 @@ pub(crate) struct VfxUiState {
     /// that drag (auto-fit lanes only — so lifting a point can't stretch the axis).
     pub lane_drag: Option<(usize, LaneRef)>,
     pub lane_vrange: Option<(f32, f32)>,
-    /// The SETTLED value axis of each auto-fit lane, by `(track, lane)`.
+    /// The settled value axis of each auto-fit lane, by `(track, lane)`.
     ///
     /// A life-curve lane used to refit every frame, so the same curve was drawn
     /// at a different scale after each edit and a point you dragged upward
-    /// sprang back toward the middle. It is fitted once and then only GROWS —
+    /// sprang back toward the middle. It is fitted once and then only grows —
     /// never shrinking, so a key can never be edited off the strip, and never
     /// re-fitting on its own, so a change is legible against a stable axis.
     pub lane_settled: std::collections::HashMap<(usize, LaneRef), (f32, f32)>,
@@ -268,7 +268,7 @@ fn draw_density(painter: &egui::Painter, rect: Rect, profile: &crate::vfx::VfxPr
     if profile.alive.is_empty() || profile.peak == 0 || rect.width() < 2.0 || dur <= 0.0 {
         return;
     }
-    // The profile spans the effect's lifetime PLUS the tail its last particles
+    // The profile spans the effect's lifetime plus the tail its last particles
     // live out; the ruler spans only the lifetime. Sample by seconds so the
     // shape lands under the moment it belongs to.
     let n = (rect.width() as usize).clamp(2, 512);
@@ -325,7 +325,7 @@ pub(crate) fn lane_label(t: VfxLaneTargetDoc) -> &'static str {
     }
 }
 
-/// The FIXED vertical range of a scalar automation lane. Being fixed (not auto-fit)
+/// The fixed vertical range of a scalar automation lane. Being fixed (not auto-fit)
 /// is what makes the timeline DAW-like — and structurally rules out the value-axis
 /// feedback loop that crashed the old inspector curve editor. Shared with the
 /// Inspector's precise point editor so both clamp identically.
@@ -357,8 +357,8 @@ fn starter_lane(target: VfxLaneTargetDoc, dur: f32) -> VfxLaneDoc {
 
 // ---------------------------------------------------------------------------
 // Unified timeline lanes: a track's animatable curves, whether they shape a
-// particle over its LIFE (velocity/size/rotation/colour) or the emitter over the
-// effect's TIMELINE (the automation multipliers). Both are `VfxCurveDoc`s; the
+// particle over its life (velocity/size/rotation/colour) or the emitter over the
+// effect's timeline (the automation multipliers). Both are `VfxCurveDoc`s; the
 // timeline draws and edits them the same way, differing only in x-domain + range.
 // ---------------------------------------------------------------------------
 
@@ -371,7 +371,7 @@ pub(crate) enum LaneRef {
     /// one component (0=x,1=y,2=z) of a Vec3 life-curve, drawn as its own scalar
     /// sub-lane with independent value dragging + auto-fit axis — the elegant way to
     /// automate a vector without wrestling a single 3-channel stop lane. The three
-    /// sub-lanes share the underlying curve's key TIMES (a component edit rewrites
+    /// sub-lanes share the underlying curve's key times (a component edit rewrites
     /// only its channel of the shared key).
     LifeChannel(LifeProp, u8),
     /// An automation multiplier over effect time (index into `track.automation`).
@@ -678,7 +678,7 @@ impl EditorTabViewer<'_> {
 
         // ---- preview upkeep: advance/scrub the deterministic instance ----
         let lifetime = doc.lifetime.max(1e-3);
-        // A one-shot previews one full lifetime PLUS its longest particle tail,
+        // A one-shot previews one full lifetime plus its longest particle tail,
         // so fades past the timeline end are visible; loops preview seamlessly.
         let period = match doc.playback {
             VfxPlaybackDoc::Looping => f32::INFINITY,
@@ -1536,7 +1536,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
         // What the effect does over time, under its ruler. The timeline's axis
         // is already time and the one quantity that varies along it is how many
         // particles exist — so a change to a rate or a lane reads as a change to
-        // the EFFECT here, not only as a change to a curve.
+        // the effect here, not only as a change to a curve.
         draw_density(
             &painter,
             Rect::from_min_size(
@@ -1552,8 +1552,8 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
 }
 
 /// Draw + edit one lane over the timeline (DAW-style) — a property shaped over the
-/// particle's LIFE (velocity/size/rotation/colour) or an automation multiplier over
-/// the effect TIMELINE. Scalar lanes are a draggable point-curve on a fixed (auto)
+/// particle's life (velocity/size/rotation/colour) or an automation multiplier over
+/// the effect timeline. Scalar lanes are a draggable point-curve on a fixed (auto)
 /// or auto-fit (life) range; vector/colour lanes draw their channels/gradient with
 /// time-only stops (exact values edit in the Inspector). All edits are deferred (the
 /// caller owns `doc`); the 🔑 button drops a keyframe at the playhead.
@@ -1708,7 +1708,7 @@ fn curve_lane_ui(
             }
         }
         LaneVis::Scalar => {
-            // The value that means "no change", drawn and NAMED. For an
+            // The value that means "no change", drawn and named. For an
             // automation lane that is x1 — its neutral sits a quarter of the way
             // up a 0..4 strip, so "am I boosting or cutting" was a judgement
             // about pixel height. For a life curve it is 0, which used not to be
@@ -2073,7 +2073,7 @@ mod tests {
 
     #[test]
     fn starter_lane_spans_the_timeline_and_is_a_flat_no_op() {
-        // Keys authored in SECONDS across [0, dur] — the domain the bake expects.
+        // Keys authored in seconds across [0, dur] — the domain the bake expects.
         let l = starter_lane(VfxLaneTargetDoc::Rate, 2.0);
         assert_eq!(l.curve.keys.len(), 2);
         assert_eq!(l.curve.keys[0].t, 0.0);

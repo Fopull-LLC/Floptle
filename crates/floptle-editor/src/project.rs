@@ -50,7 +50,7 @@ impl Editor {
         self.asset_tree = build_assets(&self.project_root);
     }
 
-    /// Open a script in the user's preferred editor — the external one (ADR-0011) if
+    /// Open a script in the user's preferred editor — the external one if
     /// they prefer it, otherwise the in-engine IDE (focusing the Scripting tab).
     #[cfg(feature = "editor-ui")]
     pub(crate) fn open_script_preferred(&mut self, path: &str) {
@@ -141,7 +141,7 @@ impl Editor {
         path: &str,
         setting: crate::assets::TexSetting,
     ) {
-        // Stored under the PROJECT-RELATIVE key, which is how scenes and
+        // Stored under the project-relative key, which is how scenes and
         // materials reference a texture; callers hand over absolute paths.
         let path = crate::assets::asset_rel_path(path, &self.project_root);
         self.texture_settings.insert(path.clone(), setting);
@@ -153,7 +153,7 @@ impl Editor {
         self.texture_registry.retain(|k, _| !same(k));
         self.texture_registry_setting.retain(|k, _| !same(k));
         // The terrain palette bakes its own 256² copy at load, so a filter
-        // change has to re-RESAMPLE it — a sampler swap alone cannot un-blur a
+        // change has to re-resample it — a sampler swap alone cannot un-blur a
         // bilinear resize. Only re-upload if this texture is in the palette.
         if self.terrain_textures.contains(&path) {
             self.terrain_textures_dirty = true;
@@ -236,7 +236,7 @@ impl Editor {
     ///
     /// Both names per slot, because a part answers to both and neither is
     /// enough on its own: the object name is precise but is rewritten by import
-    /// when a model repeats a name (`Torso` → `Torso#2`), and the MATERIAL name
+    /// when a model repeats a name (`Torso` → `Torso#2`), and the material name
     /// is the one on the model's own list and usually the group somebody means.
     pub(crate) fn model_slots(
         &self,
@@ -558,7 +558,7 @@ impl Editor {
     /// The file the open scene loads from and saves to.
     ///
     /// **This is `scene_rel`, not `scenes/{scene_name}.ron`**.
-    /// `scene_name` is only the file STEM — it is what the hierarchy header and
+    /// `scene_name` is only the file stem — it is what the hierarchy header and
     /// the window title show, and what `scene.current()` hands a script. Building
     /// a save path out of it threw the subfolder away, so
     /// `scenes/cutscenes/Opening.ron` was loaded and `scenes/Opening.ron` was
@@ -640,7 +640,7 @@ impl Editor {
         let path = self.project_cfg_path();
         match floptle_scene::try_load_project(&path) {
             Ok(Some(mut cfg)) => {
-                // A project.ron that EXISTS but predates `script_vec3` gets its
+                // A project.ron that exists but predates `script_vec3` gets its
                 // vec3 choice pinned, exactly as `load_project` does — this
                 // call site reads the file itself (to tell "absent" from
                 // "unparseable"), so it has to carry the same rule or opening
@@ -729,7 +729,7 @@ impl Editor {
     /// may itself be relative (the default is plain `assets`) — so a stored path is
     /// usually already resolvable as-is. Only a bare project-relative path (e.g. a
     /// hand-edited `shaders/foo.flsl` in a scene file) needs the root joined on.
-    /// Joining unconditionally double-prefixes the root: `assets/assets/…` (ENOENT).
+    /// Joining unconditionally double-prefixes the root: `assets/assets/…` (enoent).
     pub(crate) fn resolve_asset_path(&self, path: &str) -> PathBuf {
         resolve_asset_path(&self.project_root, path)
     }
@@ -814,14 +814,14 @@ impl Editor {
     /// Rename a file/folder to `new_name` within its current parent directory. If the
     /// typed name has no extension, the original file's extension is kept (so naming a new
     /// `.lua` script "player" yields "player.lua", and a rename can't drop the extension).
-    /// The directories holding files keyed by a scene's STEM rather than by its
+    /// The directories holding files keyed by a scene's stem rather than by its
     /// path — terrain fields, the blockout map, vertex paint, autosaves.
     const SCENE_SIDECAR_DIRS: [&'static str; 4] = ["terrain", "maps", "paint", ".floptle/autosave"];
 
     /// Every sidecar that belongs to `old_stem`, paired with where it has to go
     /// for `new_stem` to find it.
     ///
-    /// Matched by the `<stem>.` PREFIX rather than by a list of extensions, so
+    /// Matched by the `<stem>.` prefix rather than by a list of extensions, so
     /// this keeps working when a new per-scene file is invented — the failure
     /// mode of an extension list is that the file nobody remembered is the one
     /// that goes missing, which is exactly the bug this exists to fix.
@@ -1012,7 +1012,7 @@ impl Editor {
         self.asset_tree = build_assets(&self.project_root);
     }
 
-    /// Import OS files by COPYING them into a project folder — the native
+    /// Import OS files by copying them into a project folder — the native
     /// file-explorer drag-and-drop. Sources are absolute paths from the OS; each
     /// lands in `dest_dir` (auto-suffixed on name collision so nothing is
     /// clobbered). Directories are copied recursively. Dropped models are
@@ -1085,7 +1085,7 @@ impl Editor {
 
     /// Open the OS's native file picker (multi-select) and import the chosen
     /// files into `dir` when the user confirms. This is the reliable
-    /// cross-platform import path: rfd's XDG-desktop-portal backend works on
+    /// cross-platform import path: rfd's xdg-desktop-portal backend works on
     /// Wayland — where winit delivers no drag-and-drop — as well as on X11,
     /// Windows and macOS. The picker runs off the UI thread (see
     /// [`crate::native_dialog`], which is also where the reason it *must* is
@@ -1140,7 +1140,7 @@ impl Editor {
                     .or_else(|| crate::anim::strip_ext(rel, floptle_scene::SPRITE_ANIM_EXT));
                 if let Some(ck) = clip_key {
                     self.anim.clips.retain(|(k, _)| k != ck);
-                    // …and it stops being a SPRITE key. Left behind, it refuses
+                    // …and it stops being a sprite key. Left behind, it refuses
                     // every future save to that key — forever, against a file
                     // that is no longer there.
                     self.anim.sprite_keys.remove(ck);
@@ -1151,7 +1151,7 @@ impl Editor {
                         self.anim_ui.sel_anim = None;
                     }
                 }
-                // A deleted MODEL: clear a bone/object selection or anim target riding it,
+                // A deleted model: clear a bone/object selection or anim target riding it,
                 // then rebind everything fresh (orphaned instances simply drop).
                 let rides_deleted = |e| {
                     matches!(self.world.get::<Matter>(e), Some(Matter::Mesh { asset_path }) if asset_path == rel)
@@ -1239,7 +1239,7 @@ impl Editor {
         // feature. A project that has one has an opinion, and only gets entries
         // it has no name for at all.
         //
-        // It used to top up at BINDING granularity, which could not tell "never
+        // It used to top up at binding granularity, which could not tell "never
         // had this" from "deleted this on purpose" or "kept it but scoped it to
         // one player". So every version bump silently re-added unscoped
         // bindings a two-player game had deliberately removed — an unscoped
@@ -1268,7 +1268,7 @@ impl Editor {
     }
 
     /// Load the project's active scene + the file it came from: the project's
-    /// chosen ENTRY scene (project.ron `entry_scene` — the same scene a build
+    /// chosen entry scene (project.ron `entry_scene` — the same scene a build
     /// boots into, so what you open is what ships), else `scenes/first.ron`,
     /// else the first `.ron` in `scenes/`, else a tiny built-in default.
     /// The returned path's stem becomes `scene_name`, so edits save back to the same
@@ -1318,7 +1318,7 @@ impl Editor {
             .strip_prefix(&self.project_root)
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| format!("scenes/{}.ron", self.scene_name));
-        // A new scene's tree starts FOLDED. Every path that replaces the world comes
+        // A new scene's tree starts folded. Every path that replaces the world comes
         // through here, so this is the one place that has to say so — the alternative was
         // six call sites and a seventh added later that forgot.
         //
@@ -1411,7 +1411,7 @@ impl Editor {
     /// those names resolve through `set_extra_script_dirs` or not at all. So
     /// every exported game that used a package came up with those nodes silent
     /// and nothing logged, because nothing had failed: the script was simply
-    /// not found. (`pkg://` ASSETS kept working the whole time, through the
+    /// not found. (`pkg://` assets kept working the whole time, through the
     /// `packages/<id>/` fallback in `resolve_pkg_ref` — which is exactly why
     /// this reads as "scripts are broken" rather than "packages are missing".)
     ///
@@ -1621,14 +1621,14 @@ impl Editor {
     }
 
     /// Save the open scene (+ its terrain fields/palette). Success clears the
-    /// dirty flag and the crash-recovery autosave; FAILURE keeps both and lands
+    /// dirty flag and the crash-recovery autosave; failure keeps both and lands
     /// in the Console loudly — a failed save must never look like a saved one
     /// (the old path printed to stderr and callers cleared `scene_dirty`
     /// unconditionally, which could silently lose work).
     pub(crate) fn save_scene(&mut self) -> bool {
         // never save during Play: the world holds simulation state (moved
         // bodies, script spawns), and a mid-play `scene.load(...)` may have
-        // swapped in ANOTHER scene entirely — writing that over the edited
+        // swapped in another scene entirely — writing that over the edited
         // scene's file (and its terrain) is exactly how work gets lost.
         if self.playing {
             self.console.push(
@@ -1750,7 +1750,7 @@ impl Editor {
         ok &= self.save_paint();
         ok &= self.save_tex_paint();
         ok &= self.save_maps();
-        // The texture PALETTE (which image fills each painted slot) is editor state,
+        // The texture palette (which image fills each painted slot) is editor state,
         // not in the field — persist it so painted textures survive a reload. Glowing
         // slots keep their `|glow` marker (see adopt_terrain's load). Cold terrains
         // count: their fields still splat this palette when they stream back in.
@@ -1855,7 +1855,7 @@ impl Editor {
         }
     }
 
-    /// After a scene loads: if a NEWER autosave exists (a crash or lost session
+    /// After a scene loads: if a newer autosave exists (a crash or lost session
     /// left unsaved work behind), arm the recovery prompt.
     pub(crate) fn check_autosave(&mut self) {
         self.autosave_prompt = None;
@@ -2154,7 +2154,7 @@ pub(crate) fn reset_refused_refs() {
 /// [`resolve_asset_path`], which is the only caller.
 fn resolve_asset_path_anywhere(project_root: &Path, path: &str) -> PathBuf {
     // `pkg://<id>/<rest>` — a package's own file, addressed by the package's
-    // IDENTITY rather than by where its folder happens to be. That is the whole
+    // Identity rather than by where its folder happens to be. That is the whole
     // point of the scheme: the same reference works whether the package was
     // copied into the project, linked to a working copy on another disk, or
     // renamed on the way in.
@@ -2252,7 +2252,7 @@ thread_local! {
     /// Global rather than threaded through `resolve_asset_path` because that
     /// function is called from around fifty places that have a project root and
     /// nothing else, and this is written exactly once per package load and only
-    /// ever read. It exists for LINKED packages; every other kind resolves from
+    /// ever read. It exists for linked packages; every other kind resolves from
     /// the project root alone.
     static PACKAGE_ROOTS: std::cell::RefCell<std::collections::HashMap<String, PathBuf>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
@@ -2300,7 +2300,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             ortho: false,
             ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
         },
-        // The default camera flies on play (hold right-mouse to look, WASD to move).
+        // The default camera flies on play (hold right-mouse to look, wasd to move).
         scripts: vec![floptle_scene::ScriptDoc {
             kind: "freelook".into(),
             enabled: true,
@@ -2451,7 +2451,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// carrying both has edits in the root copy that the game has never loaded, and
 /// the root one is almost certainly the newer, wanted work.
 ///
-/// Returned as the SUBFOLDER paths, because that is the file the user thinks
+/// Returned as the subfolder paths, because that is the file the user thinks
 /// they have been editing and the one they will want the other merged into.
 /// This only reports; nothing is moved. Guessing which of two files a person
 /// wants to keep is not a guess an editor gets to make silently — and the whole
@@ -2499,7 +2499,7 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
     out
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.
@@ -2578,7 +2578,7 @@ mod path_tests {
         );
         // The canonical project-relative form works the same way.
         assert_eq!(resolve_asset_path(&root, "textures/t.png"), root.join("textures/t.png"));
-        // A ref whose first component only HAPPENS to match the root name but has
+        // A ref whose first component only happens to match the root name but has
         // no file behind it falls back to the canonical join (missing-file default).
         assert_eq!(
             resolve_asset_path(&root, "assets/textures/missing.png"),
@@ -2599,7 +2599,7 @@ mod path_tests {
         let root = dir.join("Forgery");
         floptle_vfs::create_dir_all(root.join("models/items")).unwrap();
         floptle_vfs::write(root.join("models/items/key.glb"), b"glb").unwrap();
-        // A decoy at the root with the same file name: the LONGEST tail wins.
+        // A decoy at the root with the same file name: the longest tail wins.
         floptle_vfs::write(root.join("key.glb"), b"decoy").unwrap();
 
         let want = root.join("models/items/key.glb");
@@ -2607,7 +2607,7 @@ mod path_tests {
         assert_eq!(resolve_asset_path(&root, "/old/disk/Forgery/models/items/key.glb"), want);
         // …and on Windows', which is not even absolute here.
         assert_eq!(resolve_asset_path(&root, "C:\\Users\\ty\\Forgery\\models\\items\\key.glb"), want);
-        // An absolute path that EXISTS is still taken as written.
+        // An absolute path that exists is still taken as written.
         assert_eq!(resolve_asset_path(&root, want.to_str().unwrap()), want);
         // No tail of it in the project: missing — under the root, so every
         // loader reports it the way it reports a typo, and never as-written.
@@ -2858,7 +2858,7 @@ mod path_tests {
         const IMPORTERS: &[&str] =
             &["gltf_import::import(", "gltf_import::geometry(", "import_rigged("];
         // `anim.rs` extracts clips for `floptle bake clips <PROJECT> <MODEL>`,
-        // whose MODEL is an argument the caller typed — already absolute or
+        // whose model is an argument the caller typed — already absolute or
         // already relative to their cwd, and not a project-relative ref at all.
         const RAW_BY_DESIGN: &[&str] = &["anim.rs"];
         let mut bad = Vec::new();
@@ -2901,7 +2901,7 @@ mod script_vec3_pin_tests {
     /// (an existing project's `vec3` recorded as `exact`) is written by the
     /// windowed editor, which owns project.ron; `floptle inspect`, `check` and
     /// the rest declare `writes_project: false` and have to mean it. The
-    /// choice still RESOLVES to exact in memory either way.
+    /// choice still resolves to exact in memory either way.
     #[test]
     fn a_headless_open_resolves_the_pin_without_writing_the_file() {
         let dir = std::env::temp_dir().join(format!("floptle_pin_headless_{}", std::process::id()));

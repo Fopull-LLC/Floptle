@@ -7,7 +7,7 @@
 use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 
 /// Project an absolute world point to physical-pixel screen space (camera-relative,
-/// ADR-0015). Returns `None` when the point is behind the camera.
+/// Adr-0015). Returns `None` when the point is behind the camera.
 pub(crate) fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
     let rel = (world - cam_world).as_vec3();
     let clip = vp * rel.extend(1.0);
@@ -133,7 +133,7 @@ pub(crate) fn camera_frustum_lines(
     let up = rot * Vec3::Y;
     let right = rot * Vec3::X;
     let far = 2.2f32; // a compact visualization length, not the real far plane
-    // An ORTHOGRAPHIC camera has no apex: its frame is the same rectangle at
+    // An orthographic camera has no apex: its frame is the same rectangle at
     // every distance, so the gizmo is a BOX. Drawing the perspective cone for it
     // would say the shot narrows toward the camera, which is the one thing
     // choosing orthographic means it does not — and a gizmo that contradicts the
@@ -155,7 +155,7 @@ pub(crate) fn camera_frustum_lines(
     let corners = rect_at(far);
     let pc: Vec<Option<Vec2>> = corners.iter().map(|&c| project(c, cam_world, vp, w, h)).collect();
     let mut lines = Vec::new();
-    // The near end: the apex for a perspective camera, the near RECT for an
+    // The near end: the apex for a perspective camera, the near rect for an
     // orthographic one.
     let near: Vec<Option<Vec2>> = match ortho_height {
         Some(_) => rect_at(0.0).iter().map(|&c| project(c, cam_world, vp, w, h)).collect(),
@@ -177,7 +177,7 @@ pub(crate) fn camera_frustum_lines(
     lines
 }
 
-/// MODEL-LOCAL deduped triangle edges of an imported model — the mesh collider's
+/// Model-local deduped triangle edges of an imported model — the mesh collider's
 /// wireframe. Edges are deduped per part (shared triangle edges collapse) and a global
 /// budget caps a dense map so the overlay stays a sane line count.
 pub(crate) fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::ImportedModel) -> Vec<(Vec3, Vec3)> {
@@ -205,7 +205,7 @@ pub(crate) fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::Impo
 /// vertex per straddling cell (averaged edge crossings), connected to its +X/+Y/+Z
 /// neighbors. `stride` sets coarseness (bigger = fewer lines). Cached by the caller and
 /// projected to screen each frame.
-/// The edges of the surface a terrain COLLIDES with, in the field's local
+/// The edges of the surface a terrain collides with, in the field's local
 /// frame: the drawn triangles (`floptle_physics::drawn_surface`), each edge
 /// once. Drawn over the terrain, this either lies exactly on the picture or
 /// it does not — which is the whole question the toggle exists to answer.
@@ -410,7 +410,7 @@ pub(crate) fn point_light_lines(
         }
     }
     let r = range.clamp(0.2, 500.0) as f64;
-    // AN AIMED LAMP draws its CONE, not a ring around itself. The ring says
+    // AN aimed lamp draws its cone, not a ring around itself. The ring says
     // "this reaches this far in every direction", which for a spot is exactly
     // the thing that is not true — and a spot pointed at the ceiling looks
     // identical to one pointed at the floor if all you can see is a circle.
@@ -458,7 +458,7 @@ pub(crate) fn point_light_lines(
 /// bundle of parallel rays flowing along −`dir` (the way the light travels) to `anchor`,
 /// each capped with an arrowhead. `dir` points toward the sun (matches `Light.direction`).
 /// The directional light has no world position, so callers anchor it in front of the
-/// camera. All-`DVec3` so it stays precise under floating origin (ADR-0015). Empty if the
+/// camera. All-`DVec3` so it stays precise under floating origin. Empty if the
 /// direction is degenerate or nothing projects in front of the camera.
 pub(crate) fn light_dir_lines(
     anchor: DVec3,
@@ -855,12 +855,12 @@ pub(crate) fn rigidbody_lines(
 }
 
 // ---- particle emitter + force gizmos ------------------------------------
-// Visualize the SELECTED particle track: where particles are born (the emit shape,
+// Visualize the selected particle track: where particles are born (the emit shape,
 // warm) and which way they head / what forces push them (arrows). Geometry mirrors
 // `floptle_vfx::sim::sample_shape` exactly so the gizmo matches what emits.
 
 /// A particle emitter's birth shape, decoupled from the scene doc types. Cone `angle`
-/// is in DEGREES (half-angle of the spread cone about +Y), matching `EmitShape::Cone`.
+/// is in degrees (half-angle of the spread cone about +Y), matching `EmitShape::Cone`.
 pub(crate) enum EmitterViz {
     Point,
     Cone { angle: f32, radius: f32 },
@@ -880,7 +880,7 @@ const PG_SHAPE: [f32; 3] = [0.98, 0.62, 0.25]; // emitter birth shape (warm oran
 const PG_EMIT: [f32; 3] = [0.40, 0.95, 0.75]; // emit direction (cyan-green)
 const PG_FORCE: [f32; 3] = [0.95, 0.50, 0.90]; // force fields (magenta)
 
-/// Project a node-local point through world matrix `m` (camera-relative, ADR-0015).
+/// Project a node-local point through world matrix `m` (camera-relative).
 fn plocal(m: Mat4, p: Vec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
     project(m.transform_point3(p).as_dvec3(), cam_world, vp, w, h)
 }
@@ -1048,12 +1048,12 @@ pub(crate) const BONE_BODY_PX: f32 = 7.0;
 ///
 /// A bone used to be a bare line between two joints, and the only thing you
 /// could click was a 12-pixel disc on the joint itself. Two things follow from
-/// the octahedron that do not follow from a line. It has a WIDTH, so the whole
+/// the octahedron that do not follow from a line. It has a width, so the whole
 /// body is a target rather than a dart-board dot. And its belt is a real square
 /// in the bone's own frame, so it shows the bone's roll — which way the elbow
 /// bends — where a line is the same picture whatever the rotation about it.
 pub(crate) struct BoneViz {
-    /// The joint that DRIVES this bone: its head, the end it pivots about.
+    /// The joint that drives this bone: its head, the end it pivots about.
     /// Clicking the body selects this, because rotating it is what swings the
     /// bone — the same joint whose dot sits at the wide end.
     pub head_joint: usize,
@@ -1118,7 +1118,7 @@ pub(crate) fn rig_viz(
     h: f32,
 ) -> RigViz {
     let node_world = pose.filter(|p| p.len() == rig.skeleton.nodes.len()).unwrap_or(&rig.rest_world);
-    // Every joint's absolute world MATRIX, in skeleton order (so a parent is
+    // Every joint's absolute world matrix, in skeleton order (so a parent is
     // always already resolved — `Skeleton::new` guarantees parent < child). The
     // full matrix, not just the position: a bone's belt is squared to its own
     // frame, and that is where its roll comes from.
@@ -1148,7 +1148,7 @@ pub(crate) fn rig_viz(
 
 /// Build one bone's octahedron: head at joint `p`, tail at joint `i`.
 ///
-/// The belt is squared to the HEAD joint's own basis rather than to anything
+/// The belt is squared to the head joint's own basis rather than to anything
 /// screen-derived, which is the whole reason the shape carries roll: turn the
 /// joint about its bone axis and the octahedron visibly twists, where a line
 /// would not move at all.

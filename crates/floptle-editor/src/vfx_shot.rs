@@ -704,7 +704,7 @@ fn contact_sheet(frames: &[Vec<u8>], w: u32, h: u32, background: [f32; 3]) -> im
     let rows = (n as u32).div_ceil(cols.max(1));
     // **Filled, not left blank.** A grid rarely divides evenly, and a new
     // `RgbaImage` is transparent black — which anything showing the sheet paints
-    // WHITE. So a five-frame sheet came back with a white block in the corner
+    // White. So a five-frame sheet came back with a white block in the corner
     // that reads as a sixth frame, of a blown-out effect, that does not exist.
     let byte = |c: f32| (c.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
     let fill =
@@ -817,7 +817,7 @@ fn fitted_camera(cloud: &[(Vec3, f32)], origin: DVec3, aspect: f32) -> RenderCam
     let dist = dist.max(half.length() + 0.1);
 
     let eye = centre + (dir * dist).as_dvec3();
-    // Columns are (right, up, BACK) — the camera looks down its own −Z.
+    // Columns are (right, up, back) — the camera looks down its own −Z.
     let rot = Quat::from_mat3(&floptle_core::math::Mat3::from_cols(right, up, -fwd));
     RenderCamera::new(eye, rot, Projection::of_camera(FOV_Y, false, 10.0, 0.01, 10_000.0))
 }

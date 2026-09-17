@@ -24,7 +24,7 @@
 //!
 //! Every section is always here. A section that cannot act says what it
 //! would do and what it is waiting for, so a layer without a tileset still
-//! shows TILE and AUTOTILE, and the panel's shape does not change under you.
+//! shows tile and autotile, and the panel's shape does not change under you.
 
 use egui::{Color32, RichText};
 use floptle_core::{Entity, Matter, TileXform};
@@ -227,7 +227,7 @@ fn short_texture(tex: &str, page: u32) -> String {
 /// The line that stands in for a whole section when the layer has no tileset.
 ///
 /// The sections below the tileset used to vanish entirely without one — no tile
-/// heading, no AUTOTILE heading, nothing. Which is indistinguishable from an
+/// heading, no autotile heading, nothing. Which is indistinguishable from an
 /// engine that does not have per-tile collision or autotiling, and is exactly
 /// what one was reported as: "there isn't a way to build the collision shape for
 /// each tile", "I'm still not seeing any auto tiling settings". Both were built.
@@ -277,7 +277,7 @@ impl TileCtx<'_> {
         self.autotile_section(ui);
     }
 
-    // ---- LAYER --------------------------------------------------------------
+    // ---- layer --------------------------------------------------------------
 
     fn layer_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "LAYER");
@@ -340,7 +340,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- TOOL ---------------------------------------------------------------
+    // ---- tool ---------------------------------------------------------------
 
     fn tool_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TOOL");
@@ -361,7 +361,7 @@ impl TileCtx<'_> {
         });
         ui.small("Paint in the ⌖ Scene view. Press 9 for the tile tool, then B / E / R / G …");
 
-        // Orientation — the ⇔ ⇕ ↻ trio. With a selection they turn the SELECTION;
+        // Orientation — the ⇔ ⇕ ↻ trio. With a selection they turn the selection;
         // without one they turn the brush. Same buttons, because "turn this" is one
         // idea and having two sets of them is how you press the wrong one.
         let has_sel = self.tools.selection.is_some();
@@ -457,7 +457,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- GRID ---------------------------------------------------------------
+    // ---- grid ---------------------------------------------------------------
 
     fn grid_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "GRID");
@@ -511,7 +511,7 @@ impl TileCtx<'_> {
             );
         });
         // An overlay that draws nothing reads as "nothing here is solid", which
-        // is true and useless. Say which of the two it is. Read from the LAYER
+        // is true and useless. Say which of the two it is. Read from the layer
         // rather than `tools.editing` — this section runs before the one that
         // derives it, so `editing` here is a frame behind.
         if self.tools.show_collision && self.layer_tileset().is_empty() {
@@ -519,7 +519,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- TILESET ------------------------------------------------------------
+    // ---- tileset ------------------------------------------------------------
 
     /// The active layer's tileset path, straight from the node. Empty when the
     /// layer has none — the authority `tools.editing` is derived from.
@@ -534,7 +534,7 @@ impl TileCtx<'_> {
         section(ui, "TILESET");
         // `editing` is what every section below points at, and it used to be set
         // and never cleared — so selecting a layer with no tileset left the tile
-        // and AUTOTILE editors quietly writing to the previous layer's tileset.
+        // and autotile editors quietly writing to the previous layer's tileset.
         // It is derived from the layer, so derive it here, every frame, both ways.
         let Some(e) = self.tools.layer else {
             self.tools.editing = None;
@@ -634,7 +634,7 @@ impl TileCtx<'_> {
     /// The tileset's extra sheets.
     ///
     /// A level built out of a ground sheet, a props sheet and a decoration sheet
-    /// used to need three tilemap NODES, and that is not a workaround — a wall on
+    /// used to need three tilemap nodes, and that is not a workaround — a wall on
     /// one node is not a neighbour of a wall on another, so nothing autotiles
     /// across the join, the collision merge stops at it, and every grid tool
     /// stops there too. Pages put them on one layer.
@@ -748,7 +748,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- PALETTE ------------------------------------------------------------
+    // ---- palette ------------------------------------------------------------
 
     fn palette_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "PALETTE");
@@ -814,7 +814,7 @@ impl TileCtx<'_> {
             });
         }
         let page = self.tools.page;
-        // Every page reads from the TILESET, page 0 included; the layer's
+        // Every page reads from the tileset, page 0 included; the layer's
         // material is the fallback only where the tileset names no sheet, which
         // is the same rule the mesh builder follows. When these two disagreed
         // the palette showed one sheet and the map drew another.
@@ -881,8 +881,8 @@ impl TileCtx<'_> {
                         }
 
                         // Two different things are highlighted here and they are
-                        // not the same thing: what the BRUSH will place, and
-                        // what the TILE section is editing. They agree after an
+                        // not the same thing: what the brush will place, and
+                        // what the tile section is editing. They agree after an
                         // ordinary click and stop agreeing the moment you
                         // ctrl-click a second tile, so drawing one ring for both
                         // would make a bulk edit look like it was about to be
@@ -995,7 +995,7 @@ impl TileCtx<'_> {
                     .and_then(|s| s.groups.get(g as usize))
                     .is_some_and(|group| !group.tiles_for(mask).is_empty());
                 self.cmds.push(TileCmd::AddToRule(g, mask, idx));
-                // Only move on once a shape has SOMETHING. Clicking on to the
+                // Only move on once a shape has something. Clicking on to the
                 // next rule the moment a second tile lands would make adding a
                 // variant impossible — you would be typing into the next shape.
                 if self.tools.fill_advance && !had_one {
@@ -1012,7 +1012,7 @@ impl TileCtx<'_> {
                 let local = floptle_core::tile_in_page(idx);
                 self.tools.palette = Some((local % sc, local / sc, 1, 1));
                 self.tools.stamp = Stamp::one(idx);
-                // Clicking a tile that belongs to a group arms the GROUP: that is
+                // Clicking a tile that belongs to a group arms the group: that is
                 // what somebody clicking an autotile tile means, and arming the
                 // literal tile would paint one fixed corner piece everywhere.
                 //
@@ -1038,7 +1038,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- TILE ---------------------------------------------------------------
+    // ---- tile ---------------------------------------------------------------
 
     fn tile_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TILE");
@@ -1053,7 +1053,7 @@ impl TileCtx<'_> {
             return;
         };
         let Some(set) = self.store.get(&path).cloned() else { return };
-        // Every control below writes to the WHOLE selection. One tile is the
+        // Every control below writes to the whole selection. One tile is the
         // ordinary case and reads exactly as it did; more than one is what makes
         // setting up a sheet a minute's work instead of an afternoon's.
         let cells: Vec<u32> =
@@ -1243,8 +1243,8 @@ impl TileCtx<'_> {
     }
 
     /// Draw a tile's collider by hand: click to add a point, drag one to move
-    /// it, right-click to remove it. Every point snaps to the ART'S OWN PIXEL
-    /// GRID.
+    /// it, right-click to remove it. Every point snaps to the ART'S OWN pixel
+    /// Grid.
     ///
     /// The snapping is the part that matters and it is not a nicety. A slope is
     /// built out of several tiles whose diagonals have to *meet*: if one tile's
@@ -1331,7 +1331,7 @@ impl TileCtx<'_> {
         let drag_id = ui.id().with(("tile_shape_drag", cell));
         let mut held: Option<usize> = ui.data(|d| d.get_temp(drag_id));
 
-        // Which point the pointer is over — the hit test is in SCREEN space, so
+        // Which point the pointer is over — the hit test is in screen space, so
         // it stays a comfortable target whatever the tile's pixel density is.
         let hover_pt = resp.hover_pos().and_then(|m| {
             next.iter()
@@ -1355,7 +1355,7 @@ impl TileCtx<'_> {
             held = None;
         }
         // Clicking an existing point does nothing (you meant to drag it);
-        // clicking anywhere else inserts a point into the nearest EDGE, so a
+        // clicking anywhere else inserts a point into the nearest edge, so a
         // shape grows where you pointed instead of always at the end of the list
         // — which is what makes adding a step to a slope one click rather than a
         // rebuild.
@@ -1464,7 +1464,7 @@ impl TileCtx<'_> {
         }
     }
 
-    // ---- AUTOTILE -----------------------------------------------------------
+    // ---- autotile -----------------------------------------------------------
 
     fn autotile_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "AUTOTILE");
@@ -1831,7 +1831,7 @@ impl TileCtx<'_> {
         // The armed rule's tiles, one by one, because the grid only has room to
         // show the first. This is where a duplicate is added or taken back out.
         //
-        // Their art is looked up HERE, while `sheet_of` is still the only thing
+        // Their art is looked up here, while `sheet_of` is still the only thing
         // borrowing self — the strip below both mutates `fill_mask` and pushes
         // commands.
         let strip: Vec<VariantThumb> = armed
@@ -1973,10 +1973,10 @@ impl TileCtx<'_> {
 /// The neighbourhood a rule matches, drawn small in the corner of its slot.
 ///
 /// Eight dots around a centre: filled where this rule expects more of the same
-/// group, hollow where it expects an edge. Drawn OVER the tile art rather than
+/// group, hollow where it expects an edge. Drawn over the tile art rather than
 /// beside it because the pairing is the whole point — "this picture, for this
 /// shape" has to be readable at a glance across forty-seven of them.
-/// The four 45° ramps, as unit-tile outlines from the BOTTOM-LEFT. The glyph is
+/// The four 45° ramps, as unit-tile outlines from the bottom-left. The glyph is
 /// the shape: ◣ is filled at the bottom-left, which is what its points say.
 const RAMPS: &[(&str, &[[f32; 2]], &str)] = &[
     ("◣", &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], "ramp up to the left"),
@@ -1985,7 +1985,7 @@ const RAMPS: &[(&str, &[[f32; 2]], &str)] = &[
     ("◥", &[[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], "ceiling ramp, high on the right"),
 ];
 
-/// Which edge a new point belongs on: the one it is nearest to in SCREEN space.
+/// Which edge a new point belongs on: the one it is nearest to in screen space.
 ///
 /// Appending to the end instead would put every new point after the last one
 /// authored, so adding a step halfway along a slope would fold the outline over
@@ -2032,11 +2032,11 @@ fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKin
         if !corners && (dx != 0 && dy != 0) {
             continue;
         }
-        // `dy` is in ROW space — `-1` is NORTH, which is UP the screen — and
-        // egui's +y is DOWN, so the two agree and the row index is used as-is.
+        // `dy` is in ROW space — `-1` is north, which is UP the screen — and
+        // egui's +y is down, so the two agree and the row index is used as-is.
         //
         // It used to be negated, which drew the whole diagram upside down: the
-        // dot for "there is more of this group ABOVE me" appeared below the
+        // dot for "there is more of this group above me" appeared below the
         // centre. Every tile in a sheet then looked like it answered the
         // vertically mirrored neighbourhood, so picking tiles by the picture
         // built an autotile set that was upside down and looked, in a level,
@@ -2061,8 +2061,8 @@ fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKin
 /// head while drawing the sheet, and it is the one that tells you which of your
 /// tiles to click.
 ///
-/// The direction reads INVERTED on purpose and it is the whole trick: a tile
-/// with neighbours below and to the right is the piece at the TOP-LEFT of the
+/// The direction reads inverted on purpose and it is the whole trick: a tile
+/// with neighbours below and to the right is the piece at the top-left of the
 /// shape, because the shape continues away from it in both those directions.
 pub(crate) fn mask_shape_name(mask: u8, kind: AutotileKind) -> &'static str {
     use autotile::{E, EDGES, N, NE, NW, S, SE, SW, W};
@@ -2089,7 +2089,7 @@ pub(crate) fn mask_shape_name(mask: u8, kind: AutotileKind) -> &'static str {
         return base;
     }
     // Surrounded on all four edges, so the only thing left to say is which
-    // DIAGONAL is missing — the inside corner of an L-bend, the piece a 47-tile
+    // Diagonal is missing — the inside corner of an L-bend, the piece a 47-tile
     // sheet has and a 16-tile one does not.
     match (mask & (NE | SE | SW | NW)) ^ (NE | SE | SW | NW) {
         0 => "middle, fully surrounded",
@@ -2109,7 +2109,7 @@ fn describe_mask(mask: u8, kind: AutotileKind) -> String {
             continue;
         }
         if mask & bit != 0 {
-            // `dy` is in ROW space: -1 is north, which is ABOVE on screen. These
+            // `dy` is in ROW space: -1 is north, which is above on screen. These
             // were the other way round, so the panel said "below" while the tile
             // answered "above" — an author following the words drew a sheet that
             // was upside down and could not see why.
@@ -2134,7 +2134,7 @@ fn describe_mask(mask: u8, kind: AutotileKind) -> String {
 
 /// One tile of the sheet, drawn into `rect`, honouring its packed orientation.
 ///
-/// Goes through `tile_corner_drawn` — the SAME function the mesh builder uses — so
+/// Goes through `tile_corner_drawn` — the same function the mesh builder uses — so
 /// a preview cannot show one orientation and the map draw another. That is the
 /// whole reason the orientation maths lives in core rather than in the mesh.
 fn paint_tile(
@@ -2164,7 +2164,7 @@ fn paint_tile(
     // egui's `Image` cannot express a rotated UV window, so draw the quad as a
     // mesh with the four UVs permuted the same way the tilemap mesh permutes them.
     let mut mesh = egui::Mesh::with_texture(sheet.id());
-    // Corners of the drawn quad in (s, t): s left→right, t BOTTOM→top. egui's y
+    // Corners of the drawn quad in (s, t): s left→right, t bottom→top. egui's y
     // grows downward, so t = 1 is rect.top().
     for (s, t) in [(0u8, 1u8), (1, 1), (1, 0), (0, 0)] {
         let (a, b) = floptle_core::tile_corner(s, t, xf);
@@ -2190,7 +2190,7 @@ fn paint_tile(
 /// collider's shape, and the autotile neighbourhood it answers.
 fn draw_tile_overlays(ui: &egui::Ui, rect: egui::Rect, set: &TileSet, cell: u32, cell_px: f32) {
     // The collider, in the shape it actually is. A tick would say "solid"; this
-    // says "solid HERE", which is the part that is easy to get wrong and
+    // says "solid here", which is the part that is easy to get wrong and
     // impossible to notice.
     match set.collision(cell).shape() {
         floptle_tiles::TileShape::None => {}
@@ -2497,7 +2497,7 @@ impl crate::Editor {
         self.record();
         let n = self.tile_layers().len();
         let e = self.world.spawn();
-        // In FRONT of the previous layer, by a tenth of a unit. Stacking layers at
+        // In front of the previous layer, by a tenth of a unit. Stacking layers at
         // the same Z makes the depth test pick arbitrarily between them and the map
         // shimmers as the camera moves — the same last-bit problem the tilemap mesh
         // exists to avoid, one level up.
@@ -2789,7 +2789,7 @@ mod tests {
         }
     }
 
-    /// Arming a rule and clicking a tile assigns THAT tile to THAT
+    /// Arming a rule and clicking a tile assigns that tile to that
     /// neighbourhood. The old flow could only assign a whole preset at once,
     /// in cell order, from a multi-selection — correct for a sheet drawn in the
     /// preset's order and unusable otherwise, with no way to see or fix one.
@@ -2836,7 +2836,7 @@ mod tests {
         assert_eq!(at.variants(0, masks[5]), &[10, 11, 12]);
     }
 
-    /// While a rule is armed, a palette click ADDS. Advancing to the next shape
+    /// While a rule is armed, a palette click adds. Advancing to the next shape
     /// happens on the first tile only, or the second click would land on some
     /// other shape and adding a variant would be impossible.
     #[test]
@@ -2883,7 +2883,7 @@ mod tests {
         );
     }
 
-    /// Per-tile collision and autotiling were both built and both INVISIBLE
+    /// Per-tile collision and autotiling were both built and both invisible
     /// without a tileset — the sections returned before drawing their own
     /// heading, so the panel looked like an engine that has neither. Reported
     /// exactly that way, twice.
@@ -2905,7 +2905,7 @@ mod tests {
     /// the mask the engine resolves, and they did not: `OFFSETS` measures `dy`
     /// in ROW space, where `-1` is north — up the screen — and both the sentence
     /// and the 3×3 diagram negated it. So a tile that answers "there is more of
-    /// this group ABOVE me" was labelled *below*, and drawn with its dot below
+    /// this group above me" was labelled *below*, and drawn with its dot below
     /// the centre.
     ///
     /// The cost of that is not a wrong word. An author picking tiles by what the
@@ -2928,8 +2928,8 @@ mod tests {
     }
 
     /// The shape names are the other half of the fix, and they have to be the
-    /// INVERSE of the neighbour directions: a tile whose group continues below
-    /// and to the right is the piece at the TOP-LEFT of the shape. Getting this
+    /// Inverse of the neighbour directions: a tile whose group continues below
+    /// and to the right is the piece at the top-left of the shape. Getting this
     /// backwards would be the same bug wearing a different hat.
     #[test]
     fn a_tile_is_named_for_where_it_sits_not_where_its_neighbours_are() {
@@ -2952,7 +2952,7 @@ mod tests {
     }
 
     /// `tools.editing` was set and never cleared, so selecting a layer with no
-    /// tileset left the TILE and AUTOTILE editors pointed at the PREVIOUS
+    /// tileset left the tile and autotile editors pointed at the previous
     /// layer's — every edit landing on a tileset the layer does not name.
     #[test]
     fn a_layer_with_no_tileset_stops_editing_the_last_ones() {

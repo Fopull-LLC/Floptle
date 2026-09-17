@@ -195,7 +195,7 @@ impl Editor {
         let sys = self.script_host.input_system().clone();
         let mut raw =
             if game_focused { self.raw_input_for_game() } else { floptle_input::RawInput::default() };
-        // Even when the view isn't focused the banked edges must be DRAINED, or
+        // Even when the view isn't focused the banked edges must be drained, or
         // a press made while editing would fire the moment play regains focus.
         raw.pressed = std::mem::take(&mut self.tick_input_edges.0);
         raw.released = std::mem::take(&mut self.tick_input_edges.1);
@@ -482,7 +482,7 @@ fn input_map_mtime(root: &std::path::Path) -> Option<floptle_core::time::SystemT
 mod tests {
     use super::*;
 
-    /// Freeing the cursor has to reach the ACTION layer too, not just the raw
+    /// Freeing the cursor has to reach the action layer too, not just the raw
     /// `input` API. `LookEnable` is bound to the right mouse button in the
     /// starter map, so a camera would otherwise keep turning for the whole
     /// journey across to the Inspector — and every click on a slider would also

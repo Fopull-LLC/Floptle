@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(found[0].line, 1);
     }
 
-    /// Every input name the SHIPPED default scripts reference must exist in the
+    /// Every input name the shipped default scripts reference must exist in the
     /// starter map.
     ///
     /// This is the conversion's guard rail. A fresh project seeds both, and its

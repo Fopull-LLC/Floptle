@@ -1,4 +1,4 @@
-//! Game-UI editor integration (docs/ui-make.md, phase 1).
+//! Game-UI editor integration (docs/UI-make.md, phase 1).
 //!
 //! - `gather_game_ui`: walk the scene for `UiLayer` nodes, build each layer's
 //!   element tree, solve layout (CPU — cheap, readable), emit draw lists, and
@@ -22,10 +22,10 @@ use floptle_ui::{
 
 use crate::Editor;
 
-/// Is this element something a POINTER drives — a button, an interactive
+/// Is this element something a pointer drives — a button, an interactive
 /// slider, a text field, a draggable?
 ///
-/// Asked of the elements layout actually PLACED, which is the whole point: an
+/// Asked of the elements layout actually placed, which is the whole point: an
 /// `ElementSpec` query over the world counts a button inside a hidden panel,
 /// because `visible` doesn't cascade through the ECS the way it cascades
 /// through the solver. A tooltip is deliberately not on this list — hovering is
@@ -71,7 +71,7 @@ pub(crate) fn draw_ui_world(
 ) {
     let (uic, uib) = flsl;
     for (dl, _, origin, right, down, _) in canvases {
-        // ADR-0015: the world is drawn relative to the camera.
+        // Adr-0015: the world is drawn relative to the camera.
         let rel = Vec3::new(
             (origin[0] - cam_world.x) as f32,
             (origin[1] - cam_world.y) as f32,
@@ -526,7 +526,7 @@ impl Editor {
 
     /// Resolve styles + advance transitions over a freshly-built layer tree.
     ///
-    /// Runs on the Node COPIES, never the ECS — which is precisely why a
+    /// Runs on the Node copies, never the ECS — which is precisely why a
     /// play-time hover can't end up in a saved scene, and why this needs no
     /// cooperation from the play-snapshot machinery.
     ///
@@ -572,7 +572,7 @@ impl Editor {
         }
     }
 
-    /// Every enabled UI layer `want` accepts, as a STYLED node tree, z-sorted
+    /// Every enabled UI layer `want` accepts, as a styled node tree, z-sorted
     /// (stable, so scene order breaks ties). Also returns the index→entity map
     /// the scrollbar and mask lookups need.
     ///
@@ -825,7 +825,7 @@ impl Editor {
         // Capture the composited scene (now in `target`, before the UI draws
         // on top) into the backdrop, so `backdrop()` UI shaders can frost it.
         //
-        // Only where the target can be SAMPLED. A build draws the game
+        // Only where the target can be sampled. A build draws the game
         // straight into the swapchain, and a swapchain is samplable only if
         // the surface offered the flag — which a browser's canvas does not.
         // Binding it anyway is a validation error per frame and the whole
@@ -879,7 +879,7 @@ impl Editor {
         );
     }
 
-    /// UI layers rendered as world CANVASES — a flat quad at each layer node's
+    /// UI layers rendered as world canvases — a flat quad at each layer node's
     /// transform: origin = translation (canvas top-left), plane axes from its
     /// rotation, `canvas_scale` world units per design unit. Returns per layer:
     /// (draw list, solved rects in design units, origin, right, down, design_vp).
@@ -1008,7 +1008,7 @@ impl Editor {
     /// interaction. `None` when the cursor is hidden/locked (FPS look, game
     /// trap) or outside the game viewport.
     ///
-    /// The game's WISH is the test, not the live grab: while the editor is
+    /// The game's wish is the test, not the live grab: while the editor is
     /// holding the pointer (`cursor_freed`) a game that still wants it locked
     /// gets no pointer either, so the click that hands the cursor back doesn't
     /// also press whatever it happened to land on.
@@ -1055,7 +1055,7 @@ impl Editor {
     /// game? `ui_interactive` is whether the game has something clickable of
     /// its own under (or wanting) the pointer.
     ///
-    /// A game that is ASKING for the lock gets it back whatever it has on
+    /// A game that is asking for the lock gets it back whatever it has on
     /// screen. Gating that on its UI the way the click-to-play trap is gated
     /// would strand the cursor outright: while a game holds the lock its own
     /// elements don't take the pointer either (see `ui_pointer`), so a HUD with
@@ -1123,7 +1123,7 @@ impl Editor {
     pub(crate) fn ui_interact(&mut self) {
         self.ui_events.clear();
         let down = self.input_buttons[0];
-        // Edges come from banked EVENTS (never missed, even when a whole click
+        // Edges come from banked events (never missed, even when a whole click
         // fits inside one slow frame) or the sampled state transition.
         let pressed_edge = std::mem::take(&mut self.ui_lmb_pressed_evt) || (down && !self.ui_lmb_was);
         let released_edge =
@@ -1158,7 +1158,7 @@ impl Editor {
         }
         let pointer = self.ui_pointer();
         // Collect every interactive element in draw order (later = on top). Each
-        // item carries the pointer's position in that LAYER'S design units, so
+        // item carries the pointer's position in that layer'S design units, so
         // screen-space (pointer px / scale) and world-space (camera ray → panel
         // plane) hit-test through one uniform `contains`: (id, rect, pointer
         // design-units or None if off-panel, slider spec).
@@ -1167,7 +1167,7 @@ impl Editor {
         type InteractItem =
             (u32, [f32; 4], Option<[f32; 2]>, Option<SliderSpec>, Option<[f32; 4]>);
         let mut items: Vec<InteractItem> = Vec::new();
-        // Does anything the pointer CLICKS exist on screen this frame? Answered
+        // Does anything the pointer clicks exist on screen this frame? Answered
         // from the placed elements below, and published to `ui_pointer_wanted`.
         let mut pointer_wanted = false;
         // The topmost scroll view under the pointer this frame → (entity id,
@@ -1212,10 +1212,10 @@ impl Editor {
             && viewport[1] > 1.0
         {
             // Every enabled layer, screen-space and world alike — the same
-            // STYLED trees the draw passes lay out, which is the only reason a
+            // Styled trees the draw passes lay out, which is the only reason a
             // click lands where the element looks like it is.
             let (layers, ents) = self.ui_layer_trees(|_| true);
-            // Camera-relative pointer ray (for world-space panels). ADR-0015:
+            // Camera-relative pointer ray (for world-space panels):
             // the world is offset to the camera, so the ray origin is ~0.
             let cam = play_camera(&self.world, self.camera.render_camera());
             let aspect = viewport[0] / viewport[1];
@@ -1278,8 +1278,8 @@ impl Editor {
                     floptle_ui::place_scrollbars(roots, &mut placed, &bars);
                     let bar_targets: HashMap<u32, u32> = bars.into_iter().collect();
                     nav_layers.push((*layer, roots.clone(), placed.clone()));
-                    // Publish each screen-space element's SOLVED rect in
-                    // physical pixels — `node:uiRect()` reads it. In WINDOW
+                    // Publish each screen-space element's solved rect in
+                    // physical pixels — `node:uiRect()` reads it. In window
                     // space (design rect × scale, plus the surface's origin),
                     // because that is the space `input.mouse()` reports in and
                     // `camera.worldToScreen` returns; hit-testing the mouse
@@ -1620,7 +1620,7 @@ impl Editor {
     /// `selected` is already a first-class style state, so this needs no new
     /// look and no new hook — the element simply becomes selected, and the
     /// project's `selected` block says what that means. A group clears its
-    /// mates within the same LAYER, so two screens can reuse a group name.
+    /// mates within the same layer, so two screens can reuse a group name.
     fn ui_toggle(&mut self, clicked: u32) {
         let Some(ent) =
             self.world.entity_with::<Transform>(clicked)
@@ -2764,7 +2764,7 @@ impl Editor {
             }
         }
         // --- text field ---
-        // Lives under `text` because a field's VALUE is its text: everything
+        // Lives under `text` because a field's value is its text: everything
         // above (font, alignment, tracking, stroke, the style's `text_color`)
         // applies unchanged, and a script reads it the way it reads any label.
         let mut has_field = spec.field.is_some();
@@ -2915,7 +2915,7 @@ impl Editor {
                         }
                     });
             });
-            // 9-slice: the thing that makes YOUR panel art usable at any size.
+            // 9-slice: the thing that makes your panel art usable at any size.
             let mut sliced = img.slice.iter().any(|v| *v > 0.0);
             if ui
                 .checkbox(&mut sliced, "9-slice")
@@ -3304,7 +3304,7 @@ mod tests {
         );
     }
 
-    /// The reason the frame answer is computed from PLACED elements: a closed
+    /// The reason the frame answer is computed from placed elements: a closed
     /// menu's buttons are still sitting in the world with `visible: true` on
     /// them, and only the solver knows their panel is hidden.
     #[test]

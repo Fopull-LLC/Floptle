@@ -95,7 +95,7 @@ impl Editor {
         let net_hosting = self.net_server.is_some();
         let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
         let net_as_player = self.net_play_client.is_some();
-        // The MEASURED round trip, falling back to the transport's own number
+        // The measured round trip, falling back to the transport's own number
         // until the first probe comes back. Through a relay the transport can
         // only see its own leg, so it reports host↔relay and calls it the
         // player's ping — off by a whole hop, and always in the flattering
@@ -119,7 +119,7 @@ impl Editor {
             .or_else(|| self.net_server.as_ref().map(|s| s.late_inputs()))
             .unwrap_or(0);
         let replays = crate::shadow::list_replays(&self.project_root);
-        // A real session (QUIC) has no hub: the link is the actual network, so
+        // A real session (quic) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
             && self.net_hub.is_none();
@@ -204,7 +204,7 @@ impl Editor {
                 s.visuals = vis.clone();
                 // **Leave the scrollbar its own gutter.**
                 //
-                // egui's scroll bars FLOAT by default: they are drawn over the
+                // egui's scroll bars float by default: they are drawn over the
                 // contents and allocate no width. So the last few pixels of
                 // every scrolling panel are behind a bar — a slider's label
                 // ellipsised down to its first letter, a `…` menu half over the
@@ -304,7 +304,7 @@ impl Editor {
         out.perf_snapshot.pacing = Pacing {
             mean_ms: self.frame_ms,
             p99_ms: self.frame_low_ms,
-            // `refresh_period` is in SECONDS (it is compared against `dt`).
+            // `refresh_period` is in seconds (it is compared against `dt`).
             refresh_ms: self.refresh_period * 1000.0,
             snap_rate: self.dt_snap_rate,
             present_wait_ms: self.present_wait_ms,
@@ -411,7 +411,7 @@ impl Editor {
             // the same bug as one you never freed.
             window.set_cursor_visible(true);
         }
-        // **Against the dims last APPLIED, not against what they were at the top
+        // **Against the dims last applied, not against what they were at the top
         // of this frame.** The old check captured the value before the UI pass
         // and compared after it, which caught exactly one source of change:
         // Project Settings. A script setting `app.setRetroHeight` runs before
@@ -439,7 +439,7 @@ impl Editor {
         // Allocated the first frame a scene asks for them and dropped again when
         // it stops: this is a full-frame mip chain, and much the largest thing
         // the renderer holds, so a project that never turns reflections on must
-        // not carry one. It follows the COMPOSITED size, which in retro mode is
+        // not carry one. It follows the composited size, which in retro mode is
         // the internal resolution — reflecting a full-res picture into a 320×240
         // scene would be sharper than anything else in the frame.
         let ssr_on = light_node.reflections;
@@ -716,7 +716,7 @@ impl Editor {
                         ui.close();
                     }
                 });
-                // HELP, and specifically somewhere to REPORT things. The tracker used
+                // Help, and specifically somewhere to report things. The tracker used
                 // to appear once, in the Hub's About tab, which is not where anybody
                 // is standing when something goes wrong.
                 ui.menu_button("Help", |ui| {
@@ -805,7 +805,7 @@ impl Editor {
                             out.cmd.step_tick = true;
                         }
                     });
-                    // The tick counter, so an observed event has a frame NUMBER you
+                    // The tick counter, so an observed event has a frame number you
                     // can put in a frame-data table.
                     ui.label(
                         egui::RichText::new(format!("tick {game_tick_no}")).monospace().weak(),
@@ -876,7 +876,7 @@ impl Editor {
                                 "can't save during Play — press Stop first (Play changes aren't kept)",
                             );
                     } else if scene_dirty_now {
-                        // Only a BUTTON when there is something to save. A
+                        // Only a button when there is something to save. A
                         // chip that looks pressable and does nothing is the
                         // small dead interaction this is meant to replace.
                         if ui
@@ -1560,7 +1560,7 @@ impl Editor {
     ) {
         let NetSnapshot { net_hosting, net_peer_count, net_as_player, net_rtt, net_pred_stats, net_late_inputs, net_is_real, .. } = net.clone();
         // Client-side input timing, from the server's InputAck feedback —
-        // the only place a JOINER can see whether its inputs run late.
+        // the only place a joiner can see whether its inputs run late.
         let net_input_ack = self.net_play_client.as_ref().and_then(|c| c.input_ack());
         // ---- net-stats overlay: one compact line while a session runs, so
         // connection health is visible without the 🌐 panel open ----
@@ -1785,7 +1785,7 @@ impl Editor {
         // The Scene tab is transparent so the 3D render shows through; the others
         // paint opaque over it. Users can drag/re-dock/tab these freely.
         //
-        // Clear the Scene rect first: egui_dock only runs the ACTIVE tab's `ui`,
+        // Clear the Scene rect first: egui_dock only runs the active tab's `ui`,
         // so if Scene is tabbed behind Scripting, scene_ui never runs and the rect
         // would otherwise stay pinned to the old viewport region — letting clicks,
         // context-menus and model-drops fall through onto whatever panel now
@@ -1963,7 +1963,7 @@ impl Editor {
             // A build has nothing to restore to — no header, and Escape
             // belongs to the game (cursor release), not the layout.
             if !player_mode {
-                // A PANEL, not a bare `ui.horizontal`. A plain row paints no
+                // A panel, not a bare `ui.horizontal`. A plain row paints no
                 // background of its own, so the strip it occupied stayed
                 // transparent and the 3D surface render showed through it —
                 // a band of scene along the top edge of every maximized tab,
@@ -2300,7 +2300,7 @@ impl Editor {
         }
 
         // Project Settings used to be a fixed-size modal window here. It's
-        // now the ⚙ Settings DOCK TAB (see `settings_ui.rs`): draggable,
+        // now the ⚙ Settings dock TAB (see `settings_ui.rs`): draggable,
         // dockable beside the viewport, searchable, and closed by default.
 
     }
@@ -3200,7 +3200,7 @@ impl Editor {
                     // The size/detail pair silently decides quality, and the old
                     // copy here ("set detail higher before sculpting a large one")
                     // Terrain 2.0: the field is sparse and unbounded — the dialog
-                    // sizes a STARTING slab, and memory scales with the surface,
+                    // sizes a starting slab, and memory scales with the surface,
                     // not the volume. Show the honest estimate live.
                     let (chunks, mb) = crate::terrain_ui::new_terrain_preview(
                         cfg.size_xz,

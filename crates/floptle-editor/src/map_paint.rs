@@ -1,14 +1,14 @@
 //! Carrying a blockout's paint across a geometry edit.
 //!
-//! Vertex paint is one colour per RENDER vertex and texture paint is one patch
-//! per RENDER triangle — and a map mesh re-triangulates from scratch every time
+//! Vertex paint is one colour per render vertex and texture paint is one patch
+//! per render triangle — and a map mesh re-triangulates from scratch every time
 //! you pull a face. So after an extrude, the block that used to be "the top
 //! face's four corners" is just four numbers with nothing to attach to; applied
 //! blind it lands on whatever now occupies those indices, which is paint on the
 //! wrong surfaces. Dropping it instead is honest, and infuriating: touching one
 //! wall would clear a level's shading.
 //!
-//! So the editor keeps a DURABLE name for every render vertex and triangle:
+//! So the editor keeps a durable name for every render vertex and triangle:
 //!
 //! * a face is named by the (sorted) set of mesh vertices it uses, hashed —
 //!   stable through face reindexing, which `delete_faces` and `knife` both do;
@@ -50,7 +50,7 @@ pub(crate) struct MapPaintIdent {
     tris: Vec<Vec<TriKey>>,
 }
 
-/// One map mesh's paint, addressed by the DURABLE names of the surfaces it sits
+/// One map mesh's paint, addressed by the durable names of the surfaces it sits
 /// on rather than by index. That is what makes it survive a round trip through
 /// geometry that stopped existing: an undo restores the mesh, the triangulation
 /// comes back with the same names, and each colour/patch finds its surface again.
@@ -85,7 +85,7 @@ fn face_key(mesh: &MapMesh, face: u32) -> FaceKey {
 /// Name every render vertex and triangle of `slots` (which must be the
 /// triangulation of `mesh`).
 pub(crate) fn ident_of(mesh: &MapMesh, slots: &[SlotMesh]) -> MapPaintIdent {
-    // One hash per FACE, not per corner — a 20k-corner blockout would otherwise
+    // One hash per face, not per corner — a 20k-corner blockout would otherwise
     // re-sort and re-hash the same face four times over.
     let keys: Vec<FaceKey> = (0..mesh.faces.len() as u32).map(|f| face_key(mesh, f)).collect();
     let at = |f: u32| keys.get(f as usize).copied().unwrap_or(0);
@@ -255,7 +255,7 @@ impl Editor {
                 }
             }
         }
-        // Undo/redo: surfaces coming BACK have no live colour to carry, so the
+        // Undo/redo: surfaces coming back have no live colour to carry, so the
         // step's stash supplies theirs. Live paint always wins — anything you
         // painted since is never overwritten by a resurrected surface.
         for (k, c) in &restore.verts {
@@ -429,7 +429,7 @@ mod tests {
     }
 
     /// Re-assigning faces to another material slot re-groups the parts, and the
-    /// paint has to follow the FACE into its new part rather than staying at an
+    /// paint has to follow the face into its new part rather than staying at an
     /// index that now draws something else.
     #[test]
     fn a_face_keeps_its_name_when_it_moves_to_another_slot() {

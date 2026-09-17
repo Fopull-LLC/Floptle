@@ -1,4 +1,4 @@
-//! Text fields, drag & drop, and tooltips at run time (docs/ui-styles.md §D).
+//! Text fields, drag & drop, and tooltips at run time (docs/UI-styles.md §D).
 //!
 //! The three of them share one idea: **the engine runs the mechanism and the
 //! game owns the look.** A field has a caret but no border of its own; a drag
@@ -207,7 +207,7 @@ impl Editor {
         let Some(mut state) = self.ui_edit else {
             // Nothing focused: the editing keys are dropped rather than banked
             // (clicking into a field would otherwise replay everything typed at
-            // the menu before it), and `input_typed` is left ALONE so it
+            // the menu before it), and `input_typed` is left alone so it
             // reaches `input.typed()`. A focused field consumes typing; without
             // one, the game gets it. That is the whole suppression rule.
             self.ui_text_ops.clear();
@@ -351,7 +351,7 @@ impl Editor {
 
     /// Show, hide and position the layer's tooltip element.
     ///
-    /// The engine writes text into one of YOUR elements and moves it. It draws
+    /// The engine writes text into one of your elements and moves it. It draws
     /// nothing: a tooltip's look is a panel, a shadow, a font and a delay, and
     /// four of those five are already yours.
     pub(crate) fn ui_tooltips(
@@ -406,7 +406,7 @@ impl Editor {
 
     /// Keep every repeater's children matching its `count`.
     ///
-    /// Spawns and destroys only the DIFFERENCE. A list that gains one row
+    /// Spawns and destroys only the difference. A list that gains one row
     /// keeps the other nine, with their scripts' state, their hover, their
     /// in-flight style transitions and their scroll position — rebuilding the
     /// lot every frame is what makes a hand-rolled list flicker and forget.

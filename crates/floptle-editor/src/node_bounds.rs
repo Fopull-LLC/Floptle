@@ -314,7 +314,7 @@ mod tests {
 
     /// Nothing that draws through the loop is left unmeasured by accident.
     ///
-    /// Written as an explicit list so ADDING a Matter kind that draws geometry
+    /// Written as an explicit list so adding a Matter kind that draws geometry
     /// makes somebody decide, here, whether it can be culled — rather than
     /// silently inheriting "always submit" and quietly costing a frame.
     #[test]

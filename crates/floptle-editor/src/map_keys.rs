@@ -4,7 +4,7 @@
 //! Two rules make "doesn't interfere with anything else" a property of the
 //! design instead of a promise:
 //!
-//! 1. **Context.** Map chords are only ever consulted while the Map TOOL is
+//! 1. **Context.** Map chords are only ever consulted while the Map tool is
 //!    active, the cursor isn't in a text field, and Ctrl is up. Every
 //!    application-wide shortcut is either Ctrl-modified (undo/save/copy…) or
 //!    lives outside that context, so nothing the map binds can reach them.

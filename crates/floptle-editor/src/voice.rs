@@ -6,7 +6,7 @@
 //! once a tick to ship what the microphone heard, and [`VoiceChat::receive`] to
 //! hand arriving frames to the right speaker.
 //!
-//! ## It lives with the SESSION, not the scene
+//! ## It lives with the session, not the scene
 //!
 //! Every playing voice is reset by a scene swap, which for a spatial one-shot
 //! is right and for a conversation is not — the server switching maps must not
@@ -317,7 +317,7 @@ impl VoiceChat {
     pub fn rebind_scene(&mut self, audio: &mut crate::audio::AudioSystem) {
         let stale: Vec<VoiceId> = self.speakers.values().filter_map(|s| s.voice).collect();
         if let Some(engine) = audio.engine() {
-            // The VOICES are re-made (the mixer's per-scene state resets under
+            // The voices are re-made (the mixer's per-scene state resets under
             // them), but the rings they read from are not, so whatever had
             // already been decoded is still there to play.
             for id in stale {
@@ -364,7 +364,7 @@ impl VoiceChat {
         }
     }
 
-    /// the HARNESS MICROPHONE: a WAV played in as though a peer were speaking.
+    /// the harness microphone: a WAV played in as though a peer were speaking.
     ///
     /// Voice is the one feature that normally needs two machines, two people
     /// and a microphone to try at all, which makes it the one most likely to
@@ -414,13 +414,13 @@ impl VoiceChat {
         Some((t.peer, seq, packet))
     }
 
-    /// TESTING: push audio straight at the capture, and open its gate.
+    /// Testing: push audio straight at the capture, and open its gate.
     #[cfg(test)]
     pub fn inject_microphone(&mut self, pcm: &[f32]) {
         self.capture.inject(pcm);
     }
 
-    /// TESTING: open the mic gate without a device.
+    /// Testing: open the mic gate without a device.
     #[cfg(test)]
     pub fn set_transmit(&mut self, on: bool) {
         self.capture.set_transmit(on);
@@ -570,7 +570,7 @@ mod tests {
         let buffered = |peer: u64| {
             rows.iter().find(|r| r.0 == peer).map(|r| r.1).unwrap_or(0.0)
         };
-        // The claim is about COST, not about volume: a muted speaker's audio is
+        // The claim is about cost, not about volume: a muted speaker's audio is
         // never decoded, so nothing reaches their ring at all.
         assert_eq!(buffered(3), 0.0, "a muted speaker's audio was decoded anyway");
         assert!(buffered(4) > 0.0, "…while the control speaker really did decode");

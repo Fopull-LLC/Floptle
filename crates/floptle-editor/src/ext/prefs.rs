@@ -156,7 +156,7 @@ impl Stores {
         let project_path = Some(project_root.join(".floptle/packages").join(format!("{id}.ron")));
         let user = user_path.as_ref().map(|p| read(p)).unwrap_or_default();
         let project = project_path.as_ref().map(|p| read(p)).unwrap_or_default();
-        // Session survives a package RELOAD (it is "until the editor quits"),
+        // Session survives a package reload (it is "until the editor quits"),
         // so it is carried over rather than rebuilt.
         let session = self.by_pkg.remove(id).map(|s| s.session).unwrap_or_default();
         self.by_pkg.insert(

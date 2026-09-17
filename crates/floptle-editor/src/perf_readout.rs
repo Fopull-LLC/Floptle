@@ -64,7 +64,7 @@ impl PerfSnapshot {
     }
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.
@@ -291,7 +291,7 @@ pub(crate) fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl F
     any().filter(|&m| m > 0).map(|mhz| 1000.0 / mhz as f32).unwrap_or(0.0)
 }
 
-/// Is the DISPLAY pacing the frame, rather than the scene being slow
+/// Is the display pacing the frame, rather than the scene being slow
 ///?
 ///
 /// The signature `docs/subsystems/renderer.md` already describes: `acquire`
@@ -340,7 +340,7 @@ mod fifo_pacing_tests {
         assert_eq!(fifo_pacing_multiple(16.7, 0.3, 16.68), None);
     }
 
-    /// A GENUINELY slow scene that happens to cost close to two refreshes is
+    /// A genuinely slow scene that happens to cost close to two refreshes is
     /// not this — the whole point of the `cost_ms` half of the test.
     #[test]
     fn a_scene_that_is_actually_slow_is_not_reported_as_display_pacing() {
@@ -375,7 +375,7 @@ mod refresh_tests {
 
         // The surface maps and the real output answers.
         let live = chosen_refresh_period(boot, dp2, hdmi);
-        // In SECONDS: `refresh_period` is compared against `dt`, not against a
+        // In seconds: `refresh_period` is compared against `dt`, not against a
         // millisecond readout. 144.001 Hz -> 6.944 ms.
         assert!((live - 1.0 / 144.001).abs() < 1e-6, "{live}");
 
@@ -391,7 +391,7 @@ mod refresh_tests {
     }
 }
 
-/// Draw how the frames are ARRIVING, beside what they cost.
+/// Draw how the frames are arriving, beside what they cost.
 ///
 /// **Two different questions, and an fps number answers neither on its own.** A
 /// scene costing 8 ms that presents at 20 fps is a display path pacing the

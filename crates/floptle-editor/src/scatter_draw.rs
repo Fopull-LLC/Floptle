@@ -95,7 +95,7 @@ impl ScatterCache {
 /// Drop an instance onto the real surface under it.
 ///
 /// `ground` casts a ray and answers the distance to the first surface, if any.
-/// A prop with no ground under it is DROPPED rather than left floating at the
+/// A prop with no ground under it is dropped rather than left floating at the
 /// region's nominal height — a tree hanging in the air over a canyon reads as a
 /// bug, and a missing tree reads as a canyon.
 /// The instance stays in the source's own frame; only the RAY goes out to the
@@ -292,7 +292,7 @@ impl crate::Editor {
     /// by a script) had nothing to hand scatter, because scatter took a file
     /// path and a plant is not a file.
     ///
-    /// Baked at DECLARE time, not per instance: editing the prefab while the
+    /// Baked at declare time, not per instance: editing the prefab while the
     /// game runs does not re-bake it, exactly as editing a `.glb` mid-run does
     /// not re-import it.
     ///
@@ -326,7 +326,7 @@ impl crate::Editor {
         }
         let parts = self.bake_scatter_prototype(asset);
         if parts.is_empty() {
-            // **"Nothing to draw" has to be a fact about the ASSET.**
+            // **"Nothing to draw" has to be a fact about the asset.**
             //
             // A bake registers meshes on the GPU, so with no GPU it comes back
             // empty whatever the asset is — and `floptle run` has no GPU and
@@ -358,7 +358,7 @@ impl crate::Editor {
                     None,
                 );
             } else {
-                // Cached, but remembered as a NON-answer: an editor that later
+                // Cached, but remembered as a non-answer: an editor that later
                 // gets a GPU re-bakes it (see `scatter_protos_gpuless`). Not
                 // caching at all was the obvious move and the wrong one — a
                 // headless `floptle run` bakes inside every one of its thousands
@@ -517,7 +517,7 @@ mod tests {
     /// A prototype of several parts draws one instance per part, each at its
     /// place within the prop and all sharing the prop's transform.
     /// That is what lets a generated plant — a trunk and
-    /// A field is culled by DIRECTION, not only by distance.
+    /// A field is culled by direction, not only by distance.
     ///
     /// `band_at` has always rejected props past the last LOD band, so a field was
     /// bounded — but never oriented. A full disc submitted its whole area
@@ -623,7 +623,7 @@ mod tests {
         assert!((ys[0] - ys[1]).abs() > 0.5, "the offset part moved: {ys:?}");
     }
 
-    /// A prop with no ground under it is DROPPED, not left floating at the
+    /// A prop with no ground under it is dropped, not left floating at the
     /// region's nominal height. A tree hanging in the air over a canyon reads
     /// as a bug; a missing tree reads as a canyon.
     #[test]
@@ -766,7 +766,7 @@ mod tests {
         assert!(!out.is_empty(), "…while still drawing the field");
     }
 
-    /// The draw budget cuts the HORIZON, not your feet. The sweep is ordered
+    /// The draw budget cuts the horizon, not your feet. The sweep is ordered
     /// nearest first for exactly this reason: a budget spent on whichever
     /// chunks a nested loop reached first leaves holes in front of the player
     /// and props behind the fog.
@@ -871,7 +871,7 @@ mod tests {
             "{casts:?} props were re-settled onto the ground because their planet moved; \
              a settled height is expressed in the body's own frame and cannot go stale"
         );
-        // Every prop is in the same place on the PLANET as before. Draw
+        // Every prop is in the same place on the planet as before. Draw
         // positions are camera-relative, so read them back into the body's own
         // frame — the planet turned as well as moved, and a prop that rode it
         // correctly turned with it.

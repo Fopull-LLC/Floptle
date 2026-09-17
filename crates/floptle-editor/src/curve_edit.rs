@@ -342,7 +342,7 @@ pub(crate) fn curve_editor(
 
     // Common shapes, one click. Every curve was dragged by hand from a straight
     // line, which is where most of the authoring time in the tab actually went.
-    // These rewrite the two ENDS' tangents and leave the
+    // These rewrite the two ends' tangents and leave the
     // values alone, so an ease is a shape applied to a curve you already have
     // rather than a curve that replaces it.
     ui.horizontal(|ui| {
@@ -409,13 +409,13 @@ pub(crate) fn curve_editor(
     };
     // ---- the value axis ----------------------------------------------------
     //
-    // It used to REFIT every time the pointer lifted, so the same curve was drawn
+    // It used to refit every time the pointer lifted, so the same curve was drawn
     // at a different scale after each edit and a key you dragged upward sprang
     // back toward the middle. An axis that moves under you is an axis you cannot
     // read a change against, which was most of "it's hard to tell how my change
     // will affect it".
     //
-    // So: fit once, then keep it. It may only GROW, and only when the curve has
+    // So: fit once, then keep it. It may only grow, and only when the curve has
     // actually left it — that way an edit can never push a key off-screen, and
     // the graph is never redrawn smaller than it was a moment ago. Frozen
     // outright mid-drag, which is the original NaN guard: an axis that grew while
@@ -558,7 +558,7 @@ fn curve_clip_id() -> egui::Id {
 
 /// The standard easings, as tangent shapes applied to a curve's ends.
 ///
-/// Deliberately not a curve GENERATOR: the values you authored are the ones you
+/// Deliberately not a curve generator: the values you authored are the ones you
 /// want, and an ease is how the curve gets between them. Applying one to a
 /// three-key curve eases every segment, which is what "ease this" means.
 #[derive(Clone, Copy, PartialEq, Eq)]

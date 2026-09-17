@@ -50,7 +50,7 @@ impl floptle_net::Occluder for LevelSight<'_> {
 
 /// The rewound world for a stamped combat intent (`docs/multiplayer.md`
 /// §7): every networked node's pose (+ its scripts' `synced` vars) at the
-/// tick the SENDER perceived — their stamp minus each node's interp delay,
+/// tick the sender perceived — their stamp minus each node's interp delay,
 /// clamped to the rewind window. Poses only exist for transform-synced nodes;
 /// synced vars rewind for every networked node.
 fn build_rewind_scope(
@@ -111,7 +111,7 @@ pub(crate) struct HiddenServer {
 ///
 /// Split out from [`Editor::refuse_second_session`] so the decision can be
 /// asserted without standing up a session: the failure this exists to fix was a
-/// SILENT one, and a message that stopped being produced would leave no trace
+/// Silent one, and a message that stopped being produced would leave no trace
 /// in any other test.
 pub(crate) fn second_session_reason(hosting: bool, is_client: bool) -> Option<&'static str> {
     if hosting {
@@ -171,7 +171,7 @@ impl Editor {
             if now != self.net_lobby_code {
                 let addr = self.net_relay_hosting.clone().unwrap_or_default();
                 match (&self.net_lobby_code, &now) {
-                    // Gone: say it as a WARNING, because unlike a game filling
+                    // Gone: say it as a warning, because unlike a game filling
                     // up this one is broken — nobody can join until it is back.
                     (Some(_), None) => self.console.push(
                         floptle_script::LogLevel::Warn,
@@ -382,7 +382,7 @@ impl Editor {
                     self.net_join_timeout = timeout_s;
                     self.net_join_local()
                 }
-                // `net.join("cloud://UABCDE")` — the code's first LETTER names
+                // `net.join("cloud://UABCDE")` — the code's first letter names
                 // the region, and the region list is already on disk, so this
                 // resolves without asking fopull.com anything. That is the
                 // whole reason the join path never depends on the control
@@ -730,7 +730,7 @@ impl Editor {
             let _ = c.take_anim_updates();
         }
         // The ghost follows scene switches exactly like a remote client:
-        // reload the scene from DISK into its hidden world, rebind NetIds.
+        // reload the scene from disk into its hidden world, rebind NetIds.
         let ghost_switch = self.net_client.as_mut().and_then(|(c, _)| c.take_scene_switch());
         if let Some(scene) = ghost_switch {
             let loaded = self
@@ -779,7 +779,7 @@ impl Editor {
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
-                // A host is not joining anything — but a RELAY host can stop
+                // A host is not joining anything — but a relay host can stop
                 // being reachable while it carries on simulating perfectly, and
                 // a lobby screen that reads "joined" through a relay outage is
                 // lying to the person staring at it.
@@ -828,7 +828,7 @@ impl Editor {
         }
         let hub = floptle_net::MemoryHub::new();
         // **Impairment reaches the loopback harness too**.
-        // `net_impair_wrap` was applied at the two real tails — QUIC and the
+        // `net_impair_wrap` was applied at the two real tails — quic and the
         // relay — so `FLOPTLE_NET_IMPAIR` did nothing at all to an in-process
         // session. That was invisible while the harness was only reachable from
         // the 🌐 panel beside a live link; now that `run --ghosts` makes it the
@@ -908,7 +908,7 @@ pub(crate) struct ClientSidePlan {
 /// `rollback` is the live driver's node set (empty when none is running).
 /// Those nodes are the exception to every rule here: every peer simulates
 /// them, so they are filtered out of both passes (the driver runs their
-/// hooks itself) but their bodies stay AWAKE (the driver steps them itself).
+/// hooks itself) but their bodies stay awake (the driver steps them itself).
 /// Both halves are unioned onto whatever the session decided rather than
 /// replacing it, because this function and the rollback start each own only
 /// part of the answer.
@@ -928,7 +928,7 @@ pub(crate) fn plan_client_side(
         if !(r.transform || r.physics) {
             continue; // var-only: scripts run on the client too
         }
-        // A node the DRIVER owns is locally simulated — only the scheduling of
+        // A node the driver owns is locally simulated — only the scheduling of
         // its ticks moved. So it goes in `dskip`, not `skip`: `skip` gates
         // every pass including `lateUpdate`, which no driver replays, and a
         // fighter writing its model yaw there silently stopped in net play.
@@ -958,7 +958,7 @@ pub(crate) fn plan_client_side(
 
 impl Editor {
     /// Client-side session setup shared by the 2c harness and a real
-    /// `quic://` join: every TRANSFORM/PHYSICS-synced authority node becomes
+    /// `quic://` join: every transform/physics-synced authority node becomes
     /// snapshot-driven (scripts skipped, body deactivated — snapshots own it);
     /// var-only Networked nodes keep running everywhere (the door pattern).
     /// The Predicted node owned by `my_owner` (if any) becomes the local
@@ -1175,7 +1175,7 @@ impl Editor {
 
     fn voice_tick(&mut self) {
         let cmds = self.script_host.take_voice_commands();
-        // The server's say on who hears whom goes to the SESSION, not to this
+        // The server's say on who hears whom goes to the session, not to this
         // machine's audio path — that is the whole point of it being a rule
         // rather than a volume.
         for (peer, to) in Self::voice_forwards(&cmds) {
@@ -1396,9 +1396,9 @@ impl Editor {
     }
 
     /// A queued `scene.load(...)` from a script, routed by session role:
-    /// offline = plain switch; HOSTING = switch locally, announce to every
+    /// offline = plain switch; hosting = switch locally, announce to every
     /// client (they load + rebind), rebuild the session against the new scene;
-    /// a JOINED client = refused (the server drives scenes — ask it via an
+    /// a joined client = refused (the server drives scenes — ask it via an
     /// RPC). Runs at the top of a frame, never mid-frame under the scripts.
     pub(crate) fn perform_scene_request(&mut self, req: &floptle_script::SceneRequest) {
         use floptle_script::SceneRequest;
@@ -1468,7 +1468,7 @@ impl Editor {
             // new scene without the stream ever having restarted.
             self.voice_rebind_scene();
             self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
-            // A scene switch ENDS the match rather than carrying it across. The
+            // A scene switch ends the match rather than carrying it across. The
             // state ring is indexed by node position, the slot order comes from
             // scene order, and the new scene's fighters are different nodes —
             // none of that survives. `switch_scene` above already told the
@@ -1499,7 +1499,7 @@ impl Editor {
 
     /// **Already in a session — and say which, rather than doing nothing.**
     ///
-    /// Every way into a session (`net.host` over QUIC or a relay, `net.join`
+    /// Every way into a session (`net.host` over quic or a relay, `net.join`
     /// over either, and the in-editor client) refuses while one is already
     /// running, which is correct: a second one must not tear down the first.
     /// What was wrong was refusing in silence. Five call sites each returned
@@ -1523,7 +1523,7 @@ impl Editor {
         true
     }
 
-    /// Host a real session on a UDP port (QUIC): other machines running the
+    /// Host a real session on a UDP port (quic): other machines running the
     /// same project join with `net.join("quic://<ip>:port")`. The play world
     /// is the authoritative server — and scene-authored Predicted nodes belong
     /// to the first joining peer, whose replayed inputs drive them in the tick
@@ -1577,7 +1577,7 @@ impl Editor {
         );
     }
 
-    /// Host a real session through a rendezvous RELAY: nobody port-forwards —
+    /// Host a real session through a rendezvous relay: nobody port-forwards —
     /// the relay hands out a lobby code and friends join with it from
     /// anywhere that can reach the relay. Self-host `floptle-relay`, or use a
     /// managed one (Floptle Cloud).
@@ -1670,7 +1670,7 @@ impl Editor {
     }
 
     /// Put the bad link in front of a real transport, if this build has one.
-    /// Applied at the two tails every real session funnels through, so QUIC and
+    /// Applied at the two tails every real session funnels through, so quic and
     /// the relay are covered by construction rather than by remembering.
     pub(crate) fn net_impair_wrap(
         t: Box<dyn floptle_net::Transport>,
@@ -1712,7 +1712,7 @@ impl Editor {
         // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
         // global script passes, run per-tick with their owner's replayed
         // input instead. Slot #1 (owner None) is the host's — it stays in the
-        // global passes under the host's live keyboard. On a DEDICATED server
+        // global passes under the host's live keyboard. On a dedicated server
         // there is no host, so nothing is pre-assigned and this starts empty:
         // the slots are handed out as peers arrive.
         self.net_refresh_remote_predicted();
@@ -1751,7 +1751,7 @@ impl Editor {
         self.console.push(floptle_script::LogLevel::Debug, who, None);
     }
 
-    /// Join a real session at `host:port` (QUIC). The play world becomes a
+    /// Join a real session at `host:port` (quic). The play world becomes a
     /// predicting client of a server on another machine — same machinery as
     /// "Test as remote player", minus the hidden server.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1796,7 +1796,7 @@ impl Editor {
         self.net_join_with(Box::new(transport), &format!("quic://{addr}"));
     }
 
-    /// Join a session through a relay by LOBBY CODE.
+    /// Join a session through a relay by lobby code.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
         if !self.playing {
@@ -1831,7 +1831,7 @@ impl Editor {
         Self::net_assign_scene_owners(&mut self.world, self.dedicated);
         let mut client =
             NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
-        // `net.join(addr, {timeout = …})` — only ever bounds a WAKING server
+        // `net.join(addr, {timeout = …})` — only ever bounds a waking server
         //; an ordinary join is answered in a round trip.
         if let Some(t) = self.net_join_timeout.take() {
             client.set_join_timeout(std::time::Duration::from_secs_f32(t));
@@ -1848,7 +1848,7 @@ impl Editor {
         );
     }
 
-    /// "Test as remote player" (2c): the PLAY world becomes a predicted client
+    /// "Test as remote player" (2c): the play world becomes a predicted client
     /// and a hidden authoritative server (full second sim + Lua host) runs
     /// behind the simulated link. Your character predicts locally, the server
     /// re-runs your inputs, divergences rewind-replay — the real netcode feel,
@@ -2049,7 +2049,7 @@ impl Editor {
         // Dispatch the client intents that arrived by tick start (the pump
         // above), before this tick's scripts — with lag compensation: an rpc
         // stamped `{withInput = true}` gets a rewind scope holding every
-        // networked node's pose + synced vars at the tick its sender PERCEIVED
+        // networked node's pose + synced vars at the tick its sender perceived
         // (their stamp minus that node's interp delay, clamped to the rewind
         // window). `net.rewind(peer, fn)` applies it around the handler's
         // queries (`docs/multiplayer.md` §7).
@@ -2219,7 +2219,7 @@ impl Editor {
         self.net_hidden_spawn(spawns);
     }
 
-    /// `net.spawn(...)` from a HIDDEN-SERVER script — the local harness's half
+    /// `net.spawn(...)` from a hidden-server script — the local harness's half
     /// of runtime spawning, so per-player avatars can be tested with one
     /// machine and one keyboard instead of two of each.
     ///
@@ -2252,7 +2252,7 @@ impl Editor {
         // Read the tick's actions before borrowing the session mutably.
         let ni = self.current_net_input();
         let Some(cs) = self.net_play_client.as_mut() else { return };
-        // A rollback session ships its own inputs, at their APPLIED tick and
+        // A rollback session ships its own inputs, at their applied tick and
         // with no stamp offset (`net_rollback_tick`). Sending here too would put
         // the same tick on the wire twice under two different numbering schemes.
         if !cs.is_rollback() {
@@ -2606,7 +2606,7 @@ impl Editor {
                 Self::net_assign_scene_owners(&mut self.world, self.dedicated);
                 // Stale prediction history must not survive into the new scene.
                 self.net_predictor = None;
-                // Neither may a stale DRIVER. Its nodes belong to the world
+                // Neither may a stale driver. Its nodes belong to the world
                 // that just went away: kept, it would drive freed entities and
                 // hold their ids in both script filters, which are recomputed
                 // just below and would otherwise inherit the ghosts. If the new
@@ -2842,7 +2842,7 @@ impl Editor {
             }
         }
         // A remote player's avatar (`net.spawn(..., { owner = peer })` +
-        // Predicted): its scripts run with the OWNER's replayed input, not
+        // Predicted): its scripts run with the owner's replayed input, not
         // the host's keyboard.
         let mut bound = false;
         for &e in &ents {
@@ -2859,7 +2859,7 @@ impl Editor {
         }
     }
 
-    /// Resolve what `net.spawn(path)` names into the SUBTREE that will be
+    /// Resolve what `net.spawn(path)` names into the subtree that will be
     /// spawned, positioned. Shared by the real host and the local harness, so
     /// the two cannot drift about what a path means.
     ///
@@ -2872,7 +2872,7 @@ impl Editor {
         path: &str,
         pos: Option<[f64; 3]>,
     ) -> Option<Vec<floptle_scene::NodeDoc>> {
-        // Accepts a scene file or a PREFAB — by name ("bullet") or path
+        // Accepts a scene file or a prefab — by name ("bullet") or path
         // ("prefabs/bullet.prefab.ron").
         let all = if path.ends_with(floptle_scene::PREFAB_EXT)
             || self.resolve_prefab_request(path).is_some()
@@ -2928,8 +2928,8 @@ impl Editor {
         Some(nodes)
     }
 
-    /// Ghost gizmos: CYAN = where a ghost client believes every replicated
-    /// node is (2b hosting); ORANGE = the hidden server's authoritative truth
+    /// Ghost gizmos: cyan = where a ghost client believes every replicated
+    /// node is (2b hosting); orange = the hidden server's authoritative truth
     /// (2c play-as-client — the gap to your character is your prediction).
     pub(crate) fn net_ghost_gizmos(&mut self) {
         if !self.net_ghosts {
@@ -2968,7 +2968,7 @@ mod tests {
     /// **A refused second session says which one you are already in.**
     ///
     /// Refusing is correct — a second session must not tear down the first —
-    /// and refusing in SILENCE was the bug. Five call sites returned with no
+    /// and refusing in silence was the bug. Five call sites returned with no
     /// console entry, so a script that called `net.host` twice got a no-op it
     /// could not tell from success, because `net.role()` reads the same either
     /// way. `floptle run --join` is where it surfaced: it printed "the reason
@@ -3129,9 +3129,9 @@ mod tests {
 
 /// **Multiplayer over the network, in a browser: not yet.**
 ///
-/// Both transports this editor offers are UDP QUIC — direct, or through a relay
+/// Both transports this editor offers are UDP quic — direct, or through a relay
 /// — and a page cannot open a UDP socket at all. The browser's answer is
-/// WebTransport, which is QUIC over HTTP/3 and would be a third `Transport`
+/// WebTransport, which is quic over HTTP/3 and would be a third `Transport`
 /// impl beside the two in `floptle-net`; it is not a gate that can be flipped.
 /// `net.local` (same-process sessions) is unaffected and works here.
 ///
@@ -3408,9 +3408,9 @@ mod cloud_project_tests {
             Editor::relay_for_code(&two_regions(), "UABCDE").unwrap(),
             "us-east.relay.fopull.com:7788"
         );
-        // A planned region can still be JOINED — somebody is hosting there, and
+        // A planned region can still be joined — somebody is hosting there, and
         // refusing to reach them would be refusing to fix a region by testing
-        // it. Only HOSTING is gated on `up`.
+        // it. Only hosting is gated on `up`.
         assert_eq!(
             Editor::relay_for_code(&two_regions(), "EZZZZZ").unwrap(),
             "eu-central.relay.fopull.com:7788"
@@ -3468,7 +3468,7 @@ mod cloud_project_tests {
             why.contains("https://fopull.com/cloud?game=Fofighter"),
             "the register form takes the name, so it is prefilled: {why}"
         );
-        // The path the WEBSITE tells people to use. If this string and the
+        // The path the website tells people to use. If this string and the
         // site's ever disagree, one of the two is sending developers to a menu
         // that is not there.
         assert!(
@@ -3539,7 +3539,7 @@ mod cloud_project_tests {
     /// because nothing downstream ever compares the two clocks.
     ///
     /// Measured that way in the field: the joiner mispredicted 100 % of ticks
-    /// on a LOOPBACK link with a two-tick delay, re-simulating ~3.7 ticks per
+    /// on a loopback link with a two-tick delay, re-simulating ~3.7 ticks per
     /// tick, while the host mispredicted none. Every checksum agreed, so it
     /// presented as "rollback feels worse for my friend than for me".
     #[test]

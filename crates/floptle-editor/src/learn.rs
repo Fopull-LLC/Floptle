@@ -632,7 +632,7 @@ impl EditorTabViewer<'_> {
                         {
                             ui.ctx().copy_text(src.to_string());
                         }
-                        // Never overwrite: once the file is there it is THEIRS,
+                        // Never overwrite: once the file is there it is theirs,
                         // even if what they typed is different from this. The
                         // whole point of typing it out is being allowed to
                         // diverge from it.

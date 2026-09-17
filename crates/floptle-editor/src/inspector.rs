@@ -173,7 +173,7 @@ pub(crate) fn component_header_no_copy(ui: &mut egui::Ui, title: &str, can_remov
 /// The tiling controls for one texture binding: an Off / Tile / Triplanar mode
 /// row, then the active mode's fields. Returns true when anything changed.
 /// Shared by the base-texture row and each shader texture slot (proposal §8:
-/// tiling is per-BINDING; wrap/filter stay per-texture in the Assets panel).
+/// tiling is per-binding; wrap/filter stay per-texture in the Assets panel).
 fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
     use floptle_core::Tiling;
     let mut changed = false;
@@ -303,7 +303,7 @@ pub(crate) struct ScriptRowCtx<'a> {
 }
 
 /// A section header inside a script's tunables (`--@header Movement`) — the same
-/// TITLE ──── rule the Map tab uses, so panels read alike.
+/// Title ──── rule the Map tab uses, so panels read alike.
 fn param_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
@@ -384,7 +384,7 @@ fn script_tunables_ui(
         }
     }
 
-    // A row whose stored value is OVERRIDING the script's default, dropped
+    // A row whose stored value is overriding the script's default, dropped
     // after the walk so the row itself can hold its `&mut` while it draws.
     let mut reset: Option<(bool, usize)> = None; // (is a number, index)
     for name in order {
@@ -822,7 +822,7 @@ pub(crate) fn material_props_ui(
         );
     }
 
-    // ---- custom shader (ADR-0007): pick a .flsl; its exposed uniforms and
+    // ---- custom shader: pick a .flsl; its exposed uniforms and
     // texture slots become the rows below, live-editing the group(3) params.
 
     crate::responsive::grid(ui, "mat_shader", |ui| {
@@ -857,7 +857,7 @@ pub(crate) fn material_props_ui(
             m.shader_textures.clear();
             r.changed = true;
         }
-        // Straight to the graph. Everywhere a shader can be PICKED it can now be
+        // Straight to the graph. Everywhere a shader can be picked it can now be
         // opened, because the alternative is finding it again in the Assets
         // panel every time you want to change a line of it.
         if let Some(path) = m.shader.clone()
@@ -948,7 +948,7 @@ pub(crate) fn material_props_ui(
                 );
             }
         } else if let Some(entry) = sdf.get(&shader_path) {
-            // An sdf-stage shader: geometry, not a surface — its knobs still
+            // An SDF-stage shader: geometry, not a surface — its knobs still
             // edit live (they ride the raymarch globals).
             ui.small("◈ sdf stage — this shader IS the node's geometry (use on a Field Shape)");
             if let Some(err) = &entry.error {
@@ -999,7 +999,7 @@ pub(crate) fn material_props_ui(
         }
     }
 
-    // ---- the surface MAPS. The answer to "where do I put a normal map".
+    // ---- the surface maps. The answer to "where do I put a normal map".
     //
     // Above the lighting model on purpose: a normal map and an occlusion map
     // describe the surface itself and apply under either model, so they must not
@@ -1571,7 +1571,7 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// "◑ Materials" for a selected model ASSET: every embedded material — its
+    /// "◑ Materials" for a selected model asset: every embedded material — its
     /// tint, whether it has a texture, and which sub-objects draw with it — plus
     /// the per-model embedded-texture filter (persisted in the `.rig.ron`
     /// sidecar). The registry only knows models something has loaded; a model
@@ -1752,7 +1752,7 @@ impl EditorTabViewer<'_> {
                      tunables) and ignore the rest.",
                 );
         }
-        // Everything this panel is about to write goes onto the PRIMARY. Take the
+        // Everything this panel is about to write goes onto the primary. Take the
         // "before" here so the change can be found by comparison afterwards —
         // an immediate-mode panel leaves no other record of what it touched.
         let multi = multi_edit::Snapshot::take(self.world, self.selection);
@@ -1788,7 +1788,7 @@ impl EditorTabViewer<'_> {
     fn lighting_node_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
-        // What ELSE is lighting this scene — counted before the `Light`
+        // What else is lighting this scene — counted before the `Light`
         // borrow, because the answer needs the whole world.
         //
         // "I set intensity to 0 and I can still see" is a fair thing to
@@ -2335,7 +2335,7 @@ impl EditorTabViewer<'_> {
             // keeping).
             let targets: Vec<floptle_core::Entity> =
                 if sel_all.contains(&e) { sel_all.clone() } else { vec![e] };
-            // Do the selected nodes AGREE about their layer? If they do
+            // Do the selected nodes agree about their layer? If they do
             // not, the combo must not claim they do — showing the
             // primary's layer over a mixed selection is a readout that
             // is wrong about four nodes out of five.
@@ -2356,7 +2356,7 @@ impl EditorTabViewer<'_> {
                     for name in self.layer_names {
                         // Ticked only when the whole selection is on it.
                         let ticked = !mixed && *name == cur;
-                        // A mixed selection may be UNIFIED onto the
+                        // A mixed selection may be unified onto the
                         // layer the primary already has — that is a real
                         // edit and the obvious way to ask for it. Only a
                         // selection that already agrees can be a no-op.
@@ -2648,7 +2648,7 @@ impl EditorTabViewer<'_> {
                     // 2D. The grid is edited from
                     // Lua — a room is re-dressed per floor — so the
                     // Inspector states the shape and the one thing that
-                    // is easy to get wrong: the sheet is the MATERIAL's.
+                    // is easy to get wrong: the sheet is the material's.
                     Matter::Tilemap { cols, rows, tile, data, tileset } => {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("grid");
@@ -2681,7 +2681,7 @@ impl EditorTabViewer<'_> {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("tileset");
                             if tileset.is_empty() {
-                                // Named as the two FEATURES somebody would
+                                // Named as the two features somebody would
                                 // go looking for, and coloured, because
                                 // this was reported twice as the engine
                                 // not having either of them.
@@ -3186,7 +3186,7 @@ impl EditorTabViewer<'_> {
                                  the Lighting node.",
                             )
                             .changed();
-                        // AIMING it. Above the emitter section because
+                        // Aiming it. Above the emitter section because
                         // it is the bigger question — "does this lamp
                         // light the room or one thing in it" changes
                         // what every control under it means.
@@ -3230,7 +3230,7 @@ impl EditorTabViewer<'_> {
                                 .changed();
                         }
 
-                        // The EMITTER. Switching shape keeps whatever
+                        // The emitter. Switching shape keeps whatever
                         // size the old one had where the two agree, so
                         // trying rect against disk is one click and not
                         // a re-measure.
@@ -3862,7 +3862,7 @@ impl EditorTabViewer<'_> {
                             // More than one island is worth seeing rather than
                             // finding out about when a character will not go
                             // somewhere: it is usually a door nobody fits
-                            // through. The SHARE is what makes the number
+                            // through. The share is what makes the number
                             // actionable — "494 areas" says nothing, "the
                             // biggest holds 3% of the floor" says the bake
                             // is shattered and points at the settings.
@@ -5437,7 +5437,7 @@ impl EditorTabViewer<'_> {
             // One row per sub-object, because that is what an override is
             // keyed by. A flattened prop's object name is its material
             // name, so the two read the same there.
-            // Which part is SELECTED right now — the object picked in the
+            // Which part is selected right now — the object picked in the
             // viewport or in Objects & Rig. When that changes, this list
             // follows it: the selected part's editor opens and the rest
             // shut. A model with a dozen parts otherwise makes you scroll
@@ -5923,7 +5923,7 @@ impl EditorTabViewer<'_> {
                         }
                     }
                     // Bounce/friction/gravity/locks only matter on a
-                    // SIMULATED body — grey them out otherwise so the
+                    // Simulated body — grey them out otherwise so the
                     // mode dropdown reads as the one switch it is.
                     let dynamic = rb.mode == BodyMode::Dynamic;
                     ui.add_enabled_ui(dynamic, |ui| {
@@ -6295,7 +6295,7 @@ impl EditorTabViewer<'_> {
         {
             let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
                 || world.get::<floptle_core::MeshCollider>(e).is_some();
-            // A tilemap you PAINTED SOLID and cannot stand on. The
+            // A tilemap you painted solid and cannot stand on. The
             // warning existed, and it was printed to the Console at Play
             // — which is the one moment you are looking at the game and
             // not at the editor, and by then "I fall through the floor"
@@ -6352,7 +6352,7 @@ impl EditorTabViewer<'_> {
                 } else {
                     // The collider doubles as the node's sun-shadow caster:
                     // primitives stand in as analytic proxy shapes, and a
-                    // Collidable MESH is baked into a shadow-only occluder
+                    // Collidable mesh is baked into a shadow-only occluder
                     // volume (its true silhouette — interiors go dark).
                     let mut casts = world
                         .get::<floptle_core::CastShadow>(e)
@@ -6536,7 +6536,7 @@ impl EditorTabViewer<'_> {
                             });
                         });
                         // Everything this script declares — editor
-                        // buttons, then its tunables in DECLARATION
+                        // buttons, then its tunables in declaration
                         // order, grouped under `--@header` sections and
                         // drawn as the widget each one's annotations ask
                         // for. See `script_meta`.
@@ -6674,7 +6674,7 @@ impl EditorTabViewer<'_> {
             if !bones_only.is_empty() {
                 // Bones re-parent too: a flow-rig chain root under "Head"
                 // makes skinned hair ride the head (skinned verts follow
-                // JOINTS, so parenting the hair object alone isn't enough).
+                // Joints, so parenting the hair object alone isn't enough).
                 list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, true);
             }
 
@@ -7191,7 +7191,7 @@ fn lighting_2d_row(
                 "whether this is lit by the 2D system. auto decides from the scene; \
                  2d and 3d are never re-decided.",
             );
-        // What auto DECIDED, not just that it is deciding. An inference you
+        // What auto decided, not just that it is deciding. An inference you
         // cannot see is one you cannot trust, and this whole design rests on
         // trusting it.
         let (is2d, why) = floptle_core::resolve_2d(cur.mode, facts);
@@ -7620,7 +7620,7 @@ mod tests {
         painted
     }
 
-    /// The annotated tunables panel: rows in DECLARATION order (not alphabetical),
+    /// The annotated tunables panel: rows in declaration order (not alphabetical),
     /// a `--@header` above the rows it names, `--@hidden` gone, and each widget the
     /// one its annotations asked for. The old panel drew numbers-then-strings, each
     /// alphabetised, so a header could never sit above its own rows.
@@ -7686,7 +7686,7 @@ mod tests {
         }
         // …the hidden one is not…
         assert!(!painted.contains("debugScale"), "--@hidden must not draw:\n{painted}");
-        // …the dropdown shows its LABEL rather than the raw number…
+        // …the dropdown shows its label rather than the raw number…
         assert!(painted.contains("On"), "--@options should render as labels:\n{painted}");
         // …the units suffix rides the number…
         assert!(painted.contains("m/s"), "--@units missing:\n{painted}");
@@ -7787,7 +7787,7 @@ mod tests {
         }
     }
 
-    /// `Auto` must say what it DECIDED, not merely that it is deciding. The
+    /// `Auto` must say what it decided, not merely that it is deciding. The
     /// whole 2D-vs-3D design rests on the inference being inspectable: an
     /// inference you cannot see is one you cannot trust.
     #[test]
@@ -7815,7 +7815,7 @@ mod tests {
         assert!(painted.trim().is_empty(), "a plain cube drew a 2D lighting row:\n{painted}");
     }
 
-    /// The layer list is a LIGHT's control. On a receiver it would mean nothing,
+    /// The layer list is a light's control. On a receiver it would mean nothing,
     /// and a control that changes nothing is a lie about what the rules are.
     #[test]
     fn only_a_light_is_asked_which_layers_it_reaches() {
@@ -7837,7 +7837,7 @@ mod tests {
         assert!(painted.contains("casts where it is solid"), "{painted}");
     }
 
-    /// Unticking one layer must leave a light reaching all the OTHERS, not only
+    /// Unticking one layer must leave a light reaching all the others, not only
     /// the one that was already ticked. An untouched light shows every box on
     /// because it reaches everything; the first click has to preserve that.
     #[test]

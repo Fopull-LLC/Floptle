@@ -9,7 +9,7 @@
 //! Binary, not RON, because per-vertex arrays in a `.ron` would be unreadable and
 //! enormous — the same call terrain fields make.
 //!
-//! NOTE the scene-name keying inherits the bug class fixed earlier for terrain:
+//! Note the scene-name keying inherits the bug class fixed earlier for terrain:
 //! files keyed by `scene_name` get overwritten if the name changes underfoot. Paint
 //! rides the existing mitigations — `save_scene` refuses during Play, and paint reloads
 //! through `adopt_paint` after any scene load/undo-restore.
@@ -35,11 +35,11 @@ pub(crate) struct StoredPaint {
 ///
 /// Import splits per-material into parts with independently re-indexed vertex arrays,
 /// and part order falls out of material iteration order. So a re-export from Blender can
-/// silently permute parts or change counts. Paint keyed by vertex INDEX would then land
+/// silently permute parts or change counts. Paint keyed by vertex index would then land
 /// on the wrong vertices — visibly scrambled, with no error. This hash lets the loader
 /// notice and refuse instead.
 pub(crate) fn geom_hash(verts: &[floptle_render::Vertex]) -> u64 {
-    // FNV-1a over quantized positions. Quantized because a re-export can perturb the
+    // Fnv-1a over quantized positions. Quantized because a re-export can perturb the
     // last float bit without meaningfully moving a vertex, and we don't want to cry
     // wolf over that.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -142,7 +142,7 @@ impl Editor {
     /// Write every painted node's colors beside the scene. Called from `save_scene`.
     ///
     /// Entries the last adopt could not apply (`paint_orphans` — mesh unloadable or
-    /// the re-import guard refused) are carried through UNCHANGED, as long as a node
+    /// the re-import guard refused) are carried through unchanged, as long as a node
     /// still references their id and the user hasn't repainted it. Before this, one
     /// save from a session with broken asset resolution silently destroyed every
     /// unloaded node's paint (one project lost ~90% of both paint files).
@@ -245,7 +245,7 @@ impl Editor {
             let Some(key) = key_of.get(&sp.id).cloned() else {
                 if referenced.contains(&sp.id) {
                     // A node still wants this paint but its mesh couldn't be loaded
-                    // (missing file, broken ref) — PRESERVE the stored entry so the
+                    // (missing file, broken ref) — preserve the stored entry so the
                     // next save carries it forward instead of destroying it.
                     self.paint_orphans.push(sp);
                 }

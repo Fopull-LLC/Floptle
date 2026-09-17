@@ -63,7 +63,7 @@ pub(crate) struct MirrorNode {
 
 /// One tilemap's grid, as a package sees it — a read-only
 /// snapshot of `Matter::Tilemap`, kept in `Rc` so a scene revision bump for
-/// something ELSE in the level does not cost a copy of a map that has not
+/// something else in the level does not cost a copy of a map that has not
 /// itself changed. `Editor::fill_mirror_tilemaps` is what decides whether a
 /// fresh one is needed; this struct is just the shape.
 #[derive(Clone, Debug, PartialEq)]
@@ -100,7 +100,7 @@ pub(crate) struct SceneMirror {
     /// this module has no world access of its own to compare against.
     pub(crate) tilemaps: HashMap<u32, std::rc::Rc<TilemapGrid>>,
     /// Every tileset a tilemap in `tilemaps` names, by its project-relative
-    /// path. A tileset describes tile TYPES, not per-instance cells, so
+    /// path. A tileset describes tile types, not per-instance cells, so
     /// unlike the grids it costs nothing worth avoiding to clone fresh.
     pub(crate) tilesets: HashMap<String, floptle_tiles::TileSet>,
     /// The scene's gravity, as the sim would build it.
@@ -233,7 +233,7 @@ impl SceneMirror {
 
     /// A world-space axis-aligned box around a node.
     ///
-    /// Built from the node's ORIENTED half-extents where it has them — the box
+    /// Built from the node's oriented half-extents where it has them — the box
     /// is rotated by the node's rotation and the result is the smallest
     /// axis-aligned box containing it, which is tight for anything square-on
     /// and correct for anything turned. A node with no measurable geometry
@@ -242,7 +242,7 @@ impl SceneMirror {
     /// good for.
     ///
     /// The oriented box itself is on [`MirrorNode::half`] beside the rotation —
-    /// that is the pair to use when a box's ORIENTATION matters.
+    /// that is the pair to use when a box's orientation matters.
     pub(crate) fn aabb(&self, id: u32) -> Option<([f64; 3], [f64; 3])> {
         let n = self.get(id)?;
         let c = DVec3::from(n.world_pos);

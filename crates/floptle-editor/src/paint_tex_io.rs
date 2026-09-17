@@ -3,7 +3,7 @@
 //! one container per scene (like `.vpaint`), but the payload is PNG-encoded rather than raw
 //! — a paint atlas is up to 2048² RGBA (16 MB) and mostly flat, so PNG shrinks it by an
 //! order of magnitude. The header carries, per node/part, the atlas `edge` and a geometry
-//! hash; on load the atlas is rebuilt (its layout is DETERMINISTIC, so an unchanged mesh
+//! hash; on load the atlas is rebuilt (its layout is deterministic, so an unchanged mesh
 //! rebuilds an identical atlas) and the saved pixels are dropped onto it. A mismatch — the
 //! mesh changed since it was painted — is refused with a warning rather than scrambled.
 //!
@@ -19,7 +19,7 @@ use crate::paint_io::geom_hash;
 use crate::Editor;
 
 const MAGIC: &[u8; 4] = b"FLTP";
-/// v2: the paint image became a transparent OVERLAY (alpha = coverage). v1 files were a
+/// v2: the paint image became a transparent overlay (alpha = coverage). v1 files were a
 /// baked-canvas (fully opaque, base texture resampled in) — loading one as an overlay would
 /// blanket the node with the resampled base, the exact bug the overlay fixed. Refused.
 const VERSION: u16 = 2;
@@ -256,7 +256,7 @@ impl Editor {
                 applied.insert(id);
             } else {
                 // The mesh changed since it was painted (or the layout no longer
-                // matches): show the node UNPAINTED rather than scrambled — but keep
+                // matches): show the node unpainted rather than scrambled — but keep
                 // the saved entry on file (drop only the freshly-seeded atlas), so
                 // "restore the old model" actually brings the paint back. The next
                 // dab replaces it for real.

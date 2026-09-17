@@ -61,7 +61,7 @@ pub struct RigAsset {
     /// [`upload_skins`] right after import, because that is where a `Raster` is
     /// in hand and the bind pose is not going to change again.
     pub skin_bases: Vec<u32>,
-    /// Per SKELETON node (parallel to `skeleton.nodes`): `true` if the node renders
+    /// Per skeleton node (parallel to `skeleton.nodes`): `true` if the node renders
     /// geometry — an **object** / mesh sub-object (Sae's `Forearm`, a character's mesh
     /// part); `false` if it's a structural / skin-joint node — a **bone** of the rig
     /// (an armature joint, an empty). Objects and bones are both pose-able skeleton
@@ -154,7 +154,7 @@ pub fn upload_skins(
         .collect();
 }
 
-/// Per-entity vertex-buffer clones for CPU-SKINNED parts. The skinning bake
+/// Per-entity vertex-buffer clones for CPU-skinned parts. The skinning bake
 /// writes world-pose vertices into a mesh's vertex buffer — so two entities
 /// sharing one .glb must not share one buffer, or the last entity baked wins
 /// for both (the "player 1's hair follows player 2's animation" bug). Each
@@ -253,7 +253,7 @@ pub struct AnimSystem {
     ///
     /// Collected rather than printed here because `rescan` runs deep inside a
     /// scan with no console in hand, and because a file that will not parse must
-    /// be REPORTED — dropping it silently leaves the key resolving by file stem
+    /// be reported — dropping it silently leaves the key resolving by file stem
     /// to a different clip, and everything downstream then looks fine.
     pub load_errors: Vec<String>,
     /// Which of `clips` came from a `.spriteanim.ron`.
@@ -356,7 +356,7 @@ impl AnimSystem {
                             self.sprite_keys.insert(key);
                         }
                         // Hand-editing the file is the only way to change a sprite
-                        // animation, so a RON typo is the EXPECTED failure — and a
+                        // animation, so a RON typo is the expected failure — and a
                         // silent drop is the worst possible report of it, because
                         // the clip key then resolves by file-stem to some other
                         // clip and everything downstream looks healthy.
@@ -435,7 +435,7 @@ impl AnimSystem {
 
     /// Refresh the in-memory clip registry entry + bump the revision (so bound
     /// animators rebind and previews reflect the edit) without touching disk.
-    /// Used for live edits held under the pointer — a bone gizmo/inspector DRAG
+    /// Used for live edits held under the pointer — a bone gizmo/inspector drag
     /// defers its disk save to pointer-up, but the preview must still update in
     /// real time as the bone moves; this is the cheap per-frame refresh that does it.
     pub fn register_clip(&mut self, key: &str, doc: &AnimClipDoc) {
@@ -682,7 +682,7 @@ pub fn clip_from_doc(doc: &AnimClipDoc, skeleton: &Skeleton) -> Clip {
 
 /// Per-key interpolation for the runtime, from the doc's `modes`.
 ///
-/// The doc stores modes by TIME; the runtime wants one mode per key, indexed,
+/// The doc stores modes by time; the runtime wants one mode per key, indexed,
 /// because sampling has the index in hand and looking a float up in a list per
 /// sample would be absurd. This is the one place the two forms meet, which is
 /// also why the fragile parallel-array form never has to survive an edit: it is
@@ -1070,7 +1070,7 @@ pub fn bind_entity(
         }
         // No controller, but a rigged mesh: embedded clips, "Idle" (or the
         // first clip) as the default — models animate out of the box. Once a
-        // clip has been EXTRACTED, the `.anim.ron` of the same name takes over
+        // clip has been extracted, the `.anim.ron` of the same name takes over
         // (so timeline edits + events apply without requiring a controller).
         (None, Some(rig)) => {
             if rig.clips.is_empty() {
@@ -1144,7 +1144,7 @@ fn needs_bind(
             // Rig-load race: a controller can bind the very first play frame,
             // before its rigged mesh finished importing — falling back to a
             // node-skeleton binding (a static bind-pose T-pose that never
-            // animates, since the clips are keyed by BONE name). None of the
+            // animates, since the clips are keyed by bone name). None of the
             // keys above change when the rig later lands in the registry, so
             // upgrade a Nodes binding to the real Rig binding the moment the
             // mesh's skeleton is available.
@@ -1361,7 +1361,7 @@ pub fn resolve_attachments(
             .or_else(|| rig.rest_world.get(idx))
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        // Model-space: bone TRS ∘ bone-local offset, composed COMPONENTWISE (the
+        // Model-space: bone TRS ∘ bone-local offset, composed componentwise (the
         // scene graph's own rule) — not via matrices, whose decomposition would
         // pin a mirrored offset's negative scale to the X axis. The result is the
         // child's local transform; world_transform re-applies the mesh f64 world
@@ -1374,7 +1374,7 @@ pub fn resolve_attachments(
         // mesh's space onto a node whose parent chain is somebody else's, so
         // the attachment sat wherever the difference between the two chains put
         // it — with no error and no clue, because it still tracked the bone's
-        // MOTION perfectly and was merely in the wrong place.
+        // Motion perfectly and was merely in the wrong place.
         //
         // So place it by world transform and divide out whatever parent it
         // actually has. The normalized case takes the branch above and is
@@ -1504,11 +1504,11 @@ pub fn preview_pose(
 const NET_ANIM_DRIFT: f32 = 0.25;
 
 /// The animator-carrying entities under `root` (root first, then descendants),
-/// in a DETERMINISTIC order — children by entity index, which matches across
+/// in a deterministic order — children by entity index, which matches across
 /// peers because both machines spawn the same scene doc in node order. This is
 /// how a networked node addresses its subtree's animators on the wire (the
 /// `sub` index): the standard avatar is a Networked capsule with the rigged
-/// Model as a CHILD, and the child carries the controller.
+/// Model as a child, and the child carries the controller.
 pub fn anim_subtree(
     world: &World,
     mesh_registry: &HashMap<String, MeshAsset>,
@@ -1768,7 +1768,7 @@ pub fn rig_from_model(
     // (parts, skin joints, clip channels) is threaded through the old→new remap.
     let mut skeleton = model.skeleton.clone();
     let mut part_nodes: Vec<usize> = model.parts.iter().map(|p| p.node).collect();
-    // FOLLOW-THE-OBJECT for skinned chains: skinned vertices follow their JOINTS,
+    // Follow-the-object for skinned chains: skinned vertices follow their joints,
     // never the mesh node — so a flow-rig bone chain whose root sits at the model
     // root ignores the hair object being parented under "Head" (the hair stays
     // put while the head turns). Auto-parent each skin's root joints under the
@@ -1781,7 +1781,7 @@ pub fn rig_from_model(
     for part in &model.parts {
         let Some(skin) = &part.skin else { continue };
         let mesh_name = &model.skeleton.nodes[part.node].name;
-        // The mesh node's EFFECTIVE parent: sidecar override first, else source.
+        // The mesh node's effective parent: sidecar override first, else source.
         let parent_name = match overrides.reparent.get(mesh_name) {
             Some(p) if !p.is_empty() => p.clone(),
             Some(_) => continue, // explicitly rooted — nothing to follow
@@ -1804,7 +1804,7 @@ pub fn rig_from_model(
         }
     }
 
-    // Rotation PIVOTS. Default each object node's pivot to its geometry centroid (in
+    // Rotation pivots. Default each object node's pivot to its geometry centroid (in
     // node-local space) — far more useful than the model origin for a baked object —
     // then let the `.rig.ron` sidecar override per node by name. Bones (no geometry)
     // keep pivot zero (their origin already is the joint).
@@ -2150,7 +2150,7 @@ impl crate::Editor {
     }
 }
 
-// These exercise the AUTHORING half — the dock, the Inspector, the
+// These exercise the authoring half — the dock, the Inspector, the
 // command line — so they compile only where that half does. Without the
 // gate the player configuration cannot be linted or tested at all, which
 // is how it went unlinted through a whole release.
@@ -2233,7 +2233,7 @@ mod tests {
         )));
     }
 
-    /// The standard avatar shape — a Networked CAPSULE whose CHILD Model
+    /// The standard avatar shape — a Networked capsule whose child Model
     /// carries the Animation Controller — must be addressable for animator
     /// replication: the subtree walk finds the child (a LAN test failed
     /// exactly here — the gather only looked at the Replicated node itself),
@@ -2638,7 +2638,7 @@ mod tests {
 
     /// regression (the astronaut T-pose): binding the solar demo's real
     /// character controller through the registry path (`layers_from_doc` →
-    /// `AnimSystem::clip`) must yield NON-EMPTY clips that actually move the
+    /// `AnimSystem::clip`) must yield non-empty clips that actually move the
     /// rig. The prior offline check fed `clip_from_doc` directly and so never
     /// exercised the registry key resolution — which is exactly where an
     /// unresolved clip degrades to a 1 ms empty clip and the rig sits at its
@@ -2750,7 +2750,7 @@ mod tests {
     /// **A per-key hold survives the round trip, and an unused one leaves no
     /// trace in the file.**
     ///
-    /// The two halves are the same guard. The doc stores which TIMES hold; the
+    /// The two halves are the same guard. The doc stores which times hold; the
     /// runtime wants a mode per key index; this is the only place the two forms
     /// meet, so a mistake here is a clip that plays differently after a save.
     /// And the second assertion is what lets this ship without touching anybody

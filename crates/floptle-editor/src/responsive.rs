@@ -190,7 +190,7 @@ pub(crate) fn fit_here(ui: &Ui, want: f32) -> f32 {
 /// to ask for it. Outside one it does nothing, so this is safe wherever
 /// `fit_here` was.
 pub(crate) fn fit_here_wrapping(ui: &mut Ui, want: f32) -> f32 {
-    // **Only in a WRAPPING layout.** `Ui::end_row` is also the call that ends a
+    // **Only in a wrapping layout.** `Ui::end_row` is also the call that ends a
     // `Grid` row, and these widgets are drawn inside grid cells constantly — an
     // unguarded break there would not move a control to the next line, it would
     // move every control after it into the wrong column. `main_wrap` is the one
@@ -211,7 +211,7 @@ pub(crate) fn fit_here_wrapping(ui: &mut Ui, want: f32) -> f32 {
 pub(crate) fn check(ui: &mut Ui, on: &mut bool, text: &str) -> egui::Response {
     let w = fit_here_wrapping(ui, f32::INFINITY);
     // The tick and the gap egui puts between it and the label, so the elide
-    // budget is the room the TEXT actually gets.
+    // budget is the room the text actually gets.
     const BOX: f32 = 26.0;
     let label = elide(ui, text, (w - BOX).max(8.0));
     ui.scope(|ui| {
@@ -231,7 +231,7 @@ pub(crate) fn check(ui: &mut Ui, on: &mut bool, text: &str) -> egui::Response {
 /// `text` is the same caption passed to the `Slider`'s own `.text(...)` (pass
 /// `""` for a slider with none, e.g. one that already has its caption drawn as
 /// a separate `ui.label` before it). It has to be handed in separately because
-/// `egui::Slider` draws that caption as a THIRD thing after the track and the
+/// `egui::Slider` draws that caption as a third thing after the track and the
 /// number box, inside whatever `Ui` it is given, and does not stop at that
 /// `Ui`'s edge any more than the number box does — reserving room for the box
 /// alone (the original bug here) left the caption to draw straight past the
@@ -247,13 +247,13 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>, text: &str) -> egui::Resp
     /// The narrowest a track can go — below this it is a sliver, not a slider.
     const TRACK_FLOOR: f32 = 24.0;
 
-    // A slider CLAMPS to the width available rather than wrapping, which is the
+    // A slider clamps to the width available rather than wrapping, which is the
     // detail that decides this. Squeezed onto the tail of a line it does not
     // move down; it draws a stub of a track and pushes its number box past the
     // panel.
     //
     // So when the rest of the line is too small, ask for a block of the whole
-    // REGION's width. That is one allocation larger than what is left of the
+    // Region's width. That is one allocation larger than what is left of the
     // line, which is what a wrapped layout moves to the next line — and there
     // the block gets the width it asked for.
     //
@@ -362,7 +362,7 @@ pub(crate) fn grid<R>(
     /// What a caption column is allowed, plus the gap after it.
     const CAPTION: f32 = 78.0;
     let w = fit_here(ui, f32::INFINITY);
-    // Too thin for two columns: run the same rows as a WRAPPED FLOW instead.
+    // Too thin for two columns: run the same rows as a wrapped flow instead.
     //
     // This needs no change at the call sites, which is the reason to do it here
     // rather than rewriting sixty rows: outside a grid, `Ui::end_row` falls
@@ -379,7 +379,7 @@ pub(crate) fn grid<R>(
         egui::Grid::new(id)
             .num_columns(2)
             .spacing([8.0, 5.0])
-            // Capped so the CONTROL column is guaranteed its minimum, not so the
+            // Capped so the control column is guaranteed its minimum, not so the
             // caption column is guaranteed its preference. `egui::Grid` sizes a
             // column from its widest cell and this cap is the only bound on it,
             // so `w - CAPTION` let one long caption take everything but 78px and
@@ -666,7 +666,7 @@ pub(crate) mod tests {
             }
             let clip = cs.clip_rect;
             // Deliberate local truncation, not a panel overflow.
-            // A shape under a clip NARROWER than the PANEL, where that clip is
+            // A shape under a clip narrower than the panel, where that clip is
             // itself inside the panel, is a widget truncating its own text — a
             // combo button clipping a long asset path. Nothing it draws reaches
             // the panel edge, which is the behaviour we want, not an overflow.
@@ -705,7 +705,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// **`main_wrap` is what separates "next line" from "next GRID ROW".**
+    /// **`main_wrap` is what separates "next line" from "next grid ROW".**
     ///
     /// `Ui::end_row` does both jobs, and the responsive widgets are drawn inside
     /// grid cells constantly: unguarded, a control deciding there was no room

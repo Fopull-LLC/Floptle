@@ -68,7 +68,7 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
     let frames_v = v.get("frames").ok_or("no `frames` in this JSON — is it an Aseprite export?")?;
     let raw: Vec<&serde_json::Value> = match frames_v {
         serde_json::Value::Array(a) => a.iter().collect(),
-        // **Sorted by the frame NUMBER in the key, not by the key.** The object
+        // **Sorted by the frame number in the key, not by the key.** The object
         // form is keyed `"hero 0.aseprite"`, `"hero 1.aseprite"`, … and the map
         // this is parsed into is ordered lexicographically, which for twelve
         // frames is 0, 1, 10, 11, 2, 3 … — so every clip came out scrambled and
@@ -129,7 +129,7 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
     }
 
     let meta = v.get("meta");
-    // **Only a plain relative name.** `Path::join` DISCARDS its base when the
+    // **Only a plain relative name.** `Path::join` discards its base when the
     // argument is absolute, and Aseprite's CLI export routinely writes an
     // absolute path here — so the clip would be written pointing at
     // `/home/whoever/art/hero.png`, which exists on the importing machine and
@@ -205,7 +205,7 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
             continue;
         }
         let span = &frames[from..=to];
-        // The frame rate is the SHORTEST frame, and everything longer becomes a
+        // The frame rate is the shortest frame, and everything longer becomes a
         // hold. Aseprite's timing is per frame in milliseconds and ours is a
         // rate plus holds; this is the conversion that keeps every frame's real
         // duration rather than averaging them into a rate that matches none.

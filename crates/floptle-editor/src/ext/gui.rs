@@ -63,7 +63,7 @@ impl UiSlot {
 
 /// Run `f` against the innermost layout.
 ///
-/// SAFETY: the pointer on top of the stack was written from a `&mut egui::Ui`
+/// Safety: the pointer on top of the stack was written from a `&mut egui::Ui`
 /// whose borrow strictly encloses this call (see the module docs), and the
 /// `RefCell` borrow is released before `f` runs, so a nested `gui.*` call from
 /// inside `f` takes its own turn rather than aliasing this one.
@@ -548,12 +548,12 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             let family = crate::fonts::family_key(fonts.pkg_id, &name);
             // Two different questions, and conflating them is a crash.
             //
-            // DECLARED — is this face in the package's manifest? That is what
+            // Declared — is this face in the package's manifest? That is what
             // decides whether to complain: a name nobody shipped is an author's
             // typo and worth one Console line.
             //
-            // BOUND — has egui actually been handed it? That is what decides
-            // whether to *draw* with it, because epaint PANICS on a
+            // Bound — has egui actually been handed it? That is what decides
+            // whether to *draw* with it, because epaint panics on a
             // `FontFamily::Name` it does not know rather than falling back. The
             // two can disagree for one frame, between a package load and the
             // `set_fonts` that follows it, and a declared face drawing in the
@@ -596,7 +596,7 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     // whoever opens the editor. This package shipped `✕` on its clear button
     // for weeks that way.
     //
-    // Answered from the fonts' CHARACTER MAPS, which is the fact the renderer
+    // Answered from the fonts' character maps, which is the fact the renderer
     // acts on. `epaint::Fonts::has_glyph` is not usable for it: it resolves a
     // character to a face and compares that face against the one holding the
     // replacement glyph, so a character whose real home is that face reports

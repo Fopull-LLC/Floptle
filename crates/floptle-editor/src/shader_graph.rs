@@ -1,5 +1,4 @@
-//! The ◈ Shaders tab — the node-graph view of a `.flsl` (ADR-0007, proposal
-//! §10.2). The first box-and-wire canvas in the editor.
+//! The ◈ Shaders tab — the node-graph view of a `.flsl`. The first box-and-wire canvas in the editor.
 //!
 //! One source of truth: the graph renders `floptle_shader::graph::build_view`
 //! of the parsed file, and every edit is an IR mutation that re-prints the
@@ -270,7 +269,7 @@ impl Editor {
         if self.shader_graph.path.as_deref() != Some(path) {
             self.shader_graph.flush(&self.project_root, &mut self.ide, true, false);
             // The clipboard and the panel's open/closed state belong to the
-            // ARTIST, not the file — carrying them over is what makes copying
+            // Artist, not the file — carrying them over is what makes copying
             // a chunk of one shader into another work at all.
             let clip = self.shader_graph.clip.take();
             let focus_open = self.shader_graph.focus_open;
@@ -707,7 +706,7 @@ impl EditorTabViewer<'_> {
     pub(crate) fn shader_graph_ui(&mut self, ui: &mut egui::Ui) {
         // Arm the preview driver for next frame + keep animated previews live.
         //
-        // Only ANIMATED ones. This tab used to ask for a repaint every frame it
+        // Only animated ones. This tab used to ask for a repaint every frame it
         // was open, which pins the whole editor — Scene view and all — at full
         // framerate for the sake of a picture that, in a shader with no `time`
         // in it, cannot change until you touch something.
@@ -1184,7 +1183,7 @@ impl EditorTabViewer<'_> {
         let err_key = self.shader_graph.err_key.clone();
         let drag = self.shader_graph.drag.clone();
 
-        // Node rects (graph space + ORIGIN) — the wire endpoints. A node with
+        // Node rects (graph space + origin) — the wire endpoints. A node with
         // a live preview reserves the thumbnail strip below its body.
         let pv_on = self.shader_preview.enabled;
         let pv_hidden = self.shader_graph.pv_hidden.clone();
@@ -1425,7 +1424,7 @@ impl EditorTabViewer<'_> {
                 copy: i.modifiers.command && i.key_pressed(egui::Key::C),
                 paste: i.modifiers.command && i.key_pressed(egui::Key::V),
                 frame: !i.modifiers.command && i.key_pressed(egui::Key::F),
-                // Deliberately ignoring key REPEAT: every nudge is a commit
+                // Deliberately ignoring key repeat: every nudge is a commit
                 // with its own undo entry, and holding an arrow down would
                 // otherwise flush thirty of them a second and shove the rest
                 // of the session's history off the 64-deep stack.
@@ -2425,7 +2424,7 @@ fn palette_ui(
     out
 }
 
-/// Name-FREE stable identities: each node keyed by its wire path from the
+/// Name-free stable identities: each node keyed by its wire path from the
 /// output sink (port indices + op labels). Renaming/promoting a `let` leaves
 /// these untouched, so its downstream nodes keep their cached positions.
 fn sink_path_keys(view: &[GNode]) -> HashMap<NodeKey, String> {

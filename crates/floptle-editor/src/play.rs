@@ -66,7 +66,7 @@ impl Editor {
     /// world). Takes `&World` (not `&self`) so it can be called from the play loop
     /// while `self.gpu`/egui are mutably borrowed — see call site.
     /// Build the scene's gravity field for the sim. `origin` is the sim's world origin
-    /// (ADR-0015): radial centers are converted to the sim frame in f64 here, so a
+    ///: radial centers are converted to the sim frame in f64 here, so a
     /// planet placed far out pulls exactly.
     pub(crate) fn build_gravity_field(world: &floptle_core::World, origin: DVec3) -> floptle_physics::GravityField {
         use floptle_core::{GravityMode, Matter};
@@ -131,7 +131,7 @@ impl Editor {
     /// answer, whether the water is a planet's ocean or a fish tank.
     ///
     /// Centres are converted into the sim frame in f64 here, so a sea placed
-    /// far out is exact (ADR-0015), and the sea's own radius survives the
+    /// far out is exact, and the sea's own radius survives the
     /// node's scale — scaling a sea node scales the sea.
     pub(crate) fn build_water_field(
         world: &floptle_core::World,
@@ -190,7 +190,7 @@ impl Editor {
         field
     }
 
-    /// Where the sim's local frame should be centered at Play (ADR-0015): the active
+    /// Where the sim's local frame should be centered at Play: the active
     /// camera if there is one, else the first rigidbody, else the world origin —
     /// rounded to whole units so every later rebase shift stays exact in f32.
     pub(crate) fn sim_origin_hint(&self) -> DVec3 {
@@ -271,7 +271,7 @@ impl Editor {
             let wt = floptle_core::world_transform(&self.world, e);
             // Anchor each collider on its own node (full f64) and bake geometry
             // relative to it — the residuals stay small and exact no matter how far
-            // out the node sits (ADR-0015); the sim re-anchors them per rebase.
+            // out the node sits; the sim re-anchors them per rebase.
             let anchor = wt.translation;
             let s = wt.scale;
             // The node's identity for this collider: resolved layer bit (the
@@ -323,7 +323,7 @@ impl Editor {
                 }
                 // Primitive geometry → matching analytic collider, sized to match the
                 // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
-                // A TILEMAP's solid tiles, merged into as few boxes as the shape
+                // A tilemap's solid tiles, merged into as few boxes as the shape
                 // allows (`floptle_tiles::collision_boxes`). Two reasons it is
                 // merged rather than one box per square:
                 //
@@ -363,7 +363,7 @@ impl Editor {
         }
     }
 
-    /// Build the play sim under the project'S LAYER TABLE: terrain + static
+    /// Build the play sim under the project'S layer table: terrain + static
     /// colliders carry their node's layer bit, dynamic bodies resolve theirs,
     /// the collision matrix lands in the world, and the script host is lent
     /// the same table (`node.layer` validation + `raycast` layer filters).
@@ -390,9 +390,9 @@ impl Editor {
                 );
             }
         }
-        // Foot-gun guard: a celestial scene with a UNIFORM-Down GravityVolume
+        // Foot-gun guard: a celestial scene with a uniform-Down GravityVolume
         // adds a constant world −Y pull on top of µ/r² — on the far side of a
-        // planet that pushes AWAY from it, pumping orbital energy every pass
+        // planet that pushes away from it, pumping orbital energy every pass
         // (it cost two debugging sessions as a mystery "orbit escape").
         {
             let has_celestial = self
@@ -485,7 +485,7 @@ impl Editor {
         if !self.playing {
             return;
         }
-        // Bodies re-seed at their current transforms, but their VELOCITIES must
+        // Bodies re-seed at their current transforms, but their velocities must
         // survive the rebuild — terrain streaming in mid-flight used to zero
         // them, dropping ships out of orbit ("the sun just sucked me up": zero
         // relative velocity under warp is a plummet straight into the star).
@@ -494,7 +494,7 @@ impl Editor {
             .as_ref()
             .map(|s| s.body_states().map(|r| (r.entity.index(), r.vel)).collect())
             .unwrap_or_default();
-        // COMPOUNDS carry more runtime state that the rebuild must not drop:
+        // Compounds carry more runtime state that the rebuild must not drop:
         // the `anchored` flag and angular velocity. Losing `anchored` silently
         // freed a launch-clamped vessel whenever terrain streamed in mid-clamp
         // (loaded saves stream terrain during Play), which left the ship's
@@ -523,8 +523,8 @@ impl Editor {
 
     /// Every terrain volume as `(node world translation, node-local field, layer
     /// bit, node entity)` — what the sim colliders anchor on (the entity is what
-    /// touch events name). Each volume collides at its NATIVE resolution (the
-    /// combined field is render-only), placed in full `f64` (ADR-0015).
+    /// touch events name). Each volume collides at its native resolution (the
+    /// combined field is render-only), placed in full `f64`.
     pub(crate) fn terrain_volumes(
         &self,
         layers: &floptle_core::Layers,
@@ -552,7 +552,7 @@ impl Editor {
             .collect()
     }
 
-    /// The UNREADY terrains the game cannot start without: any celestial
+    /// The unready terrains the game cannot start without: any celestial
     /// terrain body with no resident field that a dynamic node (the player,
     /// the ship) is practically on — within `RESIDENT_SYNC_RADII` body radii.
     /// Deliberately not just the cold set: a spawn planet whose first
@@ -589,7 +589,7 @@ impl Editor {
     }
 
     /// G1/G2 residency, Play start: if the terrain under the player is still
-    /// cold, hold the run (auto-pause) and stream it in the BACKGROUND — the
+    /// cold, hold the run (auto-pause) and stream it in the background — the
     /// game must not start until the ground exists, and it must not freeze the
     /// UI loading it either (the no-stutter rule). The residency driver
     /// releases the hold the moment nothing required is left cold.
@@ -615,11 +615,11 @@ impl Editor {
     }
 
     /// G1 residency, Stop: terrains that streamed in during Play hand over to
-    /// NORMAL edit-mode residency — an UNTOUCHED field simply stays resident
+    /// Normal edit-mode residency — an untouched field simply stays resident
     /// (its RAM copy equals its disk source; dropping it only to re-stream it
     /// where the editor camera sits made Stop flicker and hitch). Only a field
     /// DUG during Play reverts to cold (Play changes are never kept) — after
-    /// flushing to the save SLOT first when one is set (`terrain.saveDir`):
+    /// flushing to the save slot first when one is set (`terrain.saveDir`):
     /// that's player state, exactly what a slot is for (G2).
     pub(crate) fn drop_play_loaded_terrains(&mut self) {
         // Exit-path guarantee: settle the background checkpoint and put every
@@ -700,7 +700,7 @@ impl Editor {
     }
 
     /// Turn ● Record off and put the posed subtree back exactly as it was
-    /// when recording started — recording authors the CLIP, never the scene.
+    /// when recording started — recording authors the clip, never the scene.
     /// One implementation for every path (transport, play start, undo, save):
     /// restores transforms and recorded property values, and forgets the
     /// preview snapshot (stale mid-record state — never to be applied).
@@ -757,7 +757,7 @@ impl Editor {
             // Everything on the wire belonged to the session that just ended.
             self.script_host.set_playing(false);
             self.play_stream_hold = false;
-            // Make the revert EXPLICIT — "where did my tweaks go" is a classic
+            // Make the revert explicit — "where did my tweaks go" is a classic
             // lost-work surprise: Play-mode changes are a simulation, not edits.
             self.console.push(
                 floptle_script::LogLevel::Debug,
@@ -786,10 +786,10 @@ impl Editor {
             // session's first legitimate lock.
             self.cursor_freed = false;
             // A mid-play `scene.load(...)` renamed the scene for the session —
-            // the restored world is the PRE-PLAY scene, so its name must come
+            // the restored world is the pre-play scene, so its name must come
             // back before `restore()` runs: restore's `adopt_terrain()` loads
             // terrain fields by scene name, and doing this after it once made
-            // Stop fill the editor scene's terrain nodes with the PLAYED
+            // Stop fill the editor scene's terrain nodes with the played
             // scene's fields (the next save then overwrote the real terrain
             // on disk — real lost work).
             self.pending_scene.clear();
@@ -865,13 +865,13 @@ impl Editor {
             // Play can't leak residency or persist in-Play digs on them. Their
             // on-disk field is untouched (nothing saves to the project during
             // Play), so cold + disk file is the pre-Play state. (Fields dug
-            // during Play with a save SLOT set flushed to the slot inside
+            // during Play with a save slot set flushed to the slot inside
             // drop_play_loaded_terrains — player state, not authoring.)
             self.drop_play_loaded_terrains();
             // The save slot never outlives its run.
             self.script_host.clear_terrain_save_dir();
         } else {
-            // Scripts run from what's on DISK — flush unsaved IDE edits first so
+            // Scripts run from what's on disk — flush unsaved IDE edits first so
             // Play always tests the code you're looking at.
             #[allow(unused_mut)]
             let mut flushed = 0;
@@ -928,7 +928,7 @@ impl Editor {
             self.script_lines.clear(); // no stale map lines across runs
             self.script_rects.clear();
             self.script_texts.clear();
-            // Every Play is a FRESH run: drop all script instances so top-level
+            // Every Play is a fresh run: drop all script instances so top-level
             // script state can't leak across sessions (a ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.
             self.script_host.reset_instances();
@@ -1014,7 +1014,7 @@ impl Editor {
         self.tick_steps = self.tick_steps.saturating_add(n);
     }
 
-    /// Frame-step BACKWARDS: put the simulation back exactly one gameplay tick
+    /// Frame-step backwards: put the simulation back exactly one gameplay tick
     /// (`docs/multiplayer.md` §7 P5 — closes 0024's deferred item).
     ///
     /// A simulation is not invertible, so this is not a general feature: it
@@ -1068,7 +1068,7 @@ impl Editor {
 
     /// Resolve a `scene.load(...)` argument to a scene file: a name ("arena"),
     /// a scenes-relative name ("arenas/desert"), or a project-relative path
-    /// ("scenes/arena.ron"). Escapes are REJECTED — in multiplayer the string
+    /// ("scenes/arena.ron"). Escapes are rejected — in multiplayer the string
     /// arrives over the wire, so it must never reach outside the project.
     pub(crate) fn resolve_scene_request(&self, req: &str) -> Option<std::path::PathBuf> {
         let r = req.trim().replace('\\', "/");
@@ -1089,7 +1089,7 @@ impl Editor {
     /// untouched: Stop still restores exactly what you were editing. Returns
     /// the new scene's project-relative path (what a server announces).
     ///
-    /// Session roles (filters, prediction, NetId rebinds) are the CALLER's job
+    /// Session roles (filters, prediction, NetId rebinds) are the caller's job
     /// — see [`Self::perform_scene_request`].
     pub(crate) fn switch_scene_during_play(&mut self, req: &str) -> Option<String> {
         let Some(path) = self.resolve_scene_request(req) else {
@@ -1111,7 +1111,7 @@ impl Editor {
                 return None;
             }
         };
-        // what SURVIVES. `node.persistent` marks a subtree as outliving the
+        // what survives. `node.persistent` marks a subtree as outliving the
         // swap — a HUD, a party, a save-game manager, the music. Collected
         // before anything is torn down, because the answer is about the world
         // that is still standing.
@@ -1138,8 +1138,8 @@ impl Editor {
         self.audio_stop_play();
         // …swap the world…
         //
-        // DESPAWN in PLACE rather than `World::new()`, so a persistent node
-        // keeps its ENTITY. That is not a micro-optimisation — script
+        // Despawn in place rather than `World::new()`, so a persistent node
+        // keeps its entity. That is not a micro-optimisation — script
         // instances, UI bindings and net handlers are all keyed by entity
         // index, and a survivor that came back under a different index would
         // have to be rebuilt, which is exactly what "persistent" promises it
@@ -1186,7 +1186,7 @@ impl Editor {
         self.env_layer = None;
         self.set_scene_file(&path);
         self.adopt_terrain();
-        // the out-of-document STORES, which a scene switch has to reload exactly as
+        // the out-of-document stores, which a scene switch has to reload exactly as
         // opening a scene does.
         //
         // Map geometry, vertex paint and texture paint live in sidecars keyed by scene
@@ -1368,11 +1368,11 @@ impl Editor {
     /// a second Skybox, and the renderer resolves both with a first-match query
     /// (`shading::skybox_uniforms`) — so the look would be decided by spawn
     /// order, which is the "the additive scene broke my lighting" failure the
-    /// nodes-only rule exists to prevent. This makes the handover EXPLICIT
+    /// nodes-only rule exists to prevent. This makes the handover explicit
     /// instead: the base scene's environment steps aside, the layer's takes
     /// over, and `scene.unload` puts the first one back.
     ///
-    /// Its nodes are DISABLED rather than despawned, because a node that comes
+    /// Its nodes are disabled rather than despawned, because a node that comes
     /// back is a node whose authored values were never lost — and because the
     /// base scene is not reloadable from disk mid-session without also undoing
     /// everything else Play has done to it.
@@ -1617,7 +1617,7 @@ mod scene_request_tests {
 
     /// `scene.load` strings resolve inside the project only: names,
     /// scenes-relative paths, and project-relative paths all work; escapes
-    /// never do — in multiplayer the string arrives over the WIRE, so it must
+    /// never do — in multiplayer the string arrives over the wire, so it must
     /// not be able to name anything outside the project.
     #[test]
     fn scene_requests_resolve_safely() {

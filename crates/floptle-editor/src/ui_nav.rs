@@ -1,4 +1,4 @@
-//! Keyboard / gamepad navigation of game UI (docs/ui-styles.md §D).
+//! Keyboard / gamepad navigation of game UI (docs/UI-styles.md §D).
 //!
 //! The geometry and the auto-repeat live in `floptle_ui::nav` (headless and
 //! tested). This is the editor/runtime half: reading the direction, deciding
@@ -24,7 +24,7 @@ pub(crate) const NAV_ACTIONS: [&str; 6] =
     ["UiUp", "UiDown", "UiLeft", "UiRight", "UiSubmit", "UiCancel"];
 pub(crate) const NAV_AXIS: &str = "UiMove";
 
-/// This frame's navigation input, as LEVELS — edges and repeat are applied
+/// This frame's navigation input, as levels — edges and repeat are applied
 /// afterwards, so both input paths behave identically.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct NavInput {
@@ -116,7 +116,7 @@ impl Editor {
     /// event queue in the same order.
     ///
     /// `layers` is every screen's `(layer, roots, solved rects)` this frame, in
-    /// draw order — focus belongs to the FRONT-most layer that has anything
+    /// draw order — focus belongs to the front-most layer that has anything
     /// focusable, which is what makes a modal over a menu behave.
     pub(crate) fn ui_navigate(
         &mut self,

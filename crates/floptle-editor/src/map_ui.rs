@@ -2,8 +2,8 @@
 //! modeling ops on the current sub-object selection, and the material-slot
 //! list (assign faces to slots; override each slot's material per node).
 //!
-//! Laid out as titled sections in the order you work in — DRAW, SELECT,
-//! TRANSFORM, MODIFY, shape, SIZE, FACE MATERIALS — with one visual language
+//! Laid out as titled sections in the order you work in — draw, select,
+//! Transform, modify, shape, size, face materials — with one visual language
 //! throughout: a rule under each section title, equal-width chips for anything
 //! that picks a mode, equal-width buttons for anything that acts, and a left
 //! label column so controls line up down the panel. Rarely-touched knobs live
@@ -39,7 +39,7 @@ use crate::responsive::section;
 /// panel gets too thin for both, at which point the caption moves above them.
 ///
 /// The controls run in a **wrapped** horizontal either way, which is the whole
-/// reason this tab survives a narrow dock: a MODIFY row is four action buttons,
+/// reason this tab survives a narrow dock: a modify row is four action buttons,
 /// and four buttons that cannot share a line now take two.
 fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     crate::responsive::row(ui, label, MIN_CONTENT_W, add)
@@ -85,7 +85,7 @@ pub(crate) struct MapCtx<'a> {
     pub(crate) map_xform: &'a mut map_edit::MapXform,
     pub(crate) map_select_hidden: &'a mut bool,
     pub(crate) map_bevel: &'a mut map_edit::BevelWidth,
-    /// True while the ▦ Map TOOL is active — every sub-object op needs it, so
+    /// True while the ▦ Map tool is active — every sub-object op needs it, so
     /// the tab offers to turn it on rather than silently greying out.
     pub(crate) map_tool_on: bool,
     pub(crate) map_playing: bool,
@@ -94,7 +94,7 @@ pub(crate) struct MapCtx<'a> {
     pub(crate) map_keys: &'a mut map_keys::MapKeys,
     pub(crate) map_rebind: &'a mut Option<map_keys::MapCmd>,
     pub(crate) map_rebind_err: &'a mut Option<String>,
-    // The FACE MATERIALS section drives the ordinary material inspector, which
+    // The face materials section drives the ordinary material inspector, which
     // wants the project's asset and shader caches.
     pub(crate) materials: &'a [(String, floptle_scene::MaterialDoc)],
     pub(crate) mat_name_buf: &'a mut String,
@@ -117,7 +117,7 @@ impl MapCtx<'_> {
             );
             return;
         }
-        // The whole tab runs on the ▦ Map TOOL's sub-object selection. Say so
+        // The whole tab runs on the ▦ Map tool's sub-object selection. Say so
         // once, at the top, with the button that fixes it — greying everything
         // out with no explanation is what made this feel broken.
         if !self.map_tool_on {
@@ -289,7 +289,7 @@ impl MapCtx<'_> {
             });
     }
 
-    // ---- SELECT -------------------------------------------------------------
+    // ---- select -------------------------------------------------------------
 
     fn map_select_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "SELECT");
@@ -433,7 +433,7 @@ impl MapCtx<'_> {
         });
     }
 
-    // ---- TRANSFORM ----------------------------------------------------------
+    // ---- transform ----------------------------------------------------------
 
     fn map_transform_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TRANSFORM");
@@ -472,7 +472,7 @@ impl MapCtx<'_> {
         }
     }
 
-    // ---- MODIFY -------------------------------------------------------------
+    // ---- modify -------------------------------------------------------------
 
     fn map_modify_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "MODIFY");
@@ -780,7 +780,7 @@ impl MapCtx<'_> {
         }
     }
 
-    // ---- SIZE ---------------------------------------------------------------
+    // ---- size ---------------------------------------------------------------
 
     /// The numeric half of a modeling tool. Editing geometry is how a map mesh
     /// gets sized — scaling the node would stretch the box-projected UVs and
@@ -838,7 +838,7 @@ impl MapCtx<'_> {
         });
     }
 
-    // ---- FACE MATERIALS -----------------------------------------------------
+    // ---- face materials -----------------------------------------------------
 
     fn map_materials_section(&mut self, ui: &mut egui::Ui, entity: floptle_core::Entity, id: u32) {
         section(ui, "FACE MATERIALS");
@@ -898,7 +898,7 @@ impl MapCtx<'_> {
                         )
                         .on_hover_text("how many faces draw with this slot — not your selection");
                         // Plain flow, not `right_to_left`. A right-aligned run
-                        // pins itself to the REGION's right edge and grows
+                        // pins itself to the region's right edge and grows
                         // leftwards from there, so in a narrow panel it walks off
                         // the left side instead of the right — same bug, harder
                         // to recognise. These two buttons read fine in order.
@@ -1013,7 +1013,7 @@ impl MapCtx<'_> {
         });
     }
 
-    // ---- KEYS ---------------------------------------------------------------
+    // ---- keys ---------------------------------------------------------------
 
     /// Every control's hotkey, listed and rebindable. Click a chord, press the
     /// new one; anything the editor already answers in this context — or that
@@ -1022,7 +1022,7 @@ impl MapCtx<'_> {
     fn map_keys_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "KEYS");
         // Wrapped, and the button is simply next in the flow rather than pinned
-        // right: a `right_to_left` layout aligns to the REGION's right edge, and
+        // right: a `right_to_left` layout aligns to the region's right edge, and
         // a region is exactly the thing that grows — so pinning right is how a
         // button ends up outside a panel it was meant to sit inside.
         ui.horizontal_wrapped(|ui| {
@@ -1163,11 +1163,11 @@ mod tests {
     use super::*;
     use floptle_map::ShapeKind;
 
-    /// A scene with one model node selected, holding an ARCH — the shape with
-    /// the most parameters, so SHAPE, SIZE and FACE MATERIALS are all on screen
-    /// at once — with faces selected so every MODIFY button is live rather than
+    /// A scene with one model node selected, holding an arch — the shape with
+    /// the most parameters, so shape, size and face materials are all on screen
+    /// at once — with faces selected so every modify button is live rather than
     /// greyed, and a per-slot material override so the material inspector draws
-    /// too. The point is to render the panel at its WIDEST, since a section that
+    /// too. The point is to render the panel at its widest, since a section that
     /// is not on screen cannot overflow.
     fn arch_scene() -> (World, Entity, map_edit::MapStore, Option<map_edit::MapSel>) {
         const ID: u32 = 1;

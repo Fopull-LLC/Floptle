@@ -47,7 +47,7 @@ pub(crate) fn load_palettes(project_root: &Path) -> Vec<Palette> {
     let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
     files.sort();
     for f in files {
-        // Guessed by CONTENT, like every other loader in the engine.
+        // Guessed by content, like every other loader in the engine.
         if let Ok(text) = std::fs::read_to_string(&f)
             && let Some(mut p) = Palette::parse(&text)
         {
@@ -141,7 +141,7 @@ impl Editor {
             self.focus_image_tab();
             return;
         }
-        // A live document is PARKED, not discarded. This used to refuse the open
+        // A live document is parked, not discarded. This used to refuse the open
         // ("save it, or repeat that to discard") and the refusal was the whole
         // problem: a document you could not save yet — because it had no name —
         // was a document you could not leave, so the 🖼 tab held you hostage
@@ -712,7 +712,7 @@ mod tests {
 
         let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
         ed.texture_registry.insert("textures/wall.png".into(), floptle_render::TexId(1));
-        // First poll only RECORDS the mtime — nothing is stale yet.
+        // First poll only records the mtime — nothing is stale yet.
         ed.poll_texture_hot_reload();
         assert!(ed.texture_registry.contains_key("textures/wall.png"));
         assert!(ed.texture_mtime.contains_key("textures/wall.png"));

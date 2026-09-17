@@ -18,7 +18,7 @@ pub(crate) fn material_params(m: &Material) -> MaterialParams {
     MaterialParams::from_material(m)
 }
 
-/// Everything a draw needs from a [`Material`] that only the RENDERER can
+/// Everything a draw needs from a [`Material`] that only the renderer can
 /// resolve: the group(1) texture set (base colour + the four surface maps) and
 /// the surface-extras index (the PBR scalars and the retro flags).
 ///
@@ -97,7 +97,7 @@ pub(crate) struct LightSlots {
     pub mask: [[u32; 4]; 16],
     /// 2D only: `[inner radius, exponent, casts-are-honoured, spare]`.
     pub falloff: [[f32; 4]; 16],
-    /// The EMITTER: `[kind, a, b, flags]` — 0 point, 1 sphere (a = radius),
+    /// The emitter: `[kind, a, b, flags]` — 0 point, 1 sphere (a = radius),
     /// 2 rect (a/b = half width/height, flag 1 = two-sided), 3 disk (a = radius,
     /// flag 1 = two-sided), 4 tube (a = half length, b = radius). Sizes are in
     /// world units, with the node's scale already folded in.
@@ -105,7 +105,7 @@ pub(crate) struct LightSlots {
     /// The emitter's world orientation (xyzw quaternion) — a rect faces the
     /// node's forward, a tube lies along its local X.
     pub rot: [[f32; 4]; 16],
-    /// The CONE, for a lamp that is aimed: `[cos(outer half angle),
+    /// The cone, for a lamp that is aimed: `[cos(outer half angle),
     /// cos(inner half angle), 0, 0]`. `-1` in `x` is **no cone**, which is what
     /// every omnidirectional light gets and what the default fills.
     ///
@@ -138,7 +138,7 @@ pub(crate) struct SplitLights {
     /// Lights that shade meshes the way they always have.
     pub three_d: LightSlots,
     /// Lights on the 2D path, read by the accumulation pass. `masks[i]` is a
-    /// bitmask over SORTING-LAYER RANK spread across four words — bit `r` of
+    /// bitmask over sorting-layer rank spread across four words — bit `r` of
     /// word `r / 32` set means the light reaches rank `r`. All-ones = every
     /// layer, which is what a light that named none does.
     pub two_d: LightSlots,
@@ -191,7 +191,7 @@ pub(crate) fn split_point_lights(
         if *intensity <= 0.0 || *range <= 0.0 {
             continue;
         }
-        // …and neither does a light on a node that is SWITCHED off, or under
+        // …and neither does a light on a node that is switched off, or under
         // one that is. `Disabled` takes a node out of physics and stops its
         // scripts, and a water volume beside this one already goes with it —
         // a lamp prefab you disabled still lighting the room is the reading
@@ -223,7 +223,7 @@ pub(crate) fn split_point_lights(
 
 /// A light's emitter packed for the shader: `[kind, a, b, flags]`.
 ///
-/// The node's SCALE is folded in here rather than in the shader, because that is
+/// The node's scale is folded in here rather than in the shader, because that is
 /// what dragging a scale handle on a window light is expected to do — and doing
 /// it once per light per frame beats doing it once per light per fragment.
 /// A lamp's cone packed for the shader: `[cos(outer half), cos(inner half), 0, 0]`.
@@ -255,7 +255,7 @@ fn emitter_lane(shape: floptle_core::LightShape, scale: Vec3, shadows: bool) -> 
     // A uniform-ish scale for the shapes that only have a radius: the largest
     // axis, so scaling a bulb up never makes it smaller in some direction.
     let s = scale.x.abs().max(scale.y.abs()).max(scale.z.abs());
-    // The `w` lane is a BITMASK — bit 0 two-sided, bit 1 casts shadows. It was a
+    // The `w` lane is a bitmask — bit 0 two-sided, bit 1 casts shadows. It was a
     // plain 0/1 for two-sidedness until a second flag needed a home; see
     // `light_flag` in field.wgsl, where the matching read lives.
     let two = |b: bool| if b { LIGHT_TWO_SIDED } else { 0.0 };
@@ -340,7 +340,7 @@ fn fill(mut lights: Vec<Candidate>) -> LightSlots {
     out
 }
 
-/// A light's named sorting layers as a bitmask over their RANKS, four words of
+/// A light's named sorting layers as a bitmask over their ranks, four words of
 /// it — bit `r` of word `r / 32`.
 ///
 /// Four words rather than one because a sorting layer's rank runs to 63
@@ -367,7 +367,7 @@ fn layer_mask(lit: &floptle_core::Lighting2D, sorting_names: &[String]) -> [u32;
 }
 
 /// The key light as the `light_dir` uniform vec4 for this camera. Directional:
-/// xyz = the normalized direction, w = 0. Stars mode: xyz = the BRIGHTEST
+/// xyz = the normalized direction, w = 0. Stars mode: xyz = the brightest
 /// star's camera-relative position, w = 1 — single-light consumers (atmosphere
 /// daylight, sky glow) follow it; the full per-star loop is `key_light` in the
 /// shaders.
@@ -384,7 +384,7 @@ pub(crate) fn sun_vec(world: &World, l: &Light, cam_world: DVec3) -> [f32; 4] {
 
 /// The atmospheres near this camera (S8): up to 4 celestial bodies with
 /// shells, deepest-immersion first, as the `atmo_*` raymarch-globals arrays.
-/// Bodies are included even from SPACE — the shader draws their limb halo,
+/// Bodies are included even from space — the shader draws their limb halo,
 /// aerial haze and cloud decks from outside too.
 pub(crate) type AtmoUniforms = ([f32; 4], [[f32; 4]; 4], [[f32; 4]; 4], [[f32; 4]; 4]);
 pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
@@ -667,9 +667,9 @@ pub(crate) fn water_infos(
 }
 
 /// [`fog_uniforms`], overridden while the camera is under water — plus the
-/// `fog_params` the PARTICLE pass should use.
+/// `fog_params` the particle pass should use.
 ///
-/// The scene's own fog is REPLACED rather than added to: underwater is a
+/// The scene's own fog is replaced rather than added to: underwater is a
 /// different medium, not the same air with more of it. Going through the one
 /// fog channel every draw path already reads is what makes meshes, terrain, SDF
 /// matter and particles go murky *together* — a separate underwater pass would
@@ -709,11 +709,11 @@ pub(crate) fn fog_uniforms_and_particles_at(
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
-/// how DYNAMIC raster meshes CAST sun shadows without being in the SDF field.
+/// how dynamic raster meshes cast sun shadows without being in the SDF field.
 /// Mirrors the physics build: a RigidBody node casts its body shape; a Collidable
 /// primitive casts the static shape `add_static_colliders` gives it (Cube →
 /// 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized). Static collider
-/// MESHES don't proxy — they bake real shadow-only occluder volumes instead
+/// Meshes don't proxy — they bake real shadow-only occluder volumes instead
 /// (`refresh_mesh_occluders`), so a level casts with its true silhouette. Skips
 /// hidden nodes and `CastShadow(false)` opt-outs; returns zeros when shadows are
 /// off.
@@ -810,7 +810,7 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
 
 /// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
 /// rotation and scale quantized to 1e-3. Translation is deliberately absent —
-/// the volume anchors on the node's f64 translation per frame, so MOVING a map
+/// the volume anchors on the node's f64 translation per frame, so moving a map
 /// never rebakes; only re-orienting or rescaling it does.
 pub(crate) type OccKey = (String, [i32; 4], [i32; 3]);
 
@@ -820,7 +820,7 @@ pub(crate) type OccKey = (String, [i32; 4], [i32; 3]);
 pub(crate) fn skybox_uniforms(
     world: &floptle_core::World,
 ) -> ([f32; 4], [f32; 4], [[f32; 4]; 3], [f32; 3]) {
-    // A DISABLED Skybox is not the scene's sky. That matters beyond the
+    // A disabled Skybox is not the scene's sky. That matters beyond the
     // Inspector's checkbox: it is how an additive layer loaded with
     // `{ environment = true }` takes the environment over — the base scene's
     // node steps aside rather than racing the layer's for this first match.
@@ -858,7 +858,7 @@ pub(crate) fn skybox_uniforms(
 }
 
 /// Resolve the scene's PostProcess node for the renderer: the PostStack settings
-/// (bloom / vignette / SSAO) plus the raymarch SDF-AO params `[on, strength,
+/// (bloom / vignette / SSAO) plus the raymarch SDF-ao params `[on, strength,
 /// radius, _]`. A disabled chain — or a node deleted mid-session — turns
 /// everything off (it self-heals back on the next scene load).
 /// The camera history motion blur reprojects against: the previous frame's
@@ -871,7 +871,7 @@ pub(crate) type MotionHistory = (floptle_core::math::Mat4, DVec3);
 /// ceiling, because only the frame knows which camera is rendering and how many
 /// pixels tall it is.
 ///
-/// **The world is camera-relative** (ADR-0015), so the previous view-projection
+/// **The world is camera-relative**, so the previous view-projection
 /// cannot be used as it was taken: a point sitting still in the world has a
 /// different relative position in each frame's coordinates. Shifting by how far
 /// the camera itself moved is what turns "where was this pixel" into a question
@@ -991,7 +991,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
             motion_blur,
             motion_samples,
             dof_show_focus,
-            // Resolved per VIEWPORT, against that viewport's own camera —
+            // Resolved per viewport, against that viewport's own camera —
             // see `dof_focus_distance`. It cannot be folded in here: this
             // function does not know which eye is about to render.
             dof_focus_node: _,
@@ -1048,7 +1048,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 // fills them — see `motion_frame`).
                 motion_blur: *motion_blur,
                 motion_samples: *motion_samples,
-                // The accessibility filter is a PREFERENCE, not a scene
+                // The accessibility filter is a preference, not a scene
                 // setting — the caller folds it in after this,
                 // and `time` likewise comes from the frame, not the node.
                 ..floptle_render::PostSettings::default()
@@ -1130,7 +1130,7 @@ mod light_split_tests {
         assert_eq!(s.two_d.mask[0], [!0u32; 4], "the mask must be all-ones, never zero");
     }
 
-    /// Named layers become RANK bits, so the shader compares a number rather
+    /// Named layers become rank bits, so the shader compares a number rather
     /// than a string. A name the project no longer has contributes no bit — the
     /// light does not reach a layer that does not exist.
     #[test]
@@ -1149,7 +1149,7 @@ mod light_split_tests {
         assert_eq!(s.two_d.mask[0], [1 << 2, 0, 0, 0], "only Characters, which is rank 2");
     }
 
-    /// A rank past the 32nd has to land in a later WORD, not fall off the end of
+    /// A rank past the 32nd has to land in a later word, not fall off the end of
     /// the first one. A project with that many sorting layers would otherwise
     /// find every layer past the 32nd unlit by every light, with nothing said.
     #[test]
@@ -1297,14 +1297,14 @@ mod light_split_tests {
         // coincide.
         assert!((c[1] - c[0]).abs() < 1e-6, "a hard edge has no falloff band: {c:?}");
 
-        // A NARROWER cone has a LARGER cosine. Getting this backwards is the
+        // A narrower cone has a larger cosine. Getting this backwards is the
         // one error `smoothstep(outer, inner, …)` would hide by simply
         // inverting the beam.
         let narrow = cone_lane(20.0, 0.25);
         let wide = cone_lane(120.0, 0.25);
         assert!(narrow[0] > wide[0], "narrow {narrow:?} vs wide {wide:?}");
 
-        // Softness is a FRACTION of the cone: the inner angle is inside the
+        // Softness is a fraction of the cone: the inner angle is inside the
         // outer one, never outside it.
         let soft = cone_lane(60.0, 0.5);
         assert!(soft[1] > soft[0], "the full-brightness angle is the narrower one: {soft:?}");

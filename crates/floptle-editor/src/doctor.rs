@@ -82,7 +82,7 @@ fn examine() -> Findings {
 
     // **Ask by doing.** A device can be created on an adapter whose shaders the
     // engine cannot compile, so nothing short of building the renderer answers
-    // this — see the OpenGL note in HANDOFF.
+    // this — see the OpenGL note in handoff.
     //
     // A validation failure reaches the uncaptured-error handler rather than
     // this thread, so the handler records it and the check reads what it left.

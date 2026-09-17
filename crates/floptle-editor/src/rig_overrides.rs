@@ -18,12 +18,12 @@ pub(crate) struct RigOverrides {
     /// child object/bone name → new parent name (`""` or absent parent = model root).
     #[serde(default)]
     pub reparent: BTreeMap<String, String>,
-    /// object/bone name → its rotation PIVOT (the "joint"), in the node's local space.
+    /// object/bone name → its rotation pivot (the "joint"), in the node's local space.
     /// Absent = the object's geometry centroid (the auto default). This is what lets a
     /// baked object whose origin is at the model root rotate about its real joint.
     #[serde(default)]
     pub pivot: BTreeMap<String, [f32; 3]>,
-    /// Filtering for the model's EMBEDDED textures (all of them — per-model, not
+    /// Filtering for the model's embedded textures (all of them — per-model, not
     /// per-image). Absent = the engine default (crisp/pixelated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_filter: Option<crate::assets::FilterMode>,

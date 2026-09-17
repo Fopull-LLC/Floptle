@@ -40,7 +40,7 @@ pub(crate) enum EditorTab {
     Tiles,
     /// The UI authoring canvas: one game-UI layer at design resolution, with
     /// rulers, guides, snapping, align/distribute, state preview and an
-    /// element outline (docs/ui-styles.md, phase C).
+    /// element outline (docs/UI-styles.md, phase C).
     UiDesign,
     /// 🎓 Learn: follow-along tutorials whose steps tick themselves off as the
     /// project comes to match them (see `learn.rs`).

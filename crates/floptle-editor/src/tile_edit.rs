@@ -187,13 +187,13 @@ pub(crate) struct TileTools {
     pub(crate) xform: TileXform,
     /// The palette's rubber-band selection, as `(px, py, w, h)` in sheet cells.
     pub(crate) palette: Option<(u32, u32, u32, u32)>,
-    /// Which SHEET of the tileset the palette is showing.
+    /// Which sheet of the tileset the palette is showing.
     ///
     /// 0 is the layer's own material sheet — which is every project that has
     /// never added a page, so this defaulting to 0 is the whole of the backward
     /// compatibility on the editing side.
     pub(crate) page: u32,
-    /// Paint an autotile GROUP rather than a literal tile: the tile placed is
+    /// Paint an autotile group rather than a literal tile: the tile placed is
     /// whichever of the group's tiles fits its neighbours.
     pub(crate) group: Option<u16>,
     /// Retile after every stroke. On by default when a group is armed, because a
@@ -211,7 +211,7 @@ pub(crate) struct TileTools {
     /// After a rule is given its first tile, arm the next empty one.
     ///
     /// On, because filling a 47-shape preset is otherwise 94 clicks with half of
-    /// them spent re-arming. Off is what you want while adding VARIANTS — the
+    /// them spent re-arming. Off is what you want while adding variants — the
     /// second, third and fourth tile for one shape — so it is a checkbox beside
     /// the grid rather than a rule of the tool. Clicking a rule that already has
     /// a tile never advances either way, because asking for a filled rule is
@@ -228,7 +228,7 @@ pub(crate) struct TileTools {
     pub(crate) show_collision: bool,
     /// Which tileset the tab is editing (a path into [`TileStore`]).
     pub(crate) editing: Option<String>,
-    /// The palette tiles whose properties the tab is EDITING.
+    /// The palette tiles whose properties the tab is editing.
     ///
     /// A set rather than one cell, because "these forty tiles are all solid" and
     /// "these six are the same slope" are the two things setting up a sheet
@@ -366,7 +366,7 @@ pub(crate) fn add_tilemap_colliders(
     // a ramp is a ramp in the sim and not the box around it. Anchored at its own
     // centroid-free bounding centre for the same reason the boxes are: the
     // points are baked relative to a point the node's transform places, so the
-    // f64 residuals stay small however far out the level sits (ADR-0015).
+    // f64 residuals stay small however far out the level sits.
     for p in &shapes.polys {
         let mid = p.pts.iter().fold([0.0f32, 0.0], |a, q| [a[0] + q[0], a[1] + q[1]]);
         let n = p.pts.len() as f32;
@@ -540,7 +540,7 @@ impl Editor {
 
     /// Which square of the active layer the cursor is over.
     ///
-    /// Intersects the cursor ray with the layer's own PLANE (the node's local
+    /// Intersects the cursor ray with the layer's own plane (the node's local
     /// XY), rather than assuming z = 0 in world space: a tilemap parented into a
     /// rotated rig, or one of several parallax layers at different Z, still
     /// answers about itself. Returns `None` when the ray misses the plane or lands
@@ -1039,7 +1039,7 @@ pub(crate) struct TileViz {
     pub(crate) band: Option<Vec<Vec2>>,
     /// The current selection, as a closed ring.
     pub(crate) selection: Option<Vec<Vec2>>,
-    /// The layer's outer edge — where the map ENDS, which is otherwise invisible
+    /// The layer's outer edge — where the map ends, which is otherwise invisible
     /// on an empty grid and is the first thing you need to see.
     pub(crate) bounds: Vec<Vec2>,
 }
@@ -1151,7 +1151,7 @@ impl Editor {
         if let Some(cur) = self.cursor
             && let Some((cx, cy)) = self.tile_cell_under(cur)
         {
-            // Mid-drag the telegraph is the RECTANGLE, not the square: what a
+            // Mid-drag the telegraph is the rectangle, not the square: what a
             // release will do, not where the pointer happens to be.
             if let Some((ax, ay)) = self.tile_tools.from.filter(|_| self.tile_tools.down) {
                 let (lo_x, hi_x) = (ax.min(cx), ax.max(cx));

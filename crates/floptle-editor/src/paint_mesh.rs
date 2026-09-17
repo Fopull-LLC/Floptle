@@ -78,7 +78,7 @@ pub(crate) struct PaintPart {
 /// cross-triangle seams (see [`for_each_cell_texel`]) so that over-fill never lands in the
 /// next triangle's cell.
 const ATLAS_PAD: u32 = 2;
-/// Target texels per triangle on AVERAGE — the paint texture's resolution knob. The real
+/// Target texels per triangle on average — the paint texture's resolution knob. The real
 /// per-triangle budget is redistributed by world-space area (a big/stretched face gets
 /// proportionally more), which is what keeps texel density — and so the painted detail —
 /// uniform across faces regardless of their shape. See [`PaintMeshCache::atlas_mesh`].
@@ -121,7 +121,7 @@ pub(crate) struct MeshAtlas {
 /// they get the same colour: the paint flows across the edge with no visible seam, even
 /// though the two triangles live in different corners of the atlas.
 ///
-/// The triangle is walked DILATED by one texel per edge (the per-edge bias), so the last
+/// The triangle is walked dilated by one texel per edge (the per-edge bias), so the last
 /// rendered texel right at the edge is always covered — an exact point-in-triangle test can
 /// leave a one-texel gap there that would flash the seed texture through. The over-fill is
 /// bounded to one texel, which [`ATLAS_PAD`] keeps inside this triangle's own rect.
@@ -227,7 +227,7 @@ impl PaintPart {
             max = Vec3::ZERO;
         }
 
-        // Cell size from the mean triangle edge — but FLOORED so the grid can never be
+        // Cell size from the mean triangle edge — but floored so the grid can never be
         // finer than MAX_CELLS_PER_AXIS across the mesh. Mean edge alone is a trap: one
         // big triangle among fine ones gives a tiny cell and an enormous grid.
         let mut acc = 0f64;
@@ -476,7 +476,7 @@ impl PaintMeshCache {
         self.parts.get(key)
     }
 
-    /// Drop one model's cached geometry — for meshes the editor itself EDITS
+    /// Drop one model's cached geometry — for meshes the editor itself edits
     /// (blockout nodes), whose triangles change under the brush.
     pub(crate) fn remove(&mut self, key: &str) {
         self.parts.remove(key);
@@ -524,7 +524,7 @@ impl PaintMeshCache {
         self.parts.get(key)?.get(part).map(|p| (p.min, p.max))
     }
 
-    /// Build a part's paint ATLAS: a unique-UV render mesh (identical positions + normals)
+    /// Build a part's paint atlas: a unique-UV render mesh (identical positions + normals)
     /// where every triangle owns its own patch of the texture, packed by its real shape.
     ///
     /// Two properties the old uniform `cols × cols` grid lacked:
@@ -693,7 +693,7 @@ mod tests {
         assert!(h.normal.z.abs() > 0.9, "normal should face ±Z, got {:?}", h.normal);
     }
 
-    /// the repeating fix: every triangle owns a UNIQUE, non-overlapping patch of the atlas,
+    /// the repeating fix: every triangle owns a unique, non-overlapping patch of the atlas,
     /// so a dab on one triangle can never land on another — even when the mesh's own UVs tile.
     #[test]
     fn atlas_gives_each_triangle_a_disjoint_uv_cell() {
@@ -708,7 +708,7 @@ mod tests {
                 assert_eq!(atlas.mesh.vertices[t * 3 + k].uv, cell.uv[k], "mesh UV == cell UV");
             }
         }
-        // The two triangles' texel footprints (their rasterized texel sets) must be DISJOINT
+        // The two triangles' texel footprints (their rasterized texel sets) must be disjoint
         // — that is what makes a dab on one impossible to see on the other.
         let footprint = |cell: &AtlasCell| {
             let mut set = std::collections::HashSet::new();
@@ -871,7 +871,7 @@ mod tests {
         let p = PaintPart::build(&d); // must return, not hang or OOM
         assert!(!p.oversized.is_empty(), "the floor quad must be treated as oversized");
         assert!(p.grid.len() < 100_000, "grid blew up: {} cells", p.grid.len());
-        // …and the oversized triangle must still be HITTABLE.
+        // …and the oversized triangle must still be hittable.
         let hit = p.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1.0, 0.0), 1e5);
         let h = hit.expect("the big floor quad must still be raycastable");
         assert!((h.t - 5.0).abs() < 1e-2, "t = {}", h.t);
@@ -879,7 +879,7 @@ mod tests {
 
     /// The freeze that shipped: `raycast` marched t=0..max_t at half-cell steps, so a
     /// fine mesh + the real max_t (1e5) meant tens of millions of iterations per mesh
-    /// per frame. A MISS is the common case (most of the scene isn't under the cursor),
+    /// per frame. A miss is the common case (most of the scene isn't under the cursor),
     /// so it must be near-free.
     #[test]
     fn a_miss_on_a_fine_mesh_is_cheap() {

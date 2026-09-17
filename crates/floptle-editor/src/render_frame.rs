@@ -60,7 +60,7 @@ impl Editor {
     ///
     /// The main gather can't call this directly (a live `self.gpu.as_mut()`
     /// borrow through most of `render()` conflicts with a `&mut self` method
-    /// call, even though the two touch disjoint fields), so the DECISION is
+    /// call, even though the two touch disjoint fields), so the decision is
     /// `light_cap_warning` — a plain function, no `self`, callable from
     /// anywhere — and this method is the thin wrapper `render_world_into` uses.
     pub(crate) fn warn_lights_dropped(&mut self, dropped: usize) {
@@ -146,7 +146,7 @@ impl Editor {
         //
         // Capture the terrain dirty state before `sync_terrain_gpu` consumes it: the atlas
         // upload feeds shadows/AO from each terrain's shadow proxy, then
-        // `sync_terrain_meshes` re-extracts the PRIMARY-ray chunk meshes straight from the
+        // `sync_terrain_meshes` re-extracts the primary-ray chunk meshes straight from the
         // authority field (Terrain 2.0 / P3). Structural change = full re-mesh; a sculpt
         // dab re-meshes only the chunks it touched (`terrain_chunks_dirty`).
         let terrain_full_rebuild = self.terrain_gpu_dirty;
@@ -167,7 +167,7 @@ impl Editor {
         // residency runs: the fill marks its body generation-owned
         // (`planet_gen_pending`), and residency must see that mark the same
         // frame — or it adopts the freshly created body as cold and streams a
-        // STALE same-id file into it (the authored scene's old planet loaded
+        // Stale same-id file into it (the authored scene's old planet loaded
         // under a rolled galaxy's spawn world — the player fell straight through it).
         self.drain_terrain_generates();
         self.update_terrain_residency(lod_cam);
@@ -176,7 +176,7 @@ impl Editor {
         // frame + threaded writes — autosaves must never stutter the game.
         self.step_terrain_checkpoint();
         {
-            // TERRAIN: residency, field generation and meshing.
+            // Terrain: residency, field generation and meshing.
             // `0074` came in as "I can see through unloaded terrain" and was a
             // priority bug; a number here would have shown the meshing queue.
             let _t = floptle_core::profile::Span::new();
@@ -251,7 +251,7 @@ impl Editor {
         // any selection change since the last boundary into its own undo step.
         // Skipped while playing — script-driven transforms must not enter the
         // undo history — and while recording (the world carries previewed clip
-        // values then; edits go to the CLIP as keys, not to scene undo).
+        // values then; edits go to the clip as keys, not to scene undo).
         self.begin_history_frame();
 
         self.play_step(dt, game_focused);
@@ -337,7 +337,7 @@ impl Editor {
                         && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
                             self.anim_ui.clip_dirty = true;
                         }
-                    // A held edit (bone gizmo/inspector DRAG) defers its disk save to
+                    // A held edit (bone gizmo/inspector drag) defers its disk save to
                     // pointer-up, so without this the preview keeps re-sampling the old
                     // clip and the bone looks frozen mid-drag. Refresh the in-memory clip
                     // + bump the revision so preview_pose rebinds to the live edit — the
@@ -379,7 +379,7 @@ impl Editor {
         // Game-UI layers: gather + solve on the CPU while `self` is free (the
         // draw core borrows the GPU stack); drawn over the finished frame below.
         // after the animation preview, so scrubbing shows live in every view.
-        // Is the game drawn over the whole WINDOW this frame? Not "does the Game
+        // Is the game drawn over the whole window this frame? Not "does the Game
         // tab have focus" — a docked tab has focus and draws into its own rect,
         // and asking the focus question here meant the overlay was also packed
         // and drawn full-window every frame, hidden under the editor's chrome.
@@ -669,7 +669,7 @@ impl Editor {
                 // `rm_draw` already accounts for the matter toggle + terrain presence;
                 // with nothing to raymarch the globals still upload so the raster
                 // pass's field group (shadows/AO/proxies) sees this frame's data.
-                // …and RENDER, second half: the passes themselves.
+                // …and render, second half: the passes themselves.
                 let draw_t = floptle_core::profile::Span::new();
                 // The sky, into the environment map, so surfaces have something
                 // to reflect. Before every other pass and after the globals,
@@ -819,7 +819,7 @@ impl Editor {
                 if !self.nav_surface.is_empty() {
                     tri_layer.draw(gpu, color, depth, view_proj, &self.nav_surface);
                 }
-                // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
+                // Script-drawn filled triangles (draw.tri/cone/disc — solid gizmos).
                 if !self.script_tris.is_empty() {
                     let verts: Vec<floptle_render::TriVertex> = self
                         .script_tris
@@ -919,7 +919,7 @@ impl Editor {
                         let d3 = floptle_core::math::Vec3::from(*down);
                         // Project element rects → Scene-tab overlay entries
                         // (gizmos — the master Gizmos toggle hides them, the
-                        // canvas CONTENT stays since it's your actual UI).
+                        // canvas content stays since it's your actual UI).
                         if !ui_gizmos {
                             continue;
                         }
@@ -1042,7 +1042,7 @@ impl Editor {
                     {
                         ps.dof_focus = d;
                     }
-                    // Motion blur is a GAME-view effect. The Scene view is a
+                    // Motion blur is a game-view effect. The Scene view is a
                     // tool: you have to be able to place a prop while the
                     // camera is still coasting, and a viewport that smears
                     // whenever you orbit is a viewport you fight.

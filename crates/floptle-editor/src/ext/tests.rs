@@ -117,7 +117,7 @@ fn a_package_registers_a_panel_a_menu_and_a_hook() {
 }
 
 /// The permission story, checked from Lua's side: an undeclared capability is
-/// ABSENT, so `http` is nil rather than a function that refuses.
+/// Absent, so `http` is nil rather than a function that refuses.
 #[test]
 fn an_undeclared_capability_is_absent_not_refused() {
     let proj = temp("perm");
@@ -627,7 +627,7 @@ fn read_bytes_reads_binary_and_honours_what_the_user_picked() {
 
     // Somewhere the package has no business reaching on its own.
     let outside = std::env::temp_dir().join(format!("floptle-picked-{}.bin", std::process::id()));
-    // Bytes that are deliberately not valid UTF-8, which is what makes this a
+    // Bytes that are deliberately not valid utf-8, which is what makes this a
     // different function rather than a convenience.
     std::fs::write(&outside, [0xffu8, 0x00, 0xfe, b'h', b'i']).unwrap();
     let outside_s = outside.to_string_lossy().to_string();
@@ -985,7 +985,7 @@ fn right_aligned_content_sits_at_the_edge_on_the_very_first_frame() {
     for (i, w) in widths.iter().enumerate() {
         assert!(*w <= 300.5, "frame {i} laid out {w} wide inside 300: {widths:?}");
     }
-    // It FILLS the row from the first frame — which is the difference from the
+    // It fills the row from the first frame — which is the difference from the
     // measured spacer, whose first frame claims nothing.
     assert!(
         widths[0] >= 299.0,
@@ -1385,7 +1385,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
     );
 
     // A tilemap node, purely so `tilemap.of()` above has something to walk —
-    // the coverage sweep needs the HANDLE to exist, not a real level.
+    // the coverage sweep needs the handle to exist, not a real level.
     let mut world = floptle_core::World::default();
     let tm = world.spawn();
     world.insert(tm, floptle_core::Name("__CoverageTilemap".into()));
@@ -1475,7 +1475,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// the walk above reaches every top-level TABLE, and cannot
+/// the walk above reaches every top-level table, and cannot
 /// see the fields of a table a binding *returns* — `scene.info(id).ui` is
 /// real, was undocumented for exactly that reason (invisible from inside the
 /// engine, only found once a substantial package was built against it), and
@@ -2373,7 +2373,7 @@ fn a_package_writes_a_node_document_and_builds_a_subtree() {
 }
 
 /// A queued edit must not hold anything of Lua's. LuaJIT has ~8000 registry
-/// slots and `create_table` PANICS when they run out, so a tool that queues a
+/// slots and `create_table` panics when they run out, so a tool that queues a
 /// few hundred edits in a loop would take the editor down if the command carried
 /// the table rather than a copy of it.
 #[test]
@@ -2462,7 +2462,7 @@ fn a_document_read_from_a_node_can_be_written_to_a_new_one() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// Reading a node that is not selected RAISES. A nil would have a tool place an
+/// Reading a node that is not selected raises. A nil would have a tool place an
 /// empty node and report success, which is the failure this API exists to avoid.
 #[test]
 fn reading_the_document_of_an_unselected_node_says_why_rather_than_answering_nil() {
@@ -2729,7 +2729,7 @@ fn a_package_reads_a_nodes_triangles() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// A read that cannot be answered calls back with `nil` and a REASON, rather
+/// A read that cannot be answered calls back with `nil` and a reason, rather
 /// than never calling back — a callback that silently never runs is the worst
 /// of the three possible failures.
 #[test]

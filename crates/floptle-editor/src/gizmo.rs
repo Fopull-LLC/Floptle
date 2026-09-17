@@ -5,7 +5,7 @@
 //! object's Transform once per frame into `GizmoFrame`, so window/device
 //! events can hit-test the cursor cheaply. Dragging applies an absolute
 //! transform from a start-of-drag snapshot (no per-event accumulation → no
-//! drift). It only PAINTS — it never registers an egui widget — so it never
+//! drift). It only paints — it never registers an egui widget — so it never
 //! steals input from panels or the RMB fly-camera.
 
 use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3};
@@ -53,7 +53,7 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    /// Every tool, in KEYBIND order. This is the single source of truth: `from_digit`,
+    /// Every tool, in keybind order. This is the single source of truth: `from_digit`,
     /// `digit`, and the viewport toolbar all read it, so the toolbar can never again
     /// disagree with the number keys (it used to list Rect before Sculpt while the keys
     /// said otherwise). Add a tool here and it appears, in order, everywhere.
@@ -135,7 +135,7 @@ impl Handle {
 pub(crate) struct GizmoFrame {
     pub(crate) center: Vec2,
     /// Local-axis arrow tips; `None` for an axis that projects behind the camera.
-    /// For the Rect tool these are the +axis FACE centers of the bounds box.
+    /// For the Rect tool these are the +axis face centers of the bounds box.
     pub(crate) tips: [Option<Vec2>; 3],
     /// Rect tool: the −axis face centers.
     pub(crate) neg_tips: [Option<Vec2>; 3],
@@ -167,7 +167,7 @@ pub(crate) struct DragState {
     pub(crate) handle: Handle,
     /// The entity this snapshot belongs to — guards against the selection
     /// changing mid-drag and applying the wrong object's start transform.
-    /// For a BONE drag this is the rigged-mesh entity that owns the bone.
+    /// For a bone drag this is the rigged-mesh entity that owns the bone.
     pub(crate) entity: Entity,
     /// `Some(bone_index)` when the gizmo is posing an armature bone (not an ECS
     /// entity). The drag writes the bone's local pose into the open clip instead
@@ -267,7 +267,7 @@ pub(crate) fn build_gizmo(
     if tool == Tool::MapEdit && xf_override.is_none() {
         return None;
     }
-    // Either an explicit world transform — a selected armature BONE, which is not
+    // Either an explicit world transform — a selected armature bone, which is not
     // an ECS entity — or the selected entity's world transform (so the gizmo sits
     // on the node's actual, parented placement).
     let t = match xf_override {
@@ -579,7 +579,7 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                 flush(painter, &mut ghost, false);
             }
             // The object's own axes, named. Three rings tell you the planes you
-            // can turn in; they do not tell you which way the object is FACING,
+            // can turn in; they do not tell you which way the object is facing,
             // which is the thing you actually need when the object is a head, a
             // wing or a gun. A short stub with a letter on it does, and it is the
             // same red/green/blue the ring uses, so the two read as one gizmo.
@@ -650,7 +650,7 @@ mod tests {
         let e = w.spawn();
         w.insert(e, Transform { translation: DVec3::new(0.0, 0.0, -10.0), ..Default::default() });
         // Camera-relative projection: the view carries no translation, so the
-        // object's world position is its position relative to the eye (ADR-0015).
+        // object's world position is its position relative to the eye.
         let proj = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 1000.0);
         (w, e, DVec3::ZERO, proj)
     }

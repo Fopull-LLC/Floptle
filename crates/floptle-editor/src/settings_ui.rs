@@ -142,7 +142,7 @@ pub(crate) fn row<R>(
 ) -> R {
     // 120 px of caption, until the panel is too thin to spare it — then the
     // caption moves above its control and the control gets the full width.
-    // `crate::responsive::row_with` also runs the body in a WRAPPED horizontal,
+    // `crate::responsive::row_with` also runs the body in a wrapped horizontal,
     // so a settings row with three controls on it folds rather than leaves.
     // 150 px of content, not the 96 the tile-ish tabs use: a settings control is
     // a checkbox with a sentence on it or a slider with a unit, and neither
@@ -239,7 +239,7 @@ impl<'a> SettingsCtx<'a> {
             })
             .collect();
 
-        // Searching to nothing is worth SAYING — an empty pane with no
+        // Searching to nothing is worth saying — an empty pane with no
         // explanation reads as a broken panel.
         if searching && hits.is_empty() {
             ui.vertical_centered(|ui| {
@@ -336,7 +336,7 @@ impl<'a> SettingsCtx<'a> {
                     .show(ui, |ui| {
                         ui.add_space(6.0);
                         // Breathing room down the left of the content column —
-                        // as a MARGIN, not as a `horizontal` wrapper. A
+                        // as a margin, not as a `horizontal` wrapper. A
                         // horizontal layout hands its children an unbounded
                         // width, and the content column is the one place that
                         // must not be unbounded: everything in it then lays out
@@ -355,7 +355,7 @@ impl<'a> SettingsCtx<'a> {
                                     // A fresh scope, so `max_rect.left` is where
                                     // the cursor actually is — then clamp its
                                     // right edge to the panel. Measured from the
-                                    // CLIP rect because a scrolled content region
+                                    // Clip rect because a scrolled content region
                                     // reports a width that grows with whatever
                                     // was put in it, and every paragraph in the
                                     // section wraps against this number.
@@ -381,7 +381,7 @@ impl<'a> SettingsCtx<'a> {
     }
 
     // --- Accessibility ----------------------------------
-    /// The player-facing settings, in the editor so they can be TRIED.
+    /// The player-facing settings, in the editor so they can be tried.
     ///
     /// A game drives the same values from Lua (`access.*`); this pane exists
     /// because "text scaling that reflows" and "a colourblind-safe picture" are
@@ -873,7 +873,7 @@ impl<'a> SettingsCtx<'a> {
             .small(),
         );
         // Named strengths first, the number second. The number alone is a bad
-        // control here: it counts grid steps, so BIGGER is subtler, and the
+        // control here: it counts grid steps, so bigger is subtler, and the
         // value that reads as authentic depends on the project's own pixel
         // resolution rather than on taste. Anyone reaching for "make my game
         // look like that" and dragging a 0–512 slider lands somewhere far too
@@ -1002,7 +1002,7 @@ impl<'a> SettingsCtx<'a> {
         );
         ui.add_space(8.0);
 
-        // Sorting layers live here too, and are deliberately a SEPARATE list.
+        // Sorting layers live here too, and are deliberately a separate list.
         // A 2D scene routinely wants a Background that collides with nothing and
         // a Player that does, both sorting independently of either fact; sharing
         // one list would mean every new draw order invents a physics layer.
@@ -1122,7 +1122,7 @@ impl<'a> SettingsCtx<'a> {
                     let after = project.layers[i].clone();
                     // The rename follows through: exception pairs here, the open
                     // scene's nodes below (per keystroke, so they never detach
-                    // mid-edit). Other scene FILES keep the old name and warn at Play.
+                    // mid-edit). Other scene files keep the old name and warn at Play.
                     for (a, b) in project.no_collide.iter_mut() {
                         if *a == before {
                             *a = after.clone();
@@ -1206,7 +1206,7 @@ impl<'a> SettingsCtx<'a> {
             );
             ui.add_space(6.0);
             // **The matrix scrolls sideways rather than shrinking.** It is one
-            // checkbox per layer PAIR, so its width is decided by the project and
+            // checkbox per layer pair, so its width is decided by the project and
             // not by the panel: sixteen layers cannot be made to fit a docked
             // Settings pane, and squeezing them would put two adjacent
             // checkboxes under one click. Scrolling keeps every pair reachable
@@ -1462,7 +1462,7 @@ mod tests {
 
     /// Collect every string egui painted this frame.
     ///
-    /// egui reports a duplicate widget id by PAINTING an error over the
+    /// egui reports a duplicate widget id by painting an error over the
     /// offending widget rather than logging it, so reading the paint list is
     /// how a test can see one.
     fn painted_text(output: &egui::FullOutput) -> String {
@@ -1489,8 +1489,8 @@ mod tests {
 
     /// The Input section actually draws its rows.
     ///
-    /// NOTE on what this does *not* cover: the popup bug (binding menus and the
-    /// SOCD dropdown snapping shut on click) was an egui **widget-id
+    /// Note on what this does *not* cover: the popup bug (binding menus and the
+    /// Socd dropdown snapping shut on click) was an egui **widget-id
     /// collision** — every action row built its picker from the same label, so
     /// all the rows' menus shared one id and fought over which was open. The
     /// fix is the `push_id` namespacing in `input_ui.rs`. egui reports a clash

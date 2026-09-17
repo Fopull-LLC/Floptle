@@ -3,7 +3,7 @@
 //!
 //! Layout is fixed and boring on purpose — a tool column that never resizes
 //! itself, a right panel you can drag but that never moves on its own, and the
-//! canvas in the middle. The house UX bar (`ui-stability-feedback`) applies in
+//! canvas in the middle. The house UX bar (`UI-stability-feedback`) applies in
 //! full here: nothing re-centres, nothing re-sizes, popups are a constant size.
 
 use egui::{Color32, RichText};
@@ -41,7 +41,7 @@ pub(crate) struct ImageCtx<'a> {
     pub(crate) st: &'a mut ImageEditState,
     pub(crate) project_root: &'a std::path::Path,
     pub(crate) cmd: &'a mut EditorCmd,
-    /// The PARKED documents' tab labels, in stash order — see
+    /// The parked documents' tab labels, in stash order — see
     /// `Editor::image_stash`. The live one is `st`; it is not in here.
     pub(crate) parked: &'a [String],
 }
@@ -290,7 +290,7 @@ impl ImageCtx<'_> {
 
             ui.separator();
             // The cell grid needs a sheet to draw, and the sheet is a property of
-            // the IMAGE — so its numbers are here, beside the toggle that shows
+            // the image — so its numbers are here, beside the toggle that shows
             // them, rather than in a settings file the art does not travel with.
             ui.checkbox(&mut l.cell_grid, "Sheet cell grid");
             ui.add_enabled_ui(l.cell_grid, |ui| {
@@ -817,7 +817,7 @@ impl ImageCtx<'_> {
             .show(ui, |ui| {
                 // Eighteen tools is ~500 px of strip. Docked short — beside a
                 // Scene view, or on a laptop — the tail of the list was simply
-                // CLIPPED AWAY, with no scrollbar and no way to reach the pen or
+                // Clipped away, with no scrollbar and no way to reach the pen or
                 // the text tool except by keyboard.
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1718,7 +1718,7 @@ impl ImageCtx<'_> {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("transform").small().strong());
                 ui.separator();
-                // Offered as OUTPUT PIXELS as well as a factor, because the
+                // Offered as output pixels as well as a factor, because the
                 // number in your head is "32 wide", not "twice".
                 ui.small("size");
                 let (mut px, mut py) = (sw as f32 * xf.scale.0, sh as f32 * xf.scale.1);
@@ -2295,7 +2295,7 @@ mod tests {
         let _ = run(&mut st);
     }
 
-    /// Drive the tab with REAL pointer events: press on the canvas, drag, release.
+    /// Drive the tab with real pointer events: press on the canvas, drag, release.
     ///
     /// This is the one test that proves the whole chain connects — the view
     /// transform, the hit-testing, the tool state machine and the brush — rather

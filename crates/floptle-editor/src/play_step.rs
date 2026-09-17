@@ -36,10 +36,10 @@ impl Editor {
         });
     }
 
-    /// Frame-time smoothing: SNAP the measured dt to the nearest whole multiple
+    /// Frame-time smoothing: snap the measured dt to the nearest whole multiple
     /// of the display's refresh period when it's close. Under vsync (Fifo) a
     /// frame's true screen time is a whole number of refresh periods — the
-    /// CPU-side measurement just adds 1–3 ms of scheduler noise on top, and
+    /// Cpu-side measurement just adds 1–3 ms of scheduler noise on top, and
     /// feeding that noise into the fixed-step accumulator moves everything the
     /// interpolation renders by `velocity × noise` every frame (the moving-
     /// jitter that came and went with window mode / load). The residual error
@@ -89,7 +89,7 @@ impl Editor {
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
         let dt = self.smooth_dt(raw_dt);
-        // This frame's time for UI style transitions. Handed to the RUNTIME
+        // This frame's time for UI style transitions. Handed to the runtime
         // rather than to a pass, because several passes style the same tree in
         // a frame and each needs the real `dt`; `begin_frame` is what stops an
         // element charging it twice (see `Editor::ui_style_dt`).
@@ -118,7 +118,7 @@ impl Editor {
 
         // FPS in the window title (smoothed, refreshed a few times a second).
         if dt > 0.0 {
-            // **Smooth the frame TIME and invert at display time.** Smoothing
+            // **Smooth the frame time and invert at display time.** Smoothing
             // `1.0 / dt` averages a reciprocal, which is biased toward the fast
             // frames — and the more bimodal the distribution, the more wildly it
             // flatters. See `Editor::fps` for the capture where it read 4312 fps
@@ -182,7 +182,7 @@ impl Editor {
             }
         }
 
-        // Glide an in-progress focus (F). Any WASD/Space/C input hands control back
+        // Glide an in-progress focus (F). Any wasd/Space/C input hands control back
         // to the user immediately. Only the camera position eases; the view angle is
         // left to mouse-look, so you can look around mid-glide.
         if self.focus_anim.is_some() {
@@ -252,7 +252,7 @@ impl Editor {
             self.push_app_info();
         }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
-        // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
+        // attached to nodes. Scripts hot-reload as their files change.
         if self.playing {
             // A scene transition a script queued last frame happens first —
             // at a frame boundary, never mid-frame under the scripts that
@@ -366,7 +366,7 @@ impl Editor {
                 floptle_script::InputSnapshot { aim, ..Default::default() }
             };
             self.script_host.set_input(frame_input.clone());
-            // …and the ACTION layer's frame domain, off the same devices and
+            // …and the action layer's frame domain, off the same devices and
             // the same focus rule, so `input.action(...)` and `input.key(...)`
             // agree about whether the game is being played this frame.
             self.resolve_frame_actions(sdt, input_live);
@@ -414,12 +414,12 @@ impl Editor {
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
             // cursor for free-look, or release it). The state persists until changed/Stop.
-            // DEDUPED against the current state: shipped camera scripts call
+            // Deduped against the current state: shipped camera scripts call
             // setMouseLocked every frame from update(), and re-issuing the OS grab at
             // frame rate tears down/recreates the pointer lock each time (on Wayland
             // that reads as a flickering, uncontrollable cursor).
             if let Some(want) = self.script_host.take_mouse_lock() {
-                // An explicit UNLOCK is a game saying "the pointer is mine now",
+                // An explicit unlock is a game saying "the pointer is mine now",
                 // and it has to release the editor's click-to-play trap too —
                 // that is a second, invisible lock owner the game has no way to
                 // reach. Deduping it against `script_mouse_lock` would drop the
@@ -436,7 +436,7 @@ impl Editor {
                 if want != self.script_mouse_lock {
                     self.script_mouse_lock = want;
                     // While the editor is holding the pointer, the game's wish
-                    // is RECORDED and not applied — it lands the moment you
+                    // is recorded and not applied — it lands the moment you
                     // click back into the Game view. This is the whole reason
                     // Escape works against a camera script that re-locks every
                     // frame: the re-lock is a no-op until you say so.
@@ -481,7 +481,7 @@ impl Editor {
                     self.captions.remove(0);
                 }
             }
-            // `water.setFrozen(node, on)` — freezing is a STATE, so it lands on
+            // `water.setFrozen(node, on)` — freezing is a state, so it lands on
             // the node and the physics field is rebuilt from it. The rebuild
             // preserves live velocities, so a sea freezing under a swimmer does
             // not fling them.
@@ -510,7 +510,7 @@ impl Editor {
                     self.rebuild_sim();
                 }
             }
-            // GPU-load any models a script swapped via `node.model` (the Matter is
+            // Gpu-load any models a script swapped via `node.model` (the Matter is
             // already updated by run; re-importing here means the new mesh renders
             // this frame).
             self.load_script_swapped_models();
@@ -544,7 +544,7 @@ impl Editor {
                 anim_dt,
                 anim_cmds,
             );
-            // ANIMATION: clip sampling, blending, pose composition and CPU
+            // Animation: clip sampling, blending, pose composition and CPU
             // skinning.
             self.profile_record(floptle_core::profile::Bucket::Animation, anim_t.ms());
             for (eid, func) in fired {
@@ -560,7 +560,7 @@ impl Editor {
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
             }
-            // Apply script velocity writes, then run the GAMEPLAY tick loop (docs/
+            // Apply script velocity writes, then run the gameplay tick loop (docs/
             // netcode-design.md §3): each banked 60 Hz tick runs `fixedUpdate` with a
             // per-tick input snapshot, applies its writes, and steps physics exactly one
             // tick — the deterministic unit netcode snapshots/prediction share. Rendered
@@ -643,7 +643,7 @@ impl Editor {
                     // Game view isn't focused — but still consumed, so stale edges
                     // don't fire on refocus.
                     let snap = if game_focused {
-                        // The accumulators are DRAINED either way — while the
+                        // The accumulators are drained either way — while the
                         // editor holds the pointer the mouse half is dropped
                         // rather than banked, so nothing fires in a burst the
                         // moment you hand the cursor back.
@@ -679,9 +679,9 @@ impl Editor {
                     // history, so motions and buffers advance exactly once per
                     // tick regardless of framerate. Drains the banked edges.
                     //
-                    // A ROLLBACK session owns that domain instead: every peer's
+                    // A rollback session owns that domain instead: every peer's
                     // input, including ours, is written into its slot at its
-                    // APPLIED tick and history advances exactly once from
+                    // Applied tick and history advances exactly once from
                     // there. Resolving devices here as well would advance it a
                     // second time and halve every motion window on the local
                     // player only (see `InputSystem::sample_tick`). The driver
@@ -722,8 +722,8 @@ impl Editor {
                     }
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
-                    // Real hosting: each REMOTE player's Predicted node runs
-                    // with its OWNER's replayed input for this tick — the
+                    // Real hosting: each remote player's Predicted node runs
+                    // with its owner's replayed input for this tick — the
                     // one-script model (§6), server side. Those nodes are
                     // filtered out of the global passes; run_*_for bypasses
                     // the filters. The host's own input is restored after.
@@ -805,7 +805,7 @@ impl Editor {
                         if self.physics_paused {
                             sim.clear_held_forces();
                         } else {
-                            // PHYSICS. Timed per tick and
+                            // Physics. Timed per tick and
                             // accumulated, because a frame can run several — a
                             // per-frame timer would report the last tick and hide
                             // a catch-up frame, which is exactly the spike a game
@@ -869,7 +869,7 @@ impl Editor {
                 }
             }
             // `lateUpdate` — the camera pass: after physics and the interpolated
-            // writeback, so followers sample this frame's FINAL poses. (A camera
+            // writeback, so followers sample this frame's final poses. (A camera
             // positioned in `update` reads last frame's pose — a follow error of
             // velocity × dt that turns frame-time noise into visible jitter.)
             // The tick loop overwrote the input snapshot with per-tick state —
@@ -927,7 +927,7 @@ impl Editor {
                 self.script_errors = self.script_host.errors().to_vec();
             }
             // Immediate-mode 3D lines queued this frame — by `update`, `fixedUpdate`
-            // and `lateUpdate` — drained once per frame, REPLACING the list (an
+            // and `lateUpdate` — drained once per frame, replacing the list (an
             // idle script clears its lines). Drained here, after the late pass,
             // so a camera-pass drawer (the solar map) lands the same frame as the
             // camera it positioned — draining per tick left the lines a frame
@@ -950,7 +950,7 @@ impl Editor {
             self.bake_scatter_prototypes();
             // Bone attachments resolve after physics: physics moves the mesh root (a
             // character body), while animation only bent the bones — so a weapon on a
-            // bone must read the POST-physics mesh world or it swims a frame behind.
+            // bone must read the post-physics mesh world or it swims a frame behind.
             anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
             // 2D cameras follow after all of that, for the same reason bone
             // attachments do: a camera chasing a player has to read where the
@@ -1042,7 +1042,7 @@ impl Editor {
         }
     }
 
-    /// GPU-load models a script swapped via `node.model` so they render this
+    /// Gpu-load models a script swapped via `node.model` so they render this
     /// frame.
     ///
     /// This is [`Editor::import_model`], once per changed node, and nothing
@@ -1064,7 +1064,7 @@ impl Editor {
     }
 
     /// End-of-input bookkeeping: clear the per-frame key/button edges, re-pin a
-    /// CONFINE-only cursor grab, and drain script logs into the Console.
+    /// Confine-only cursor grab, and drain script logs into the Console.
     pub(crate) fn finish_input_frame(&mut self) {
         // Clear per-frame input edges after scripts consumed them.
         self.input_keys_pressed.clear();
@@ -1074,7 +1074,7 @@ impl Editor {
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
-        // The per-TICK accumulators are consumed by the gameplay-tick loop while
+        // The per-tick accumulators are consumed by the gameplay-tick loop while
         // playing; outside play they'd grow unbounded, so drain them here instead.
         if !self.playing {
             self.tick_keys_pressed.clear();
@@ -1089,7 +1089,7 @@ impl Editor {
             self.tick_input_edges.0.clear();
             self.tick_input_edges.1.clear();
         }
-        // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
+        // A confine-only grab (X11 has no OS cursor lock) still lets the pointer
         // wander inside the window — pin it ourselves while a look/pan/lock/trap is
         // active. Look/pan read RAW device motion, so re-centering never pollutes
         // the deltas. A trapped Game cursor re-centers to the game rect (not the

@@ -131,7 +131,7 @@ mod tests {
     /// Scaffold `name` into a temp dir the way `--new --template` does.
     ///
     /// `tag` is the calling test's own name. Tests in one binary run in
-    /// PARALLEL threads, so a path keyed only on the template would have two of
+    /// Parallel threads, so a path keyed only on the template would have two of
     /// them scaffolding and deleting the same directory underneath each other —
     /// which fails as "script not found" and looks exactly like a broken
     /// template.

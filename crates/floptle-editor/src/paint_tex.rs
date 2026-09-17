@@ -57,7 +57,7 @@ use crate::Editor;
 /// no filtering bleed across the packed triangle patches.
 pub(crate) const PAINT_SAMPLING: TexSampling = TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp };
 
-/// A fresh canvas texel: fully transparent (the overlay shows nothing), with WHITE rgb so
+/// A fresh canvas texel: fully transparent (the overlay shows nothing), with white rgb so
 /// the Multiply/Darken blend modes see the identity when paint first lands on a texel.
 pub(crate) const CLEAR_TEXEL: [u8; 4] = [255, 255, 255, 0];
 
@@ -81,7 +81,7 @@ pub(crate) struct PaintPartTex {
     /// The atlas mesh's own paint block (imported COLOR_0, carried over at registration;
     /// 0 = the mesh had none). ×1 multiply, like any imported block.
     pub(crate) mesh_vp: u32,
-    /// Atlas-ordered MIRROR of the node's brush vertex-paint block (0 = none). Rebuilt by
+    /// Atlas-ordered mirror of the node's brush vertex-paint block (0 = none). Rebuilt by
     /// `sync_tex_paint_mirrors` whenever vertex paint changes; ×2 modulate, like the brush.
     pub(crate) node_vp: u32,
 }
@@ -113,7 +113,7 @@ impl Editor {
     }
 
     /// Build a node's per-part paint textures + atlas meshes on first paint. The canvas is
-    /// fully TRANSPARENT — an overlay over the node's ordinary render, which never changes.
+    /// fully transparent — an overlay over the node's ordinary render, which never changes.
     /// Returns the id, or `None` if the node has no paintable mesh. `pub(crate)` so a scene
     /// reload can rebuild the (deterministic) atlas before overwriting it with saved pixels.
     pub(crate) fn ensure_paint_tex(&mut self, e: Entity, key: &str) -> Option<u32> {
@@ -149,7 +149,7 @@ impl Editor {
             // Registering with the atlas's remapped COLOR_0 allocates its paint block, so
             // the overlay's paint is shaded by the mesh's imported per-vertex look.
             //
-            // A BLOCKOUT's atlas is a dynamic slot instead: its geometry changes
+            // A blockout's atlas is a dynamic slot instead: its geometry changes
             // every time the level is edited, and static meshes can never be
             // freed — so a re-registration per edit of a painted wall would leak
             // one for the whole session. (Map geometry carries no COLOR_0, so
@@ -182,9 +182,9 @@ impl Editor {
         Some(id)
     }
 
-    /// Keep each texture-painted node's vertex paint shading its OVERLAY: the node's brush
+    /// Keep each texture-painted node's vertex paint shading its overlay: the node's brush
     /// block is indexed by original vertex id, but the atlas mesh has its own (unshared)
-    /// vertices — so an atlas-ordered MIRROR block is maintained per part and remapped
+    /// vertices — so an atlas-ordered mirror block is maintained per part and remapped
     /// through `orig_vids` whenever vertex paint changes (`vpaint_epoch` bumps on every
     /// mutation: dab, fill, clear, undo, reload). Runs once per frame; a no-op when nothing
     /// changed.
@@ -245,7 +245,7 @@ impl Editor {
     /// one pass, darkest at the seam — painted ambient occlusion, the retro baked look.
     /// `center` is the cursor hit and `model` maps object → the same (camera-relative) space.
     ///
-    /// `view` is the camera ray direction: triangles facing AWAY are skipped (unless the
+    /// `view` is the camera ray direction: triangles facing away are skipped (unless the
     /// brush's back-faces switch is on), so the sphere can't bleed through a thin wall onto
     /// its far side — the same rule the vertex brush applies per vertex.
     ///
@@ -315,7 +315,7 @@ impl Editor {
                                 continue;
                             }
                             let cur = pixels[idx + ch] as f32;
-                            // The blend mode composes within the PAINT layer. A texel
+                            // The blend mode composes within the paint layer. A texel
                             // receiving its first paint takes the color directly — lerping
                             // from the clear texel's white would haze soft brush edges.
                             let target = brush.blend.apply(cur, s);
@@ -326,7 +326,7 @@ impl Editor {
                             };
                         }
                         if brush.channels[3] {
-                            // Coverage always MIXES toward the brush alpha — a multiply/
+                            // Coverage always mixes toward the brush alpha — a multiply/
                             // darken against a transparent (0) texel could never deposit.
                             pixels[idx + 3] =
                                 (cur_a + (src_a - cur_a) * w).round().clamp(0.0, 255.0) as u8;
@@ -376,10 +376,10 @@ impl Editor {
     }
 
     /// Flood the selected nodes' paint textures (the ▦ Texture target's "Fill selected").
-    /// One uniform DAB over every texel: the brush STRENGTH is the deposit weight, so
+    /// One uniform DAB over every texel: the brush strength is the deposit weight, so
     /// strength 1.0 floods solid color while 0.3 lays a 30% translucent wash over the base
     /// — and repeated fills deepen it, exactly like repeated strokes. Blend mode + channel
-    /// mask apply as in a dab. With ⊘ Erase active it FADES all paint by the strength
+    /// mask apply as in a dab. With ⊘ Erase active it fades all paint by the strength
     /// instead (full strength removes it — the base shows through). One undo step per node
     /// — `None` pre-state when the node wasn't painted, so undo removes the paint entirely.
     pub(crate) fn tex_fill_selected(&mut self) {
@@ -477,11 +477,11 @@ impl Editor {
     }
 }
 
-/// Push a texture-painted node's paint OVERLAY: each part's atlas mesh with its paint
+/// Push a texture-painted node's paint overlay: each part's atlas mesh with its paint
 /// texture, coplanar over the base (which the caller draws normally — the base look never
 /// changes). The instance alpha rides just under the opaque cutoff so the overlay routes to
 /// the alpha-blended transparent pass; unpainted texels have zero alpha and show nothing.
-/// A FREE function taking explicit fields — the render loop has `self.raster` borrowed out,
+/// A free function taking explicit fields — the render loop has `self.raster` borrowed out,
 /// so no `&self` method may run there (the `push_terrain_instances` pattern).
 pub(crate) fn push_painted_node(
     world: &floptle_core::World,
@@ -569,7 +569,7 @@ mod tests {
         (l0 >= -1e-4 && l1 >= -1e-4 && l2 >= -1e-4).then_some([l0, l1, l2])
     }
 
-    /// Nearest-sample an RGBA8 image with REPEAT wrap (what the base pass does).
+    /// Nearest-sample an RGBA8 image with repeat wrap (what the base pass does).
     fn sample_wrap(img: &TextureData, u: f32, v: f32) -> [u8; 4] {
         let (w, h) = (img.width.max(1), img.height.max(1));
         let x = (((u - u.floor()) * w as f32) as u32).min(w - 1);
@@ -719,7 +719,7 @@ mod tests {
             }
         };
         dab(&mut paint, Vec3::new(2.4, 2.2, 0.0), 1.3, [0.05, 0.02, 0.02], false);
-        // Erase the middle — a short STROKE (several dabs), like the brush actually delivers:
+        // Erase the middle — a short stroke (several dabs), like the brush actually delivers:
         // each dab multiplies alpha by (1-w), so a stroke converges to exactly zero.
         for _ in 0..4 {
             dab(&mut paint, Vec3::new(2.4, 2.2, 0.0), 0.5, [0.0; 3], true);
@@ -740,11 +740,11 @@ mod tests {
                         let Some(l) = bary2d(wx, wy, cell.pos[0], cell.pos[1], cell.pos[2]) else {
                             continue;
                         };
-                        // BASE pass: the node's own render — original (tiling) UVs.
+                        // Base pass: the node's own render — original (tiling) UVs.
                         let su = cell.src_uv[0][0] * l[0] + cell.src_uv[1][0] * l[1] + cell.src_uv[2][0] * l[2];
                         let sv = cell.src_uv[0][1] * l[0] + cell.src_uv[1][1] * l[1] + cell.src_uv[2][1] * l[2];
                         rgba = sample_wrap(&base_tex, su, sv);
-                        // OVERLAY pass: the paint, alpha-blended over.
+                        // Overlay pass: the paint, alpha-blended over.
                         if with_overlay {
                             let u = cell.uv[0][0] * l[0] + cell.uv[1][0] * l[1] + cell.uv[2][0] * l[2];
                             let v = cell.uv[0][1] * l[0] + cell.uv[1][1] * l[1] + cell.uv[2][1] * l[2];

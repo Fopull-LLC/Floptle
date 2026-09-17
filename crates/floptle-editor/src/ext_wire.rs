@@ -307,7 +307,7 @@ impl Editor {
                 }),
             };
             if !tileset.is_empty() && !mirror.tilesets.contains_key(tileset) {
-                // A tileset describes tile TYPES, not per-instance cells —
+                // A tileset describes tile types, not per-instance cells —
                 // cheap to clone fresh regardless of how big the grid is, so
                 // this does not need the same reuse trick.
                 if let Some(set) = self.tiles.get(tileset) {
@@ -912,7 +912,7 @@ pub(crate) struct NodeSpec {
 
 /// Every key a node document has, checked against what a package sent.
 ///
-/// **This exists because serde IGNORES a key it does not recognise.** Without
+/// **This exists because serde ignores a key it does not recognise.** Without
 /// it, `{ taggs = {"cover"} }` is accepted, does nothing, and reports success —
 /// the exact silent-failure shape that is the single most common bug in this
 /// engine's history. A misspelt property is now a Console line naming the key.
@@ -1206,7 +1206,7 @@ mod tests {
         assert_eq!(ed.world.get::<floptle_core::Layer>(e).map(|l| l.0.clone()), Some("props".into()));
     }
 
-    /// A patch is a PATCH. Naming one field must not blank the others — which is
+    /// A patch is a patch. Naming one field must not blank the others — which is
     /// the failure a whole-document write would have every time a package was
     /// written against an older engine than it runs on.
     #[test]
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     /// The scene file's own linkage is not a package's to write: a `parent`
-    /// index points at a POSITION in a list, and re-pointing one silently wires
+    /// index points at a position in a list, and re-pointing one silently wires
     /// a scene to something else.
     #[test]
     fn a_package_cannot_write_the_scene_files_parent_index() {
@@ -1450,7 +1450,7 @@ mod tests {
         let m1 = ed.ext_mirror();
         let g1 = m1.tilemap(id).expect("the grid was built").clone();
         // Bump the world revision without touching the tilemap at all — a
-        // mutable access to an UNRELATED node, exactly what a streamed level
+        // mutable access to an unrelated node, exactly what a streamed level
         // or an animated neighbour does every frame.
         let other = ed.world.spawn();
         ed.world.insert(other, floptle_core::Name("Unrelated".into()));

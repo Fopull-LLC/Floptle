@@ -220,7 +220,7 @@ impl WebState {
 
     /// Frames to hand to Lua this pass, each with the callback that wants it.
     ///
-    /// The key is BORROWED, not taken: a stream's callback is called once per
+    /// The key is borrowed, not taken: a stream's callback is called once per
     /// frame and must survive until the stream ends.
     pub(crate) fn take_frames(&mut self) -> Vec<(u64, String, String)> {
         let frames = std::mem::take(&mut self.ready_frames);
@@ -424,7 +424,7 @@ fn run_request(
     };
     match res {
         Ok(r) => read_body(r.status(), r),
-        // A 4xx/5xx is an ANSWER, not a transport failure: the caller wants the
+        // A 4xx/5xx is an answer, not a transport failure: the caller wants the
         // status and the body, which is usually where the server explains what
         // it did not like.
         Err(ureq::Error::Status(code, r)) => {
@@ -443,7 +443,7 @@ fn run_request(
 /// ```text
 /// event: progress          <- optional; defaults to "message"
 /// data: {"pct": 40}        <- may repeat; lines join with \n
-///                          <- a BLANK LINE ends the frame
+///                          <- a blank line ends the frame
 /// : keepalive              <- a comment. Ignored, but it proves the
 ///                             connection is alive, which is what the idle
 ///                             timeout below is counting.
@@ -459,7 +459,7 @@ fn run_stream(
     let agent = package_agent()
         // Two different deadlines, and they are not interchangeable.
         //
-        // CONNECT is the caller's timeout: how long to wait for the server to
+        // Connect is the caller's timeout: how long to wait for the server to
         // answer at all.
         .timeout_connect(Duration::from_secs_f64(timeout.clamp(1.0, 120.0)))
         // read is per read, and it is the only way a blocking reader can notice
@@ -502,7 +502,7 @@ fn run_stream(
         match read_line(&mut reader, &mut line) {
             Ok(0) => {
                 // The connection closed. That is the end of the stream, and
-                // whether it was a CLEAN end is the server's business to have
+                // whether it was a clean end is the server's business to have
                 // said in a frame — this only reports that it stopped.
                 return Reply { ok: true, status, ..Reply::default() };
             }
@@ -556,10 +556,10 @@ fn is_timeout(e: &std::io::Error) -> bool {
     )
 }
 
-/// Read one line, including its terminator, without requiring valid UTF-8.
+/// Read one line, including its terminator, without requiring valid utf-8.
 ///
 /// `BufRead::read_line` wants a `String` and fails the whole read on a byte
-/// sequence that is not UTF-8; a stream is somebody else's output and one bad
+/// sequence that is not utf-8; a stream is somebody else's output and one bad
 /// byte should cost one mangled character, not the connection.
 fn read_line(r: &mut impl std::io::BufRead, out: &mut Vec<u8>) -> std::io::Result<usize> {
     r.read_until(b'\n', out)

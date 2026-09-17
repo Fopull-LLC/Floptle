@@ -265,7 +265,7 @@ impl Editor {
             }
         }
         // Rect-tool resize: grow/shrink toward the dragged side, keeping the
-        // OPPOSITE edge visually fixed — Free positions and Pin offsets get the
+        // Opposite edge visually fixed — Free positions and Pin offsets get the
         // exact compensation for their placement mode.
         if let Some((idx, dsize, from_min, cur)) = cmd.ui_resize.take() {
             let ent = self.world.entity_with::<Transform>(idx);
@@ -942,7 +942,7 @@ impl Editor {
             self.record();
             match c {
                 // The live half (where the follow has got to, any shake running)
-                // is deliberately left at its default here: this is an EDIT to
+                // is deliberately left at its default here: this is an edit to
                 // the rule, and inheriting a play session's position into an
                 // authored camera is how a camera moves when you change its
                 // dead zone.
@@ -1279,7 +1279,7 @@ impl Editor {
             self.save_image_palette();
         }
         // Closing goes through `close_image_doc`, which asks about unsaved work
-        // and takes DISCARD for an answer. It used to refuse outright and say
+        // and takes discard for an answer. It used to refuse outright and say
         // "save first" — which is not a thing you can do to a document that has
         // never had a name, so the only exit was closing the project.
         if cmd.image_close {
@@ -1409,7 +1409,7 @@ impl Editor {
         if let Some(fill) = cmd.fill_terrain.take()
             && let Some(e) = self.target_terrain() {
                 // Snapshot for undo (one step), then fill the whole field. Fills only
-                // modify EXISTING chunks, so the stored set is the exact undo cover.
+                // modify existing chunks, so the stored set is the exact undo cover.
                 let id = match self.world.get::<Matter>(e) {
                     Some(Matter::Terrain { id, .. }) => *id,
                     _ => 0,
@@ -1569,7 +1569,7 @@ impl Editor {
             self.run_editor_action(e, &kind, &func);
         }
         // Adopt any finished background planet generations. (The runtime queue
-        // DRAINS earlier in the frame — before residency, see render_frame's
+        // Drains earlier in the frame — before residency, see render_frame's
         // ordering comment; editor actions drain inside `run_editor_action`.)
         self.poll_terrain_generates();
         if let Some(name) = cmd.new_scene.take() {
@@ -1601,7 +1601,7 @@ impl Editor {
             // Seed the rename modal with the current base name (the extension is shown as a
             // fixed suffix in the modal, so you edit just the name).
             let p = Path::new(&path);
-            // Seed with the BASE name (up to the first dot) — the modal shows
+            // Seed with the base name (up to the first dot) — the modal shows
             // the rest as a fixed suffix, compound extensions included.
             let full = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let name = if floptle_vfs::is_dir(p) {

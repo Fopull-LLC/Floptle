@@ -59,7 +59,7 @@ impl Editor {
         self.selection.last().copied()
     }
 
-    /// **The one gate every selection GESTURE passes through.**
+    /// **The one gate every selection gesture passes through.**
     ///
     /// A locked selection ignores viewport picks, Hierarchy clicks, select-all
     /// and the arrow-key step — see [`Editor::selection_locked`]. It
@@ -107,7 +107,7 @@ impl Editor {
     /// clicking one is not the gesture the lock exists to refuse. A bone
     /// belonging to some other model still is, and is still refused.
     ///
-    /// Unlocked, a bone selection REPLACES the node selection — the two are
+    /// Unlocked, a bone selection replaces the node selection — the two are
     /// mutually exclusive and the Inspector switches to the bone editor. Locked,
     /// the model stays selected, because it must: the lock has nothing to hold
     /// otherwise (`enforce_selection_lock` would release it a frame later) and
@@ -129,7 +129,7 @@ impl Editor {
         true
     }
 
-    /// Clear the selection as a GESTURE — clicking empty space in a viewport.
+    /// Clear the selection as a gesture — clicking empty space in a viewport.
     /// Held by the lock, unlike a bare `selection.clear()`, which is what the
     /// paths that answer to the world (scene switch, delete) still use.
     pub(crate) fn clear_selection(&mut self) {
@@ -268,7 +268,7 @@ impl Editor {
                 self.input_buttons_pressed[i] = true;
                 self.tick_buttons_pressed[i] = true;
             }
-            // Game-UI edges bank as EVENTS, not sampled state: at a low frame
+            // Game-UI edges bank as events, not sampled state: at a low frame
             // rate a quick click's press and release land inside one frame's
             // event batch, and a sampled edge (down && !was) misses it — the
             // player "can't click" buttons exactly when the game struggles.
@@ -348,7 +348,7 @@ impl Editor {
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let cam = self.camera.render_camera();
         let inv = cam.view_proj(w / h).inverse();
-        // Camera-relative ray (the world is offset to the camera, ADR-0015).
+        // Camera-relative ray (the world is offset to the camera).
         let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
         let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
         let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
@@ -516,7 +516,7 @@ impl Editor {
         let start = drag.start_xf;
         let cursor_delta = cursor - drag.cursor_start;
         let (snap, step) = (self.grid.snap, self.grid.size as f64);
-        // A sub-object drag snaps the DISTANCE TRAVELLED, not the resulting
+        // A sub-object drag snaps the distance travelled, not the resulting
         // world point: the gizmo sits on a selection centroid that is rarely on
         // a grid line, and on a normal-aligned (diagonal) axis, snapping the
         // point would quantize the move off its own axis and slide the face
@@ -621,7 +621,7 @@ impl Editor {
                     let n = (s1 - s0).normalize_or_zero();
                     let factor = 1.0 + cursor_delta.dot(n) * SCALE_SENS;
                     let mut sc = start.scale;
-                    // Floor the MAGNITUDE, keep the sign — a mirrored (negative-scale)
+                    // Floor the magnitude, keep the sign — a mirrored (negative-scale)
                     // node must stay mirrored (`.max(0.01)` used to snap -1 to +0.01).
                     let s = start.scale[i] * factor;
                     sc[i] = s.abs().max(0.01).copysign(if s == 0.0 { start.scale[i] } else { s });
@@ -648,7 +648,7 @@ impl Editor {
             }
             Tool::Rect => {
                 // Face push/pull: the dragged face follows the cursor along its
-                // outward normal; the OPPOSITE face stays put (scale + recenter
+                // outward normal; the opposite face stays put (scale + recenter
                 // in one gesture — pull a cube into a floor without offset math).
                 let Some(i) = handle.axis_index() else { return };
                 let outward = local_axis(start.rotation, i) * handle.sign();
@@ -724,7 +724,7 @@ impl Editor {
     /// node's *local* transform when it has a parent (so dragging a child's gizmo
     /// edits its local placement, and parents still carry it).
     pub(crate) fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
-        // A Map-tool drag targets SUB-OBJECTS (verts/edges/faces), not the
+        // A Map-tool drag targets sub-objects (verts/edges/faces), not the
         // node: translate the snapshot verts by the gizmo's world delta and
         // never touch the Transform. Route before everything else.
         if self.map_drag.is_some() {
@@ -733,7 +733,7 @@ impl Editor {
             }
             return;
         }
-        // A gizmo drag on an armature BONE / model object (not an ECS entity):
+        // A gizmo drag on an armature bone / model object (not an ECS entity):
         // in pivot-edit mode it moves the object's rotation pivot; otherwise it poses
         // the bone into the open clip. Route it before any Transform write.
         #[cfg(feature = "editor-ui")]
@@ -805,7 +805,7 @@ impl Editor {
             .or_else(|| rig.rest_world.get(idx))
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        // Sit the gizmo at the object's PIVOT (its joint), not the node origin — for a
+        // Sit the gizmo at the object's pivot (its joint), not the node origin — for a
         // baked object the origin is at the model root (the feet), which is exactly the
         // problem. `bone_local · T(pivot)` places it at the pivot with the node's orientation.
         let pivot = rig.skeleton.nodes.get(idx).map(|n| n.pivot).unwrap_or(Vec3::ZERO);
@@ -860,7 +860,7 @@ impl Editor {
         };
         // The gizmo sits at the pivot, so `parent_scene⁻¹ · world` = T(t + anchor)·R·S
         // (see `TransformTRS::matrix_about_rest`); its translation is `t + anchor`, so
-        // the node's pose translation is that minus the pivot ANCHOR — the pivot mapped
+        // the node's pose translation is that minus the pivot anchor — the pivot mapped
         // into parent space by the rest rotation/scale, which is the offset the forward
         // composition actually added. Subtracting the raw pivot instead would drift any
         // node whose rest is rotated. (pivot = 0 → anchor = 0 → unchanged.)
@@ -888,8 +888,8 @@ impl Editor {
         }
     }
 
-    /// Move an object/bone's rotation PIVOT to the dragged gizmo position (pivot-edit
-    /// mode). The gizmo sits at the pivot in the node's REST frame, so the node-local
+    /// Move an object/bone's rotation pivot to the dragged gizmo position (pivot-edit
+    /// mode). The gizmo sits at the pivot in the node's rest frame, so the node-local
     /// pivot point is `(mesh_world · rest_world[idx])⁻¹ · gizmo_world`. Applied live +
     /// persisted to the `.rig.ron` sidecar.
     #[cfg(feature = "editor-ui")]
@@ -1128,13 +1128,13 @@ mod focus_tests {
         // Another bone of the same model: fine.
         assert!(ed.select_bone(mine, 7));
         assert_eq!(ed.bone_selection, Some((mine, 7)));
-        // Another MODEL's bone: refused, and nothing moves.
+        // Another model's bone: refused, and nothing moves.
         assert!(!ed.select_bone(other, 1), "the lock leaked through another model's rig");
         assert_eq!(ed.bone_selection, Some((mine, 7)));
         assert_eq!(ed.selection, vec![mine]);
     }
 
-    /// Released, a bone pick behaves as it always did: the bone REPLACES the
+    /// Released, a bone pick behaves as it always did: the bone replaces the
     /// node selection, because the two are mutually exclusive and the Inspector
     /// switches to the bone editor.
     #[test]
@@ -1149,7 +1149,7 @@ mod focus_tests {
     }
 
     /// The trap this guards: the lock's only switch is the Inspector's name
-    /// row, which is drawn for the SELECTED node. Locked with nothing selected,
+    /// row, which is drawn for the selected node. Locked with nothing selected,
     /// there is no row, so there is no way back.
     #[test]
     fn an_empty_selection_cannot_be_locked() {
@@ -1174,7 +1174,7 @@ mod focus_tests {
         assert!(!ed.selection_locked, "a lock over nothing must release itself");
     }
 
-    /// The lock holds back CLICKS, not the world. Undo restoring what was
+    /// The lock holds back clicks, not the world. Undo restoring what was
     /// selected at the time is not somebody clicking, and a lock that swallowed
     /// it would leave the Inspector pointing at a node that is not there.
     #[test]

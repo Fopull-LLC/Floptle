@@ -28,7 +28,7 @@ impl EditorTabViewer<'_> {
             // Taking the full body for the viewport rect (not merely painting
             // over it) is what keeps this honest: the offscreen target is sized
             // from this rect and the pointer is mapped through it, so the picture
-            // is RENDERED at the size it is shown at rather than stretched to
+            // is rendered at the size it is shown at rather than stretched to
             // cover the gap, and a click still lands where it looks like it did.
             // The margin is read from the same `egui::Style` egui_dock derives it
             // from, so the two cannot drift apart.
@@ -197,7 +197,7 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // PLAY banner. Persistent, not a toast: the whole
+        // Play banner. Persistent, not a toast: the whole
         // failure is that a Play-time edit looks like it worked — the gizmo
         // moves, the Inspector shows the new number — and Stop throws it away
         // with nothing ever said. `push_history` no-ops while playing, so the
@@ -209,7 +209,7 @@ impl EditorTabViewer<'_> {
         // "copy to the stopped scene" button beside it is what turns a value
         // found during Play into one you keep.
         //
-        // Top-CENTRE, and in both views: the Game tab is where somebody watching
+        // Top-centre, and in both views: the Game tab is where somebody watching
         // their game is actually looking, and the top-left corner of the Scene
         // tab is already the tool palette.
         //
@@ -285,7 +285,7 @@ impl EditorTabViewer<'_> {
             );
         }
 
-        // ▦ Model tool HUD. The Map PANEL is the control surface; this is a
+        // ▦ Model tool HUD. The Map panel is the control surface; this is a
         // status strip — what the next click and the next drag will do, on one
         // line, so it states the tool's mode without duplicating the panel or
         // covering the scene. `⏷` opens the same chips for anyone who would
@@ -525,7 +525,7 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // Gizmos master toggle — top-right of the VIEWPORT (editor view only). Off hides
+        // Gizmos master toggle — top-right of the viewport (editor view only). Off hides
         // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
         // selected node's.
         //
@@ -568,7 +568,7 @@ impl EditorTabViewer<'_> {
                                             // Squaring the view to a plane is
                                             // almost always the 2D intent, so
                                             // bring the projection with it — a
-                                            // locked PERSPECTIVE view still
+                                            // locked perspective view still
                                             // draws a layer 2 units back at a
                                             // different scale, which is the
                                             // thing that stops two tilemaps
@@ -581,7 +581,7 @@ impl EditorTabViewer<'_> {
                                     }
                                     ui.separator();
                                     // …and it is still a separate switch, because
-                                    // an orthographic FREE view is a real thing to
+                                    // an orthographic free view is a real thing to
                                     // want (a technical shot, an isometric look).
                                     let mut ortho = self.view_ortho.is_some();
                                     if ui
@@ -835,7 +835,7 @@ impl EditorTabViewer<'_> {
             }
             if viz.show_verts {
                 for v in &viz.verts {
-                    // A vertex round the back draws as a RING, not a dot — the
+                    // A vertex round the back draws as a ring, not a dot — the
                     // fastest read there is for "that one is behind the
                     // surface", and it survives being the same colour.
                     let (r, c) = if v.selected {
@@ -904,7 +904,7 @@ impl EditorTabViewer<'_> {
                 painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, sel_col), egui::StrokeKind::Inside);
             }
             // ✂ Knife: the pending cut and where it would land. The end point is
-            // drawn as a RING on an existing corner and a dot mid-edge, so you
+            // drawn as a ring on an existing corner and a dot mid-edge, so you
             // can see before you click whether the cut reuses a corner or makes
             // a new one.
             // A cut that would be refused draws grey and says why, right at the
@@ -1140,7 +1140,7 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        // The baked navmesh — where characters can walk. Coloured per REGION,
+        // The baked navmesh — where characters can walk. Coloured per region,
         // because the question people actually have is "why will it not walk
         // over there", and two colours meeting at a doorway answers it on
         // sight: that gap is too narrow for the character it was baked for.
