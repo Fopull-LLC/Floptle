@@ -551,12 +551,11 @@ impl EditorTabViewer<'_> {
         // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
         // selected node's.
         //
-        // It used to be `.anchor(RIGHT_TOP)`, which is the top-right of the
-        // whole egui screen — so in any layout where the Scene view is not
-        // flush with the window's right edge it sat over the Inspector, over
-        // the tab strip, over whatever else lived up there, covering panels it
-        // had nothing to do with. It is placed against this tab's rect now, and
-        // like the tool strip it drags, docks and folds away.
+        // Placed against this tab's rect, not `.anchor(RIGHT_TOP)`: that is
+        // the top-right of the whole egui screen, so in any layout where the
+        // Scene view is not flush with the window's right edge it would sit
+        // over the Inspector, the tab strip, whatever else lived up there.
+        // Like the tool strip it drags, docks and folds away.
         if !game {
             crate::viewport_panel::show(
                 ui.ctx(),

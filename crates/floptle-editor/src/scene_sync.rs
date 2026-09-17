@@ -271,11 +271,10 @@ impl Editor {
     /// texture, but it is still showing the texture of the model — though if I
     /// change the emission I can see it get brighter."
     ///
-    /// This used to live at the end of `apply_frame_commands`, which is the
-    /// editor's UI pass. So it ran for the editor's own window and for nothing
-    /// else: `floptle shot` and every other path that goes straight to
-    /// `render_world_into` photographed a scene wearing the wrong textures, and
-    /// said nothing about it. It belongs to the frame, and both paths call it.
+    /// It belongs to the frame, not to the editor's UI pass, and both paths call
+    /// it: `floptle shot` and every other path that goes straight to
+    /// `render_world_into` would otherwise photograph a scene wearing the wrong
+    /// textures, and say nothing about it.
     ///
     /// Idempotent and cheap: every entry is skipped once registered, so the
     /// steady-state cost is one hash lookup per material per frame.

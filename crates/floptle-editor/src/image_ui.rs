@@ -1783,8 +1783,7 @@ impl ImageCtx<'_> {
                 if let Some((x, y)) = self.st.cursor {
                     ui.label(RichText::new(format!("{}, {}", x.floor() as i32, y.floor() as i32)).small().weak());
                 }
-                // The selection's origin and size, in pixels. It used to say
-                // only "selection active", which is how you end up counting
+                // The selection's origin and size, in pixels, so nobody counts
                 // pixels on screen to check a region is square.
                 if let Some(b) = self.st.selection_bounds() {
                     ui.separator();

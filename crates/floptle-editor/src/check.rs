@@ -129,10 +129,10 @@ fn rel(root: &Path, path: &Path) -> String {
 /// Check `root`. Returns the process exit code: 0 clean, 1 something is wrong
 /// with the project, 2 the thing named is not a project.
 ///
-/// **Those last two are worth keeping apart**, and they used to share an exit
-/// code here while `run`, `shot` and `exec` all answered 2. "your path is wrong"
-/// and "your project is broken" are the exact distinction this verb exists to
-/// draw, so a caller must not have to read the prose to tell them apart.
+/// Those last two are kept apart, the way `run`, `shot` and `exec` keep them:
+/// "your path is wrong" and "your project is broken" are the exact distinction
+/// this verb exists to draw, so a caller must not have to read the prose to
+/// tell them apart.
 pub(crate) fn run(root: &Path, json: bool) -> i32 {
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());

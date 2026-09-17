@@ -190,13 +190,11 @@ impl Editor {
         // nobody was disconnected, and a game filling up is the best news a
         // developer gets all week. A warning icon would say the opposite of
         // what the sentence says.
-        // **The lobby code is the relay's fact, not ours**.
-        // It used to be latched at host time and believed forever — so when a
-        // relay restarted, every server kept advertising six characters that
-        // refused everybody who typed them, on the developer's page and to any
-        // shipped build that asked, with nothing anywhere saying otherwise.
-        // Followed from the transport each tick instead, which reports `None`
-        // whenever there is no live lobby.
+        // The lobby code is the relay's fact, not ours, so it is followed from
+        // the transport each tick, which reports `None` whenever there is no
+        // live lobby. Latched at host time, a relay restart would leave every
+        // server advertising six characters that refuse everybody who types
+        // them.
         if self.net_relay_hosting.is_some()
             && let Some(s) = self.net_server.as_ref()
         {

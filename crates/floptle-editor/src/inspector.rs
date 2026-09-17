@@ -5196,10 +5196,8 @@ impl EditorTabViewer<'_> {
         // Stop reverts the world, so a transform typed
         // here while playing is thrown away — `push_history` no-ops
         // during Play, which also means it is not undoable and never
-        // marks the scene unsaved. Nothing used to say so.
-        //
-        // The way out already existed and was simply never pointed at:
-        // the header's … menu copies the transform, and the component
+        // marks the scene unsaved. The banner says so, and points at the
+        // way out: the header's … menu copies the transform, and the component
         // clipboard survives Stop — so "nudge it while watching, then
         // keep the value" is Copy values → Stop → Paste values. Saying
         // that here is worth more than a warning would be, because it
@@ -5347,17 +5345,11 @@ impl EditorTabViewer<'_> {
         let cur_bone = *self.bone_selection;
         // ===== The model's own materials =====
         //
-        // An imported model arrives with a material per part, and until
-        // now the only way to see them was to select the model in the
-        // Assets panel (read-only) and the only way to edit one was to
-        // expand the model in the Hierarchy and find the right
-        // sub-object. So "give this model a normal map" or "make this
-        // model jitter" had no obvious door, and the obvious-looking one
-        // — adding a Material to the node — used to flatten every part
-        // to a single colour.
-        //
-        // Both are answered here: the whole list, on the node, editable,
-        // with the model-wide button beside it.
+        // An imported model arrives with a material per part. "Give this
+        // model a normal map" and "make this model jitter" both get their
+        // door here: the whole list, on the node, editable, with the
+        // model-wide button beside it — rather than a read-only view in the
+        // Assets panel and a hunt for the right sub-object in the Hierarchy.
         if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e).cloned()
             && let Some(parts) = self.mesh_registry.get(&asset_path).map(|a| {
                 // Collected up front: the rows below need `world` mutably,

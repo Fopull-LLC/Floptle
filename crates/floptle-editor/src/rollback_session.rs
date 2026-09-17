@@ -497,7 +497,7 @@ impl Editor {
                 None,
             );
         }
-        // The other verdict, and the one that used to end matches: the referee
+        // The other verdict, and the one that must not end a match: the referee
         // against the field. A cheat changes one machine; a referee fault
         // changes only the referee, so everybody disagreeing with it and
         // nobody disagreeing with each other means it is wrong. The match keeps

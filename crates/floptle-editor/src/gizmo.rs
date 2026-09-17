@@ -54,9 +54,9 @@ pub(crate) enum Tool {
 
 impl Tool {
     /// Every tool, in keybind order. This is the single source of truth: `from_digit`,
-    /// `digit`, and the viewport toolbar all read it, so the toolbar can never again
-    /// disagree with the number keys (it used to list Rect before Sculpt while the keys
-    /// said otherwise). Add a tool here and it appears, in order, everywhere.
+    /// `digit`, and the viewport toolbar all read it, so the toolbar cannot
+    /// disagree with the number keys. Add a tool here and it appears, in order,
+    /// everywhere.
     pub(crate) const ALL: [Tool; 9] = [
         Tool::Select,
         Tool::Move,

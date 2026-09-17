@@ -187,12 +187,11 @@ fn is_bound(ui: &egui::Ui, family: &str) -> bool {
 /// The font painted text is drawn in: the caller's size, in whatever family the
 /// enclosing `gui.font` scope selected.
 ///
-/// **Painted text used to ignore `gui.font` entirely.** `textAt` hardcoded the
-/// proportional family, so a package that ships a typeface could set it for
-/// every widget and then watch its hand-painted chart labels come out in the
-/// editor's type — with no way to tell why. Reading the family back off the
-/// style is what makes `gui.font` mean the same thing for a button and for a
-/// label painted at a coordinate.
+/// Reading the family back off the style is what makes `gui.font` mean the
+/// same thing for a button and for a label painted at a coordinate: a
+/// hardcoded proportional family would let a package that ships a typeface
+/// set it for every widget and then watch its hand-painted chart labels come
+/// out in the editor's type, with no way to tell why.
 ///
 /// Only ever a family egui actually holds: `gui.font` refuses to set one that
 /// is not bound, because `FontFamily::Name` is a panic rather than a fallback

@@ -2735,10 +2735,10 @@ impl ImageEditState {
         // halfway through a stroke is a brush you're guessing with.
         //
         // And drawn from the brush's own footprint, so what you see outlined is
-        // the set of texels that will change. The circle this used to draw was
-        // re-derived from `radius` and was wrong for every brush that is not a
-        // smooth disc — most visibly the one-pixel pencil, which showed a small
-        // circle floating between texels.
+        // the set of texels that will change: a circle re-derived from
+        // `radius` is wrong for every brush that is not a smooth disc — most
+        // visibly the one-pixel pencil, which would show a small circle
+        // floating between texels.
         if let Some((cx, cy)) = self.cursor
             && self.tool.is_paint()
         {

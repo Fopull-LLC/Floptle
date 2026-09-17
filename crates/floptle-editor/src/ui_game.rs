@@ -427,11 +427,11 @@ impl Editor {
                 None,
             );
         }
-        // A one-key typo must not cost the whole look. One file failing to parse
-        // used to drop every style in the project — thirty styles inert because
-        // of one line — which reads as "the restyle did nothing" rather than as
-        // a parse error. Keep the last sheet that did load, and say so, the way
-        // the input map already does.
+        // A one-key typo must not cost the whole look: one file failing to
+        // parse dropping every style in the project — thirty styles inert
+        // because of one line — reads as "the restyle did nothing" rather than
+        // as a parse error. Keep the last sheet that did load, and say so, the
+        // way the input map does.
         if styles_failed && !self.ui_styles.styles.is_empty() {
             self.console.push(
                 floptle_script::LogLevel::Warn,

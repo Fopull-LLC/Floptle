@@ -48,9 +48,8 @@ pub(crate) enum LintKind {
     /// frame, before anything visible has happened.
     HookSignature,
     /// A poll for a key the editor answers itself, which therefore reads `false`
-    /// forever. The whole hazard is that this is
-    /// indistinguishable from "the player did not press it", so the only way to
-    /// find out used to be a confused player.
+    /// forever. The whole hazard is that this is indistinguishable from "the
+    /// player did not press it".
     ReservedKey,
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Vertex paint is one colour per render vertex and texture paint is one patch
 //! per render triangle — and a map mesh re-triangulates from scratch every time
-//! you pull a face. So after an extrude, the block that used to be "the top
+//! you pull a face. So after an extrude, the block that was "the top
 //! face's four corners" is just four numbers with nothing to attach to; applied
 //! blind it lands on whatever now occupies those indices, which is paint on the
 //! wrong surfaces. Dropping it instead is honest, and infuriating: touching one

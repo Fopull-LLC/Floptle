@@ -141,11 +141,9 @@ impl Editor {
             self.focus_image_tab();
             return;
         }
-        // A live document is parked, not discarded. This used to refuse the open
-        // ("save it, or repeat that to discard") and the refusal was the whole
-        // problem: a document you could not save yet — because it had no name —
-        // was a document you could not leave, so the 🖼 tab held you hostage
-        // until you closed the project.
+        // A live document is parked, not discarded. Refusing the open ("save
+        // it, or repeat that to discard") would make a document you cannot save
+        // yet — because it has no name — a document you cannot leave.
         self.park_image_doc();
         let Some(doc) = fio::open_any(&file, Mode::Painterly) else {
             let why = if is_image_doc(&file.to_string_lossy()) {

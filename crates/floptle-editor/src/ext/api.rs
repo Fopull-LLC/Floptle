@@ -1414,14 +1414,13 @@ fn require_fn(
 /// way the rest of this API resolves it: `{}` is an empty **object**, because
 /// every place a document takes a table it takes a named one.
 fn lua_to_json(_lua: &Lua, t: Table) -> mlua::Result<serde_json::Value> {
-    // **The same encoder `json.encode` uses**, deliberately. It used to go
-    // through mlua's serde conversion, which decides array-vs-object by its own
-    // rule and knows nothing about `json.array` — so `scene.set(id, { scripts =
-    // json.array{} })` wrote `{}` and the document then failed to parse with
-    // "invalid type: map, expected a sequence". There was no expression a
-    // package could write to clear a list field of a node, which is the exact
-    // thing `json.array` exists for. Routing it here also brings the recursion
-    // limit and `json.null` to `scene.set`, which had neither.
+    // The same encoder `json.encode` uses, not mlua's serde conversion: that
+    // decides array-vs-object by its own rule and knows nothing about
+    // `json.array`, so `scene.set(id, { scripts = json.array{} })` would write
+    // `{}` and the document would fail to parse with "invalid type: map,
+    // expected a sequence" — with no expression a package could write to clear
+    // a list field, which is the exact thing `json.array` exists for. Routing
+    // it here also brings the recursion limit and `json.null` to `scene.set`.
     to_json(&Value::Table(t), 0)
 }
 

@@ -683,12 +683,9 @@ fn axis_label(v: f32) -> String {
     }
 }
 
-/// Label the value axis, and say where zero is.
-///
-/// The graph used to carry no numbers at all — an unlabelled point in an
-/// unlabelled box — and drew its zero line only `if lo < 0.0 && hi > 0.0`, i.e.
-/// only once the curve had already gone negative. Both halves of "I can't tell
-/// what this is going to do".
+/// Label the value axis, and say where zero is — an unlabelled point in an
+/// unlabelled box, with a zero line only once the curve has already gone
+/// negative, is both halves of "I can't tell what this is going to do".
 ///
 /// When zero is off the top or bottom, the edge says so rather than the graph
 /// staying silent about which side of it you are on.

@@ -97,11 +97,10 @@ pub(crate) struct VfxUiState {
     pub lane_vrange: Option<(f32, f32)>,
     /// The settled value axis of each auto-fit lane, by `(track, lane)`.
     ///
-    /// A life-curve lane used to refit every frame, so the same curve was drawn
-    /// at a different scale after each edit and a point you dragged upward
-    /// sprang back toward the middle. It is fitted once and then only grows —
-    /// never shrinking, so a key can never be edited off the strip, and never
-    /// re-fitting on its own, so a change is legible against a stable axis.
+    /// A life-curve lane is fitted once and then only grows — never shrinking,
+    /// so a key can never be edited off the strip, and never re-fitting on its
+    /// own, so a change is legible against a stable axis. Refit every frame,
+    /// a point you drag upward springs back toward the middle.
     pub lane_settled: std::collections::HashMap<(usize, LaneRef), (f32, f32)>,
 }
 

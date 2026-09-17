@@ -320,8 +320,8 @@ pub(crate) fn save_viewport_panels(p: &crate::viewport_panel::ViewportPanels) {
 /// How the image canvas draws everything that is **not** your art: the
 /// transparency checker, the pixel grid, the sheet cell grid.
 ///
-/// Every one of these used to be a literal in the draw code, which is fine right
-/// up until the art is the colour of the overlay — and which art that is, is not
+/// Settings, not literals in the draw code: a fixed overlay is fine right up
+/// until the art is the colour of the overlay — and which art that is, is not
 /// knowable in advance. A 28-alpha white grid over pale pixel art is invisible at
 /// exactly the zoom you need it at, and a grey checker under grey art says
 /// nothing at all.

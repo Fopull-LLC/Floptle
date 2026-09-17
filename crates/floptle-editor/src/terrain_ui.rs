@@ -12,11 +12,11 @@ pub(crate) struct TerrainBrush {
     pub(crate) mode: floptle_field::Brush,
     pub(crate) radius: f32,
     pub(crate) strength: f32,
-    /// The weight ramp from core to rim. Terrain used to hardcode a linear falloff —
-    /// this is what lets a stroke be a hard stamp instead of a soft smear.
+    /// The weight ramp from core to rim: what lets a stroke be a hard stamp
+    /// instead of a soft smear.
     pub(crate) profile: floptle_field::BrushProfile,
-    /// Dab spacing as a fraction of the radius. Was hardcoded at 0.34; low values give
-    /// a continuous smear, high values give distinct stamps.
+    /// Dab spacing as a fraction of the radius. Low values give a continuous
+    /// smear, high values give distinct stamps.
     pub(crate) spacing: f32,
     pub(crate) color: [f32; 3],
     /// Paint target: -1 = flat color, else a terrain texture palette slot.

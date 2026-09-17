@@ -1148,9 +1148,8 @@ impl MapSubMode {
 /// What a click or a box drag does to the existing sub-object selection.
 ///
 /// Shift adds and Ctrl subtracts, which is the convention every modeling tool
-/// shares — and the reason both used to mean "toggle" was that there was only
-/// one code path for them. Toggling is fine for one click and useless for a
-/// box: dragging a box over a region you have half-selected would flip the
+/// shares. Neither toggles: toggling is fine for one click and useless for a
+/// box — dragging a box over a region you have half-selected would flip the
 /// overlap back off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectMode {

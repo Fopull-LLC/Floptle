@@ -418,11 +418,10 @@ impl<'a> EditorTabViewer<'a> {
 /// menu-bar Add menu all list the same things).
 ///
 /// The catalog itself is data — [`crate::matter_catalog::NEW_CATALOG`] — and
-/// this only renders it. That split is the point: the menu used to BE the
-/// catalog, a flat run of twenty `if ui.button(..)` arms in creation order, and
-/// there was nothing to check because a list has no shape. Now the shape is a
-/// value, the grouping is a decision written down once, and a new node type that
-/// nobody filed under a heading fails the build.
+/// this only renders it. That split is the point: the shape is a value, the
+/// grouping is a decision written down once, and a new node type that nobody
+/// filed under a heading fails the build — where a flat run of `if
+/// ui.button(..)` arms has no shape to check.
 pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Option<Entity>) {
     use crate::matter_catalog::{NEW_CATALOG, NEW_TOP_LEVEL, NewEntry, NewNode};
 

@@ -156,11 +156,11 @@ impl Editor {
 
         // ---- compile, but only when the graph actually moved ----
         //
-        // This used to clone the IR, type-check it and re-transpile the whole
-        // shader every frame the tab was open. On a hundred-node sky graph
-        // that is a real per-frame bill, paid to produce a byte-identical
-        // module: the live literal values it exists to stream ride the uniform
-        // lane array uploaded further down, which costs nothing.
+        // Cloning the IR, type-checking it and re-transpiling the whole shader
+        // every frame the tab is open is a real per-frame bill on a
+        // hundred-node sky graph, paid to produce a byte-identical module: the
+        // live literal values it exists to stream ride the uniform lane array
+        // uploaded further down, which costs nothing.
         let rev = (path.clone(), self.shader_graph.ir_rev);
         let recompiled = self.shader_preview.rev.as_ref() != Some(&rev);
         if recompiled {

@@ -739,14 +739,12 @@ impl Editor {
                 }
             }
         }
-        // ✚ Effect asks for a name before it writes anything.
-        //
-        // It used to invent `NewEffect`, `NewEffect1`, `NewEffect2` and hand you
-        // the timeline — so naming your own effect meant renaming a file that a
-        // node already pointed at, which is the moment nobody does it. Asking
-        // first is also the only order that is safe: a `.vfx.ron` renamed after
-        // the fact leaves the `ParticleSystem.asset` on the node pointing at the
-        // old key.
+        // ✚ Effect asks for a name before it writes anything. An invented
+        // `NewEffect1` handed to the timeline means naming your own effect is
+        // renaming a file a node already points at, which is the moment nobody
+        // does it. Asking first is also the only order that is safe: a
+        // `.vfx.ron` renamed after the fact leaves the `ParticleSystem.asset`
+        // on the node pointing at the old key.
         if let Some(e) = cmd.new_particles.take() {
             self.new_asset_prompt = Some((crate::NewAsset::Effect(e), String::new()));
         }
@@ -1279,9 +1277,8 @@ impl Editor {
             self.save_image_palette();
         }
         // Closing goes through `close_image_doc`, which asks about unsaved work
-        // and takes discard for an answer. It used to refuse outright and say
-        // "save first" — which is not a thing you can do to a document that has
-        // never had a name, so the only exit was closing the project.
+        // and takes discard for an answer: "save first" is not a thing you can
+        // do to a document that has never had a name.
         if cmd.image_close {
             self.close_image_doc(None);
         }

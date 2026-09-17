@@ -53,9 +53,9 @@ pub(crate) fn asset_picker(
         .width(pw)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            // A constant popup size: content used to dictate the height, so
-            // the popup grew and shrank between opens (and got uselessly tiny
-            // on short lists). Fixed frame, scroll inside.
+            // A constant popup size: content dictating the height makes the
+            // popup grow and shrink between opens (and go uselessly tiny on
+            // short lists). Fixed frame, scroll inside.
             ui.set_min_width(pw);
             ui.set_min_height(430.0);
             let qid = id.with("q");

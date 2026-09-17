@@ -408,11 +408,10 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         }
     }
     let asked = span.steps();
-    // **Counted, not assumed.** The report used to publish the number that was
-    // asked for, which is an echo of the command line rather than an
-    // observation — and the loop can end early, so the two are not the same
-    // number. A field a caller reads to know how far the run got has to have
-    // been measured by the thing that got there.
+    // Counted, not assumed. The number asked for is an echo of the command
+    // line rather than an observation, and the loop can end early, so the two
+    // are not the same number. A field a caller reads to know how far the run
+    // got has to have been measured by the thing that got there.
     let mut steps = 0u32;
     // **The clock, not the step count.** A step is not a promise that anything
     // moved: a paused session — which is what the Play-start terrain hold makes

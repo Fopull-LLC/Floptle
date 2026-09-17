@@ -574,14 +574,12 @@ impl AnimSystem {
 
 /// Does this path end in `ext`, however the disk spelled the case?
 ///
-/// **Case-insensitively, everywhere, or not at all.** An asset extension is
+/// Case-insensitively, everywhere, or not at all. An asset extension is
 /// typed by a person into a save dialog, and `Walk.SpriteAnim.ron` is the same
 /// file as `walk.spriteanim.ron` on Windows and on a default macOS volume. The
-/// editor used to be of two minds about it: the Assets browser's "is this a
-/// clip" lowercased first, and the scan that actually loads clips compared
-/// exactly — so a capitalised clip appeared in the browser, dragged onto a
-/// state, and resolved to nothing, because the registry it was being looked up
-/// in had never loaded it.
+/// Assets browser's "is this a clip" and the scan that loads clips must agree,
+/// or a capitalised clip appears in the browser, drags onto a state, and
+/// resolves to nothing.
 /// `path` is an animation clip asset — a baked `.anim.ron`, or a frame-listed
 /// `.spriteanim.ron`, which plays as one and so drags as one.
 pub fn is_anim_clip(path: &str) -> bool {

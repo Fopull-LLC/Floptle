@@ -772,11 +772,11 @@ impl Editor {
     ///
     /// This is "where are the pixels", which is a different question from
     /// [`Self::game_view`]'s "who owns the keyboard" — and the one every
-    /// pointer→viewport conversion wants. Confusing the two is why clicking in
-    /// a docked Game tab used to hit-test against whole-window coordinates: the
-    /// tab was focused, so `game_view()` said true, so the pointer was never
-    /// moved into the tab's rect. Single source of truth for the render path
-    /// and the input path alike; if they disagree, clicks land somewhere else.
+    /// pointer→viewport conversion wants. Confuse the two and a click in a
+    /// docked Game tab hit-tests against whole-window coordinates: the tab is
+    /// focused, so `game_view()` says true, so the pointer is never moved into
+    /// the tab's rect. Single source of truth for the render path and the
+    /// input path alike; if they disagree, clicks land somewhere else.
     pub(crate) fn game_offscreen(&self) -> bool {
         #[cfg(feature = "editor-ui")]
         {

@@ -321,14 +321,11 @@ pub(crate) fn sync_sheet_grids(
 /// A texture's sampling settings, looked up by a path in either form.
 ///
 /// `texture_settings` is keyed the way scenes and materials reference a texture:
-/// **project-relative**. The Assets browser works in absolute paths, though, so the
-/// Inspector's filter/wrap combo used to store an absolute key that nothing ever read
-/// back — the setting persisted, the Inspector showed it, and every renderer looking the
-/// texture up by its `textures/ui/hud/Fill.png` ref missed and got the default. Pixel art
-/// came out bilinear-blurred with `Pixelated` plainly selected.
-///
-/// Keys are normalised on load and on write, so the fallback below is only for a stray
-/// absolute path arriving from the Assets side.
+/// project-relative. The Assets browser works in absolute paths, so keys are
+/// normalised on load and on write — an absolute key is one no renderer looking the
+/// texture up by its `textures/ui/hud/Fill.png` ref would find, and pixel art would
+/// come out bilinear-blurred with `Pixelated` plainly selected. The fallback below is
+/// only for a stray absolute path arriving from the Assets side.
 pub(crate) fn tex_setting(
     settings: &std::collections::HashMap<String, TexSetting>,
     project_root: &Path,

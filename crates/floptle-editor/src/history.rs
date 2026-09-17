@@ -165,8 +165,8 @@ impl Editor {
         self.suppress_sel_step = true;
         // Entities are respawned below — drop animator runtimes keyed by the old ones.
         // The map sub-object selection is keyed by Entity but addresses a stable
-        // geometry id, so it can be carried across the respawn (undo mid-edit
-        // used to dump you out of the shape you were working on).
+        // geometry id, so it is carried across the respawn: undo mid-edit
+        // keeps you in the shape you are working on.
         let keep_map = self.map_sel.take();
         self.anim.clear_instances();
         self.world = World::new();

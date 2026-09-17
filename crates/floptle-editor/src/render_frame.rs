@@ -654,14 +654,10 @@ impl Editor {
         match acquired {
             Some(frame) => {
                 // The scene always renders into the post input, whether or not
-                // any effect is switched on.
-                //
-                // It used to go straight to the swapchain when the chain was
-                // empty, which was a real saving when both were the same 8-bit
-                // sRGB texture. They are not any more: the scene renders in the
+                // any effect is switched on: the scene renders in the
                 // floating-point scene format, the window takes 8-bit sRGB, and
                 // the chain's terminal pass is the only thing that knows how to
-                // get from one to the other. So "no effects" is now a chain of
+                // get from one to the other. So "no effects" is a chain of
                 // exactly one pass rather than a different route.
                 let depth =
                     if self.project.retro { retro.depth_view() } else { gpu.depth_view() };

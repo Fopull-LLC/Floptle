@@ -998,11 +998,9 @@ impl Editor {
         // default) that is every drawn triangle, from the same extraction
         // the collider runs — so this wireframe lies on the picture or the
         // collider does not, and a screenshot settles it. For one set to
-        // the field it is the field's own zero crossing, coarsely. (It
-        // used to draw the shadow proxy for every terrain, unrotated and
-        // unscaled: a wireframe of a surface nothing collided with, in the
-        // wrong place — an instrument that lied about the thing it was
-        // for.) Cached per terrain in node-local coords, rebuilt when that
+        // the field it is the field's own zero crossing, coarsely — never
+        // the shadow proxy, which is a surface nothing collides with.
+        // Cached per terrain in node-local coords, rebuilt when that
         // terrain's shape changes; posed here through the node's full
         // transform, so a moved, turned or scaled terrain's wireframe
         // follows for free.

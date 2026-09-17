@@ -560,10 +560,9 @@ pub(crate) fn render_frame_pixels(
         ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
     }
 
-    // **The whole chain, not the tonemap.** This used to pass tonemap alone and
-    // default everything else, so a project with bloom, vignette, AO, posterise
-    // or a custom post shader photographed as a scene that has none of them —
-    // and the one promise this verb makes is that the picture is the editor's.
+    // The whole chain, not the tonemap: the one promise this verb makes is
+    // that the picture is the editor's, bloom, vignette, AO, posterise and
+    // custom post shaders included.
     // Built the way the Game view builds it: the PostProcess node's own
     // settings, the depth-of-field focus resolved against the scene, screen
     // ambient occlusion, and any `stage post` shaders the project compiled.
@@ -707,12 +706,11 @@ fn max_side() -> u32 {
 
 /// Parse `--size` as `WxH`, or a single number meaning a square.
 ///
-/// **The bounds are checked here, not at the texture.** `--size 20000x20000`
-/// used to reach `create_texture`, and wgpu's validation failure is a panic —
-/// so a typed number too large ended in a crash report asking the caller to open
-/// a GitHub issue about having asked for a big picture. That is the same shape
-/// as `inspect | head` panicking on SIGPIPE: a mistake in the command line
-/// reported as a defect in the engine.
+/// The bounds are checked here, not at the texture: `--size 20000x20000`
+/// reaching `create_texture` is a wgpu validation panic, and a crash report
+/// asking the caller to open a GitHub issue about having asked for a big
+/// picture is a mistake in the command line reported as a defect in the
+/// engine — the same shape as `inspect | head` panicking on SIGPIPE.
 /// `--after`: how long to play before drawing, in seconds.
 ///
 /// `30s`, `1.5s` or a bare `30` are seconds; `900f` is frames, converted at the

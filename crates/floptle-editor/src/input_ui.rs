@@ -370,8 +370,8 @@ fn action_row(
 ) {
     let multiplayer = players > 1;
     // Every widget in this row is namespaced by the action name. Without it,
-    // two rows' menus share an egui id and fight — which is exactly why the
-    // pickers refused to stay open.
+    // two rows' menus share an egui id and fight, and the pickers refuse to
+    // stay open.
     ui.push_id(("action", &action.name), |ui| {
         // **Wrapped.** A row is a fixed prefix (the live dot and the action's
         // name) followed by however many bindings the action has, each as wide

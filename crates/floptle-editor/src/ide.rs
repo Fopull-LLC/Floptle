@@ -74,9 +74,9 @@ pub(crate) struct IdeState {
     /// The Docs page's filter box.
     pub(crate) docs_search: String,
     /// Which Docs page is showing: the guides, the API browser, or the shader
-    /// stdlib. The API reference used to live below 2,500 lines of guide, which
-    /// is a reference nobody browses — it was only ever reachable by searching
-    /// for something you already knew the name of.
+    /// stdlib. Its own page, because a reference below 2,500 lines of guide is
+    /// a reference nobody browses — reachable only by searching for something
+    /// you already know the name of.
     pub(crate) docs_page: DocsPage,
     /// Which guide page the Docs tab has open — an index into `DOC_SECTIONS`.
     pub(crate) docs_guide: usize,
@@ -1309,14 +1309,13 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// The Guides page: a **contents column** and one page at a time.
+    /// The Guides page: a contents column and one page at a time.
     ///
-    /// It used to be twenty-four `CollapsingHeader`s in a single scroll, which
-    /// is a table of contents pretending to be a page. Nothing told you where
-    /// you were, pages were only near their relatives by luck, and the one way
-    /// to reach anything was to search for a word you already knew — so the
-    /// guide taught you nothing you did not already know to look for. That is
-    /// the same complaint the API browser was rebuilt for, one page over.
+    /// Two dozen `CollapsingHeader`s in a single scroll is a table of contents
+    /// pretending to be a page: nothing says where you are, pages are only near
+    /// their relatives by luck, and the one way to reach anything is to search
+    /// for a word you already know — so the guide teaches you nothing you did
+    /// not already know to look for.
     ///
     /// So: chapters down the left, the page itself on the right, and the search
     /// box narrows the contents rather than expanding every matching section in
@@ -1451,13 +1450,12 @@ fn docs_contents_width(avail: f32) -> Option<f32> {
 impl EditorTabViewer<'_> {
 
     /// The Docs landing page: three pages behind one search box — the sectioned
-    /// guide, the **API browser**, and the shader stdlib.
+    /// guide, the API browser, and the shader stdlib.
     ///
-    /// They used to be one endless scroll with the reference at the bottom,
-    /// which meant the only way to reach an API entry was to search for a name
-    /// you already knew. A reference you cannot *browse* teaches nobody the
-    /// thing they didn't know existed, and "the engine has a scheduler and
-    /// nobody knows" was the actual complaint that started this work.
+    /// Three pages, not one endless scroll with the reference at the bottom: a
+    /// reference you cannot browse teaches nobody the thing they didn't know
+    /// existed — the engine has a scheduler, and a reader should find that out
+    /// by looking.
     fn docs_page_ui(&mut self, ui: &mut egui::Ui) {
         // The page switch, then a filter box that narrows whichever page is up.
         ui.horizontal(|ui| {
@@ -6018,14 +6016,13 @@ Prose with `inline code` in it.
         }
     }
 
-    /// **A call that promises an `err` must say what makes it fail.**
+    /// A call that promises an `err` must say what makes it fail.
     ///
-    /// The reference used to be inconsistent about this in exactly the way that
-    /// is worst: some entries listed their refusals, some said "or nil and why"
-    /// and left you to find out by causing each one, and some named a second
-    /// return value and then never mentioned it again. A reader cannot tell
+    /// A reference that is inconsistent about this — some entries listing their
+    /// refusals, some saying "or nil and why", some naming a second return
+    /// value and never mentioning it again — leaves a reader unable to tell
     /// which kind they are looking at, so the useful ones do not get trusted
-    /// either — and "handle the error" is not something you can write against a
+    /// either; and "handle the error" is not something you can write against a
     /// doc that will not say what the errors are.
     ///
     /// So the convention is a literal one, and this is what makes it a rule

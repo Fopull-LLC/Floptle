@@ -2345,8 +2345,8 @@ impl crate::Editor {
 
     fn apply_tileset_cmd(&mut self, cmd: TileCmd) {
         let Some(path) = self.tile_tools.editing.clone() else { return };
-        // Never edit a tileset whose file we could not read: the edit would be
-        // written over the file we deliberately refused to touch.
+        // Never edit a tileset whose file could not be read: the edit would be
+        // written over the file the load refused to touch.
         if self.tiles.load_failed.contains(&path) {
             return;
         }

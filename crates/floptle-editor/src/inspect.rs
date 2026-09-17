@@ -148,9 +148,8 @@ fn rel(root: &Path, path: &Path) -> String {
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, select: Option<&str>, json: bool) -> i32 {
     // The same refusal, in the same words, with the same code as every other
-    // verb that takes a project. This used to print "no readable project.ron"
-    // as though it were an answer and exit 0 — so a caller pointed at the wrong
-    // directory was told the run had succeeded.
+    // verb that takes a project: a caller pointed at the wrong directory is
+    // told so, at a non-zero exit, not handed an answer.
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;

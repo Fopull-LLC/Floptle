@@ -16,12 +16,10 @@ use crate::{MeshAsset, anim};
 ///   this object's override  ▸  the node's Material  ▸  the part as imported
 ///
 /// The most specific one wins, whole — its colour, its texture, its maps, its
-/// retro flags. Its own function because that sentence is the contract, and it
-/// used to be three-quarters true: a node Material multiplied its colour into
-/// each part's imported colour while its texture replaced outright, so a model
-/// given a new material kept the old picture on it and only the emissive
-/// appeared to work. A rule that applies half a material is not a rule anybody
-/// can predict, and this is the place it is stated once.
+/// retro flags. Its own function because that sentence is the contract: a
+/// rule that applies half a material (colour multiplied in, texture replaced
+/// outright) is not a rule anybody can predict, and this is the place it is
+/// stated once.
 pub(crate) enum PartLook<'a> {
     /// This sub-object's own override material, plus the exact key it is
     /// stored under in `ObjectMaterials` — the object name or the material

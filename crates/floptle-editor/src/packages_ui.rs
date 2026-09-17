@@ -229,8 +229,8 @@ pub(crate) enum FolderPurpose {
 /// Apply a folder the user picked, if they have picked one yet.
 ///
 /// The picker runs off-thread (see [`crate::native_dialog`]), so the click and
-/// the answer are different frames. Everything after the answer arrives is the
-/// same work the button used to do inline.
+/// the answer are different frames; this is the button's work, once the answer
+/// arrives.
 fn drain_folder_picker(
     ctx: &PkgCtx<'_>,
     state: &mut PackagesState,
@@ -1657,14 +1657,11 @@ fn reviews_section(
                 "opens fopull.com to review this package — it appears here once it is posted",
             ),
         };
-        // An ordinary button. It was the loudest control on a package — a
-        // solid accent slab for editing a review you had already written, next
-        // to an outlined Install — which is precisely backwards. There is one
-        // primary action here and it is Install, further up.
-        //
-        // The "open page ↗" that used to sit beside this went with it: the same
-        // link, to the same page, is already in the action row under the
-        // gallery, and two identical controls in one view is one too many.
+        // An ordinary button, not an accent slab: there is one primary action
+        // here and it is Install, further up. No "open page ↗" beside it
+        // either — the same link, to the same page, is already in the action
+        // row under the gallery, and two identical controls in one view is one
+        // too many.
         if ui.button(label).on_hover_text(hint).clicked() {
             let _ = floptle_script::open_in_browser(&floptle_package::index::review_page_for(id));
             // Whatever gets posted over there is not in the copy fetched over

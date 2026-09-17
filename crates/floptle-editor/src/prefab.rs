@@ -29,10 +29,10 @@ impl Editor {
     /// Open a prefab for editing **on its own**: its nodes
     /// become the whole world, and saving writes back to this same file.
     ///
-    /// A prefab is a reusable subtree, and the only way to change one used to be
-    /// to drop it into whatever scene happened to be open, edit the instance and
-    /// re-save — which never overwrites, so the obvious route left a second file
-    /// beside the one you meant to change.
+    /// A prefab is a reusable subtree. Dropping one into whatever scene is open,
+    /// editing the instance and re-saving never overwrites, so that route
+    /// leaves a second file beside the one you meant to change; this one
+    /// writes the file itself.
     ///
     /// The editing surface is the ordinary one: Hierarchy, Inspector, gizmos,
     /// undo, Play. What differs is only where a save goes, and that is decided by

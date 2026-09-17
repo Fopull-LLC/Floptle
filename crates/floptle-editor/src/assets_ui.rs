@@ -370,9 +370,8 @@ impl<'a> EditorTabViewer<'a> {
         if is_prefab(path) {
             self.cmd.open_prefab = Some(path.to_string());
         // …and a `.spriteanim.ron` for the same reason: it can sit beside its art
-        // anywhere, including under `scenes/`, and handing one to the scene
-        // loader is how double-clicking a sprite animation used to try to open a
-        // level.
+        // anywhere, including under `scenes/`, and the scene loader would take
+        // it for a level.
         } else if anim_ui::is_sprite_anim(path) {
             self.cmd.open_script = Some(path.to_string());
             self.cmd.focus_scripting = true;

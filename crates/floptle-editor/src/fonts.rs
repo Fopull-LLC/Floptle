@@ -1,9 +1,9 @@
 //! The editor's font stack, in one place.
 //!
-//! Two callers need the *same* stack and used to build it separately: the real
-//! window in `main.rs` and `icons::test_context` for headless tests. That is the
-//! shape of a drift bug — a test that draws in a font the editor does not have
-//! answers a question nobody asked. Both call [`definitions`] now.
+//! Two callers need the *same* stack: the real window in `main.rs` and
+//! `icons::test_context` for headless tests. Both call [`definitions`] — a
+//! test that draws in a font the editor does not have answers a question
+//! nobody asked.
 //!
 //! Packages can add to it. A package names a typeface in its `package.ron`:
 //!

@@ -52,17 +52,11 @@ fn action(ui: &mut egui::Ui, enabled: bool, text: &str, hover: &str) -> bool {
 
 /// Everything the ▦ Model tab reads or writes, as borrows.
 ///
-/// The tab used to render straight off `EditorTabViewer`, which holds around a
-/// hundred disjoint field borrows for the whole editor. That works, and it cost
-/// the tab the one thing every other tab has: **it could not be driven from a
-/// test.** `TileCtx` and `SettingsCtx` take exactly what they need, so ◫ Tiles
-/// and ⚙ Settings can be run headlessly and asserted on; ▦ Model could not, and
-/// so it was the one panel whose narrow-dock layout was checked only through the
-/// primitives it happens to use.
-///
-/// Taking the borrows explicitly is the whole fix. Nothing about the rendering
-/// changed — this is the same code reading the same state through a smaller
-/// door — and [`crate::responsive::tests::assert_fits`] can now drive it.
+/// Rendering straight off `EditorTabViewer`, which holds around a hundred
+/// disjoint field borrows for the whole editor, would cost the tab the one
+/// thing every other tab has: being driven from a test. Like `TileCtx` and
+/// `SettingsCtx`, this takes exactly what the tab needs, so ▦ Model runs
+/// headlessly and [`crate::responsive::tests::assert_fits`] can drive it.
 ///
 /// Changes go on [`EditorCmd`](crate::EditorCmd) and apply after the frame, the
 /// same deferral every other panel uses: geometry ops need `&mut Editor` for the
