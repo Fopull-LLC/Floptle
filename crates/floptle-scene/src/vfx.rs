@@ -1,13 +1,12 @@
-//! Particle effect asset DTOs (RON) — the on-disk form of `floptle-vfx`'s
-//! authoring model (`docs/subsystems/particles-vfx.md`).
+//! Particle effects on disk: the RON form of `floptle-vfx`'s authoring model.
 //!
-//! One effect per **`*.vfx.ron`** file, discovered anywhere under `assets/` by
-//! extension (the `.anim.ron` discipline). Asset keys are project-relative paths
-//! without the extension (`vfx/360Slash`). Every field past `name` has a serde
-//! default so the format can grow without breaking older files.
+//! One effect per `*.vfx.ron` file, found anywhere under `assets/` by
+//! extension. An asset key is the project-relative path without the extension
+//! (`vfx/360Slash`). Every field past `name` has a serde default, so the format
+//! grows without breaking older files.
 //!
-//! Doc ↔ runtime conversion lives editor/runtime-side (the anim precedent) —
-//! this module is pure data + load/save.
+//! This module is data plus load and save; the editor and the runtime convert
+//! between a doc and the live effect.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,7 +79,7 @@ pub enum VfxRenderDoc {
     /// A single camera-facing ribbon from the effect origin to the track's
     /// `beam_end`, subdivided into `segments` — energy beams, lasers, tethers.
     /// The track ignores emission entirely; width/color come from its `size` /
-    /// `color` properties sampled at the EFFECT's normalized time.
+    /// `color` properties sampled at the effect's normalised time.
     Beam {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         texture: Option<String>,
@@ -257,7 +256,7 @@ impl Default for VfxEmitDoc {
     }
 }
 
-/// A ranged emission on the timeline — the draggable clip. Its LENGTH is the lifetime of
+/// A ranged emission on the timeline — the draggable clip. Its length is the lifetime of
 /// the particles it releases. `emit` is `None` only in legacy files (pre-clip-emit); load
 /// migration fills it from the old track-level rate/bursts (see `migrate_clips`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -270,8 +269,8 @@ pub struct VfxClipDoc {
     pub emit: Option<VfxEmitDoc>,
 }
 
-/// DEPRECATED (pre-clip-emit): a hand-placed instant emit. Kept so old `.vfx.ron` still
-/// parses; `migrate_clips` folds these into burst clips on load.
+/// A hand-placed instant emit from older `.vfx.ron` files. Still parsed;
+/// `migrate_clips` folds each one into a burst clip on load.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct VfxBurstDoc {
     pub t: f32,
@@ -361,10 +360,10 @@ pub struct VfxTrackDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_alive: Option<u32>,
 
-    // DEPRECATED (pre-clip-emit): the track used to carry one rate + lifetime for all its
-    // clips plus a separate `bursts` list. Retained with defaults so old `.vfx.ron` still
-    // deserializes; `migrate_clips` folds them into per-clip `emit` on load and clears
-    // them, so new saves omit them entirely (skip_serializing_if).
+    // Older `.vfx.ron` files carry one rate and lifetime for all of a track's
+    // clips plus a separate `bursts` list. They still deserialise;
+    // `migrate_clips` folds them into per-clip `emit` on load and clears them,
+    // so new saves omit them (skip_serializing_if).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bursts: Vec<VfxBurstDoc>,
     #[serde(default = "ten_f32", skip_serializing_if = "is_ten")]
@@ -446,15 +445,14 @@ fn is_absolute_scale(m: &VfxLifetimeScaleDoc) -> bool {
 }
 
 impl VfxEffectDoc {
-    /// Uniformly stretch/squash everything authored along the effect timeline by
-    /// `ratio` (= new_lifetime / old_lifetime). This is the `Rescale` (Roblox-style)
-    /// response to a lifetime edit: automation-lane graphs and clip spans move
-    /// proportionally so the whole timeline scales as one. Per-particle life curves
-    /// are normalized `[0,1]` and are intentionally left untouched.
+    /// Stretch or squash everything authored along the effect timeline by
+    /// `ratio` (new lifetime / old lifetime): the `Rescale` response to a
+    /// lifetime edit. Automation-lane graphs and clip spans move proportionally,
+    /// and clip lengths (particle lifetime) stretch with them, so the whole
+    /// timeline scales as one. Per-particle life curves are normalised to
+    /// `[0,1]` and stay as they are.
     ///
-    /// Only the timeline-domain positions change — clip lengths (particle lifetime)
-    /// stretch with everything else, matching the WYSIWYG "the whole thing scales"
-    /// feel. Callers apply this before writing the new `lifetime`.
+    /// Apply it before writing the new `lifetime`.
     pub fn rescale_timeline(&mut self, ratio: f32) {
         if !ratio.is_finite() || ratio <= 0.0 || (ratio - 1.0).abs() < 1e-6 {
             return;
@@ -579,17 +577,15 @@ fn default_color() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::Rgba([1.0, 1.0, 1.0, 1.0]))
 }
 
-/// Legacy migration (pre-clip-emit): fold the old track-level `rate` / `particle_lifetime`
-/// / `lifetime_jitter` / `bursts` into per-clip `emit` + clip length, then clear the
-/// deprecated fields so new saves omit them. A no-op for already-migrated tracks.
+/// Fold a track's old fields (`rate`, `particle_lifetime`, `lifetime_jitter`,
+/// `bursts`) into per-clip `emit` and clip length, then clear them so new
+/// saves omit them. A no-op for a track already in the new shape.
 ///
-/// A clip without an explicit `emit` was a legacy stream clip. Under the
-/// clip-length-is-lifetime model its authored `[start, end]` span BECOMES the lifetime —
-/// we deliberately keep the span rather than shrinking it to the old `particle_lifetime`,
-/// so a continuous stream (e.g. a looping fountain that emitted across the whole loop)
-/// keeps streaming instead of emitting for `particle_lifetime` and then going silent to
-/// the loop end. Each old burst becomes a single-pulse burst clip whose length is that
-/// lifetime (a burst was a point in time, so a span has to be synthesized).
+/// A clip without an explicit `emit` is an old stream clip: its authored
+/// `[start, end]` span becomes the lifetime, so a fountain that streamed across
+/// its whole loop keeps streaming. Each old burst becomes a single-pulse burst
+/// clip as long as the old particle lifetime, since a burst was a point in
+/// time and a clip needs a span.
 fn migrate_clips(t: &mut VfxTrackDoc) {
     if t.clips.iter().all(|c| c.emit.is_some()) && t.bursts.is_empty() {
         return;
@@ -925,7 +921,7 @@ mod tests {
         }
         let t = &doc.tracks[0];
         assert_eq!(t.clips.len(), 2, "one stream clip + one migrated burst clip");
-        // Stream clip: Rate(30), the AUTHORED span [0,1.5] kept as the lifetime (not
+        // Stream clip: Rate(30), the authored span [0,1.5] kept as the lifetime (not
         // shrunk to particle_lifetime — that would make a continuous stream pulse), jitter
         // carried.
         assert_eq!(t.clips[0].emit, Some(VfxEmitDoc::Rate { rate: 30.0 }));

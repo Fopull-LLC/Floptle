@@ -1,24 +1,23 @@
-//! Animation asset DTOs (RON) — baked clips + layered controllers.
+//! Animation assets on disk: baked clips and layered controllers, as RON.
 //!
-//! Two asset kinds, discovered anywhere under `assets/` by extension so users
-//! can organize them freely:
+//! Both kinds are found anywhere under `assets/` by extension, so a project
+//! organises them however it likes:
 //!
-//! - **`*.anim.ron`** — a baked [`AnimClipDoc`]: self-contained keyframe data,
-//!   channels keyed by **node name**. Extracted from a model's embedded glTF
-//!   clips (default home: `assets/animations/<Model>/`), or hand-authored in
-//!   the Animating window. Name-binding makes a clip model-independent: it
-//!   plays on any rig with matching node names, *and* on plain scene nodes
-//!   (cutscenes — the controller's node + descendants are matched by their
-//!   scene `Name`s).
-//! - **`*.actl.ron`** — an [`AnimControllerDoc`]: prioritized layers of states
-//!   (clip + speed/loop/instant/stepped-fps) with a crossfade table. Attached
-//!   to a node via the AnimationController component; edited in the visual
-//!   graph window.
+//! - **`*.anim.ron`** is an [`AnimClipDoc`]: keyframe channels keyed by node
+//!   name, extracted from a model's glTF clips (into
+//!   `assets/animations/<Model>/`) or authored in the Animating window. Keyed
+//!   by name, a clip plays on any rig with matching node names, and on plain
+//!   scene nodes too — a cutscene matches the controller's node and its
+//!   descendants by their scene `Name`s.
+//! - **`*.actl.ron`** is an [`AnimControllerDoc`]: prioritised layers of
+//!   states (clip, speed, loop, instant, stepped fps) with a crossfade table.
+//!   A node attaches one through its AnimationController component and edits
+//!   it in the graph window.
 //!
-//! Asset **keys** are project-relative paths without the extension, e.g.
-//! `animations/UVMappedR6/Walk`. Loaders fall back to matching the file stem
-//! (`Walk`) when a key doesn't resolve, so moving a clip to another folder
-//! degrades gracefully instead of silently breaking a controller.
+//! An asset key is the project-relative path without the extension,
+//! `animations/UVMappedR6/Walk`. When a key does not resolve the loader matches
+//! the file stem (`Walk`), so moving a clip to another folder keeps its
+//! controller playing.
 
 use serde::{Deserialize, Serialize};
 
@@ -85,12 +84,10 @@ pub enum AnimPropValueDoc {
     Frame(SpriteFrameDoc),
 }
 
-/// One frame of a sprite animation: **which image, and which piece of it**.
+/// One frame of a sprite animation: which image, and which piece of it.
 ///
-/// A frame names its own art, which is the whole design. Animating a material's
-/// `cell` was always possible and confined a clip to one sheet forever; here a
-/// clip can walk across sheets, and pick up a plain PNG that was never on a
-/// sheet at all, because each frame carries everything needed to draw it.
+/// Each frame names its own art, so a clip can walk across several sheets and
+/// pick up a plain PNG that was never on a sheet at all.
 ///
 /// `cols`/`rows` default to `1`, so `(texture: "shout.png")` is the whole image.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -138,19 +135,16 @@ pub struct AnimTrackDoc3 {
     pub values: Vec<[f32; 3]>,
     #[serde(default)]
     pub step: bool,
-    /// **How each key reaches the next**, by the key's time: hold, linear, a
+    /// How each key reaches the next, by the key's time: hold, linear, a
     /// smooth spline, or an ease. A key not listed uses the lane's `step`.
     ///
-    /// By TIME rather than by index, and that is the whole design. The obvious
-    /// spelling is a list parallel to `times`, and it is a trap: a dozen places
-    /// in the editor insert into or remove from `times`, and every one of them
-    /// that forgot the parallel list would shift every mode after it onto the
-    /// wrong key — silently, and only visibly as "the animation is wrong
-    /// somewhere". Keyed by time, a missed update leaves an entry that matches
-    /// nothing, which does nothing.
+    /// Keyed by time rather than by index: the editor inserts into and removes
+    /// from `times` in many places, and an entry keyed by time that misses its
+    /// key matches nothing instead of shifting every mode after it onto the
+    /// wrong key.
     ///
     /// Empty unless a lane uses it, and skipped on serialize, so a clip that
-    /// never touches this writes the same bytes it always did.
+    /// never touches it writes the same bytes as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modes: Vec<AnimKeyModeDoc>,
     /// Older files: the keys that hold, by time. Folded into `modes` on load
@@ -372,18 +366,15 @@ pub const ANIM_CLIP_EXT: &str = ".anim.ron";
 pub const ANIM_CTL_EXT: &str = ".actl.ron";
 pub const SPRITE_ANIM_EXT: &str = ".spriteanim.ron";
 
-/// A sprite clip written as **a list of frames** — `*.spriteanim.ron`.
+/// A sprite clip written as a list of frames: `*.spriteanim.ron`.
 ///
-/// The same thing a sprite lane in the timeline holds, in the shape a person
-/// (or an importer) writes by hand: a frame rate and a list, rather than a time
-/// per key. It exists because that is how sprite animation is *authored* —
-/// twelve frames at twelve a second — while the timeline's shape is how
-/// everything else in a clip is authored, and neither is wrong.
+/// The same data a sprite lane in the timeline holds, in the shape a person or
+/// an importer writes by hand: a frame rate and a list, twelve frames at twelve
+/// a second, rather than a time per key.
 ///
-/// It loads **as an ordinary clip** ([`SpriteAnimDoc::to_clip`]), so a
-/// `.spriteanim.ron` can go in a controller state, be blended between, carry
-/// timeline events and be played from Lua exactly like an `.anim.ron`. One
-/// animation system, two ways in.
+/// It loads as an ordinary clip ([`SpriteAnimDoc::to_clip`]), so a
+/// `.spriteanim.ron` goes in a controller state, blends, carries timeline
+/// events and plays from Lua exactly like an `.anim.ron`.
 ///
 /// ```ron
 /// (
@@ -435,17 +426,13 @@ pub struct SpriteAnimFrameDoc {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cell: u32,
     /// How many frame-slots this one occupies. `1` (the default) is one slot.
+    /// A hand animator's timing is not a constant frame rate, and `hold: 4`
+    /// reads better than the same frame listed four times.
     ///
-    /// Here because a hand animator's timing is not a constant frame rate, and
-    /// the alternative — repeating a frame four times — makes the list unread­able
-    /// exactly where the timing is the interesting part.
-    ///
-    /// **Zero, negative and not-a-number all mean one slot.** A frame that
-    /// occupies no time is not a shorter frame, it is a frame nobody can ever
-    /// see: it lands on the same instant as the one after it, and a stepped lane
-    /// resolves that in favour of the later key. Fractions above zero are kept
-    /// as written — half a slot is a real thing to ask for — so the floor is on
-    /// "no time at all", not on "quick".
+    /// Zero, negative and not-a-number all mean one slot: a frame with no time
+    /// lands on the same instant as the next one, and a stepped lane resolves
+    /// that in favour of the later key, so nobody could ever see it. Fractions
+    /// above zero are kept as written; half a slot is a real thing to ask for.
     #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
     pub hold: f32,
 }
@@ -780,10 +767,9 @@ mod tests {
         }
     }
 
-    /// **A frame that occupies no time is a frame nobody can see.** `hold: 0`
-    /// used to advance the clock by `f32::MIN_POSITIVE`, which puts two keys on
-    /// the same instant — and a stepped lane resolving a tie in favour of the
-    /// later key means the frame is not merely brief, it never draws at all.
+    /// A frame that occupies no time is a frame nobody can see: two keys on
+    /// the same instant, and a stepped lane resolving the tie in favour of the
+    /// later one, means the frame never draws at all. So `hold: 0` is one slot.
     ///
     /// Asserted on distinct times rather than on the number itself, because the
     /// property that matters is reachability.
