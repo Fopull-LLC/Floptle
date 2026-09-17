@@ -170,7 +170,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
-    // water.setFrozen(node, frozen) — freezing is a STATE, not a second system.
+    // water.setFrozen(node, frozen) — freezing is a state, not a second system.
     // A world that thaws is the same node with a flag flipped, and the physics
     // and the look both follow from it.
     {

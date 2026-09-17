@@ -1,11 +1,11 @@
 //! The Lua `assembly.*` API — compound-rigidbody (multi-part vessel) control.
 //!
-//! An ASSEMBLY is a node whose RigidBody has the `assembly` flag: one 6-DOF
+//! An assembly is a node whose RigidBody has the `assembly` flag: one 6-DOF
 //! compound body built from its RigidBody-bearing descendant nodes (see
 //! `floptle-physics::compound`). Ships, rovers, cranes — anything built from
 //! parts that can also come apart.
 //!
-//! Forces QUEUE and the editor feeds them to the sim as tick-held forces (they
+//! Forces queue and the editor feeds them to the sim as tick-held forces (they
 //! act through every physics substep of the tick, then clear — scripts re-arm
 //! thrust each `fixedUpdate`, and a dropped call means thrust stops). Reads
 //! (`assembly.info`) come from a per-frame mirror the editor refreshes before
@@ -28,8 +28,8 @@ pub struct AssemblyInfo {
     pub mass: f32,
     /// Center of mass, world space.
     pub com: [f64; 3],
-    /// The assembly ORIGIN (the root's authored pose), world space — the
-    /// PHYSICS-fresh anchor for force-application math. Node transforms lag
+    /// The assembly origin (the root's authored pose), world space — the
+    /// Physics-fresh anchor for force-application math. Node transforms lag
     /// a rails carry behind the sim inside `fixedUpdate`; computing engine
     /// offsets from the node pose applied thrust ~a tick's orbit off the
     /// real hull (a constant spurious torque on orbiting worlds).
@@ -51,15 +51,15 @@ pub struct AssemblyImpact {
     pub part: u32,
     /// Total normal impulse the part absorbed this tick (mass·Δv, sim units).
     pub impulse: f32,
-    /// Peak NORMAL closing speed the part hit at this tick (m/s). Budgeted
+    /// Peak normal closing speed the part hit at this tick (m/s). Budgeted
     /// depenetration flattens `impulse` on a fast crash, but this reports the
-    /// true normal impact speed. NOTE: this is only the component along the
+    /// true normal impact speed. note: this is only the component along the
     /// contact normal — it collapses on a glancing hit or a hit against a curved
     /// surface (a fast ram into a planet reads a small `speed`). Judge crash
     /// severity by `speedAbs`; keep `speed` for square-on touchdown feel.
     pub speed: f32,
-    /// Peak TOTAL closing speed at the contact this tick (m/s) — the full
-    /// contact-point velocity magnitude, the honest ENERGY metric. The
+    /// Peak total closing speed at the contact this tick (m/s) — the full
+    /// contact-point velocity magnitude, the honest energy metric. The
     /// tangential (grind/slide) speed is `sqrt(max(0, speedAbs² − speed²))`.
     pub speed_abs: f32,
     /// World point of the part's hardest contact.
@@ -91,11 +91,11 @@ pub enum AssemblyCmd {
     /// craft stays in full physics however far the camera roams (so you can
     /// fly it from the map view, where the camera pulls far back).
     KeepLive { root: u32, on: bool },
-    /// Re-pose the compound's COLLISION shapes to match its part nodes' current
+    /// Re-pose the compound's collision shapes to match its part nodes' current
     /// transforms — for articulated parts (a folding landing leg) so the
     /// collider follows the moving geometry. Mass properties stay frozen.
     SyncColliders { root: u32 },
-    /// Teleport the assembly ORIGIN to a world position, velocity untouched
+    /// Teleport the assembly origin to a world position, velocity untouched
     /// (re-pinning a clamped vessel to a pad that rides an orbiting planet).
     Teleport { root: u32, pos: [f64; 3] },
 }
@@ -106,7 +106,7 @@ pub enum AssemblyCmd {
 ///
 /// It went through the shared reader after that bug returned by a second route:
 /// a private copy of "is this a vector" borrowed one concrete userdata type,
-/// and `fast` mode's vectors are not userdata at all (ADR-0028 Phase 3). Ask
+/// and `fast` mode's vectors are not userdata at all. Ask
 /// [`crate::math_api::vec3_of`] — it is the one place that knows every spelling.
 fn v3(v: &Value, what: &str) -> mlua::Result<[f64; 3]> {
     if let Some(p) = crate::math_api::vec3_of(v) {
@@ -198,10 +198,10 @@ pub(crate) fn install_assembly_api(
     // assembly.split(node, parts [, fn] [, prefab]) — detach part nodes (a node
     // or a list of nodes) into a new vessel. The detach happens after this
     // script pass; fn(newRoot) is called with the fresh vessel's node when it
-    // exists. Pass a PREFAB name and the detached half is rooted at a fresh
+    // exists. Pass a prefab name and the detached half is rooted at a fresh
     // instance of it (which must carry an assembly RigidBody) instead of a bare
     // node — so the half that comes away is a live, scripted craft (an undocked
-    // lander that can fly home), not inert debris. Give it a BARE root: the
+    // lander that can fly home), not inert debris. Give it a bare root: the
     // detached parts are the compound's shapes, and any RigidBody the prefab
     // brings of its own would sit outside it.
     {
@@ -238,7 +238,7 @@ pub(crate) fn install_assembly_api(
         )?;
         t.set("split", f)?;
     }
-    // assembly.merge(node, other) — LATCH `other`'s assembly onto this one: the
+    // assembly.merge(node, other) — latch `other`'s assembly onto this one: the
     // two compounds become one rigid body with their combined momentum, the
     // absorbed part nodes re-parent under this root (world pose kept), and
     // `other`'s root node is retired. The inverse of `assembly.split`; this is
@@ -357,7 +357,7 @@ pub(crate) fn install_assembly_api(
     // assembly.impacts(node) — the last tick's per-part contact loads: an
     // array of { part, impulse, speed, speedAbs, x, y, z } (part = the part
     // node's entity id, impulse = total normal impulse it absorbed, speed = peak
-    // NORMAL closing speed, speedAbs = peak TOTAL closing speed = the energy
+    // Normal closing speed, speedAbs = peak total closing speed = the energy
     // metric, x/y/z = its hardest contact point, world space). Empty between
     // contacts. Poll from fixedUpdate and compare `speedAbs` against a per-part
     // crash tolerance (and `sqrt(speedAbs²−speed²)` is the grind/slide speed) —

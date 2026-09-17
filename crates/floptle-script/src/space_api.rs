@@ -3,7 +3,7 @@
 //!
 //! The editor assembles the scene's `CelestialBody` nodes into an on-rails
 //! system each tick and feeds a snapshot here; reads are instant against that
-//! snapshot. `space.warp(m)` QUEUES a request the editor applies (and may
+//! snapshot. `space.warp(m)` queues a request the editor applies (and may
 //! clamp/reject — e.g. under thrust once S4's rules land).
 
 use std::cell::RefCell;

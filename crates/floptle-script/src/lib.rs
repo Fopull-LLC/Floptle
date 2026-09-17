@@ -1,11 +1,10 @@
-//! # floptle-script — the Lua scripting host (ADR-0003)
+//! # floptle-script: the Lua scripting host
 //!
-//! Game logic lives in `.lua` files under a project's `scripts/` folder, attached
-//! to nodes (the [`floptle_core::Scripts`] component names which scripts run, with
-//! per-instance float `params`). [`ScriptHost`] embeds Lua (LuaJIT via `mlua`) and
-//! drives them each frame.
+//! Game logic lives in `.lua` files under a project's `scripts/` folder,
+//! attached to nodes: the [`floptle_core::Scripts`] component names which
+//! scripts run, with per-instance `params`. [`ScriptHost`] embeds Luau through
+//! `mlua` and drives them each frame.
 //!
-//! ## The script contract
 //! A script file defines plain functions in its own sandboxed environment:
 //! ```lua
 //! defaults = { speed = 45 }              -- tunables shown in the Inspector
@@ -16,19 +15,20 @@
 //!   node.yaw = node.yaw + math.rad(params.speed) * dt
 //! end
 //!
-//! function fixedUpdate(node, dt)         -- every GAMEPLAY tick (constant dt)
+//! function fixedUpdate(node, dt)         -- every gameplay tick (constant dt)
 //!   -- movement / gameplay / physics writes belong here (netcode cadence)
 //! end
 //! ```
-//! The host hands each call a mutable `node` table (`x/y/z`, `scale`/`scale_x..z`,
-//! `yaw/pitch/roll` in radians) synced to the node's [`Transform`] before the call
-//! and read back after, plus the globals `params` (this instance's values), `time`
-//! (seconds since play started) and `dt`. The full Lua standard library is in
-//! scope; `log("...")` prints to the engine console.
+//! The host hands each call a mutable `node` table (`x/y/z`,
+//! `scale`/`scale_x..z`, `yaw/pitch/roll` in radians) synced to the node's
+//! [`Transform`] before the call and read back after, plus the globals
+//! `params` (this instance's values), `time` (seconds since play started) and
+//! `dt`. The Lua standard library is in scope; `log("...")` prints to the
+//! engine console.
 //!
-//! Each `(node, script)` pair gets its own environment so per-instance state
-//! persists across frames, and the host **hot-reloads** a script when its file
-//! changes on disk (re-running it in a fresh environment).
+//! Each `(node, script)` pair gets its own environment, so per-instance state
+//! persists across frames, and the host hot-reloads a script when its file
+//! changes on disk, re-running it in a fresh environment.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -80,7 +80,7 @@ pub struct DrawLine {
     pub color: [f32; 4],
 }
 
-/// One SCREEN-SPACE rectangle a script queued via `draw.rect` /
+/// One screen-space rectangle a script queued via `draw.rect` /
 /// `draw.rectOutline` this tick (immediate mode, like the 3D `draw.*` calls).
 ///
 /// Pixels are the same space `input.mouse()` and `camera.worldToScreen` use, so
@@ -125,7 +125,7 @@ pub struct DrawText {
     pub font: String,
 }
 
-/// One world-space FILLED triangle a script queued via `draw.tri` / `draw.cone`
+/// One world-space filled triangle a script queued via `draw.tri` / `draw.cone`
 /// / `draw.disc` this tick (immediate mode). Drawn by the runtime triangle
 /// layer alongside the lines — solid gizmo geometry, world markers.
 #[derive(Clone, Copy, Debug)]
@@ -139,7 +139,7 @@ pub struct DrawTri {
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
-/// DETERMINISM INVARIANT (`docs/multiplayer.md` §3): the
+/// Determinism invariant (`docs/multiplayer.md` §3): the
 /// host's `HashMap`/`HashSet` state is only ever *iterated* where order cannot
 /// change simulation results — each queued write lands on a distinct key
 /// (entity/component/field), scripts themselves run in ECS insertion order
@@ -148,7 +148,7 @@ pub struct DrawTri {
 /// sort before applying — netcode prediction replays depend on same-inputs →
 /// same-results.
 type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
-/// The COLOUR-valued twin of [`ComponentWrites`] (`e.fill = color(...)`). A
+/// The colour-valued twin of [`ComponentWrites`] (`e.fill = color(...)`). A
 /// separate map because `borderR` already means the right border width — one
 /// namespace would have made a colour assignment resize an edge.
 type ComponentColorWrites = Rc<RefCell<HashMap<(u32, String, String), [f32; 4]>>>;
@@ -185,7 +185,7 @@ pub enum SceneRequest {
     Load { name: String },
     /// `scene.load(name, { additive = true })` — layer on top of it.
     ///
-    /// `environment` is `{ environment = true }`: the layer OWNS the world's
+    /// `environment` is `{ environment = true }`: the layer owns the world's
     /// environment while it is loaded — its `lighting` block (sun + fog) plus
     /// its Skybox and PostProcess nodes replace the base scene's, which are
     /// disabled rather than destroyed and come back on `unload`. Without it an
@@ -226,7 +226,7 @@ type UiHandlers = Rc<RefCell<HashMap<(u32, String), mlua::RegistryKey>>>;
 /// One live `ui.on(element, hook, fn)`: a script listening to an element it
 /// does not live on.
 ///
-/// The owner is the LISTENING script, not the element — which is the whole
+/// The owner is the listening script, not the element — which is the whole
 /// point. A menu manager holds every button's `clicked` in one file, instead of
 /// a three-line script per button, and its listeners live and die with it: a
 /// reload re-registers them, and destroying the manager stops them.
@@ -281,7 +281,7 @@ pub use math_api::{ExactVec3, LuaVec3, Vec3Mode};
 /// this crate could `borrow::<LuaVec3>()` and be right. With two backings that
 /// is no longer true, and the failure is silent in the worst way:
 /// `AnyUserData::borrow` is bounded on `'static` and not on `UserData`, so a
-/// borrow of the wrong type still COMPILES and merely never matches. Ask here
+/// borrow of the wrong type still compiles and merely never matches. Ask here
 /// instead.
 pub fn vec3_of(v: &mlua::Value) -> Option<glam::DVec3> {
     math_api::vec3_of(v)
@@ -374,11 +374,11 @@ pub struct InputSnapshot {
     pub keys_pressed: std::collections::HashSet<String>,
     /// Keys that went up this frame (edge).
     pub keys_released: std::collections::HashSet<String>,
-    /// The CHARACTERS entered this frame, resolved by the OS keyboard layout,
+    /// The characters entered this frame, resolved by the OS keyboard layout,
     /// with a paste folded in.
     ///
     /// Not the same question as `keys_pressed`: that one is physical (`"q"` is
-    /// the key where Q sits on a QWERTY board, which types `a` on AZERTY), and
+    /// the key where Q sits on a qwerty board, which types `a` on azerty), and
     /// this is what the player meant to write. Polling keys to build a string
     /// gets the alphabet wrong for anyone whose keyboard isn't yours.
     pub typed: String,
@@ -387,7 +387,7 @@ pub struct InputSnapshot {
     pub scroll: f32,
     pub buttons_down: [bool; 3],
     pub buttons_pressed: [bool; 3],
-    /// The ACTIVE camera's world (yaw, pitch), captured with the snapshot —
+    /// The active camera's world (yaw, pitch), captured with the snapshot —
     /// `input.aimYaw()`/`aimPitch()`. This makes camera-relative movement
     /// deterministic under prediction: the view direction rides the input
     /// command, so the server and any replay use exactly the angle the player
@@ -413,7 +413,7 @@ struct Source {
     path: PathBuf,
     /// The file's text, read the first time an error needs a line quoted and
     /// kept until the file changes (the same mtime bump that resets
-    /// `generation` drops it). Only a script that has RAISED is resident: a
+    /// `generation` drops it). Only a script that has raised is resident: a
     /// script raising in `update` raises every frame, on every instance, and
     /// reading the file per error was one read per instance per pass.
     text: Option<std::rc::Rc<str>>,
@@ -437,7 +437,7 @@ struct Instance {
     /// A `RegistryKey` and not a live `Table` for the same reason `env` is: a
     /// Table held from Rust costs a slot on mlua's bounded auxiliary ref stack,
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
-    /// on a scene — reached as a PANIC.
+    /// on a scene — reached as a panic.
     node: Option<(RegistryKey, crate::env::NodeStamp)>,
     /// Which lifecycle hooks this script's environment defines, read once when
     /// the chunk is built (and again on hot reload — a rebuild is a new
@@ -596,7 +596,7 @@ pub struct ScriptHost {
     /// This frame's physics body state per entity index (velocity + grounded), fed in
     /// before `run` so scripts can read `node.vx/vy/vz/grounded`.
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
-    /// This frame's solved UI element rects in WINDOW physical pixels (entity
+    /// This frame's solved UI element rects in window physical pixels (entity
     /// index → [x, y, w, h]); `node:uiRect()` reads it so scripts can hit-test
     /// the mouse against a panel's actual rendered position instead of guessing
     /// its geometry. Same space as `input.mouse()`, which is the only reason
@@ -623,7 +623,7 @@ pub struct ScriptHost {
     /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
     shader_param_sets: ShaderParamSets,
     /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
-    /// texture write is a REBIND, not a buffer write — the two cost different
+    /// texture write is a rebind, not a buffer write — the two cost different
     /// things and the driver treats them differently.
     shader_texture_sets: ShaderTextureSets,
     screen_shader_toggles: ScreenShaderToggles,
@@ -635,7 +635,7 @@ pub struct ScriptHost {
     /// bodies and name the node it hit (`hit.node`). `net.rewind` re-poses these
     /// for lag-compensated combat queries (`docs/multiplayer.md` §7).
     hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
-    /// World position of the sim's local origin (ADR-0015). Scripts speak world
+    /// World position of the sim's local origin. Scripts speak world
     /// coordinates; `raycast` converts to the sim frame in f64 at this boundary.
     sim_origin: Rc<RefCell<glam::DVec3>>,
     /// Terrain edits queued by `terrain.sculpt/dig/paint(...)` this frame, drained by
@@ -651,13 +651,13 @@ pub struct ScriptHost {
     /// over project files / genspec regeneration, and writes evictions here.
     terrain_save_dir: Rc<RefCell<Option<String>>>,
     /// `terrain.warm(name)` requests this frame (immediate mode, drained per
-    /// frame): body NAMES whose terrain should be resident regardless of any
+    /// frame): body names whose terrain should be resident regardless of any
     /// gameplay anchor's distance — the map warms its focused planet while
     /// open. A warmed body loads if cold and never evicts.
     terrain_warm: Rc<RefCell<Vec<String>>>,
     /// The editor's answer to `terrain.busy()`: true while the background
     /// terrain worker has a field generating or streaming in. Published each
-    /// frame so a game that builds its world on DEMAND can wait its turn
+    /// frame so a game that builds its world on demand can wait its turn
     /// instead of queueing new worlds behind the ground someone stands on.
     terrain_busy: Rc<std::cell::Cell<bool>>,
     /// `terrain.flush()` — write every dirty resident field to the save slot
@@ -806,7 +806,7 @@ pub struct ScriptHost {
     /// value). Flushed to the node's stored `ScriptInst` params so tunables are
     /// two-way: the write persists across frames and shows live in the
     /// Inspector (and reverts on Stop like every play-mode change). Numbers
-    /// and strings; only DECLARED tunables persist (a key in `defaults` or the
+    /// and strings; only declared tunables persist (a key in `defaults` or the
     /// stored params).
     param_writes: RefCell<Vec<(u32, String, String, ParamWrite)>>,
     /// Pending `scene.load(...)` / `scene.unload(...)` requests. The driver
@@ -816,7 +816,7 @@ pub struct ScriptHost {
     /// `scene.onLoaded(fn)` subscriptions, as `(owner entity, callback)`. The
     /// owner is recorded so a subscription dies with the script that made it —
     /// otherwise a swap would leave every old scene's loading screen listening.
-    /// A PERSISTENT node's subscription survives, which is the entire point:
+    /// A persistent node's subscription survives, which is the entire point:
     /// something has to outlive the load to be told about it.
     scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>>,
     /// Every WaterVolume in the scene, refreshed by the driver before scripts
@@ -921,9 +921,9 @@ pub struct ScriptHost {
     net: net_api::SharedNet,
     /// The `voice.*` bridge: queued voice commands + mirrored microphone and
     /// speaker state. Separate from `net` because voice lives
-    /// with the SESSION, not the scene — a scene swap must not reset it.
+    /// with the session, not the scene — a scene swap must not reset it.
     voice: voice_api::SharedVoice,
-    /// Per-(entity, script) `synced` STORE tables (the raw values behind the
+    /// Per-(entity, script) `synced` store tables (the raw values behind the
     /// proxy scripts see) — the host collects them for the server session and
     /// writes received updates into them on clients. Shared (Rc) with the
     /// `net.rewind` closure, which swaps historical values in around a
@@ -958,7 +958,7 @@ pub struct ScriptHost {
     /// upvalue ceiling. Same once-per-version rule, and it clears on edit — so
     /// the warning comes back the moment the file grows again.
     upvalue_warned: std::collections::HashSet<(String, u64)>,
-    /// Entities whose scripts are SKIPPED this session (a networked client
+    /// Entities whose scripts are skipped this session (a networked client
     /// doesn't run server-authoritative nodes' scripts — their state arrives
     /// in snapshots; docs/multiplayer.md §6). Set by the driver.
     script_skip: std::collections::HashSet<u32>,
@@ -972,7 +972,7 @@ pub struct ScriptHost {
     /// here. Separate from `script_skip` because a driver-owned node is still
     /// locally simulated; only the scheduling moved.
     driver_skip: std::collections::HashSet<u32>,
-    /// Set while the rollback driver is RE-SIMULATING ticks it already ran
+    /// Set while the rollback driver is re-simulating ticks it already ran
     /// (`docs/multiplayer.md` §4). Scripts read it as
     /// `net.replaying()`; the engine uses it to discard the one-shot side
     /// effects a replay re-fires. Shared with the Lua closures.
@@ -985,7 +985,7 @@ pub struct ScriptHost {
 
 /// Where each suppressed one-shot queue stood when a replay began (§4).
 ///
-/// Gating at the DRAIN rather than inside each Lua closure is deliberate: a
+/// Gating at the drain rather than inside each Lua closure is deliberate: a
 /// closure-side check has to be remembered at every new call site, and the one
 /// that gets forgotten is a doubled hit spark nobody traces back to netcode.
 /// Truncation catches every producer of a gated queue by construction.
@@ -1086,7 +1086,7 @@ pub enum VfxCmd {
     /// Live emission scale (0..~2): multiplies rates/burst counts and shades
     /// particle size — `ps:setIntensity(throttle)` drives an engine plume.
     Intensity(f32),
-    /// Aim every Beam track's endpoint at a WORLD-space point — the editor
+    /// Aim every Beam track's endpoint at a world-space point — the editor
     /// converts it to effect-local before applying (`ps:setBeamEnd(x, y, z)`).
     SetBeamEnd([f64; 3]),
 }
@@ -1189,7 +1189,7 @@ pub(crate) struct SceneMirror {
     tilemaps: HashMap<u32, TilemapMirror>,
     /// The project's loaded tilesets, keyed by their project-relative path.
     ///
-    /// LENT by the host (`ScriptHost::set_tilesets`), the same way the layer table
+    /// Lent by the host (`ScriptHost::set_tilesets`), the same way the layer table
     /// is: the script host does no file I/O of its own, so who owns the parse is
     /// unambiguous and a headless test can hand in a tileset without a project on
     /// disk. A path with no entry means the tileset failed to load or was never
@@ -1253,7 +1253,7 @@ pub(crate) struct SceneMirror {
     repeat_index: HashMap<u32, u32>,
     /// The colour-valued half of the same mirror (`e.fill`, `e.textColor`, …).
     component_colors: HashMap<u32, HashMap<String, HashMap<String, [f32; 4]>>>,
-    /// …and the STRING-valued half (`mat.texture`, `el.text`, `el.style`).
+    /// …and the string-valued half (`mat.texture`, `el.text`, `el.style`).
     ///
     /// Writable since strings landed, and readable by nothing: `mat.texture`
     /// answered nil however many times it had been set, so a script could not
@@ -1264,7 +1264,7 @@ pub(crate) struct SceneMirror {
     /// part handle's `:shaderParam("glow")` reads back what the part's
     /// override carries, the way `.color` does.
     shader_state: HashMap<u32, HashMap<String, ShaderState>>,
-    /// Model asset path → the material slots it was imported with, LENT by the
+    /// Model asset path → the material slots it was imported with, lent by the
     /// editor (`ScriptHost::set_model_slots`) the way the tilesets are: the host
     /// does no file I/O, and a `.glb`'s parts are the importer's knowledge.
     ///
@@ -1442,7 +1442,7 @@ pub struct SpawnRequest {
     pub prefab: String,
     pub pos: Option<[f64; 3]>,
     pub cb: Option<mlua::RegistryKey>,
-    /// Spawn the prefab's root(s) as CHILDREN of this entity (kept at the
+    /// Spawn the prefab's root(s) as children of this entity (kept at the
     /// world `pos` — the driver converts to the parent's local frame). How a
     /// vessel prefab's parts land under an assembly root.
     pub parent: Option<u32>,
@@ -1475,7 +1475,7 @@ pub enum RichSet {
     Celestial(Vec<(String, CompVal)>),
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
-    /// `node:setPrimitive(shape [, color])`. The shape is already PARSED — the
+    /// `node:setPrimitive(shape [, color])`. The shape is already parsed — the
     /// name was checked at the call, where a misspelling can still name a line.
     MatterPrimitive(floptle_core::Shape, [f64; 3]),
     /// `node:setTextSpans{...}` — per-stretch colours along this element's text.
@@ -1497,7 +1497,7 @@ pub enum RichSet {
         tileset: Option<String>,
     },
     /// `node:setSpriteBatch{ size = }` — the other half of the 2D pair. A
-    /// game's sprite styles are DATA (one batch per material, one material per
+    /// game's sprite styles are data (one batch per material, one material per
     /// style), so the nodes that draw them have to be makeable from the same
     /// Lua that declares them, not authored one-by-one into a scene and kept in
     /// sync by nothing.
@@ -1580,7 +1580,7 @@ pub enum RichSet {
     /// the layers a light reaches, and whether this node blocks light.
     ///
     /// One call rather than three because they are one feature and a node uses
-    /// one half of it: a LIGHT sets `mode` and `layers`, a RECEIVER sets `mode`
+    /// one half of it: a light sets `mode` and `layers`, a receiver sets `mode`
     /// and `blocks`.
     MatterLighting2D {
         mode: Option<floptle_core::Lit2D>,
@@ -1666,7 +1666,7 @@ pub(crate) struct TilemapMirror {
 /// Both names are here because a part answers to both, and neither is
 /// sufficient on its own: the object name addresses exactly one part but is
 /// rewritten by import when a model repeats a name (`Torso` becomes `Torso#2`),
-/// while the MATERIAL name is the one on the model's own materials list and
+/// while the material name is the one on the model's own materials list and
 /// usually covers the group somebody means — a character's `Clothing` is its
 /// torso and both arms, which is exactly what a clothing system wants to change
 /// at once.
@@ -1786,13 +1786,13 @@ struct Shared {
     ui_rects: Rc<RefCell<HashMap<u32, [f32; 4]>>>,
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
-    /// Cross-node POSITION writes onto entities that have a physics body —
-    /// the driver TELEPORTS the body there (otherwise the physics writeback
+    /// Cross-node position writes onto entities that have a physics body —
+    /// the driver teleports the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// This frame's `b:draw(...)` calls per sprite-batch entity.
     ///
-    /// IMMEDIATE mode, like `draw.*` and `gizmo.*`: the list is taken every
+    /// Immediate mode, like `draw.*` and `gizmo.*`: the list is taken every
     /// pass and becomes that node's whole set of sprites, so what you drew this
     /// frame is exactly what shows and there is no `clear()` anyone can forget.
     /// A retained list would leak for as long as the game ran.
@@ -1800,7 +1800,7 @@ struct Shared {
     /// `node:setShaderParam(...)` writes, drained by the editor per frame.
     shader_param_sets: ShaderParamSets,
     /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
-    /// texture write is a REBIND, not a buffer write — the two cost different
+    /// texture write is a rebind, not a buffer write — the two cost different
     /// things and the driver treats them differently.
     shader_texture_sets: ShaderTextureSets,
     screen_shader_toggles: ScreenShaderToggles,
@@ -1809,8 +1809,8 @@ struct Shared {
     ///
     /// A `RegistryKey`, resolved to a `Table` at each use. It held the `Table`
     /// directly until a Table alive in Rust turned out to cost a slot on mlua's
-    /// AUXILIARY ref stack, which is bounded near 8,000 — so a scene of a few
-    /// thousand scripted nodes exhausted it and the engine PANICKED, in the
+    /// Auxiliary ref stack, which is bounded near 8,000 — so a scene of a few
+    /// thousand scripted nodes exhausted it and the engine panicked, in the
     /// editor, where unsaved work lives. The registry is an
     /// ordinary Lua table with no such bound, and the key drops itself.
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
@@ -1872,7 +1872,7 @@ struct Shared {
     /// `(script kind, key)` combos already told they were reading from a broken
     /// script, so a handle polled every frame is one Console line.
     broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
-    /// Names a `find*` came up empty on while a SWITCHED-OFF node of that name
+    /// Names a `find*` came up empty on while a switched-off node of that name
     /// existed — said once each, because a lookup in `update` would otherwise
     /// say it every frame.
     ///
@@ -1982,7 +1982,7 @@ const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
     ),
     ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
     // A starting point for strategy games: an isometric camera you pan with
-    // WASD or the screen edge, commandable units, and the mouse layer that
+    // Wasd or the screen edge, commandable units, and the mouse layer that
     // selects and orders them.
     ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
     ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
@@ -2008,7 +2008,7 @@ const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
 mod shipped_script_tests {
     use super::SHIPPED_SCRIPTS;
 
-    /// Every shipped script must at least COMPILE.
+    /// Every shipped script must at least compile.
     ///
     /// A script only reports a syntax error when something in a scene happens
     /// to run it, so a broken default could sit in a release unnoticed — and

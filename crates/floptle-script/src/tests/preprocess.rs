@@ -86,7 +86,7 @@ fn compound_assignment_runs_end_to_end() {
 /// arrives from the loader, so the script does not run at all.
 /// `vessel_controller` hit this twice, a release apart, on mechanical edits.
 ///
-/// Luau has no such ceiling (ADR-0028; `tests/vm_dialect.rs` measures it
+/// Luau has no such ceiling (`tests/vm_dialect.rs` measures it
 /// rather than quoting it), so the same 70-upvalue file that cost two
 /// releases there loads and runs here. That is a real difference between
 /// the two VMs and this test states it in both directions, because a
@@ -163,7 +163,7 @@ fn crossing_the_upvalue_ceiling_names_the_script_the_limit_and_the_fix() {
 /// One edit from the wall, the engine says so — because the count is
 /// invisible from inside the editor, and crossing it costs the whole script.
 ///
-/// Where there is no wall (Luau — ADR-0028) the engine must say **nothing**.
+/// Where there is no wall (Luau) the engine must say nothing.
 /// A warning about a limit that is not there is worse than silence: it sends
 /// somebody to restructure a working script for no reason.
 #[test]

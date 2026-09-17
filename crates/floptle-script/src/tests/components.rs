@@ -80,7 +80,7 @@ end
     assert_eq!(sprites.0[1].scale, [2.0, 2.0], "one number scales both axes");
     assert_eq!(sprites.0[2].scale, [1.4, 0.6], "…and a vec2 stretches one of them");
 
-    // IMMEDIATE mode: a pass that draws nothing leaves nothing behind.
+    // Immediate mode: a pass that draws nothing leaves nothing behind.
     write_script(&dir, "flat", "function update(node, dt)\nend\n");
     host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
     assert!(
@@ -138,7 +138,7 @@ end
     );
     let (mut world, e) = world_with_script("level");
     world.insert(e, floptle_core::Matter::Empty);
-    // A moved, TURNED and SCALED map — the case a Lua copy of the maths gets
+    // A moved, turned and scaled map — the case a Lua copy of the maths gets
     // wrong. If `cellAt(worldAt(0, 0))` still comes back (0, 0) here, the
     // conversion is going through the transform rather than assuming
     // identity.
@@ -250,7 +250,7 @@ fn a_bad_tile_orientation_is_refused_at_the_call() {
 /// the editor's autocomplete has told people to write since tilemaps
 /// shipped; before this it resolved to `nil`, which then also failed to
 /// convert.
-/// the mirror now REUSES a tilemap's buffer instead of
+/// the mirror now reuses a tilemap's buffer instead of
 /// reallocating it every sync. The whole risk in that is staleness — a map
 /// that changed must still read as changed, on the very next frame — so this
 /// writes through the handle, steps frames, and reads back.
@@ -511,7 +511,7 @@ fn particles_api_queues_commands_and_reads_state() {
 }
 
 /// Ground truth for the `cond and X or Y` conditional idiom through the real
-/// host — with animator METHOD calls in the chain — plus the animator getters
+/// host — with animator method calls in the chain — plus the animator getters
 /// reading the fed mirror. Lua's ternary spelling is core syntax; the reported
 /// "errors writing statements like that" came from method casing (see
 /// `animator_method_typo_names_the_camel_case_fix`), not from the idiom.
@@ -570,7 +570,7 @@ fn animator_getters_and_conditional_idiom() {
     host.run(&mut world, &dir, 0.1, 0.2);
     assert_eq!(pos(&world).x, 1.0, "isPlaying('Walking') and 1 must win");
 
-    // Running but FINISHED → isPlaying is false → the chain falls to 0.
+    // Running but finished → isPlaying is false → the chain falls to 0.
     host.set_anim_info(info("Running", 2.0, true));
     host.run(&mut world, &dir, 0.1, 0.3);
     assert_eq!(pos(&world).x, 0.0, "a finished one-shot is not 'playing'");
@@ -582,7 +582,7 @@ fn animator_getters_and_conditional_idiom() {
     assert_eq!(pos(&world).x, 0.0);
 }
 
-/// A CASING typo on an animator method (`anim:IsPlaying`) must fail with a
+/// A casing typo on an animator method (`anim:IsPlaying`) must fail with a
 /// did-you-mean naming the camelCase method — not a bare "attempt to call a
 /// nil value". Genuinely unknown keys still index to nil (feature probes).
 #[test]
@@ -718,7 +718,7 @@ fn getcomponent_toggles_particle_play_on_start() {
     assert!(world.get::<ParticleSystem>(e).unwrap().play_on_start, "field must flush to the ECS");
 }
 
-/// The sprite component as a HANDLE — `node:sprite()` — plus the call that
+/// The sprite component as a handle — `node:sprite()` — plus the call that
 /// used to fail in total silence.
 ///
 /// A 2D character flips on a turn, which is one boolean written every frame.
@@ -747,7 +747,7 @@ fn a_script_reads_and_writes_the_sprite_component() {
             // value from before the line above it.
             "  log('flipX reads ' .. tostring(sp.flipX))\n",
             "  log('cell reads ' .. tostring(sp.cell))\n",
-            // The generic component route has to answer with a BOOLEAN:
+            // The generic component route has to answer with a boolean:
             // 0 is truthy in Lua, so a number makes `if sp.flipY then`
             // always taken.
             "  local c = node:getcomponent('Sprite')\n",
@@ -863,7 +863,7 @@ fn a_sprite_frame_writes_the_cell_the_node_actually_reads() {
     );
 }
 
-/// `anim:events` / `anim:duration` expose the AUTHORED clip data so a game can bake
+/// `anim:events` / `anim:duration` expose the authored clip data so a game can bake
 /// integer frame data at load, instead of letting float playback events drive
 /// gameplay (which stepped playback quantises and a prediction replay never re-fires).
 /// They read the asset mirror, so they answer in `start()` — before anything has

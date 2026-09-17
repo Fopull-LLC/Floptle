@@ -1,10 +1,8 @@
-//! The Lua `voice.*` API — proximity voice chat.
+//! The Lua `voice.*` API: proximity voice chat.
 //!
-//! Follows the same queue-drain shape as `net.*`: calls push [`VoiceCmd`]s the
-//! editor drains each tick, and live state (devices, mic level, who is
-//! speaking) is mirrored in through [`VoiceState`].
-//!
-//! ## The shape a game actually writes
+//! The same queue-drain shape as `net.*`: calls push [`VoiceCmd`]s the editor
+//! drains each tick, and live state (devices, mic level, who is speaking)
+//! comes in through [`VoiceState`].
 //!
 //! ```lua
 //! -- settings screen
@@ -25,13 +23,10 @@
 //! voice.setForward(deadPeer, deadPeers)            -- the dead talk to the dead
 //! ```
 //!
-//! ## Why there is no per-effect API here
-//!
-//! A remote speaker plays through a mixer track like every other sound, so the
-//! game authors `Voice`, `Voice Monster` (PitchShift, Distortion, Reverb…) and
-//! `Voice Dead` in `project.ron` and moves a peer between them with
-//! `:setTrack`. Turning the killer into a monster needs no new audio API at
-//! all — which is the point of a voice stream being an ordinary voice.
+//! There is no per-effect API: a remote speaker plays through a mixer track
+//! like every other sound, so the game authors `Voice`, `Voice Monster`
+//! (PitchShift, Distortion, Reverb…) and `Voice Dead` in `project.ron` and
+//! moves a peer between them with `:setTrack`.
 
 use std::cell::RefCell;
 use std::rc::Rc;

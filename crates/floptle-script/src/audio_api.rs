@@ -59,7 +59,7 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
         p.max_distance = v as f32;
     }
     // Each of these calls the same parser the engine acts on, and offers that
-    // parser's own ACCEPTS list — so the message cannot describe a behaviour the
+    // parser's own `ACCEPTS` list — so the message cannot describe a behaviour the
     // code does not have (that task's shape).
     if let Ok(s) = t.raw_get::<String>("mode") {
         p.mode = parse_enum(CALL, "mode", &s, SpatialMode::ACCEPTS, SpatialMode::parse)?;

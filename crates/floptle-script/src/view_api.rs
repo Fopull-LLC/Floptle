@@ -1,9 +1,9 @@
 //! The Lua `camera.*` API — project a world point to the active game camera's
 //! screen pixels (and the inverse: a world ray from a screen pixel). The editor
 //! feeds this the active game camera's **camera-relative** view-projection (no
-//! translation, ADR-0015), its absolute world position, and the game viewport
-//! rect in PHYSICAL pixels each frame — the same numbers the renderer and
-//! `input.mouse()` use. All the picking LOGIC (nearest orbit point to the
+//! translation), its absolute world position, and the game viewport
+//! rect in physical pixels each frame — the same numbers the renderer and
+//! `input.mouse()` use. All the picking logic (nearest orbit point to the
 //! cursor, hover, drag) stays game-side in Lua; the engine only exposes the
 //! transform the renderer already knows.
 
@@ -28,7 +28,7 @@ pub struct ViewInfo {
     /// The camera's vertical field of view, radians — what turns "how many
     /// pixels tall is the view" into "how many pixels is a metre".
     pub fov_y: f32,
-    /// An ORTHOGRAPHIC camera's view height in world units; `0` for a
+    /// An orthographic camera's view height in world units; `0` for a
     /// perspective one.
     ///
     /// Here because "how many pixels is a metre" has a completely different
@@ -121,11 +121,11 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
         }
     }
 
-    // camera.screenRect() -> x, y, w, h — the game viewport in the same SPACE as
+    // camera.screenRect() -> x, y, w, h — the game viewport in the same space as
     // input.mouse() and worldToScreen (which both carry the viewport's offset).
     // `screenSize` alone can't answer "is the cursor over the game view?": in the
     // editor the view is a dock panel, so the cursor's x is offset by whatever is
-    // to its left, and comparing it against the WIDTH reads as "past the right
+    // to its left, and comparing it against the width reads as "past the right
     // edge" from the moment you open the panel. That is an edge-pan camera that
     // slides away forever.
     {
@@ -197,7 +197,7 @@ mod tests {
     use glam::{Quat, Vec3};
 
     /// Build a camera-relative view-projection exactly like `RenderCamera::view_proj`:
-    /// projection * (rotation-only view), i.e. no translation (ADR-0015).
+    /// projection * (rotation-only view), i.e. no translation.
     fn view_info(cam_world: [f64; 3], rot: Quat, w: f32, h: f32) -> ViewInfo {
         let proj = Mat4::perspective_rh(1.0, w / h, 0.1, 10_000.0);
         let view = Mat4::from_quat(rot.conjugate());

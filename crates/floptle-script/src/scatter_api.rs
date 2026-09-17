@@ -407,7 +407,7 @@ mod tests {
         (lua, sources, logs)
     }
 
-    /// A field whose cost is not obvious says so at DECLARE TIME, while the two
+    /// A field whose cost is not obvious says so at declare time, while the two
     /// numbers that decided it are still on screen.
     ///
     /// The configuration below is the one that shipped and froze a game. Its
@@ -483,7 +483,7 @@ mod tests {
     /// accepts has to be one the engine reads.
     ///
     /// `CREATE_KEYS` is that list, and it is the same list the parser consults,
-    /// so the two cannot drift. What this pins down is the BEHAVIOUR — an
+    /// so the two cannot drift. What this pins down is the behaviour — an
     /// option outside it is refused rather than shrugged at, which is the only
     /// reason a dead option could hide for two releases.
     #[test]

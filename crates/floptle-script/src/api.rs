@@ -40,7 +40,7 @@ const LIST_MT: &str = "floptle_list_mt";
 /// Install [`LIST_MT`]: an `__index` that refuses a non-positive index and
 /// stays out of the way otherwise.
 ///
-/// Only `[0]` and below raise. An out-of-range POSITIVE index still reads nil,
+/// Only `[0]` and below raise. An out-of-range positive index still reads nil,
 /// because `if findTagged("enemy")[1] then` is how you ask whether there are
 /// any and breaking that would trade one bad afternoon for a hundred.
 fn install_list_mt(lua: &Lua) -> mlua::Result<()> {
@@ -155,7 +155,7 @@ pub(crate) fn parent_world_of(s: &crate::SceneMirror, e: u32) -> floptle_core::T
 /// The own-node handle carries raw position fields (that is what makes
 /// `node.x = node.x + 1` a plain table write), so the mirror is a frame behind
 /// for the duration of a hook. Reading world space without this rule is how
-/// `node.pos = p; log(node.worldX)` answers about where the node USED to be.
+/// `node.pos = p; log(node.worldX)` answers about where the node used to be.
 fn live_local_of(s: &crate::SceneMirror, this: &Table, e: u32) -> floptle_core::Transform {
     let mut t = s.transforms.get(&e).copied().unwrap_or(floptle_core::Transform::IDENTITY);
     if let (Ok(x), Ok(y), Ok(z)) =
@@ -214,31 +214,21 @@ pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// Read a colour out of a Lua table: named `r/g/b/a` first, then `[1]`..`[4]`.
-/// A missing alpha is 1 — `color(1, 0, 0)` is opaque red, not invisible red.
 /// What `createNode` and `spawn` hand back: not a node, and loud about it.
 ///
-/// Both are QUEUED — the driver makes the node after this pass — so there is
-/// genuinely no handle to return at the call, which is why the handle arrives
-/// through the callback instead. Returning nothing was therefore honest and,
-/// as a failure mode, terrible: `local n = createNode("Stain")` is the obvious
-/// thing to write, and the next line fails as
+/// Both are queued, so there is no handle to return at the call; the handle
+/// arrives through the callback. `local n = createNode("Stain")` is the
+/// obvious thing to write, and a nil return would fail on the next line as
 ///
 /// ```text
 /// attempt to index nil with 'position'
 /// ```
 ///
-/// which names Lua and not the cause. The reference entry saying "fn(n) gets
-/// its handle" only helps somebody who already suspects the return value. A
-/// shipped game carries a comment in its own source warning its future self
-/// that "the obvious `local n = createNode(…)` reads as nil forever" — a
-/// developer paid for this and wrote it down, which is the argument for fixing
-/// it here rather than in the docs.
-///
-/// So the call returns a table that raises the engine's own message on the
-/// first touch, naming the call, the field and the form that works. Read and
-/// write say the same thing, because a read comes back nil and is the quieter
-/// half. Same mechanism as the `synced` diagnostic.
+/// which names Lua and not the cause. So the call returns a table that raises
+/// the engine's own message on the first touch, naming the call, the field and
+/// the form that works. Read and write say the same thing, since a read that
+/// came back nil would be the quieter half. The same mechanism as the `synced`
+/// diagnostic.
 pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result<Table> {
     let proxy = lua.create_table()?;
     let mt = lua.create_table()?;
@@ -267,6 +257,8 @@ pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result
     Ok(proxy)
 }
 
+/// Read a colour out of a Lua table: named `r/g/b/a` first, then `[1]`..`[4]`.
+/// A missing alpha is 1: `color(1, 0, 0)` is opaque red, not invisible red.
 pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
     let get = |named: &str, i: usize| -> f64 {
         t.raw_get::<Option<f64>>(named)
@@ -283,7 +275,7 @@ pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
     ])
 }
 
-/// Component fields that read and write as a whole COLOUR rather than as four
+/// Component fields that read and write as a whole colour rather than as four
 /// channels: `(component, field)`.
 ///
 /// `e.fill = color(1, 0.85, 0.35)` instead of four lines of `e.fillR = …`. The
@@ -291,7 +283,7 @@ pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
 /// keeps working — but nobody has to write a colour that way any more.
 ///
 /// A separate channel from the numeric one rather than an expansion into
-/// `fillR`..`fillA`, because `borderR` already means the RIGHT border width.
+/// `fillR`..`fillA`, because `borderR` already means the right border width.
 /// Sharing the namespace would have made a colour assignment silently resize
 /// an edge.
 pub fn mirror_component_colors(
@@ -328,7 +320,7 @@ pub fn mirror_component_colors(
             HashMap::from([("color".to_string(), [color[0], color[1], color[2], 1.0])]),
         );
     }
-    // The node's TINT — a multiplier over everything it draws. Mirrored as a
+    // The node's tint — a multiplier over everything it draws. Mirrored as a
     // component so `node:getcomponent("Tint").color = …` reads and writes it and
     // an animation lane can key it: a hit flash IS a tint keyed over 0.2s.
     if let Some(t) = world.get::<floptle_core::Tint>(e) {
@@ -368,7 +360,7 @@ pub fn apply_component_color(
     field: &str,
     v: [f32; 4],
 ) {
-    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // `Material:<object>` addresses ONE part of a model's materials. Matching on
     // the head lets the same arm serve a whole node and one of its parts, which
     // is the point of the namespace: everything that can already do this to a
     // Material can do it to a part without knowing that is what it is doing.
@@ -456,7 +448,7 @@ pub fn apply_component_color(
     }
 }
 
-/// Component fields that read back as a BOOLEAN, by `(component, field)`.
+/// Component fields that read back as a boolean, by `(component, field)`.
 ///
 /// They are stored as 1/0 like everything else, and that is a trap in Lua:
 /// `0` is **truthy**, so `if el.visible then` was always taken. Returning a
@@ -480,7 +472,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             // A material's two flags. `if mat.unlit then` was always taken:
             // the field came back as the number 0, and 0 is truthy in Lua.
             | ("Material", "unlit" | "fog")
-            // A flip is a flag, and 0 is TRUTHY in Lua: without this arm
+            // A flip is a flag, and 0 is truthy in Lua: without this arm
             // `if node:getcomponent("Sprite").flipX then` is a branch that is
             // always taken, whichever way the sprite is facing.
             | ("Sprite", "flipX" | "flipY")
@@ -542,7 +534,7 @@ fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
     }
 }
 
-/// The component-name prefix that addresses ONE PART of a model's materials:
+/// The component-name prefix that addresses ONE part of a model's materials:
 /// `Material:Clothing`, `Material:Torso#2`.
 ///
 /// A namespace rather than a new kind of handle, so a per-object material is
@@ -583,7 +575,7 @@ pub(crate) fn material_target<'a>(
     world: &'a mut World,
     ent: Entity,
     comp: &str,
-    // Does this write actually name a field of a material? Checked BEFORE the
+    // Does this write actually name a field of a material? Checked before the
     // override is created, because creating one is a visible act: an override
     // is a whole material, so a part that had a texture and gets a default
     // white one has changed its look. A typo'd field name must not be able to
@@ -610,7 +602,7 @@ pub(crate) fn material_target<'a>(
 /// published for one and not the other is a field that works on a whole model
 /// and silently does nothing on one part of it.
 ///
-/// `cell` is passed in rather than read off `m`: on a Sprite node the NODE owns
+/// `cell` is passed in rather than read off `m`: on a Sprite node the node owns
 /// the cell, and the mirror has to report the one that actually draws.
 #[cfg(test)]
 pub(crate) fn material_fields_for_test(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64> {
@@ -800,7 +792,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     // everything else was set through `node:setMaterial{...}`. That reasoning
     // holds for a script, which can name any key it likes — and it silently
     // decided what the animation system can key, because the timeline's record
-    // pass reads THIS map to notice a change. A material's opacity could be set
+    // pass reads this map to notice a change. A material's opacity could be set
     // from Lua and could not be animated, and the Animating tab said nothing
     // about why: the field was simply not in the list.
     //
@@ -890,7 +882,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("posterizeDither".to_string(), f64::from(*posterize_dither)),
                 ("posterizeChroma".to_string(), f64::from(*posterize_chroma)),
                 // Depth of field. `dofFocus` is here because a rack focus is a
-                // SCRIPT: pull the focus from one distance to another over a
+                // Script: pull the focus from one distance to another over a
                 // second and the shot changes. Doing it by hand meant a shader
                 // edit, which is not a thing that can happen mid-cutscene.
                 ("dofFocus".to_string(), *dof_focus as f64),
@@ -910,7 +902,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
-    // Baked GI. Read/write is the LIVE half of the volume — the numbers that
+    // Baked GI. Read/write is the live half of the volume — the numbers that
     // change what the bake looks like without re-baking it. Dimming `intensity`
     // as the lights go out, or dropping it to 0 for a flashback, is exactly the
     // kind of thing a script should be able to do to a bounce.
@@ -931,7 +923,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
-    // A reflection probe's LIVE half. `enabled` and `intensity` change what a
+    // A reflection probe's live half. `enabled` and `intensity` change what a
     // room reflects without re-capturing anything, which is what a script wants
     // — dimming the reflections as the lights go out. The box is not here: it is
     // the node's own shape, and changing it re-captures.
@@ -1007,7 +999,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             }
         }
         if let Some(s) = &spec.shape {
-            // `radius`/`border` read back the FIRST entry: with a uniform value
+            // `radius`/`border` read back the first entry: with a uniform value
             // (the overwhelmingly common case) that is exactly the number the
             // designer typed, and per-corner shapes have the indexed fields
             // below to read instead.
@@ -1047,7 +1039,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         f.insert("scaleX".to_string(), spec.scale[0] as f64);
         f.insert("scaleY".to_string(), spec.scale[1] as f64);
         // Named `group*`, not `tint*`: an image already owns `tintR..A`, and
-        // this one multiplies the whole SUBTREE rather than one texture.
+        // this one multiplies the whole subtree rather than one texture.
         for (k, v) in ["groupR", "groupG", "groupB", "groupA"].iter().zip(spec.tint) {
             f.insert(k.to_string(), v as f64);
         }
@@ -1107,7 +1099,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         );
     }
     // **The Sprite node's own numbers.** The `Sprite ▸ frame` lane writes the
-    // MATERIAL — which image and which cell — and works on anything wearing one.
+    // Material — which image and which cell — and works on anything wearing one.
     // These are the other half: what the node does with that picture. Without
     // them a squash-and-stretch, a flip on a turn, or a pivot shifted for a
     // crouch were things a script could do and a clip could not, which is the
@@ -1265,7 +1257,7 @@ fn rgba_index(field: &str) -> usize {
 /// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
 /// [`mirror_components`]). Unknown component/field names are ignored.
 pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
-    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // `Material:<object>` addresses ONE part of a model's materials. Matching on
     // the head lets the same arm serve a whole node and one of its parts, which
     // is the point of the namespace: everything that can already do this to a
     // Material can do it to a part without knowing that is what it is doing.
@@ -1406,7 +1398,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             {
                 match field {
                     "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
-                    // A 2D camera's ZOOM. `fovY` is what an orthographic camera
+                    // A 2D camera's zoom. `fovY` is what an orthographic camera
                     // does not have, so without this the one thing a flat game
                     // wants to animate about its camera had no route at all —
                     // and `fovY` was offered where it does nothing.
@@ -1509,7 +1501,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
         // step it every tick (`face:getcomponent("Material").cell = f`) and an
         // animation clip can key it on a stepped track.
         //
-        // `Material:<object>` lands here too and writes ONE PART of a model's
+        // `Material:<object>` lands here too and writes ONE part of a model's
         // materials; `material_target` is what turns the name into the material.
         "Material" | OBJECT_MATERIAL_PREFIX => {
             // **The cell first, and not through the Material borrow.** On a
@@ -1574,7 +1566,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "rimG" => m.rim[1] = val as f32,
                     "rimB" => m.rim[2] = val as f32,
                     "rimStrength" => m.rim_strength = val as f32,
-                    // Flags, as 0/1. Keyed on a STEP lane they are a switch on
+                    // Flags, as 0/1. Keyed on a step lane they are a switch on
                     // the timeline — a material that goes fullbright for three
                     // frames is a hit flash.
                     "unlit" => m.unlit = val != 0.0,
@@ -1602,12 +1594,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "r" => color[0] = val as f32,
                     "g" => color[1] = val as f32,
                     "b" => color[2] = val as f32,
-                    // Switching kind KEEPS the size where the two shapes have
+                    // Switching kind keeps the size where the two shapes have
                     // one, so a script cross-fading a window into a bulb does
                     // not have to restate its dimensions to avoid a flash.
                     "shape" => *shape = light_shape_from_id(val, shape.extent()),
                     "shadows" => *shadows = val != 0.0,
-                    // Aiming it. `spotAngle` is the FULL cone in degrees, and
+                    // Aiming it. `spotAngle` is the full cone in degrees, and
                     // 180 or more is the omnidirectional lamp this has always
                     // been — so `light.spotAngle = 180` is how a script opens a
                     // spot back up, and there is no second flag to remember.
@@ -1702,10 +1694,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // 0 and 1 both mean off, and the field is a count, so a
                     // negative from Lua must not wrap into a huge one.
                     "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
-                    // 0 clip / 1 Reinhard / 2 ACES / 3 AgX.
+                    // 0 clip / 1 Reinhard / 2 aces / 3 AgX.
                     "tonemap" => *tonemap = val.clamp(0.0, 3.0) as u32,
                     "posterizeDither" => *posterize_dither = val != 0.0,
-                    // step BRIGHTNESS and keep the colour,
+                    // step brightness and keep the colour,
                     // so a warm light does not band into hues nobody chose.
                     "posterizeChroma" => *posterize_chroma = val != 0.0,
                     // Depth of field. Every one clamped where it has a range and
@@ -1728,7 +1720,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         // Baked GI (`Matter::LightProbes`). Only the knobs that take effect
-        // WITHOUT a re-bake are here: intensity, leak rejection, the surface
+        // Without a re-bake are here: intensity, leak rejection, the surface
         // offset and the master switch. `bounces`, `quality` and `spacing`
         // describe how to bake and would do nothing at all from a script, so
         // offering them would be offering a lie.
@@ -1747,7 +1739,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         // A reflection probe, on the same terms as the volume above: the knobs
-        // that change what a captured room LOOKS like are here, and the box —
+        // that change what a captured room looks like are here, and the box —
         // which decides what was captured in the first place — is not.
         "ReflectionProbe" => {
             if let Some(Matter::ReflectionProbe { enabled, intensity, fade, .. }) =
@@ -1913,7 +1905,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
 }
 
 /// Apply the construction-API writes (`RichSet`) queued this pass: whole
-/// component field-sets — the component is INSERTED with defaults when the
+/// component field-sets — the component is inserted with defaults when the
 /// node doesn't carry it — and Matter swaps. Unknown field names apply
 /// nothing (fail-soft, like the numeric component mirror).
 pub(crate) fn apply_rich_sets(
@@ -2092,7 +2084,7 @@ pub(crate) fn apply_rich_sets(
                             m.retro.dither_alpha =
                                 num(v).map(|n| n != 0.0).unwrap_or(m.retro.dither_alpha)
                         }
-                        // …and the opt-out from the PROJECT'S artefacts, so a
+                        // …and the opt-out from the project'S artefacts, so a
                         // script that spawns a viewmodel can hold it steady in a
                         // world the project has wobbling.
                         "retroExempt" => {
@@ -2203,7 +2195,7 @@ pub(crate) fn apply_rich_sets(
                     *oh = Matter::clamp_ortho_height(v);
                 }
             }
-            // Both write the ELEMENT's text spec, creating it if the element
+            // Both write the element's text spec, creating it if the element
             // has none yet — the same shape `node.text = ...` uses, so setting
             // a colour on a label that has not been given words yet is a no-op
             // rather than an error.
@@ -2236,7 +2228,7 @@ pub(crate) fn apply_rich_sets(
                 data.resize(want, floptle_core::EMPTY_TILE);
                 data.truncate(want);
                 // Keep whatever tileset the node already had unless one was
-                // given: `setTilemap` is also how a script RESIZES a map, and
+                // given: `setTilemap` is also how a script resizes a map, and
                 // dropping the tileset on a resize would silently un-solid the
                 // level.
                 let tileset = tileset.unwrap_or_else(|| match world.get::<Matter>(e) {
@@ -2261,7 +2253,7 @@ pub(crate) fn apply_rich_sets(
                     order: order.unwrap_or(cur.order),
                     mode: mode.as_deref().map(floptle_core::SortMode::parse).unwrap_or(cur.mode),
                 };
-                // Back at the default in EVERY respect = no component at all.
+                // Back at the default in every respect = no component at all.
                 // The mode has to be part of that test: a node put back to
                 // `order` on the default layer should stop carrying sorting, and
                 // a node left on `y` must keep it even at order 0 on Default —
@@ -2344,7 +2336,7 @@ pub(crate) fn apply_rich_sets(
                         .cloned()
                         .unwrap_or_default();
                     if let Some(f) = follow {
-                        // Only when it actually CHANGED. Setting the follow every
+                        // Only when it actually changed. Setting the follow every
                         // frame (`update(dt) cam:setCamera2D{follow=target} end`)
                         // is an ordinary thing to write, and re-seeding on every
                         // one of those calls re-reads the camera's own transform
@@ -2447,9 +2439,9 @@ pub(crate) fn apply_rich_sets(
             // both "make a light" and "retune this one"; a node that was not a
             // light yet starts from the same defaults the editor's Add gives.
             RichSet::MatterPointLight { color, intensity, range } => {
-                // The SHAPE is kept, never reset: a script retuning a window's
+                // The shape is kept, never reset: a script retuning a window's
                 // colour must not quietly turn it back into a bare point.
-                // The SHAPE and the CONE are kept, never reset, for the same
+                // The shape and the cone are kept, never reset, for the same
                 // reason: a script retuning a spot's colour must not quietly
                 // point it back at everything.
                 let (mut c, mut i, mut r, keep) = match world.get::<Matter>(e) {
@@ -2561,9 +2553,9 @@ pub(crate) fn apply_rich_sets(
 fn tile_cell(v: &Value) -> mlua::Result<u32> {
     // Carried as **f64**, not as `mlua::Integer`. Every `u32` is exactly
     // representable in an f64, while a Lua integer is 64-bit under LuaJIT and
-    // **32-bit under Luau** (ADR-0028) — so `cell = 4294967295`, which is
+    // **32-bit under Luau** — so `cell = 4294967295`, which is
     // `EMPTY_TILE` and the value the editor's own autocomplete names, arrives
-    // on Luau as a `Number` that a cast to `mlua::Integer` SATURATES to
+    // on Luau as a `Number` that a cast to `mlua::Integer` saturates to
     // 2147483647. That paints tile 2147483647, reports success, and is exactly
     // the silent-wrong-answer shape this function was written to end.
     let n: f64 = match v {
@@ -2603,7 +2595,7 @@ fn describe_cell_range() -> String {
     )
 }
 
-/// The keys a `findScript` handle answers ITSELF, and what each one is for.
+/// The keys a `findScript` handle answers itself, and what each one is for.
 ///
 /// A handle is a proxy onto another script's environment, and these three names
 /// belong to the proxy rather than to the script behind it — so a script that
@@ -2735,26 +2727,17 @@ fn tile_xform_opts(v: &Value, call: &str) -> mlua::Result<floptle_core::TileXfor
 /// The handle `node:tilemap()` returns: the grid, and what the tileset says
 /// about it.
 ///
-/// ## Why this grew
+/// Beyond `set` and `fill`, three things every 2D game needs and cannot build
+/// well in Lua:
 ///
-/// It shipped with four methods on the reasoning that a game "re-dresses a room
-/// per floor, so `set` and `fill` are what it needs; anything richer belongs in
-/// Lua on top of these". That was half right. Building the rest in Lua is fine
-/// for a rectangle fill; it is not fine for the three things below, and both
-/// in-house games hand-rolled all three:
-///
-/// * **World ↔ cell.** Every 2D game needs "which tile did the player click / is
-///   the character standing on". Written in Lua it means duplicating the grid's
-///   centring and its row-0-is-the-top convention, and the copy is wrong the day
-///   the map is moved, rotated or scaled — because a Lua copy divides by a tile
-///   size and cannot see the node's transform.
-/// * **What a tile IS.** Solidity and tags live in the tileset, keyed by cell
-///   index. A game reading them in Lua keeps its own table keyed by cell index,
-///   which goes stale the moment the artist reorders the sheet — silently, and as
-///   a gameplay bug rather than an art one.
-/// * **Orientation.** There is no way to spell "this tile, mirrored" in Lua at
-///   all without knowing the bit layout, and a game that hard-codes the bits is
-///   a game that breaks when the layout changes.
+/// * World ↔ cell: which tile the player clicked, or the character stands on.
+///   A Lua copy divides by a tile size and cannot see the node's transform, so
+///   it is wrong the day the map is moved, rotated or scaled.
+/// * What a tile is. Solidity and tags live in the tileset, keyed by cell
+///   index; a game's own table keyed the same way goes stale the moment the
+///   artist reorders the sheet.
+/// * Orientation. "This tile, mirrored" needs the bit layout, and a game that
+///   hard-codes the bits breaks when the layout changes.
 fn new_tilemap_handle(
     lua: &Lua,
     e: u32,
@@ -2768,7 +2751,7 @@ fn new_tilemap_handle(
     // holding one will look.
     t.raw_set("EMPTY", floptle_core::EMPTY_TILE)?;
 
-    // tm:set(x, y, cell [, {rot=, flipX=, flipY=}]) — 0-based from the TOP-LEFT.
+    // tm:set(x, y, cell [, {rot=, flipX=, flipY=}]) — 0-based from the top-left.
     let qs = q.clone();
     t.raw_set(
         "set",
@@ -2830,7 +2813,7 @@ fn new_tilemap_handle(
                 } else {
                     floptle_core::tile_pack(cell, xf)
                 };
-                // Clip HERE rather than relying on the write to drop what falls
+                // Clip here rather than relying on the write to drop what falls
                 // outside: a rect from -1e9 to 1e9 would otherwise queue four
                 // quintillion writes before anything looked at the bounds.
                 let (lo_x, hi_x) = (x0.min(x1).max(0), x0.max(x1));
@@ -2891,7 +2874,7 @@ fn new_tilemap_handle(
     )?;
 
     // tm:get(x, y) -> cell, or nil outside the grid / on an empty square.
-    // The ORIENTATION is stripped: `tm:get` answers "which tile", which is what
+    // The orientation is stripped: `tm:get` answers "which tile", which is what
     // every comparison against it wants. `tm:at` answers the whole question.
     let sg = scene.clone();
     t.raw_set(
@@ -2932,7 +2915,7 @@ fn new_tilemap_handle(
 
     // tm:cellAt(worldPoint) -> x, y — or nil off the map.
     //
-    // Takes a WORLD point (or a node handle) and goes through the tilemap node's
+    // Takes a world point (or a node handle) and goes through the tilemap node's
     // own world transform, so a map that has been moved, turned or scaled still
     // answers correctly. That is the part a game cannot reasonably write itself.
     let sc = scene.clone();
@@ -2955,7 +2938,7 @@ fn new_tilemap_handle(
         })?,
     )?;
 
-    // tm:worldAt(x, y) -> the world position of that square's CENTRE.
+    // tm:worldAt(x, y) -> the world position of that square's centre.
     //
     // The centre and not a corner, because what a game does with this is put
     // something on the tile.
@@ -3116,7 +3099,7 @@ fn cell_of_world(s: &crate::SceneMirror, e: u32, p: glam::DVec3) -> Option<(u32,
     let local = glam::Vec2::new(rel.x / s3.x, rel.y / s3.y);
     let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
     let fx = (local.x + w) / m.tile;
-    // Row 0 is the top, so the row index counts DOWN from +h.
+    // Row 0 is the top, so the row index counts down from +h.
     let fy = (h - local.y) / m.tile;
     if fx < 0.0 || fy < 0.0 {
         return None;
@@ -3162,7 +3145,7 @@ fn sprite_scale(v: &Value) -> [f32; 2] {
 
 /// The handle `node:sprites()` returns.
 ///
-/// One method, on purpose. `b:draw(...)` is IMMEDIATE MODE — the same contract
+/// One method, on purpose. `b:draw(...)` is immediate mode — the same contract
 /// as `draw.*` and `gizmo.*`: what you draw this frame is what shows, and next
 /// frame starts empty. There is nothing to allocate, nothing to pool, and no
 /// `clear()` to forget on the frame a wave dies.
@@ -3207,13 +3190,13 @@ fn new_sprite_batch_handle(
     Ok(t)
 }
 
-/// Apply a STRING-valued component field — the string counterpart of
+/// Apply a string-valued component field — the string counterpart of
 /// [`apply_component_field`], for path/text fields that a number can't express.
 /// The headline use is animating a UI image's texture (sprite frame-swapping);
 /// also covers a Material's texture and a text element's string. Used by the
 /// animation system's property tracks (and available for future Lua setters).
 pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, field: &str, val: &str) {
-    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // `Material:<object>` addresses ONE part of a model's materials. Matching on
     // the head lets the same arm serve a whole node and one of its parts, which
     // is the point of the namespace: everything that can already do this to a
     // Material can do it to a part without knowing that is what it is doing.
@@ -3512,7 +3495,7 @@ let node_mt = lua.create_table()?;
             }
             return Ok(Value::Nil);
         }
-        // `node.tickPos` / `node.tickX|Y|Z` — the BODY's pose at the start
+        // `node.tickPos` / `node.tickX|Y|Z` — the body's pose at the start
         // of this tick, in absolute world coordinates.
         //
         // `x`/`y`/`z` are the *interpolated render pose* between ticks, so
@@ -3547,9 +3530,9 @@ let node_mt = lua.create_table()?;
         {
             let s = scene.borrow();
             // `node.worldX/worldY/worldZ` / `node.worldPos` — the position in
-            // WORLD space, composed up the parent chain. Read-only, and the
+            // World space, composed up the parent chain. Read-only, and the
             // answer to a whole class of "my unit walked off forever": x/y/z
-            // are LOCAL, so a script that compares a node under a moved
+            // are local, so a script that compares a node under a moved
             // parent against a world-space target never arrives.
             if matches!(key.as_str(), "worldX" | "worldY" | "worldZ" | "worldPos") {
                 if !s.transforms.contains_key(&e) {
@@ -3781,7 +3764,7 @@ let node_mt = lua.create_table()?;
                     None => Value::Nil,
                 });
             }
-            // ---- the VECTOR reads ------------------------------------
+            // ---- the vector reads ------------------------------------
             // `node.vel`, `node.up`, `node.forward`, `node.right`: the same
             // state the scalar fields above expose, as one vec3 each — so a
             // controller writes `node.vel = node.vel + up * jump` instead of
@@ -3829,7 +3812,7 @@ let node_mt = lua.create_table()?;
                     None => Value::Nil,
                 });
             }
-            // Facing, from the node's ROTATION (not the body) so it answers
+            // Facing, from the node's rotation (not the body) so it answers
             // on anything with a transform. −Z forward matches the camera
             // convention (`floptle_render::camera`), +X right, +Y local up.
             "forward" | "right" | "localUp" => {
@@ -3867,7 +3850,7 @@ let node_mt = lua.create_table()?;
         if hit != Value::Nil {
             return Ok(hit);
         }
-        // A CASING slip on a real method used to die at the CALL — "attempt
+        // A casing slip on a real method used to die at the call — "attempt
         // to call method 'getChild' (a nil value)" — which names the symptom
         // and not one thing to do about it. Answer it here instead, the way
         // the animator metatable does. Only a case-insensitive exact match
@@ -3926,7 +3909,7 @@ let node_mt = lua.create_table()?;
                     tr.translation = v;
                     s.dirty.insert(e);
                     // A body node: the physics writeback would stomp this —
-                    // queue a real TELEPORT for the driver.
+                    // queue a real teleport for the driver.
                     if bodies.borrow().contains_key(&e) {
                         body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
                     }
@@ -3934,7 +3917,7 @@ let node_mt = lua.create_table()?;
             }
             return Ok(());
         }
-        // `node.tickPos = vec3(...)` / `node.tickX = n` — move the BODY in
+        // `node.tickPos = vec3(...)` / `node.tickX = n` — move the body in
         // the tick channel, without touching the render transform. The
         // transform would be overwritten by the interpolated writeback
         // anyway, which is what makes `node.x = node.x + d` inside
@@ -4053,7 +4036,7 @@ let node_mt = lua.create_table()?;
                     _ => handled = false,
                 }
                 if handled {
-                    // Position writes on a BODY node also teleport the body
+                    // Position writes on a body node also teleport the body
                     // (the writeback would revert the transform otherwise).
                     if matches!(key.as_str(), "x" | "y" | "z")
                         && bodies.borrow().contains_key(&e)
@@ -4127,7 +4110,7 @@ let node_mt = lua.create_table()?;
             }
             // Switch the node — and everything under it — off or on. Stronger than
             // `visible`, which only stops the draw: this also takes the node out of
-            // physics and stops its scripts. A node cannot re-enable ITSELF (its
+            // physics and stops its scripts. A node cannot re-enable itself (its
             // scripts aren't running); something else has to.
             "enabled" => {
                 if let Value::Boolean(b) = val {
@@ -4198,7 +4181,7 @@ let node_mt = lua.create_table()?;
             // `node.texture = "textures/ui/portrait.png"` — the UI image's
             // texture, creating the image slot if the element has none, so
             // a bare element can become a sprite. Raises on a non-string
-            // rather than dropping it: this write did NOTHING for months and
+            // rather than dropping it: this write did nothing for months and
             // nobody could tell, which is the whole of.
             "texture" => {
                 let Value::String(s) = &val else {
@@ -4270,7 +4253,7 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
     let comp_mt = lua.create_table()?;
     // **A material handle's shader knobs**: the four
     // methods below mirror `node:setShaderParam` / `setShaderTexture`, but
-    // address the material the HANDLE names — the node's own for
+    // address the material the handle names — the node's own for
     // `node:material()`, one part's override for `node:material("Head#2")`.
     // The node-level call folds into the node's own Material and could
     // never reach a part, so a character whose parts wear `.flsl` shaders
@@ -4506,7 +4489,7 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             // A string is a path or a label: a UI image's texture, a
             // Material's texture, a text element's string. This used to
             // raise "must be a number, a boolean or a color", which was the
-            // one path that failed LOUDLY and it pointed nowhere useful.
+            // one path that failed loudly and it pointed nowhere useful.
             if let Value::String(s) = &val {
                 strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
                 return Ok(());
@@ -4543,7 +4526,7 @@ fn install_sprite_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
 //
 // Reads answer from the mirror and every write updates it as it queues, so a
 // read straight after an assignment is the value just assigned rather than
-// the one the frame started with. An unknown field RAISES on both sides: a
+// the one the frame started with. An unknown field raises on both sides: a
 // handle is where somebody guesses a name, and `sp.flipx = true` doing
 // nothing at all is the failure this whole feature exists to end.
 {
@@ -4562,7 +4545,7 @@ fn install_sprite_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                 "ppu" => Value::Number(f64::from(m.ppu)),
                 "size" => Value::Number(f64::from(m.size)),
                 "cell" => Value::Integer(m.cell as mlua::Integer),
-                // Booleans as BOOLEANS: 0 is truthy in Lua, so a number here
+                // Booleans as booleans: 0 is truthy in Lua, so a number here
                 // would make `if sp.flipX then` a branch that is always taken.
                 "flipX" => Value::Boolean(m.flip_x),
                 "flipY" => Value::Boolean(m.flip_y),
@@ -4682,7 +4665,7 @@ let script_mt = lua.create_table()?;
         match key.as_str() {
             "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
             "kind" => return Ok(Value::String(lua.create_string(&name)?)),
-            // `name` asks the SCRIPT first. The handle used
+            // `name` asks the script first. The handle used
             // to answer it itself, so a script exporting `function name(id)`
             // — the obvious name for "turn an id into a display name" —
             // could call it from inside itself and from nowhere else: every
@@ -4711,8 +4694,8 @@ let script_mt = lua.create_table()?;
         match env {
             Some(env) => env.get::<Value>(key),
             // No environment. Two very different things read `nil` here: a
-            // script that has no such export, and a script that FAILED TO
-            // LOAD and therefore has no exports at all. The second wants a
+            // script that has no such export, and a script that failed TO
+            // Load and therefore has no exports at all. The second wants a
             // completely different fix and used to be indistinguishable
             // from the first at every call site, so say
             // which it is — once per `(script, key)`, because a handle
@@ -4721,8 +4704,8 @@ let script_mt = lua.create_table()?;
             None => {
                 if broken_read_warned.borrow_mut().insert((name.clone(), key.clone())) {
                     // Three things reach here and they want three different
-                    // fixes. A script that FAILED TO LOAD has no exports at
-                    // all; one that is attached but SWITCHED OFF never got
+                    // fixes. A script that failed TO load has no exports at
+                    // all; one that is attached but switched OFF never got
                     // an environment built; and a live script simply has no
                     // export by that name — which is the only one of the
                     // three a bare `nil` describes.
@@ -4783,7 +4766,7 @@ fn install_find_globals(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             let s = scene.borrow();
             // O(1) against the name index when the default scope can take
             // its answer (first node in scene order wins, as always). A
-            // narrowed scope has to walk, because the index holds the FIRST
+            // narrowed scope has to walk, because the index holds the first
             // node of that name and it may be the one being filtered out —
             // returning nil while a perfectly good second one exists would
             // be worse than the bug this fixes.
@@ -4835,7 +4818,7 @@ lua.globals().set(
     "noderef",
     lua.create_function(|_, ()| Ok(crate::env::NODEREF_SENTINEL))?,
 )?;
-// scriptref("health"): the param binds to that SCRIPT on the wired node — the
+// scriptref("health"): the param binds to that script on the wired node — the
 // Inspector only lists nodes carrying it, and the script gets a script handle
 // directly (call its functions, read its state). componentref("RigidBody"):
 // same idea for a component handle. Both read nil while unwired/invalid.
@@ -4911,7 +4894,7 @@ lua.globals().set(
                 return Ok(Value::Nil);
             }
         };
-        // O(1) against the kind index. Still the FIRST in
+        // O(1) against the kind index. Still the first in
         // scene order, because the index is built in scene order — call
         // sites depend on which one they get. The scope filter runs over the
         // index rather than replacing it, so the ordering guarantee holds.
@@ -4929,7 +4912,7 @@ lua.globals().set(
     lua.globals().set("findScript", f.clone())?;
     lua.globals().set("findScriptInScene", f)?;
 }
-// findScripts(kind): EVERY node carrying that script, as script handles in
+// findScripts(kind): every node carrying that script, as script handles in
 // scene order — for picking among several instances (e.g. a camera finding
 // the one player controller that is net.isMine, out of many avatars).
 {
@@ -4967,7 +4950,7 @@ lua.globals().set(
         })?,
     )?;
 }
-// findTagged(tag): EVERY node carrying that tag, as node handles in scene
+// findTagged(tag): every node carrying that tag, as node handles in scene
 // order (an empty table when none). `findTagged("enemy")[1]` for the first.
 {
     let scene = shared.scene.clone();
@@ -5038,7 +5021,7 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     methods.set("getParent", f)?;
 }
 // node:getscript("health") — a handle on that script, by the name the editor
-// shows. The kind stored on the node is its PATH under `scripts/` without the
+// shows. The kind stored on the node is its path under `scripts/` without the
 // extension, so a file in a folder is "forgery/playermovement" while every
 // surface a person reads — the tab, the Inspector row, the Console prefix —
 // says `playermovement`. Matching the stored kind exactly meant asking by the
@@ -5178,7 +5161,7 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                 // have to know that white is the identity.
                 Value::Nil => *clear = true,
                 Value::Table(t) => {
-                    // **A COLOUR or AN OPTIONS TABLE, decided by name.** A
+                    // **A colour or AN options table, decided by name.** A
                     // colour is `{1,0.5,0.2}` or `{r=,g=,b=}` and never
                     // carries any of these names, so their presence is the
                     // whole test — a positional list stays a colour and
@@ -5187,7 +5170,7 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                     // **`alpha` has to be in this list**, and leaving it out
                     // was not a no-op: `read_color` defaults a missing r/g/b
                     // to zero, so `setTint{ alpha = 0.5 }` read as a colour
-                    // is BLACK at full opacity — the model goes dark, the
+                    // is black at full opacity — the model goes dark, the
                     // fade never happens, and nothing is logged. It cannot
                     // collide with a colour, because a `color(...)` table
                     // carries `r/g/b/a` and `[1]..[4]` and never `alpha`.
@@ -5195,7 +5178,7 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                         .iter()
                         .any(|k| t.contains_key(*k).unwrap_or(false));
                     if opts {
-                        // Each field is read STRICTLY: present and wrong is
+                        // Each field is read strictly: present and wrong is
                         // an error naming the field, never a silent skip.
                         // A field that quietly does nothing is the failure
                         // this whole API keeps being bitten by.
@@ -5357,8 +5340,8 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
         })?,
     )?;
 }
-// node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
-// WINDOW physical pixels: the same space input.mouse() reports and
+// node:uiRect() -> x, y, w, h — this UI element's solved screen rect in
+// Window physical pixels: the same space input.mouse() reports and
 // camera.worldToScreen() returns, so a docked editor Game tab's rects carry
 // that tab's offset. Lets a script hit-test the cursor against a panel's
 // actual rendered position instead of guessing its geometry.
@@ -5514,7 +5497,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         )?;
     }
     {
-        // node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the
+        // node:setTerrainGen(opts) — attach an on-demand generation spec (the
         // same opts table terrain.generatePlanet takes): the body's field
         // generates from it, on a background thread, when something first
         // approaches — no .cfield on disk, no up-front generation (G2 galaxy
@@ -5660,7 +5643,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                     cell: t.get::<Option<u32>>("cell")?,
                     flip_x: t.get::<Option<bool>>("flipX")?,
                     flip_y: t.get::<Option<bool>>("flipY")?,
-                    // One axis at a time, and the other KEEPS what the node
+                    // One axis at a time, and the other keeps what the node
                     // had. Defaulting the unmentioned axis to 0.5 here made
                     // `setSprite{ pivotY = 0 }` — the documented way to put
                     // a character's origin at its feet — silently recentre
@@ -5670,7 +5653,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 };
                 // The mirror moves with the queue, so `node:sprite()` on the
                 // next line reads what this call just set — and so a node
-                // BECOMING a sprite here can be read at all, since the
+                // Becoming a sprite here can be read at all, since the
                 // component itself does not exist until after the pass.
                 scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
                 q.borrow_mut().push((e, set));
@@ -5737,7 +5720,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         let q = q.clone();
         // node:shake(amount, seconds) — the one camera move every 2D game
         // wants and nobody should have to write. It is added to what is
-        // DRAWN and never fed back into the follow, so it composes with a
+        // Drawn and never fed back into the follow, so it composes with a
         // chase and with the world limits instead of fighting them.
         methods.set(
             "shake",
@@ -5766,7 +5749,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         // the pair above, which shipped without one.
         //
         // A node that has said nothing about sorting answers with the
-        // DEFAULT rather than nil. "Default layer, order 0, order mode" is
+        // Default rather than nil. "Default layer, order 0, order mode" is
         // the true answer for such a node, and nil would make every caller
         // that wants to nudge something one in front write the same three
         // lines of fallback before it could add 1.
@@ -5824,7 +5807,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         ))
                     })?),
                 };
-                // An EMPTY list means every layer, and so does no list — but
+                // An empty list means every layer, and so does no list — but
                 // `layers = {}` is somebody saying "reset this to all of
                 // them", which is a different thing from not mentioning it.
                 let layers = match t.get::<Option<Table>>("layers")? {
@@ -5897,7 +5880,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         // hand — which re-wraps wrong at every resolution and cannot be
         // revealed a glyph at a time.
         //
-        // `len` is CHARACTERS of the authored string, not bytes: "the fifth
+        // `len` is characters of the authored string, not bytes: "the fifth
         // character" and "the fifth byte" disagree the moment anyone types
         // anything but ASCII, and in bytes this would fail in front of
         // whoever was writing the dialogue.
@@ -5960,7 +5943,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         //
         // The half spans cannot do. Glyph positions are computed inside the
         // renderer and never surfaced, so a game could not move one letter
-        // at any price. This applies AFTER layout: a displaced glyph never
+        // at any price. This applies after layout: a displaced glyph never
         // re-wraps its line and never moves its neighbours, which is what
         // makes wobble, jitter and per-glyph reveal the game's own to write
         // rather than a catalogue of named effects the engine maintains.
@@ -5993,7 +5976,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         // texture any material or UI image wears as `rt:<name>`: minimaps,
         // mirrors, security monitors, scopes, split-screen.
         //
-        // Every value is checked HERE, at the call. `hz = "10"` and
+        // Every value is checked here, at the call. `hz = "10"` and
         // `width = 0` raise with the property, the value and the range —
         // not three frames later as a black rectangle.
         let q = q.clone();
@@ -6165,8 +6148,8 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         )
                     })?,
                 };
-                // Checked HERE, through the parser the write itself uses: a
-                // misspelled shape used to become a CUBE, silently — a
+                // Checked here, through the parser the write itself uses: a
+                // misspelled shape used to become a cube, silently — a
                 // different object standing exactly where you put it.
                 let shape = crate::opts::parse_enum(
                     "node:setPrimitive",
@@ -6457,7 +6440,7 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
             })?,
         )?;
     }
-    // A clip's AUTHORED duration + events, read from the asset rather than from
+    // A clip's authored duration + events, read from the asset rather than from
     // playback — so a game can bake integer frame data once at load. Runtime event
     // dispatch is unchanged; these are read-only.
     //
@@ -6522,7 +6505,7 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
             })?,
         )?;
     }
-    // Method lookup goes through a function so a CASING typo fails with a
+    // Method lookup goes through a function so a casing typo fails with a
     // fix instead of a bare nil-call: the animator API is camelCase
     // (`anim:isPlaying`), and `anim:IsPlaying(...)` used to die with
     // "attempt to call a nil value (method 'IsPlaying')" — no hint at all.
@@ -6604,7 +6587,7 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
     }
     {
         // ps:setBeamEnd(x, y, z) — aim every Beam track of the node's effect at a
-        // WORLD-space point (the engine converts it to effect-local, so the beam
+        // World-space point (the engine converts it to effect-local, so the beam
         // tracks the target as the emitter moves/rotates).
         let cmds = shared.vfx_commands.clone();
         vfx_methods.set(
@@ -6704,7 +6687,7 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
     // target ("rt:securityCam" — what another camera is looking at, live), or
     // "" to clear the slot back to nothing.
     //
-    // The slot NAME is the one the shader declares (`texture ramp` → "ramp"),
+    // The slot name is the one the shader declares (`texture ramp` → "ramp"),
     // so a script names what the artist named, not an index that shifts the
     // moment a slot is added.
     {
@@ -6769,8 +6752,8 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     // whatever puts that up over the node's head — a level horizon on a
     // planet, in one call instead of twenty lines of undo-yaw-then-pitch).
     //
-    // WORLD space on both ends: the node's own world position against the
-    // target's, then the angles written back as the LOCAL yaw/pitch the
+    // World space on both ends: the node's own world position against the
+    // target's, then the angles written back as the local yaw/pitch the
     // fields are. Under an unrotated parent (the overwhelmingly common
     // case) those coincide; under a rotated one, aim with `:lookAt` on the
     // parent or read `node:worldForward()` to see what actually happened.
@@ -6779,7 +6762,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
         "lookAt",
         lua.create_function(move |_, (this, target, up): (Table, Value, Option<Value>)| {
             let e: u32 = this.raw_get("__id")?;
-            // A node handle aims at where it WORLD is; a bare vec3 is taken
+            // A node handle aims at where it world is; a bare vec3 is taken
             // as the world point it plainly is.
             let (t, here) = {
                 let s = scene.borrow();
@@ -6811,7 +6794,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     // facing something, capped. Pass `rate * dt` and the turn is
     // frame-rate independent; the ±π seam is handled (`math.approachAngle`),
     // which is where every hand-written version went the long way round.
-    // The target may be a node, a world point, or a DIRECTION vector.
+    // The target may be a node, a world point, or a direction vector.
     let scene = shared.scene.clone();
     methods.set(
         "turnTowards",
@@ -6820,7 +6803,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
             // A node handle or a point is somewhere to face; a short vector
             // that isn't a position would be ambiguous, so the rule is
             // simple and stated: handles resolve to their world position,
-            // everything else is taken as a DIRECTION.
+            // everything else is taken as a direction.
             let dir = match &target {
                 Value::Table(tt) if tt.raw_get::<u32>("__id").is_ok() => {
                     let s = scene.borrow();
@@ -6885,7 +6868,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     )?;
 }
 {
-    // node:setWorldPos(v) — put a node at a WORLD point without deriving the
+    // node:setWorldPos(v) — put a node at a world point without deriving the
     // parent inverse by hand. Through `Transform::inv_mul`, the componentwise
     // TRS inverse: a matrix decomposition attributes a mirrored parent's
     // negative determinant to X regardless of which axis is actually
@@ -6911,7 +6894,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
 }
 {
     // node:worldForward() / worldRight() / worldUp() — the node's axes after
-    // the parent chain. `node.forward` is the LOCAL one: a gun barrel
+    // the parent chain. `node.forward` is the local one: a gun barrel
     // parented to an arm points where the ARM says, not where the gun's own
     // rotation says, and shooting along the local forward misses.
     let scene = shared.scene.clone();
@@ -6933,8 +6916,8 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
 }
 {
     // node:distanceTo(other) and node:distanceFlat(other [, up]) — measured
-    // in WORLD space, because that is the answer people mean. `distance(a,
-    // b)` compares LOCAL positions, which reads correctly right up until one
+    // in world space, because that is the answer people mean. `distance(a,
+    // b)` compares local positions, which reads correctly right up until one
     // of the two is parented and then quietly answers about the wrong frame.
     // `distanceFlat` drops the component along `up` (default +Y): the "have
     // I arrived?" test for anything that walks on ground it doesn't control
@@ -6976,7 +6959,7 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     )?;
 }
 {
-    // node:moveTowards(target, maxDelta) — walk toward a WORLD point at a
+    // node:moveTowards(target, maxDelta) — walk toward a world point at a
     // speed, never overshooting it. Pass `speed * dt`. Returns true once it
     // has arrived, so `if node:moveTowards(goal, s * dt) then ... end` is the
     // whole patrol step. World-space and placed with setWorldPos, so a node
@@ -7104,7 +7087,7 @@ mod tests {
     ///
     /// The bug this pins was not that the engine lacked an empty value — it was
     /// that the only one it had was a Rust constant Lua could not name, so the
-    /// universal convention (`-1`) hit the `u32` conversion and RAISED, inside a
+    /// universal convention (`-1`) hit the `u32` conversion and raised, inside a
     /// `createNode` callback, taking the rest of the callback with it. A game
     /// shipped a level with two-thirds of its walls missing because of it.
     #[test]
@@ -7140,7 +7123,7 @@ mod tests {
         assert_eq!(tile_cell(&Value::Number(12.0)).unwrap(), 12);
     }
 
-    /// A cell that is neither a tile nor an empty marker REFUSES, and the error
+    /// A cell that is neither a tile nor an empty marker refuses, and the error
     /// names the value and the accepted range — the 0082 shape. Truncating a
     /// float would paint a neighbouring tile and say nothing.
     #[test]
@@ -7151,7 +7134,7 @@ mod tests {
         assert!(err.contains("boolean"), "the type it got is not named in: {err}");
         assert!(err.contains("accepted"), "no accepted-values list in: {err}");
         // Past the top of a u32 is out of range, not a wrap to a low tile — and
-        // not a SATURATION to one either, which is what a 32-bit Lua integer
+        // not a saturation to one either, which is what a 32-bit Lua integer
         // would do with it. 2^33 as a `Number` is what a script produces on
         // either VM.
         assert!(tile_cell(&Value::Number(8589934592.0)).is_err());
@@ -7161,7 +7144,7 @@ mod tests {
     }
 
     /// A material's spritesheet frame is reachable from a script the same way a UI
-    /// image's is: `getcomponent("Material").cell = n`. That means BOTH halves —
+    /// image's is: `getcomponent("Material").cell = n`. That means both halves —
     /// the mirror (which is also what makes the field animatable and what
     /// `getcomponent` gates presence on) and the write-back.
     #[test]

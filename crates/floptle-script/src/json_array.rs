@@ -1,24 +1,19 @@
-//! The one tag that lets Lua say **"this is a list"**.
+//! The one tag that lets Lua say "this is a list".
 //!
-//! Lua has a single table type and JSON has two, so every encoder has to guess.
-//! The guess — keys `1..n` and nothing else is an array — is right for every
-//! non-empty case and cannot be right for the empty one: `{}` is both an empty
-//! list and an empty object, and an encoder must pick. It picks `{}`, because
-//! an empty body posted to an API that reads objects has to stay an object.
-//!
-//! That left no value a script could build that wrote `[]`, which is the
-//! error path of every list a script assembles: the selection with nothing
-//! selected, the ids of the rows nobody ticked. It is invisible while testing
-//! with data and appears against the empty case.
+//! Lua has a single table type and JSON has two, so an encoder guesses: keys
+//! `1..n` and nothing else is an array. That is right for every non-empty
+//! case and cannot be right for the empty one, where `{}` is both an empty
+//! list and an empty object; the encoder picks the object, since an empty body
+//! posted to an API that reads objects has to stay one. Without a tag, no
+//! value a script builds writes `[]`: the selection with nothing selected, the
+//! ids of the rows nobody ticked.
 //!
 //! So a table can carry a metatable saying what it is, and the guess is only
-//! consulted when nothing said. `json.decode` tags every array it builds, which
-//! is what makes read → edit → send back preserve the types it was handed
-//! without the script having to remember which fields were lists.
+//! consulted when nothing said. `json.decode` tags every array it builds, so
+//! read → edit → send back preserves the types it was handed.
 //!
 //! The tag is a plain `__jsonarray = true` on the metatable rather than a
-//! hidden identity, so a script that builds its own tables can set it too —
-//! there is nothing here worth making unforgeable.
+//! hidden identity, so a script that builds its own tables can set it too.
 
 use mlua::{Lua, Table, Value};
 
@@ -77,10 +72,10 @@ pub fn encodes_as_array(t: &Table) -> bool {
 ///   numbers. Two encoders quietly disagreeing about a value is worse than
 ///   either answer, so it is refused and named.
 pub fn problem(t: &Table) -> Option<String> {
-    // Built from the KEYS, not from `#t`. Lua's length operator is free to stop
+    // Built from the keys, not from `#t`. Lua's length operator is free to stop
     // at a hole — `t[2] = nil` on a three-item list makes `#t` report 1 — so a
     // range check against it calls the surviving item 3 a stray key and says
-    // something true about the wrong thing. True of both VMs (ADR-0028).
+    // something true about the wrong thing. True of both VMs.
     //
     // `mlua::Integer`, not `i64`: these count Lua table indices, and Lua's
     // integer is 32-bit under Luau and 64-bit under LuaJIT.

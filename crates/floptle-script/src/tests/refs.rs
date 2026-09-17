@@ -152,7 +152,7 @@ fn the_get_node_methods_take_the_camel_case_spelling() {
     assert_eq!(world.get::<Transform>(root).unwrap().translation.x, 3.0);
 }
 
-/// A CASING slip on any other node method names its fix rather than dying
+/// A casing slip on any other node method names its fix rather than dying
 /// at the call site. Genuinely unknown keys still read nil, so a feature
 /// probe (`if node.someday then`) keeps working.
 #[test]
@@ -516,7 +516,7 @@ fn world_position_composes_the_parent_chain() {
 }
 
 /// The local ↔ world set, against the frame that breaks a naive
-/// implementation: a parent that is moved, ROTATED and SCALED.
+/// implementation: a parent that is moved, rotated and scaled.
 ///
 /// `node:setWorldPos` and `node:moveTowards` go back through
 /// `Transform::inv_mul` rather than decomposing a matrix — the componentwise
@@ -559,7 +559,7 @@ fn local_and_world_conversions_survive_a_rotated_scaled_parent() {
          \x20 if not arrived then error('moveTowards should report arrival') end\n\
          end\n",
     );
-    // Two runs: an ordinary parent, then a MIRRORED one (negative Y scale).
+    // Two runs: an ordinary parent, then a mirrored one (negative Y scale).
     for mirror in [false, true] {
         let mut world = World::default();
         let parent = world.spawn();
@@ -828,7 +828,7 @@ fn noderef_param_rebinds_when_the_target_appears_or_is_renamed_mid_play() {
 fn scriptref_and_componentref_bind_handles_directly() {
     // scriptref("health") gives the wired node's health script handle;
     // componentref("RigidBody") gives its component handle; a wire to a node
-    // MISSING the declared thing reads nil (validated, not a dead handle).
+    // Missing the declared thing reads nil (validated, not a dead handle).
     let dir = std::env::temp_dir().join("floptle_script_test_kindrefs");
     let _ = std::fs::create_dir_all(&dir);
     write_script(&dir, "health", "hp = 40\nfunction damage(n)\n  hp = hp - n\nend\n");

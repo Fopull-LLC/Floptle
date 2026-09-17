@@ -1,6 +1,6 @@
 use super::*;
 
-/// A LIBRARY script — no `start`, no `update`, just functions other scripts
+/// A library script — no `start`, no `update`, just functions other scripts
 /// call — must have its `params` before anybody calls into it.
 ///
 /// `params` used to be seeded by the tick, so a script that never ticks
@@ -20,7 +20,7 @@ fn a_hookless_library_script_has_its_params_before_anybody_calls_in() {
         &dir,
         "inventory",
         concat!(
-            // `@node` is a REFERENCE param: the Inspector wires it to a node
+            // `@node` is a reference param: the Inspector wires it to a node
             // and the script reads it as a handle.
             "defaults = { cap = 40, owner = noderef() }\n",
             "function cap()\n",
@@ -151,7 +151,7 @@ end
     assert_eq!(creates[0].name, "Child");
     assert_eq!(creates[0].parent, Some(e.index()));
     // Mimic the editor's drain (apply_spawn_batch): spawn the node, then run
-    // the callback — its construction writes must land IMMEDIATELY (the drain
+    // the callback — its construction writes must land immediately (the drain
     // is the last flush an editor action gets; a transform-only flush here
     // left generator planets as Matter::Empty and their generated terrain
     // fields orphaned — "generated field … but no node carries it").
@@ -464,7 +464,7 @@ fn a_hookless_pass_still_drains_a_timer_write_to_the_node() {
 
 /// A scene of thousands of scripted nodes runs.
 ///
-/// It used to PANIC — `out of auxiliary stack space (used 7999 slots)` —
+/// It used to panic — `out of auxiliary stack space (used 7999 slots)` —
 /// because the host held a live `mlua::Table` per instance in two places,
 /// and each one costs a slot on a ref stack bounded near 8,000. Two holds
 /// put the ceiling around four thousand, which a probe hit and a game
@@ -513,7 +513,7 @@ fn thousands_of_scripted_nodes_do_not_exhaust_lua() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A checkbox tunable reads as a real boolean inside a RUNNING script —
+/// A checkbox tunable reads as a real boolean inside a running script —
 /// not as the 1/0 it is stored as, and not as a truthy `0`.
 ///
 /// `env::params_table` has done this since the boolean round-trip fix, but
@@ -563,7 +563,7 @@ fn an_unticked_checkbox_param_is_false_inside_a_running_script() {
 
 /// The tick-pose channel (`docs/multiplayer.md` §3).
 ///
-/// `node.x` between ticks is the INTERPOLATED render pose — lerped by the
+/// `node.x` between ticks is the interpolated render pose — lerped by the
 /// frame's alpha, so reading it inside `fixedUpdate` is a frame-rate-
 /// dependent read that no replay can reproduce, and `node.x = node.x + d`
 /// teleports the body onto its visual position (the classic "the visuals
@@ -772,7 +772,7 @@ fn allocation_is_attributed_to_the_script_that_made_it() {
 /// writes and the hook lookup, on every scripted node, three passes a
 /// frame.
 ///
-/// The MARGINAL cost of one more scripted node, so the per-pass work that
+/// The marginal cost of one more scripted node, so the per-pass work that
 /// is not per-instance (the scene mirror) cannot mask it. Bytes rather than
 /// milliseconds: an allocation count is deterministic for a given VM, so
 /// this is a ceiling and not the growth ratio a *timing* guard would need.

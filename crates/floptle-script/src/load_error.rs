@@ -232,7 +232,7 @@ mod tests {
         assert!(msg.contains("'=' expected near 'then'"), "{msg}");
     }
 
-    /// The count is of FILE-SCOPE locals only — a local inside a function is
+    /// The count is of file-scope locals only — a local inside a function is
     /// not an upvalue of anything, and moving state in there is the fix the
     /// message recommends, so counting them would punish taking the advice.
     #[test]

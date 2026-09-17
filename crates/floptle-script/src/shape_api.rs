@@ -1,19 +1,14 @@
-//! Shape queries — `overlapSphere`, `spherecast`, `capsulecast` (roadmap B2).
+//! Shape queries: `overlapSphere`, `spherecast`, `capsulecast`.
 //!
-//! `raycast` answers "what is along this line". A combat game asks a different
-//! question — "what is inside this volume" — and until now had to fake it with
-//! a fan of rays, which misses anything thinner than the fan and cannot report
-//! penetration depth at all.
+//! `raycast` answers "what is along this line"; a combat game asks "what is
+//! inside this volume", which a fan of rays misses for anything thinner than
+//! the fan and cannot report penetration depth for.
 //!
-//! Two things make these belong here rather than in a game:
-//!
-//! * **They are nearly free in this engine.** Every collider already answers a
-//!   signed distance, so an overlap is `d(center) < radius` and a swept sphere
-//!   is the ray march with the radius subtracted. No new geometry kernels.
-//! * **Lag compensation.** Inside `net.rewind` the lent hulls are the rewound
-//!   ones, so an overlap sees the world as the attacker saw it. The netcode
-//!   design promised rewound overlaps (§7) and only `raycast` had ever kept it;
-//!   a game cannot fix that from outside, because it cannot rewind anything.
+//! Every collider answers a signed distance, so an overlap is
+//! `d(center) < radius` and a swept sphere is the ray march with the radius
+//! subtracted; no new geometry kernels. Inside `net.rewind` the lent hulls are
+//! the rewound ones, so an overlap sees the world as the attacker saw it,
+//! which a game cannot do from outside.
 //!
 //! Every query takes the same `{ ignore = node, layers = "Ground" | {...} }`
 //! options table as `raycast`, parsed by the same code, so learning one teaches
@@ -25,7 +20,7 @@ use std::rc::Rc;
 use mlua::{Lua, Table, Value};
 
 /// The shared state a query needs: the lent collider/hull sets, the sim origin
-/// (scripts speak world, the sim runs origin-relative — ADR-0015), the running
+/// (scripts speak world, the sim runs origin-relative), the running
 /// script's own entity, and the project's layer table.
 #[derive(Clone)]
 pub(crate) struct QueryShared {
@@ -135,7 +130,7 @@ pub(crate) fn install_hit_meta(lua: &Lua, shared: &QueryShared) {
         else {
             return Ok(Value::Nil);
         };
-        // Scripts speak world; the sim runs origin-relative (ADR-0015).
+        // Scripts speak world; the sim runs origin-relative.
         let o = *origin.borrow();
         let p = glam::Vec3::new((x - o.x) as f32, (y - o.y) as f32, (z - o.z) as f32);
         // The colliders on the node that was hit — usually exactly one. Asking

@@ -32,7 +32,7 @@ fn every_material_field_can_be_both_read_and_written() {
     assert!(unreadable.is_empty(), "writable but never readable: {unreadable:?}");
 }
 
-/// A TINT is a multiplier over whatever a node already draws — the "same
+/// A tint is a multiplier over whatever a node already draws — the "same
 /// model, but red" a Material cannot express, because a Material replaces.
 ///
 /// Asked for as: *"there still needs to be an easy way to apply a tint to an
@@ -121,7 +121,7 @@ fn a_script_tints_a_whole_model_without_replacing_anything() {
 ///
 /// The lanes of a Tint are set at different times and by different code: a
 /// character asks for its rim and its ambient once when it is dressed, and
-/// rewrites its COLOUR on every hit flash. If `setTint(red)` replaced the
+/// rewrites its colour on every hit flash. If `setTint(red)` replaced the
 /// whole component the character would drop back into the dark, untinted by
 /// its rim, for exactly as long as the flash lasted — a bug that would read
 /// as "the flash looks wrong" and never as "the merge is missing".
@@ -172,7 +172,7 @@ fn a_colour_write_keeps_the_rim_and_the_ambient() {
 /// keys is options, anything else is a colour. `alpha` is an option key —
 /// the docs list it as one — and leaving it out of that test is not a
 /// no-op. `read_color` defaults a missing r/g/b to zero, so
-/// `{ alpha = 0.5 }` read as a colour is the colour BLACK at full opacity:
+/// `{ alpha = 0.5 }` read as a colour is the colour black at full opacity:
 /// the model goes dark and its fade never happens, with nothing logged.
 ///
 /// That is the same failure that has now bitten this API twice — a table
@@ -219,7 +219,7 @@ fn an_alpha_only_tint_fades_the_model_instead_of_blacking_it() {
     );
 }
 
-/// **An option that is present and wrong is an ERROR, not a skip.**
+/// **An option that is present and wrong is an error, not a skip.**
 ///
 /// The options table used to read each field through a pattern that fell
 /// through on any shape it did not expect — `if let Ok(Value::Table(ct))`.
@@ -702,7 +702,7 @@ fn a_node_level_shader_write_fans_out_to_the_parts_that_wear_a_shader_or_says_so
     assert!(warned.iter().any(|m| m.contains("\"Nope\"") && m.contains("no material override")), "{warned:#?}");
 }
 
-/// the sky's uniforms are a THIRD place, and until this they
+/// the sky's uniforms are a third place, and until this they
 /// were the only shader in the engine a script could not talk to. A
 /// procedural sky that can only be a function of `time` runs its story on a
 /// clock — the reported case was a cutscene sky whose city was revealed in

@@ -157,7 +157,7 @@ fn script_reads_and_writes_a_component_field() {
 fn layers_and_tags_round_trip_through_the_lua_api() {
     // node.layer reads "Default" when unset; a valid write lands as a
     // Layer component; tags edit read-your-writes and flush as Tags; a
-    // findTagged scan sees a PRE-EXISTING tag the same frame.
+    // findTagged scan sees a pre-existing tag the same frame.
     let dir = std::env::temp_dir().join("floptle_script_test_layers");
     let _ = std::fs::create_dir_all(&dir);
     write_script(
@@ -305,7 +305,7 @@ fn assets_api_resolves_under_project_root() {
 
 #[test]
 fn save_api_round_trips_across_hosts() {
-    // set → flush writes save/<slot>.ron; a FRESH host (a new play session /
+    // set → flush writes save/<slot>.ron; a fresh host (a new play session /
     // process) reads the same values back. Tables survive; defaults fill gaps.
     let root = std::env::temp_dir().join("floptle_script_test_save_root");
     let _ = std::fs::remove_dir_all(&root);

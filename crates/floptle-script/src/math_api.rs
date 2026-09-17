@@ -3,14 +3,14 @@
 //! Vectors are small userdata values with real operators — `a + b`, `a - b`,
 //! `v * 2`, `-v`, `a == b` — plus the methods games actually reach for
 //! (`length` — also spelled `magnitude` — `normalized`, `dot`, `cross`, `lerp`,
-//! `distance`). Everything that ACCEPTS a vector also accepts a plain
+//! `distance`). Everything that accepts a vector also accepts a plain
 //! `{x=, y=, z=}` table or a node handle (anything with numeric x/y/z fields),
 //! so `distance(node, target)` just works. LuaJIT-friendly: components are
 //! plain doubles, ops allocate one small userdata — fine at gameplay call rates.
 
 use mlua::{IntoLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 
-/// Which `vec3` a Lua state hands to scripts (ADR-0028, Phase 3).
+/// Which `vec3` a Lua state hands to scripts.
 ///
 /// Per **state**, held as mlua app data, and deliberately not a thread-local:
 /// the editor runs a second Lua state for package extensions on the same
@@ -134,7 +134,7 @@ struct FastInstalled;
 /// metatable Luau already installs is readonly, so doing this from Lua raises.
 /// From Rust it can be unlocked, extended and re-locked.
 ///
-/// **`__index` WRAPS Luau's own rather than replacing it.** That function is
+/// **`__index` wraps Luau's own rather than replacing it.** That function is
 /// what resolves `.x`, `.y` and `.z`; drop it and every component read on every
 /// vector in the project returns nil, with nothing raised and nothing logged.
 fn install_fast_vec3(lua: &Lua) -> mlua::Result<()> {
@@ -344,7 +344,7 @@ impl mlua::IntoLua for LuaVec3 {
                 // Three compares on the way past, and nothing else unless one
                 // trips. This is the most-travelled conversion in the engine —
                 // a game builds thousands of vectors a frame — so the guardrail
-                // has to be free when it is not firing, which means the LOOKUP
+                // has to be free when it is not firing, which means the lookup
                 // for where to report lives behind the test rather than in
                 // front of it.
                 if far_from_origin(self.0) {
@@ -377,7 +377,7 @@ pub struct LuaVec2(pub glam::DVec2);
 
 /// Read a 3-vector out of a Lua value: a `vec3` in either backing, a `vec2`
 /// (z = 0), or any table with numeric `x`/`y`(/`z`) fields — which includes
-/// node HANDLES, so vector APIs accept nodes directly.
+/// node handles, so vector APIs accept nodes directly.
 ///
 /// The single read path, which is why `fast` mode did not need several hundred
 /// call sites edited: a native vector arrives here like anything else.
@@ -702,7 +702,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
-    // distance(a, b) — vectors, plain {x=,y=,z=} tables, or node HANDLES (so
+    // distance(a, b) — vectors, plain {x=,y=,z=} tables, or node handles (so
     // `distance(node, target)` reads both nodes' positions directly). Also
     // distance(x1,y1,z1, x2,y2,z2) for raw numbers.
     lua.globals().set(
@@ -971,7 +971,7 @@ fn install_math_helpers(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
-    // lerp is UNCLAMPED (extrapolation is useful); mix() is the clamped twin.
+    // lerp is unclamped (extrapolation is useful); mix() is the clamped twin.
     m.set("lerp", lua.create_function(|_, (a, b, t): (f64, f64, f64)| Ok(a + (b - a) * t))?)?;
     m.set(
         "mix",
@@ -1011,7 +1011,7 @@ fn install_math_helpers(lua: &Lua) -> mlua::Result<()> {
             Ok(if d.abs() <= step { target } else { cur + d.signum() * step })
         })?,
     )?;
-    // Angles: wrap into (−π, π], and the SHORTEST signed way from a to b — the
+    // Angles: wrap into (−π, π], and the shortest signed way from a to b — the
     // thing every turret, heading readout and camera yaw needs and every script
     // got subtly wrong across the ±π seam.
     m.set("wrapAngle", lua.create_function(|_, a: f64| Ok(wrap_pi(a)))?)?;
@@ -1111,7 +1111,7 @@ pub(crate) fn look_rotation(dir: glam::DVec3, up: Option<glam::DVec3>) -> (f64, 
 }
 
 /// Frame-rate-independent exponential ease: `a` moves a `rate`-dependent
-/// FRACTION of the remaining distance each second, so 30 fps and 240 fps feel
+/// Fraction of the remaining distance each second, so 30 fps and 240 fps feel
 /// identical. `rate <= 0` snaps.
 pub(crate) fn ease_scalar(a: f64, b: f64, rate: f64, dt: f64) -> f64 {
     if rate <= 0.0 { b } else { a + (b - a) * (1.0 - (-rate * dt).exp()) }
@@ -1123,7 +1123,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
     // dirTo(from, to) — the unit direction from one thing to another. Both
-    // arguments may be a vec3, a {x=,y=,z=} table, or a node HANDLE, so
+    // arguments may be a vec3, a {x=,y=,z=} table, or a node handle, so
     // `dirTo(node, target)` is the whole sentence. Same point twice →
     // vec3(0,0,0), never a NaN that quietly poisons a transform.
     g.set(
@@ -1202,7 +1202,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     // smoothDamp(current, target, vel, smoothTime, dt) -> value, vel — the
-    // critically-damped spring a camera follow wants: it has MOMENTUM, so it
+    // critically-damped spring a camera follow wants: it has momentum, so it
     // does not stop dead the instant the target does. Lua has no reference
     // parameters, so the velocity comes back as the second return:
     //   camX, camVX = smoothDamp(camX, wantX, camVX, 0.25, dt)
@@ -1265,7 +1265,7 @@ fn wrap_pi(a: f64) -> f64 {
 
 /// List helpers on the stock `table`, so working with a list of things reads as
 /// one line instead of a bookkeeping loop. All of them treat the table as an
-/// ARRAY (1..n) and return a new table rather than mutating, except `extend`.
+/// Array (1..n) and return a new table rather than mutating, except `extend`.
 fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
     let t: Table = lua.globals().get("table")?;
 
@@ -1294,7 +1294,7 @@ fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
             Ok(out)
         })?,
     )?;
-    // find(list, fn) → value, index (nil if none). Takes a PREDICATE, so
+    // find(list, fn) → value, index (nil if none). Takes a predicate, so
     // `table.find(ships, function(s) return s.docked end)` reads as a sentence.
     t.set(
         "find",
@@ -1321,7 +1321,7 @@ fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     // count(list [, fn]) — the length, or how many satisfy the predicate. Also
-    // counts a KEYED table's entries, which `#t` cannot.
+    // counts a keyed table's entries, which `#t` cannot.
     t.set(
         "count",
         lua.create_function(|_, (list, f): (Table, Option<mlua::Function>)| {
@@ -1360,7 +1360,7 @@ fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
             Ok(acc)
         })?,
     )?;
-    // keys(t) — a SORTED key list, so iterating a keyed table is deterministic
+    // keys(t) — a sorted key list, so iterating a keyed table is deterministic
     // (raw `pairs` order is hash order, which a replay can't reproduce).
     t.set(
         "keys",
@@ -1631,7 +1631,7 @@ mod helper_tests {
     /// **The property card actually asked for: bytes per
     /// operation, per mode, in the ordinary suite.**
     ///
-    /// Pinning the PROPERTY rather than the implementation is the point — the
+    /// Pinning the property rather than the implementation is the point — the
     /// card's complaint was never "vec3 is a userdata", it was "every vec3 a
     /// script builds is a heap object". `fast` must allocate nothing, and a
     /// future change that quietly reintroduces an allocation has to fail here
@@ -1925,7 +1925,7 @@ mod helper_tests {
     }
 
     /// The list helpers, and the two behaviours worth pinning: `find` takes a
-    /// predicate and returns value+index, and `keys` is SORTED (hash order isn't
+    /// predicate and returns value+index, and `keys` is sorted (hash order isn't
     /// reproducible, which matters for replays).
     #[test]
     fn table_helpers_read_like_sentences() {

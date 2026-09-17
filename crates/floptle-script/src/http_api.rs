@@ -1,14 +1,10 @@
-//! `http.*` and `json.*` — talking to a web API from Lua.
+//! `http.*` and `json.*`: talking to a web API from Lua, for an account, a
+//! card list, a leaderboard or a shop.
 //!
-//! A game that can't reach a server can't have an account, a card list, a
-//! leaderboard or a shop. This is the smallest surface that makes those
-//! possible without handing scripts a foot-gun.
-//!
-//! **Non-blocking, always.** A request is handed to a worker thread and the
+//! Non-blocking, always. A request is handed to a worker thread and the
 //! callback runs on a later tick on the main thread, so it is safe to touch
-//! nodes from it and a slow server can never stall a frame. There is no
-//! blocking form on purpose: the blocking form is the one everybody reaches
-//! for, and it turns a 300 ms round trip into a 300 ms freeze.
+//! nodes from it and a slow server never stalls a frame. There is no blocking
+//! form: it turns a 300 ms round trip into a 300 ms freeze.
 //!
 //! ```lua
 //! http.get(url [, opts], function(res) end)
@@ -17,20 +13,19 @@
 //! -- res  = { ok, status, body, json, error }
 //! ```
 //!
-//! **Outside the fixed tick, deliberately.** A reply arrives when it arrives,
-//! which no replay can reproduce — so HTTP lives in the frame pass, and calling
-//! it from `fixedUpdate` warns once. It belongs in `update`, `start`, a timer,
-//! or an RPC handler.
+//! Outside the fixed tick. A reply arrives when it arrives, which no replay
+//! can reproduce, so HTTP lives in the frame pass and calling it from
+//! `fixedUpdate` warns once. It belongs in `update`, `start`, a timer, or an
+//! RPC handler.
 //!
-//! **Play only.** Edit mode never opens a socket: a script being edited must
-//! not be able to hit a live endpoint because the Inspector happened to
-//! re-run it. Stop cancels everything in flight, and a late reply to a
-//! cancelled generation is dropped rather than delivered into a fresh session.
+//! Play only. Edit mode never opens a socket, so a script being edited cannot
+//! hit a live endpoint because the Inspector re-ran it. Stop cancels
+//! everything in flight, and a late reply to a cancelled generation is dropped
+//! rather than delivered into a fresh session.
 //!
-//! **Capped, and it says so.** In-flight and per-second limits, plus a hard
-//! body size — a script that calls `http.get` in `update` hits a wall and one
-//! Console line explaining it, rather than melting someone's connection in
-//! silence.
+//! Capped, and it says so: in-flight and per-second limits, plus a hard body
+//! size. A script that calls `http.get` in `update` hits a wall and one
+//! Console line explaining it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -54,7 +49,7 @@ const MAX_PER_SECOND: usize = 20;
 /// Largest body accepted in either direction, in bytes. A reply past this fails
 /// with an error instead of buying a script an unbounded allocation; a request
 /// body past it is refused at the call, for the same reason from the other
-/// end — a script assembling a gigabyte to POST is a script that has gone
+/// end — a script assembling a gigabyte to post is a script that has gone
 /// wrong, and the worker thread should not be the place it finds out.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Default per-request timeout, seconds.
@@ -107,7 +102,7 @@ pub(crate) struct HttpState {
     /// Play only — set by the driver. Edit mode never opens a socket.
     playing: bool,
     /// Where a request may go — set by the driver, never by a script. See
-    /// [`crate::http_policy`]. The default REFUSES local addresses; only the
+    /// [`crate::http_policy`]. The default refuses local addresses; only the
     /// editor's Play opens them.
     policy: HttpPolicy,
     /// The first request the editor lets through to a local address says,
@@ -243,7 +238,7 @@ pub(crate) fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Valu
     })
 }
 
-/// …and back. A Lua table with a `1` key is an ARRAY; anything else is an
+/// …and back. A Lua table with a `1` key is an array; anything else is an
 /// object. That is the only rule Lua's one table type can support, and stating
 /// it is better than guessing per call.
 pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
@@ -365,7 +360,7 @@ pub(crate) fn drain(
     state: &Rc<RefCell<HttpState>>,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
 ) {
-    // Collect with the borrow held; call with it RELEASED — a callback that
+    // Collect with the borrow held; call with it released — a callback that
     // fires another request re-borrows the state.
     let ready: Vec<(HttpReply, Pending)> = {
         let mut s = state.borrow_mut();
@@ -438,7 +433,7 @@ fn send(
     }
     // The address policy, applied to what the developer wrote: a literal or a
     // local name is refused here, at the call, with the hostname in the
-    // message. What a name RESOLVES to is the resolver's job (`dispatch`), on
+    // message. What a name resolves to is the resolver's job (`dispatch`), on
     // the worker thread, where a redirect's hop is checked the same way.
     let policy = s.policy;
     let host = url_host(&url);
@@ -634,7 +629,7 @@ fn dispatch(
 ///
 /// A browser can fetch; what it cannot do is any of it the way the rest of this
 /// file assumes — a blocking agent on a thread of its own, with no regard for
-/// the origin the page was served from. That is `fetch` plus CORS plus an async
+/// the origin the page was served from. That is `fetch` plus cors plus an async
 /// reply, which is Phase 5 of the web plan and a real piece of work rather than
 /// a swapped dependency. Until it exists this refuses out loud: the one thing a
 /// stub must never do here is accept the call and leave the callback pending
@@ -861,7 +856,7 @@ pub fn browser_url(url: &str) -> std::io::Result<url::Url> {
 /// Hand a URL to the platform's browser. The editor's packages and the
 /// device-code sign-in go through the same call, so a script can use it.
 ///
-/// The URL is [`browser_url`]-checked first and the CHECKED spelling is what
+/// The URL is [`browser_url`]-checked first and the checked spelling is what
 /// is opened — never the string as written.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
@@ -896,7 +891,7 @@ fn open_checked(url: &str) -> std::io::Result<()> {
     let wide = |s: &str| -> Vec<u16> { std::ffi::OsStr::new(s).encode_wide().chain([0]).collect() };
     let verb = wide("open");
     let target = wide(url);
-    // SAFETY: both strings are NUL-terminated for the duration of the call;
+    // Safety: both strings are nul-terminated for the duration of the call;
     // the window, parameters and directory arguments are allowed to be null.
     let r = unsafe {
         ShellExecuteW(
@@ -960,7 +955,7 @@ mod tests {
     }
 
     /// `json.encode` / `json.decode` round-trip the shapes a web API actually
-    /// sends, and `decode` reports bad input as a VALUE rather than raising —
+    /// sends, and `decode` reports bad input as a value rather than raising —
     /// someone else's server having a bad day is data, not a bug in your script.
     #[test]
     fn json_round_trips_and_reports_bad_input_without_raising() {
@@ -981,7 +976,7 @@ mod tests {
             .load("return json.decode(json.encode{ on = true }).on")
             .call::<bool>(())
             .unwrap());
-        // A list encodes as an ARRAY, not an object with numeric keys.
+        // A list encodes as an array, not an object with numeric keys.
         assert_eq!(s("return json.encode{1, 2, 3}"), "[1,2,3]");
         assert_eq!(s("return json.encode{}"), "{}");
         // Bad input: nil + a message, never an error.
@@ -1275,7 +1270,7 @@ mod policy_tests {
     const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
 
     /// The whole point: under the refusing policy the listener on this
-    /// machine ACCEPTS nothing, and the script is told which rule said so.
+    /// machine accepts nothing, and the script is told which rule said so.
     #[test]
     fn a_game_cannot_reach_a_loopback_port_and_the_listener_sees_no_connection() {
         let (port, accepted) = serve(OK);
@@ -1327,7 +1322,7 @@ mod policy_tests {
         assert!(err.contains("link-local"), "{err}");
     }
 
-    /// A redirect is HANDED to the script, not followed: the 302 arrives as an
+    /// A redirect is handed to the script, not followed: the 302 arrives as an
     /// ordinary reply with `res.location`, and the server it points at is
     /// never contacted.
     #[test]

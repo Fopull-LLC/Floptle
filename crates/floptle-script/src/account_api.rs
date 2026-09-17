@@ -3,28 +3,26 @@
 //! ```lua
 //! account.signIn()                       -- begins; returns immediately
 //! account.state()                        -- "signedOut" | "starting" | "waiting" | "signedIn" | "failed"
-//! account.code()                         -- while waiting: { code = "WXYZ-9999", url = "…" }
+//! account.code()                         -- while waiting: { code = "wxyz-9999", url = "…" }
 //! account.player()                       -- when signed in: { id, name, email, tier }
 //! account.get("/wallet", function(res) end)
 //! account.post("/games/fofighter/events", { event = "cpu_match_won" }, function(res) end)
 //! ```
 //!
-//! **A script asks for a player, never a token.** The access token lives in
-//! `floptle-account` and is attached to requests there. A shipped game's Lua is
-//! readable — anything a script can hold, somebody can read out of the file and
-//! post somewhere — so it never holds one. That is also why `account.get` takes
-//! a *path* rather than a URL: there is exactly one host it can reach.
+//! A script asks for a player, never a token. The access token lives in
+//! `floptle-account` and is attached to requests there; a shipped game's Lua is
+//! readable, so it never holds one. `account.get` takes a path rather than a
+//! URL for the same reason: there is exactly one host it can reach.
 //!
-//! **Polled, not called back.** Signing in takes as long as a person takes to
-//! pick up their phone, so `signIn` starts it and `state()` reports where it
-//! got to. A sign-in screen is redrawing every frame anyway, and a callback for
-//! something that can sit at "waiting" for a minute would be the awkward shape.
+//! Polled, not called back. Signing in takes as long as a person takes to pick
+//! up their phone, so `signIn` starts it and `state()` reports where it got
+//! to; a sign-in screen is redrawing every frame anyway.
 //!
-//! **Play only, like `http.*`,** and for the same reason: a script being edited
-//! must not reach a live endpoint because the Inspector re-ran it. Stop drops
-//! every pending callback and abandons a sign-in in progress — but *not* the
-//! session itself, which is stored in the OS keyring and shared with the Hub.
-//! Signing in once covers every Play after it, and every other Floptle game.
+//! Play only, like `http.*`: a script being edited cannot reach a live endpoint
+//! because the Inspector re-ran it. Stop drops every pending callback and
+//! abandons a sign-in in progress, but not the session itself, which is stored
+//! in the OS keyring and shared with the Hub. Signing in once covers every
+//! Play after it, and every other Floptle game.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -93,7 +91,7 @@ impl AccountState {
     }
 
     /// Stop / scene load: drop every waiting callback and abandon a sign-in in
-    /// progress (its user code is stale the moment Play ends). The SESSION
+    /// progress (its user code is stale the moment Play ends). The session
     /// survives — it is the player's, not this run's.
     pub(crate) fn cancel_all(&mut self) {
         self.pending.clear();
@@ -134,7 +132,7 @@ pub(crate) fn drain(
     state: &Rc<RefCell<AccountState>>,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
 ) {
-    // Collect with the borrow held, call with it RELEASED — a callback that
+    // Collect with the borrow held, call with it released — a callback that
     // makes another request re-borrows the state.
     let ready: Vec<(CloudReply, Function)> = {
         let Ok(mut s) = state.try_borrow_mut() else { return };

@@ -62,13 +62,13 @@ pub(crate) fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<F
 }
 
 /// The sentinel `noderef()` returns — a `defaults` value of this string marks the
-/// param as a node REFERENCE the Inspector wires to a scene node by name.
+/// param as a node reference the Inspector wires to a scene node by name.
 pub(crate) const NODEREF_SENTINEL: &str = "__floptle_noderef";
 /// `scriptref("health")` → `__floptle_scriptref:health` — the param binds to
 /// that script on the wired node (the script sees a script handle directly).
 pub(crate) const SCRIPTREF_PREFIX: &str = "__floptle_scriptref:";
 /// `componentref("RigidBody")` → `__floptle_compref:RigidBody` — the param
-/// binds to that COMPONENT on the wired node (a component handle directly).
+/// binds to that component on the wired node (a component handle directly).
 pub(crate) const COMPREF_PREFIX: &str = "__floptle_compref:";
 
 /// Parse a `defaults` sentinel value into the reference kind it declares.
@@ -97,7 +97,7 @@ pub(crate) enum ResolvedRef {
 /// overrides sees an empty `params` and every `params.foo` reads `nil`.
 ///
 /// `refs` are the instance's reference params, resolved + validated by the host:
-/// the script sees a node / script / component HANDLE — `params.hpBar.text = hp`,
+/// the script sees a node / script / component handle — `params.hpBar.text = hp`,
 /// `params.health.damage(5)`, `params.body.friction = 0` — zero `find()` calls.
 /// Unwired or invalid targets read `nil` (so `if params.x then` guards work).
 pub(crate) fn params_table(
@@ -121,7 +121,7 @@ pub(crate) fn params_table(
     }
     for (k, v) in params {
         // Stored params are floats, but a tunable the script declared as a
-        // BOOLEAN must read back as one — otherwise `if params.invert then`
+        // Boolean must read back as one — otherwise `if params.invert then`
         // would be true for a stored 0 (every number is truthy in Lua), which is
         // the opposite of what the Inspector's unticked checkbox says.
         let declared_bool = env
@@ -185,7 +185,7 @@ pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyS
 /// Write the node's current transform + body state into its own-node table, called
 /// before every hook.
 ///
-/// raw_set so these stay DIRECT table fields (not routed through the node metatable's
+/// raw_set so these stay direct table fields (not routed through the node metatable's
 /// `__newindex`, which is for handles to other nodes) — the read-back path reads them
 /// directly after the hook.
 pub(crate) fn stamp_node_table(
@@ -254,7 +254,7 @@ pub(crate) struct NodeStamp {
 /// Snapshot the table's current values, to compare the next hook against.
 pub(crate) fn node_stamp(t: &Table, tr: &Transform) -> NodeStamp {
     let mut pre = node_pre(tr);
-    // Read from the TABLE, not the transform: after a hook these differ whenever the
+    // Read from the table, not the transform: after a hook these differ whenever the
     // script's write was queued rather than applied in place (a body teleport).
     if let Ok(v) = t.raw_get::<f64>("x") {
         pre.x = v;
@@ -489,7 +489,7 @@ pub(crate) fn material_key(refstr: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A tunable a script declares as a BOOLEAN must stay a boolean in `params`
+    /// A tunable a script declares as a boolean must stay a boolean in `params`
     /// even after the Inspector stores it (params are floats on the way through).
     /// Every number is truthy in Lua, so a stored 0 arriving as `0` would make
     /// `if params.invert then` fire with the checkbox unticked.

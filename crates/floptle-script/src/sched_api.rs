@@ -1,10 +1,10 @@
-//! The Lua scheduler — `after` / `every` / `tween` (roadmap A4).
+//! The Lua scheduler: `after`, `every`, `tween`.
 //!
-//! Timers are TICK-driven and deterministic: the clock advances only when the
-//! host's global `run_fixed` pass runs, by the constant tick delta. It must
-//! never advance in the targeted replay paths (`run_fixed_for`, prediction
-//! replays) — those re-run one entity's tick after a net correction, and a
-//! scheduler that advanced there would double-fire every pending timer.
+//! Timers are tick-driven and deterministic: the clock advances only when the
+//! host's global `run_fixed` pass runs, by the constant tick delta, never in
+//! the targeted replay paths (`run_fixed_for`, prediction replays), which
+//! re-run one entity's tick after a net correction and would double-fire every
+//! pending timer.
 //!
 //! * `after(seconds, fn) → handle` — fire once. `handle:cancel()` aborts.
 //! * `every(seconds, fn) → handle` — fire repeatedly, first after `seconds`.
@@ -100,7 +100,7 @@ pub(crate) fn tick(
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     dt: f64,
 ) {
-    // Collect due work with the borrow held, run callbacks with it RELEASED —
+    // Collect due work with the borrow held, run callbacks with it released —
     // a callback scheduling new timers re-borrows the state.
     enum DueCall {
         Plain(Function),

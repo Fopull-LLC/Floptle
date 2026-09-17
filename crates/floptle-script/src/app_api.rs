@@ -1,5 +1,5 @@
-//! The Lua `app.*` table — the settings a game offers the person playing it, and
-//! the one thing every main menu needs and could not do: **quit**.
+//! The Lua `app.*` table: the settings a game offers the person playing it,
+//! and quit.
 //!
 //! ```lua
 //! -- a Video tab, in full
@@ -14,27 +14,16 @@
 //! end
 //! ```
 //!
-//! ## Why these live apart from the rest of the API
-//!
-//! Most of the script surface is about **simulating** a world. This is the other
-//! kind: what the game presents to a player and lets them change about it.
-//! Before this, a settings screen could reach the audio mixer (`audio.track`),
-//! the accessibility settings (`access.*`) and the scene's own post-processing
-//! (`node:getComponent("PostProcess")`) — three quarters of a real options menu —
-//! and then had nothing at all for the two things a player looks for first, and
-//! no way to close the game.
-//!
-//! ## The settings here are the project's, and a change is for this session only
+//! Most of the script surface simulates a world. This is the other kind: what
+//! the game presents to a player and lets them change, alongside the audio
+//! mixer (`audio.track`), the accessibility settings (`access.*`) and the
+//! scene's post-processing (`node:getComponent("PostProcess")`).
 //!
 //! Vsync and the retro presentation live in `project.ron`, which ships to
-//! everybody who plays. So a script changing one changes it **for the run**, and
-//! Stop puts the project back exactly as it was — the same rule
-//! `audio.track(…):setVolume` already follows, and for the same reason: this is a
-//! player's preference, not an edit to the game.
-//!
-//! Which means **persisting it is the game's job**, through `save.*`. That is not
-//! an omission; it is the only place a per-player setting belongs, and it is what
-//! `access.*` decided for the same question.
+//! everybody who plays, so a script changing one changes it for the run and
+//! Stop puts the project back as it was, the rule `audio.track(…):setVolume`
+//! follows too. Persisting a player's choice is the game's job, through
+//! `save.*`, the only place a per-player setting belongs.
 
 use std::cell::RefCell;
 use std::rc::Rc;

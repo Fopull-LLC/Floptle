@@ -248,7 +248,7 @@ pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
 
     // --- devices (global, not per-player) ----------------------------------
     //
-    // Every other function here answers the RESOLVED question — did this player
+    // Every other function here answers the resolved question — did this player
     // press Light. None of them can answer the one underneath it: is there a
     // controller here at all. So "the pad was never enumerated", "it was
     // enumerated into a slot the map doesn't bind", "the window hasn't got

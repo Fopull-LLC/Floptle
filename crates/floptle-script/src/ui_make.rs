@@ -155,7 +155,7 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
     if matches!(t.raw_get::<Value>(1)?, Value::Table(_)) {
         // not `1..=raw_len()`. A screen with a section switched off is written
         // `local dead = nil` and then `{ vitals, score, dead }`, which is the
-        // obvious way to say it and leaves a HOLE in the array. Lua's length
+        // obvious way to say it and leaves a hole in the array. Lua's length
         // operator is only defined up to a border, so a holed table reports
         // whatever its internal array happens to end at: sometimes the full
         // count, in which case the nil entry used to abort the whole screen —
@@ -300,7 +300,7 @@ fn parse_node(
     // (`{ header, body, footer }` where `body` is conditionally nil) reports
     // its length only as far as the hole, so everything after an absent child
     // used to vanish silently. A nil child is skipped below and always was —
-    // it just had to be REACHED first.
+    // it just had to be reached first.
     let mut n = 0usize;
     for pair in t.clone().pairs::<Value, Value>() {
         let (k, _) = pair?;
@@ -401,7 +401,7 @@ fn prop_value(v: &Value) -> Option<PropVal> {
         Value::String(s) => PropVal::Str(s.to_str().ok()?.to_string()),
         Value::Table(t) => {
             // A colour is the `{r=,g=,b=,a=}` table `color()` returns; anything
-            // else with numbers in it is a list. Told apart by the NAMED keys,
+            // else with numbers in it is a list. Told apart by the named keys,
             // because `read_color` also accepts positional ones — and under
             // that reading `radius = {8, 8, 0, 0}` would be a colour.
             let named = ["r", "g", "b", "a"]
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(world.get::<ElementSpec>(e).unwrap().size[0], Size::Fit);
     }
 
-    /// Every kind must be recognisable as itself on the next call, INCLUDING
+    /// Every kind must be recognisable as itself on the next call, including
     /// when properties have blurred it: a `text` with a background fill and a
     /// `box` with a label are the same ElementSpec. Inferring the kind from
     /// the element would rebuild those two from scratch every single call.

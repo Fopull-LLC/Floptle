@@ -1,13 +1,9 @@
-//! The Lua `perf` table — a game reading its own frame cost.
+//! The Lua `perf` table: a game reading its own frame cost.
 //!
-//! The point of this existing at all is that "the engine is slow" was the only
-//! report a game could make. Four separate tickets came in that way and every one
-//! turned out to be a number the game could have read itself: a component lookup
-//! that was a linear scan, `findScript` doing the same, a scatter field asking for
-//! 117,000 props, and terrain priority ignoring world distance.
-//!
-//! So this is not a debugging aid bolted to the editor. It is readable from Lua on
-//! purpose, so a project can assert its own budget in a smoke test and find out
+//! "The engine is slow" is the report a game makes when it cannot read its
+//! own numbers, and it is usually a number the game could have read itself: a
+//! scatter field asking for 117,000 props, a `findScript` in a loop. Readable
+//! from Lua, a project asserts its own budget in a smoke test and finds out
 //! from CI rather than from a player.
 //!
 //! ```lua
@@ -24,11 +20,9 @@
 //! end
 //! ```
 //!
-//! # Reading while it is off is an ERROR, not a zero
-//!
-//! Collection costs nothing when nothing is looking, which is the only way a
-//! profiler stays switched on. But that makes "off" and "free" the same shape, and
-//! a smoke test asserting `perf.ms("scripts") < 4` would then pass by measuring
+//! Reading while it is off is an error, not a zero. Collection costs nothing
+//! when nothing is looking, which makes "off" and "free" the same shape, and a
+//! smoke test asserting `perf.ms("scripts") < 4` would pass by measuring
 //! nothing. So every getter raises while collection is off and says to call
 //! `perf.enable(true)`.
 
@@ -43,7 +37,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
     let t = lua.create_table()?;
 
     // perf.enable(on) — start or stop collecting. Off is the default, and off is
-    // free. Stopping CLEARS the history: a stale mean from before a fix looks
+    // free. Stopping clears the history: a stale mean from before a fix looks
     // exactly like a fix that did not work.
     let p = profile.clone();
     t.set(
@@ -256,7 +250,7 @@ mod tests {
         (lua, p)
     }
 
-    /// Reading a time while collection is off RAISES, and the message says how to
+    /// Reading a time while collection is off raises, and the message says how to
     /// turn it on.
     ///
     /// This is the whole design decision. A zero would let

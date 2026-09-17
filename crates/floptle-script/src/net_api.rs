@@ -42,7 +42,7 @@ pub enum NetCmd {
     /// `net.host{ maxPlayers = n, port = p, relay = "addr" }` — become the
     /// authoritative host. With a `relay`, host through a rendezvous relay
     /// (lobby code, no port-forwarding); with a `port`, a real session on UDP
-    /// (QUIC) that other machines join with `net.join("quic://ip:port")`;
+    /// (quic) that other machines join with `net.join("quic://ip:port")`;
     /// with neither, the in-editor loopback harness.
     Host {
         max_players: u32,
@@ -56,7 +56,7 @@ pub enum NetCmd {
         /// `interestBudget = <bytes per second>` — per-client snapshot budget.
         /// Only meaningful alongside `interest`.
         interest_budget: Option<u32>,
-        /// `interestOcclusion = "Level"` — also require LINE of SIGHT, tested
+        /// `interestOcclusion = "Level"` — also require line of sight, tested
         /// against that collision layer. Only meaningful alongside `interest`.
         ///
         /// A radius bounds a leak; it does not remove one. This is the part a
@@ -80,7 +80,7 @@ pub enum NetCmd {
         /// measured RTT at match start.
         ///
         /// Fixed for the session and never auto-adjusted mid-match: adaptive
-        /// delay hides a bad connection by changing how the game FEELS while
+        /// delay hides a bad connection by changing how the game feels while
         /// you are playing it, which a fighting game cannot tolerate. The
         /// number is exposed and chosen instead.
         input_delay: Option<u8>,
@@ -131,7 +131,7 @@ pub enum NetRoleState {
     Client,
 }
 
-/// Live ROLLBACK state fed by the driver each tick
+/// Live rollback state fed by the driver each tick
 /// (`docs/multiplayer.md` §7 P6), read by `net.rollbackDepth()` and
 /// friends — and the per-tick seed behind `net.random()`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -209,7 +209,7 @@ pub struct NetState {
     /// `None` offline, on a client, and on a direct/LAN host (there is no code
     /// to show — joiners use the address).
     pub lobby_code: Option<String>,
-    /// **Is this a server with NOBODY SITTING at it?**
+    /// **Is this a server with nobody sitting at it?**
     ///
     /// `net.isServer()` is true for both shapes of host and that is usually the
     /// right question — the simulation does not care who started it. This is the
@@ -269,7 +269,7 @@ pub(crate) struct NetHandler {
 
 /// The lag-compensation context for the RPC currently being dispatched on the
 /// server (`docs/multiplayer.md` §7): the world state at the tick the
-/// SENDER perceived, precomputed by the driver from its history ring. Staged
+/// Sender perceived, precomputed by the driver from its history ring. Staged
 /// via `ScriptHost::set_rewind` around `dispatch_rpc`; `net.rewind(peer, fn)`
 /// applies it for the duration of `fn`.
 #[derive(Clone, Debug, Default)]
@@ -349,7 +349,7 @@ fn deterministic_unit(seed: u64, tick: u64, draw: u64) -> f64 {
     (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// A resolved tick of ACTIONS into the wire form — what a predicted node's
+/// A resolved tick of actions into the wire form — what a predicted node's
 /// owner ships to the server.
 ///
 /// The wire carries actions, not keys: a pad player and a keyboard player who
@@ -582,7 +582,7 @@ pub(crate) fn install_net_api(
         // `rng()` with no seed rolls from the clock, which is poison in a
         // rollback sim: two peers draw different numbers and the match forks.
         // This is seeded from (match seed, tick, draw index), so every peer
-        // draws the same sequence for a tick, and a REPLAY of that tick draws
+        // draws the same sequence for a tick, and a replay of that tick draws
         // it again — which is the part a hand-rolled seed usually gets wrong.
         //
         // Shapes match Lua's own `math.random`: `net.random()` → [0,1),
@@ -789,7 +789,7 @@ pub(crate) fn install_net_api(
     // is going out where inputs should, or history is being resent far more
     // than it needs to be. This is the one number that says which.
     //
-    // Returns a list of {kind, count, bytes}, biggest first, and RESETS, so
+    // Returns a list of {kind, count, bytes}, biggest first, and resets, so
     // successive calls measure the interval between them rather than all of
     // history. Call it once a second and print the top row.
     {
@@ -901,7 +901,7 @@ pub(crate) fn install_net_api(
 
     // --- lag-compensated queries (§7) --------------------------------------
     // net.rewind(peer, fn): inside `fn`, raycasts see the networked bodies
-    // where `peer` PERCEIVED them (their interp-delayed view at the tick their
+    // where `peer` perceived them (their interp-delayed view at the tick their
     // rpc was stamped with), and other scripts' `synced` vars read the values
     // from that same tick. Only meaningful on the server, inside an `onRpc`
     // handler for an rpc sent `{withInput = true}` — anywhere else it warns
@@ -1002,7 +1002,7 @@ pub(crate) fn install_net_api(
         t.set(
             "spawn",
             lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
-                // Keys first, ROLE second: a client calling this is a no-op by
+                // Keys first, role second: a client calling this is a no-op by
                 // design, and finding out a year later that the options table
                 // was also misspelled the whole time is the failure this task is
                 // about.
@@ -1172,12 +1172,11 @@ pub(crate) fn build_synced_proxy(
     Ok((proxy, store))
 }
 
-/// The `synced` a script gets when it declares **no** `replicated` table.
+/// The `synced` a script gets when it declares no `replicated` table.
 ///
-/// Not declaring one is legitimate and common — a `Networked` node that
-/// replicates only its transform has no synced vars at all — so this is not a
-/// load-time warning. But leaving `synced` nil meant the first touch of it
-/// raised in Lua's words and nobody else's:
+/// Not declaring one is common (a `Networked` node that replicates only its
+/// transform has no synced vars), so it is not a load-time warning. A nil
+/// `synced` would fail on first touch in Lua's words alone:
 ///
 /// ```text
 /// forgery/barrel: runtime error: [string "forgery/barrel"]:830:
@@ -1185,18 +1184,11 @@ pub(crate) fn build_synced_proxy(
 /// ```
 ///
 /// Nothing in that names the cause, and every other signal says replication is
-/// on: the node carries a `Networked` component, the session is live,
-/// `net.role()` answers `"server"`, and the sibling script in the same
-/// generated scene replicates happily. The missing half lives in a different
-/// file from the one that looks wrong, so the error sends you into the netcode.
-/// It cost about forty minutes of a Forgery session, most of
-/// it spent disproving good hypotheses the message was equally compatible with.
-///
-/// So the value is a table that raises the *engine's* message on the first
-/// read or write, naming the script and the var that was touched. **Read and
-/// write say the same thing on purpose**: a read comes back nil today and is
-/// the worse half — a client mirror reading `synced.state` fails silently and
-/// simply never updates.
+/// on, so the error sends you into the netcode. Instead the value is a table
+/// that raises the engine's message on the first read or write, naming the
+/// script and the var that was touched. Read and write say the same thing: a
+/// read that came back nil would be the quieter half, a client mirror reading
+/// `synced.state` that simply never updates.
 pub(crate) fn build_undeclared_synced_proxy(lua: &Lua, kind: &str) -> mlua::Result<Table> {
     let proxy = lua.create_table()?;
     let mt = lua.create_table()?;

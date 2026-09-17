@@ -466,7 +466,7 @@ fn a_driver_owned_node_keeps_its_late_pass_after_the_session_filtered_it() {
          this test proves nothing"
     );
 
-    // Step 3: the driver binds it. `extend_filters` ALONE is the bug —
+    // Step 3: the driver binds it. `extend_filters` alone is the bug —
     // `script_skip` still holds it, so the late pass stays dead.
     host.extend_filters([e.index()]);
     host.run_late(&mut world, 1.0 / 60.0, 0.0);
@@ -996,7 +996,7 @@ fn a_replay_never_suppresses_an_error() {
         logs.iter().any(|l| l.level == LogLevel::Error && l.msg.contains("boom")),
         "the raised error must survive the gate: {logs:?}"
     );
-    // The PRINT's own line must not be there. Matched with the level as
+    // The print's own line must not be there. Matched with the level as
     // well as the text, because a runtime error now quotes the source line
     // it happened on (`crate::runtime_error`) — and in this script the
     // print and the `error()` share one line, so the error's own log

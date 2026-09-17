@@ -161,7 +161,7 @@ fn indexing_a_result_list_from_zero_says_lists_start_at_one() {
 }
 
 /// A screen with a section switched off, written the way anybody writes it:
-/// `local dead = nil` and then the section in the list. That leaves a HOLE
+/// `local dead = nil` and then the section in the list. That leaves a hole
 /// in the array, and a hole used to take the whole screen down — one absent
 /// section and nothing at all was built, with an error naming an index
 /// rather than a section. Found in a real project.
@@ -212,7 +212,7 @@ end
 
 /// `ui.make` raises on a property name it does not know, and the reasoning
 /// is right: a declarative screen that silently ignores a line is worse
-/// than one that stops. The same has to be true of a VALUE.
+/// than one that stops. The same has to be true of a value.
 ///
 /// `pin = "topCenter"` used to answer `topLeft`, silently and forever. Four
 /// HUD elements — a floor readout, a controls hint, an interaction prompt
@@ -241,7 +241,7 @@ fn ui_make_refuses_a_value_a_property_does_not_take() {
         assert!(err.contains(want), "the error never mentions {want}: {err}");
     }
 
-    // …and the spelling people actually write is ANSWERED. This is the one
+    // …and the spelling people actually write is answered. This is the one
     // that was reported; refusing it would have been correct and useless.
     write_script(
         &dir,
@@ -265,7 +265,7 @@ fn ui_make_refuses_a_value_a_property_does_not_take() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Reconcile REUSES entities, so an element that was a buy button and is
+/// Reconcile reuses entities, so an element that was a buy button and is
 /// now a sold-out label is the same entity with no `clicked` in its new
 /// description. Its old closure used to stay armed — clicking one thing did
 /// another thing's job, intermittently, depending on what the screen last
@@ -375,7 +375,7 @@ fn ui_hook_events_reach_the_node_scripts() {
 /// is a script file per button.
 ///
 /// Also pins the two properties that make it safe to write: registering
-/// again REPLACES (so calling it from `update` costs one closure, not one
+/// again replaces (so calling it from `update` costs one closure, not one
 /// per frame), and `ui.off` stops it.
 #[test]
 fn a_manager_hears_buttons_it_does_not_live_on() {
@@ -469,7 +469,7 @@ fn a_listener_dies_with_the_script_that_registered_it() {
     host.drop_ui_handlers(&[menu.index()]);
     host.run_ui_hooks(&mut world, &[(btns[0], "clicked")]);
     assert_eq!(hits(&host), 1.0, "a destroyed manager stops answering");
-    // …and so does a listener whose ELEMENT went away — entity indices are
+    // …and so does a listener whose element went away — entity indices are
     // reused, so a stale one would fire on whatever inherits the slot.
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0); // update re-registers
     host.drop_ui_handlers(&[btns[0]]);

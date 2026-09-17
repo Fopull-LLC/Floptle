@@ -1,14 +1,14 @@
 //! The Lua `terrain.*` API — runtime terrain editing and queries (Terrain 2.0 P6).
 //!
-//! Writes (`sculpt`/`dig`/`paint`/`paintTexture`) QUEUE ops; the editor drains them
+//! Writes (`sculpt`/`dig`/`paint`/`paintTexture`) queue ops; the editor drains them
 //! after the script pass and applies each to the authority `ChunkField`, the sim's
 //! collider copy (so collision changes the same tick), the chunk remesh queue, and
 //! the shadow-proxy region — the exact pipeline an editor brush dab takes. Reads
-//! (`query`/`height`) run immediately against the LENT sim colliders, the same loan
+//! (`query`/`height`) run immediately against the lent sim colliders, the same loan
 //! `raycast(...)` uses, so they see the world as of this frame.
 //!
 //! Multiplayer note (documented in scripting.md): ops apply on the machine that runs
-//! them. Until replicated terrain lands, run terrain edits SERVER-side and mirror
+//! them. Until replicated terrain lands, run terrain edits server-side and mirror
 //! them to clients with an RPC that repeats the same call — the ops are deterministic
 //! by construction (same call, same field result).
 
@@ -27,7 +27,7 @@ pub struct TerrainOp {
     pub strength: f32,
     pub mode: TerrainOpMode,
     /// Ties this op to the yield report it produces when it lands. Ops are
-    /// QUEUED and applied after the script pass, so a dig cannot return what it
+    /// Queued and applied after the script pass, so a dig cannot return what it
     /// removed — the edit has not happened yet. It returns this instead, and the
     /// measured report arrives through `terrain.yields()`.
     pub id: u64,
@@ -89,7 +89,7 @@ pub(crate) struct TerrainStreamShared {
     pub flush: Rc<RefCell<bool>>,
     /// Mirror of "the background terrain worker has something to do" — a field
     /// being generated, or one streaming in. Published so a game that creates
-    /// worlds on DEMAND can wait its turn.
+    /// worlds on demand can wait its turn.
     pub busy: Rc<std::cell::Cell<bool>>,
     /// Project root — `terrain.deleteSaveDir` resolves its (validated,
     /// relative) path against this.
@@ -109,10 +109,10 @@ pub(crate) fn install_terrain_api(
     let TerrainReceipts { yields, next_op_id } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
-    // terrain.deleteSaveDir(path) — delete a save slot's PERSISTED TERRAIN from
+    // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
     // disk ("delete this save" UIs, paired with save.deleteSlot). Deliberately
     // narrow, not a generic rm -rf: the path must be relative with no "..",
-    // must not be the ACTIVE saveDir (clear it first), and only terrain files
+    // must not be the active saveDir (clear it first), and only terrain files
     // (.cfield/.tfield/.meta) inside that one directory are removed — the
     // directory itself (and an emptied parent) goes only once it's empty.
     // Returns the number of files removed.
@@ -159,7 +159,7 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.flush() — write every EDITED resident field to the save slot now
+    // terrain.flush() — write every edited resident field to the save slot now
     // (terrain.saveDir must be set). Call at checkpoints and on exit-to-menu so
     // a slot always reloads from fast files instead of regenerating; streaming
     // already flushes on its own when bodies stream out.
@@ -173,10 +173,10 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame
+    // terrain.warm(bodyName) — keep that body's terrain resident this frame
     // regardless of where the ship/player physically is: it loads if cold and
     // never streams out. Immediate mode (call it every frame while you care) —
-    // the map calls it for its TAB-focused planet so focusing a far world
+    // the map calls it for its tab-focused planet so focusing a far world
     // streams its real terrain in while everything else stays a cheap sphere.
     {
         let w = warm.clone();
@@ -193,7 +193,7 @@ pub(crate) fn install_terrain_api(
 
     // terrain.busy() — is the background terrain worker already occupied?
     //
-    // For a game that GENERATES its world as the player travels. Terrain fills
+    // For a game that generates its world as the player travels. Terrain fills
     // and streams share one background budget, so a game that queues more of
     // them whenever it feels like it queues them behind the ground somebody is
     // standing on. Asking first is how on-demand generation stays smooth: build
@@ -208,7 +208,7 @@ pub(crate) fn install_terrain_api(
     }
 
     // terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's
-    // SAVE-SLOT directory for player-edited terrain (relative to the project
+    // Save-slot directory for player-edited terrain (relative to the project
     // root, e.g. "saves/slot1/terrain"). While set, the streaming system loads
     // a body's field from here first (before the project file or its genspec)
     // and writes edited fields back here on evict/stop — so a player's digs
@@ -353,7 +353,7 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.generatePlanet(id, opts) — REPLACE terrain volume `id`'s whole
+    // terrain.generatePlanet(id, opts) — replace terrain volume `id`'s whole
     // field with a generated planet (floptle_field::procgen::PlanetFill; runs
     // on an editor background thread — heavyweight, seconds per body). Every
     // knob is optional; layer paints are {slot=…, color={r,g,b}}:
@@ -393,7 +393,7 @@ pub(crate) fn install_terrain_api(
             // per-frame publish owns the flag from the real job state after
             // this, and is what lowers it again.
             //
-            // Only the QUEUEING calls raise it. `terrain.warm` deliberately does
+            // Only the queueing calls raise it. `terrain.warm` deliberately does
             // not: it is immediate-mode, called every frame for as long as a
             // caller cares about a body, so raising it there would pin the flag
             // true for the whole time the map has a planet focused.
@@ -404,7 +404,7 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.yields() → the reports for edits that have LANDED since the last
+    // terrain.yields() → the reports for edits that have landed since the last
     // call, drained. An op is queued and applied after the script pass, so the
     // report for a dab arrives on the following frame; the id `dig` returned
     // ties the two together.
@@ -503,7 +503,7 @@ pub(crate) fn install_terrain_api(
             for c in cols.borrow().iter() {
                 let Some(t) = c.shape.chunk_terrain() else { continue };
                 let Some((lo, hi)) = t.field.bounds() else { continue };
-                // Cast the WORLD-down ray in the field's local frame (the node
+                // Cast the world-down ray in the field's local frame (the node
                 // may be rotated/scaled); reconstruct the hit's world Y through
                 // the same frame.
                 let s = t.scale.max(1e-6);

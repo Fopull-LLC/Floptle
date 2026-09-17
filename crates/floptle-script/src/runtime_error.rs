@@ -1,11 +1,8 @@
-//! Turning a *runtime* error into the engine's voice — and making the two VMs
-//! say the same thing.
+//! A runtime error in the engine's voice, the same on both VMs.
 //!
-//! [`crate::load_error`] does this for errors that fire before a script runs.
-//! This is its sibling for the ones that fire while it does, and it exists
-//! because of a difference measured while porting the engine to Luau
-//! (ADR-0028). Given the commonest mistake anybody makes in a game script —
-//! one transposed letter in a field name:
+//! [`crate::load_error`] does this for errors that fire before a script runs;
+//! this is its sibling for the ones that fire while it does. The commonest
+//! mistake in a game script is one transposed letter in a field name:
 //!
 //! ```lua
 //! node.pos = node.postion.x
@@ -16,15 +13,13 @@
 //! | LuaJIT | `attempt to index field 'postion' (a nil value)` |
 //! | Luau | `attempt to index nil with 'x'` |
 //!
-//! Luau names the field being read *from* the nil rather than the expression
-//! that *was* nil, so the typo — the only part the reader can act on — is the
-//! one word missing. Worse, `missingGlobal.x` and a nil local `t.x` produce
-//! that identical sentence, so three distinct bugs are one message.
+//! Luau names the field read from the nil rather than the expression that was
+//! nil, so the typo, the one part the reader can act on, is the one word
+//! missing; `missingGlobal.x` and a nil local `t.x` produce the identical
+//! sentence.
 //!
-//! ## What this does about it
-//!
-//! The error carries the script and the line; the engine has the source. So
-//! read the line and name **both halves**:
+//! The error carries the script and the line, and the engine has the source,
+//! so it reads the line and names both halves:
 //!
 //! ```text
 //! platformMover.lua:3: attempt to index nil with 'x'
@@ -32,25 +27,14 @@
 //!       node.pos = node.postion.x
 //! ```
 //!
-//! Two properties are the point, and both are worth more than the extra words:
+//! That names the typo, which neither VM does, and both VMs produce the
+//! identical sentence, since the rewrite is driven by the source line rather
+//! than the VM's phrasing.
 //!
-//! 1. **It names the typo**, which neither VM does on its own — LuaJIT names
-//!    `postion` without the receiver, Luau names `x` which is not the problem.
-//! 2. **Both VMs produce the identical sentence.** The rewrite is driven by the
-//!    source line, not by the VM's phrasing, so the dual-VM diff harness sees
-//!    one message. That is the property that lets the default flip without a
-//!    game's error output changing.
-//!
-//! ## What it refuses to do
-//!
-//! **Guess.** If a line indexes `.x` on two different receivers, or reaches
-//! through a `]` this does not parse, no name is offered — only the source
-//! line, which is still more than either VM gives. A confidently wrong name
-//! would send somebody to fix the wrong expression, which is worse than the
-//! terse message it replaced.
-//!
-//! The original text is always kept, first and unmodified: it is what a reader
-//! searches for, and other tools match on it.
+//! It never guesses. If a line indexes `.x` on two different receivers, or
+//! reaches through a `]` this does not parse, no name is offered, only the
+//! source line. The original text is always kept, first and unmodified: it is
+//! what a reader searches for, and other tools match on it.
 
 /// Rewrite one runtime error, given the source line it names.
 ///

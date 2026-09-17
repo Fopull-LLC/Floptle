@@ -3,7 +3,7 @@
 //! **Why this module exists.** 32 of the 74 bugs ever filed against this engine
 //! — 43% — are one shape: the engine answered something it did not understand
 //! instead of refusing it. A `collide` option parsed, stored and
-//! read by nothing, for two releases. A `pin = "topCenter"` that meant top-LEFT,
+//! read by nothing, for two releases. A `pin = "topCenter"` that meant top-left,
 //! silently, forever. A typo'd `perchunk` that took the default and said
 //! nothing. Every one was found by somebody playing, and every one was fixed on
 //! its own.
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// Every registered option table refuses a key the engine does not read —
-    /// checked by CALLING it, from Lua, through the real host.
+    /// checked by calling it, from Lua, through the real host.
     ///
     /// 32 of the 74 bugs filed against this engine were one shape: the engine
     /// answered something it did not understand. Every one was fixed on its own,

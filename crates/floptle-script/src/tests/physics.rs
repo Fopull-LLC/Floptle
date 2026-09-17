@@ -1,6 +1,6 @@
 use super::*;
 
-/// `terrain.busy()` has to be true the MOMENT work is
+/// `terrain.busy()` has to be true the moment work is
 /// queued, not on the frame after.
 ///
 /// The consumer is a game that builds its world as the player travels: it
@@ -8,7 +8,7 @@ use super::*;
 /// with last frame's state means the answer to "did what I just asked for
 /// start?" is "no" — so the game queues it again, and the second request is
 /// the one that lands behind the ground somebody is standing on. The flag is
-/// therefore raised by the QUEUEING call itself; the editor's per-frame
+/// therefore raised by the queueing call itself; the editor's per-frame
 /// publish then owns it from the real job state and is what lowers it again.
 #[test]
 fn terrain_busy_is_true_the_moment_a_fill_is_queued() {
@@ -55,7 +55,7 @@ fn terrain_busy_is_true_the_moment_a_fill_is_queued() {
     );
 
     // What the editor does with the queue, and then its per-frame publish
-    // finding nothing left to do. The flag is the WORKER's state, so the
+    // finding nothing left to do. The flag is the worker's state, so the
     // host is what lowers it — and the script sees that on the next tick.
     let queued = host.take_terrain_generates();
     assert_eq!(queued.len(), 1, "the fill was queued for the editor to drain");
@@ -447,7 +447,7 @@ fn shape_queries_are_callable_from_lua() {
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     // No colliders lent, so the answers are "nothing" — but they must be
-    // ANSWERS (an empty list, a nil) rather than an error about a missing
+    // Answers (an empty list, a nil) rather than an error about a missing
     // global, which is what a query nobody wired would give.
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 }

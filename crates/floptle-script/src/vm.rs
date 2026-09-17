@@ -1,51 +1,32 @@
-//! Which Lua the engine runs.
+//! Which Lua the engine runs: Luau, everywhere. Desktop and browser share one
+//! dialect to document and one set of behaviour to test, and Luau's collector
+//! is the faster one on real games (Solar's system scene 4.81 → 4.15 ms, a
+//! first-person scene 13.99 → 12.38 ms, frame p95; `scripts/scene-bench.sh`).
 //!
-//! ADR-0028 takes the engine to **Luau** everywhere — desktop and browser, one
-//! dialect to document and one set of behaviour to test.
+//! There is no LuaJIT build: it exposed `io` to every script it ran. What
+//! remains of the switch is the `vm-luau` feature name, which every dependent
+//! forwards, and the checks below.
 //!
-//! **Luau is the default.** It became so once the dual-VM diff harness went
-//! green — the whole scripting suite, every shipped game script, every tutorial
-//! project, under both — and once the real-game bench came back faster rather
-//! than merely not-worse (Solar's system scene 4.81 ms -> 4.15 ms, a
-//! Forgery-shaped first-person scene 13.99 ms -> 12.38 ms, frame p95; see
-//! `scripts/scene-bench.sh`).
-//!
-//! The `vm-luajit` escape hatch stayed buildable for one release after the
-//! default flipped (v0.84.x), as ADR-0028 scheduled, and was removed in
-//! v0.89.0: a LuaJIT build exposed `io` to every script it ran, and a build
-//! nobody ships is one `--features` away from being run on somebody's
-//! project. What remains of the switch is the `vm-luau` feature name, which
-//! every dependent forwards, and the checks below.
-//!
-//! ## The wiring, and the mistake it is easy to make
-//!
-//! `mlua` links exactly one Lua. Cargo features are **additive**, so a crate
-//! that depends on this one and names a second `mlua/...` VM feature — or a
-//! browser build that reaches `mlua/luau` through a target-specific dependency
-//! while the desktop switch says something else — puts two Luas in the graph.
-//!
-//! **What you see when that happens is not our error.** `mlua-sys`'s build
-//! script runs before this crate compiles at all, and it says:
+//! `mlua` links exactly one Lua. Cargo features are additive, so a crate that
+//! depends on this one and names a second `mlua/...` VM feature, or a browser
+//! build that reaches `mlua/luau` through a target-specific dependency while
+//! the desktop switch says something else, puts two Luas in the graph.
+//! `mlua-sys`'s build script then fails before this crate compiles at all:
 //!
 //! ```text
 //! error: You can enable only one of the features: lua54, lua53, lua52, lua51, luajit, luajit52, luau
 //! ```
 //!
-//! It says the same thing for *no* VM as for two — it is one `else` branch —
-//! and it names none of the features you actually wrote. That message is why
-//! this paragraph exists: it is what somebody will paste into a search, and
-//! this is where it should land them.
-//!
-//! The `compile_error!` below states the invariant, but it is a backstop, not
-//! the diagnostic — `mlua-sys` fails first. The guard that actually fires is
-//! `tests/vm_wiring.rs`, which reads every crate manifest in the workspace and
-//! fails on a dependency that would smuggle a second VM in.
-//!
-//! `scripts/vm.sh luau <cargo args>` is the short way to say the whole thing.
+//! It says the same for no VM as for two, and names none of the features you
+//! wrote. The `compile_error!` below states the invariant as a backstop; the
+//! guard that fires first is `tests/vm_wiring.rs`, which reads every crate
+//! manifest in the workspace and fails on a dependency that would bring a
+//! second VM in. `scripts/vm.sh luau <cargo args>` is the short way to say the
+//! whole thing.
 
 #[cfg(not(feature = "vm-luau"))]
 compile_error!(
-    "floptle-script: no script VM selected. Enable `vm-luau` (the default — Luau, ADR-0028,\n\
+    "floptle-script: no script VM selected. Enable `vm-luau` (the default — Luau,\n\
      and the only VM the engine embeds since v0.89.0).\n\
      `--no-default-features` on its own leaves the engine with no Lua at all."
 );
@@ -65,28 +46,20 @@ pub const VM_NAME: &str = "luau";
 /// slower than the last one.
 pub const VM_HAS_CODEGEN: bool = cfg!(all(feature = "vm-luau-codegen", not(target_arch = "wasm32")));
 
-/// Fill in what Luau is missing so the *documented* Lua surface — the one the
-/// docs were written against, on LuaJIT — is the same here.
+/// Fill in what Luau is missing so the documented Lua surface is the same
+/// here. Call it on a fresh state before anything else touches the globals.
 ///
-/// Call it on a fresh state before anything else touches the globals.
+/// `bit`: [`editor-scripting.md`] promises packages a bit library, and a game
+/// script has the whole standard library in scope. Luau calls it `bit32`, with
+/// the same operations and different results: `bit32.bnot(0)` is 4294967295
+/// where `bit.bnot(0)` is -1, signed 32-bit. A plain alias would change a
+/// package's hash, so every result goes back through `tobit`.
 ///
-/// ## What it fills in, and why this one is not optional
-///
-/// **`bit`.** [`editor-scripting.md`] promises third-party packages a bit
-/// library, and a game script has the whole standard library in scope, so
-/// `bit.band` is reachable from code this project did not write and cannot
-/// edit. Luau calls it `bit32` — the operations are the same, but the
-/// **results are not**: `bit32` answers unsigned (`bit32.bnot(0)` is
-/// 4294967295) where LuaJIT's `bit` answers signed 32-bit (`bit.bnot(0)` is
-/// -1). Aliasing one to the other would be a package's hash quietly changing
-/// value, which is the worst available outcome — so every result goes back
-/// through `tobit`.
-///
-/// Deliberately not shimmed, because a stand-in would be worse than the
-/// absence: `loadstring`/`load` (a sandbox that compiles a string is not one),
-/// `io`/`os.getenv` (a shipped game must not reach the machine), `goto` (syntax
-/// — no library can add it), and `debug.getinfo`. Those are documented
-/// differences, and `tests/vm_dialect.rs` records each one.
+/// Not shimmed, because a stand-in would be worse than the absence:
+/// `loadstring`/`load` (a sandbox that compiles a string is not one),
+/// `io`/`os.getenv` (a shipped game must not reach the machine), `goto`
+/// (syntax; no library can add it), and `debug.getinfo`. `tests/vm_dialect.rs`
+/// records each one.
 ///
 /// [`editor-scripting.md`]: https://github.com/Fopull-LLC/Floptle/blob/main/docs/editor-scripting.md
 pub fn install_compat(lua: &mlua::Lua) -> mlua::Result<()> {

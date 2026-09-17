@@ -1,37 +1,28 @@
-//! Script state capture for rollback (`docs/multiplayer.md` §2.3, §5).
+//! Script state capture for rollback.
 //!
-//! A rollback restores a confirmed tick and re-simulates every tick since. For
-//! that to be correct, everything the simulation can *read* has to come back —
-//! including the parts that live in Lua. A script opts in by defining two hooks:
+//! A rollback restores a confirmed tick and re-simulates every tick since, so
+//! everything the simulation can read has to come back, including the parts
+//! that live in Lua. A script opts in by defining two hooks:
 //!
 //! ```lua
 //! function snapshot()      return { hp = hp, meter = meter, frame = frame } end
 //! function restore(s)      hp, meter, frame = s.hp, s.meter, s.frame end
 //! ```
 //!
-//! Everything else about the script stays exactly as it is: a script that
-//! defines neither is simply not rolled back, which is right for cosmetics and
-//! wrong for gameplay. That is the whole contract, and it belongs in the docs
-//! in those words.
+//! A script that defines neither is not rolled back, which is right for
+//! cosmetics and wrong for gameplay.
 //!
-//! ## The engine owns the copy
+//! The captured value is converted to an owned [`NetValue`] tree on the way
+//! out and rebuilt as a fresh Lua table on the way in: a deep copy in both
+//! directions. A rollback re-simulates from the restored tick, mutating what
+//! it was handed, so a snapshot that shared its tables with the live sim would
+//! be corrupted by the first replay and desync under packet loss. The engine
+//! owning the copy means a script cannot get this wrong.
 //!
-//! The captured value is converted to an owned [`NetValue`] tree on the way out
-//! and rebuilt as a fresh Lua table on the way in. That is a deep copy in both
-//! directions, by construction — which matters more than it sounds:
-//!
-//! A rollback restores a tick and then **re-simulates from it, mutating whatever
-//! it was handed**. A snapshot that shared its tables with the live sim would be
-//! corrupted by the first replay and wrong for every replay after it, and the
-//! symptom would be a desync that only appears under packet loss. Making the
-//! engine own the copy means a script cannot get this wrong, rather than merely
-//! being told not to.
-//!
-//! It also fixes what may live in rollback state: scalars, strings and nested
-//! tables. A function, a coroutine or a node handle in a snapshot is refused
-//! with a Console error naming the script — those cannot be meaningfully
-//! restored anyway, and silently dropping them would produce a state that looks
-//! restored and isn't.
+//! Rollback state is scalars, strings and nested tables. A function, a
+//! coroutine or a node handle in a snapshot is refused with a Console error
+//! naming the script; silently dropping it would produce a state that looks
+//! restored and is not.
 
 use floptle_net::NetValue;
 
@@ -60,7 +51,7 @@ pub struct ScriptState {
     ///
     /// That cost a cross-platform match: a model's turn-toward-the-opponent
     /// angle, smoothed with `math.exp`, which is library code and is not
-    /// required to agree between glibc and Windows' UCRT. One ULP a tick, and a
+    /// required to agree between glibc and Windows' ucrt. One ULP a tick, and a
     /// match that both players could see was identical voided itself every few
     /// seconds. The alarm was working perfectly and firing on something neither
     /// simulation could feel.

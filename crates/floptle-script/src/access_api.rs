@@ -1,10 +1,6 @@
-//! The Lua `access` table and the `caption` primitive — accessibility a game can
-//! offer its players.
-//!
-//! Before this the engine's entire accessibility surface was input rebinding, and
-//! that exists by accident of the action-map work rather than by intent. A game
-//! that wanted bigger text, a colourblind-safe picture, less movement or captions
-//! had to build all four itself, so most would not.
+//! The Lua `access` table and the `caption` primitive: accessibility a game
+//! offers its players. Bigger text, a colourblind-safe picture, less movement
+//! and captions, without the game building any of them itself.
 //!
 //! ```lua
 //! -- an options menu, in full
@@ -16,14 +12,14 @@
 //! end
 //! ```
 //!
-//! The engine honours what it owns: UI text sizes go through the layout, so text
-//! scaling **reflows**; the colour filter is a stage in the post chain; UI
-//! transitions snap when motion is reduced. What it cannot honour for a game — a
-//! camera shake the game drives — reads `access.reducedMotion()` and skips it.
+//! The engine honours what it owns: UI text sizes go through the layout, so
+//! text scaling reflows; the colour filter is a stage in the post chain; UI
+//! transitions snap when motion is reduced. A camera shake the game drives
+//! reads `access.reducedMotion()` and skips itself.
 //!
-//! Persisting these is the game's, via `save.*`, deliberately: they are the
-//! player's settings and belong in the player's save, not in a project file that
-//! ships to everyone.
+//! Persisting these is the game's job, via `save.*`: they are the player's
+//! settings and belong in the player's save, not in a project file that ships
+//! to everyone.
 
 use std::cell::RefCell;
 use std::rc::Rc;

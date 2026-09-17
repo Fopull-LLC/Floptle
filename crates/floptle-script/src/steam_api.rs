@@ -1,76 +1,60 @@
-//! `steam.*` — the game-runtime Lua surface over `floptle_services::Platform`.
+//! `steam.*`: the game-runtime Lua surface over `floptle_services::Platform`.
 //!
-//! **Nil, not an error, is what "not on Steam right now" looks like.** Every
-//! getter below reads through `Platform::identity()`, which is `None` under
-//! `NullPlatform` — an authoring session, the editor's own docked Play-mode
-//! viewport, or a `floptle run`/exported build with no Steam client running
-//! all answer this way, and it is an ordinary branch a script takes with
-//! `steam.available()`, never a raised error.
+//! Nil, not an error, is what "not on Steam right now" looks like. Every getter
+//! reads through `Platform::identity()`, which is `None` under `NullPlatform`:
+//! an authoring session, the editor's docked Play viewport, or a `floptle run`
+//! or exported build with no Steam client running. `steam.available()` is the
+//! ordinary branch a script takes.
 //!
-//! **`localUserId` is a string.** A SteamID64 routinely exceeds 2^53, past
-//! where an `f64` (every Lua number) stops representing an integer exactly —
-//! returning one as a Lua number would silently round it.
+//! `localUserId` is a string. A SteamID64 routinely exceeds 2^53, past where an
+//! `f64` (every Lua number) represents an integer exactly, so a Lua number
+//! would round it.
 //!
-//! **Avatars are not exposed here yet.** `Identity::avatar_small/medium/large`
-//! exist at the Rust level (raw RGBA8 bytes), but turning them into something
-//! a script can actually draw needs a runtime texture-from-bytes primitive
-//! that doesn't exist anywhere in the engine yet — that's its own piece of
-//! infrastructure, not a Steam-specific gap, and is deliberately left for a
-//! follow-up rather than shipped as bytes a script has no way to use.
+//! Avatars are not exposed yet. `Identity::avatar_small/medium/large` exist at
+//! the Rust level as raw RGBA8 bytes; drawing one from a script needs a runtime
+//! texture-from-bytes primitive the engine does not have.
 //!
-//! **Achievement/stat writes never hit the network directly.** Every unlock,
-//! clear or stat write marks the backend dirty; an automatic batch (or an
-//! explicit `steam.flushStats()`) sends everything pending in one call,
-//! reconciling with the backend's own async confirmation rather than trusting
-//! the synchronous call's own `Ok` — see `floptle_steam::SteamPlatform`'s
-//! `pump`/`flush`. **Average-rate stats and progress-indicator notifications
-//! are out of scope** — the Steamworks binding this engine uses doesn't wrap
-//! either at all (the Steam integration plan).
+//! Achievement and stat writes never hit the network directly. Every unlock,
+//! clear or stat write marks the backend dirty; an automatic batch, or an
+//! explicit `steam.flushStats()`, sends everything pending in one call and
+//! reconciles with the backend's own async confirmation. Average-rate stats
+//! and progress-indicator notifications are out of scope: the Steamworks
+//! binding does not wrap either.
 //!
-//! **Cloud saves (`steam.cloud*`) have no conflict policy of their own** —
+//! Cloud saves (`steam.cloud*`) have no conflict policy of their own.
 //! `steam.cloudFileTimestamp` is the primitive a script compares against its
-//! own local save's modification time to decide what "newer" means for
-//! itself. Data is a binary-safe Lua string in and out, same as
-//! `ed.readBytes` elsewhere in this engine.
+//! own local save's modification time. Data is a binary-safe Lua string in and
+//! out, as with `ed.readBytes`.
 //!
-//! **Friend ids (`steam.friends`, `steam.friendRichPresence`) are strings**,
-//! same reasoning as `localUserId`. `steam.friends()` returns the CALLER's
-//! friend list; `steam.friendRichPresence(id, key)` reads one of that
-//! friend's own rich-presence values, set by their own game calling
-//! `steam.setRichPresence` — different from reading your own.
+//! Friend ids (`steam.friends`, `steam.friendRichPresence`) are strings, as
+//! `localUserId` is. `steam.friends()` returns the caller's friend list;
+//! `steam.friendRichPresence(id, key)` reads one of that friend's own
+//! rich-presence values, set by their own game calling `steam.setRichPresence`.
 //!
-//! **Leaderboards are asynchronous, and their callback always runs exactly
-//! once.** `steam.findLeaderboard`, `findOrCreateLeaderboard`, `uploadScore`
-//! and `downloadScores` each hand their answer to a callback on a later frame
-//! — never inline — and they do so in every session, including one with no
-//! Steam at all, where the callback gets `(nil, "Steam isn't available…")`.
-//! That is deliberate: the alternative is a call that answers `(false, err)`
-//! immediately when there's no backend and through a callback when there is,
-//! which gives a game two failure paths where the second is the one nobody
-//! writes. A board handle is a string (`localUserId`'s reasoning again) and
-//! lasts only for the session that resolved it — Steam can read a handle's raw
-//! value but cannot construct one back from it, so there is nothing useful to
-//! persist.
+//! Leaderboards are asynchronous, and their callback always runs exactly once.
+//! `steam.findLeaderboard`, `findOrCreateLeaderboard`, `uploadScore` and
+//! `downloadScores` hand their answer to a callback on a later frame, never
+//! inline, in every session; with no Steam at all the callback gets
+//! `(nil, "Steam isn't available…")`, so a game has one failure path rather
+//! than two. A board handle is a string and lasts only for the session that
+//! resolved it: Steam can read a handle's raw value but cannot construct one
+//! back from it.
 //!
-//! **The overlay (`steam.openOverlay*`, `steam.onOverlayChanged`) is drawn
-//! by the Steam client from outside this process** — nothing here renders
-//! it. Every open answers `(false, why)` when the overlay can't show
-//! (disabled in Steam's settings, not hooked into this renderer, no Steam at
-//! all), where the SDK's own call would silently do nothing — so a game can
-//! fall back to showing the URL or the invite code instead. Page and dialog
-//! names are checked against the SDK's own list before any backend is asked,
-//! so a typo fails in every session, not only on a machine with Steam. While
-//! the overlay is up the engine feeds scripts neutral input, the same way it
-//! does when the Game view isn't focused: a key held through Shift+Tab is
-//! released rather than stuck down for as long as the player is shopping.
+//! The overlay (`steam.openOverlay*`, `steam.onOverlayChanged`) is drawn by
+//! the Steam client from outside this process. Every open answers
+//! `(false, why)` when the overlay cannot show (disabled in Steam's settings,
+//! not hooked into this renderer, no Steam at all), so a game can fall back to
+//! showing the URL or the invite code. Page and dialog names are checked
+//! against the SDK's own list before any backend is asked, so a typo fails in
+//! every session. While the overlay is up the engine feeds scripts neutral
+//! input, as when the Game view is not focused: a key held through Shift+Tab
+//! is released rather than stuck down while the player is shopping.
 //!
-//! Installed unconditionally (`ScriptHost::new()`), same as every other
-//! `install_*_api` — the `steam` global always exists so `steam.available()`
-//! is always safe to call. What varies is only what `platform` currently
-//! points at: `NullPlatform` by default, swapped for a real
-//! `floptle_steam::SteamPlatform` by `ScriptHost::set_platform` when (and
-//! only when) the caller has decided this session is the game — see
-//! the Steam integration plan's "Where Steam activates".
+//! Installed unconditionally in `ScriptHost::new()`, like every other
+//! `install_*_api`, so `steam.available()` is always safe to call. What varies
+//! is what `platform` points at: `NullPlatform` by default, swapped for a real
+//! `floptle_steam::SteamPlatform` by `ScriptHost::set_platform` when the
+//! caller has decided this session is the game.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -300,13 +284,13 @@ fn opt_enum<T>(
 
 /// Read an integer option, falling back to `default` when absent.
 ///
-/// A value too big for an `i32` is REFUSED, not truncated. `as` would turn
+/// A value too big for an `i32` is refused, not truncated. `as` would turn
 /// `start = 4294967296` into `0` and download the wrong rows while reporting
 /// success — the silent-wrong-answer shape `crate::opts` exists to stop.
 fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Result<i32> {
     let Some(t) = t else { return Ok(default) };
     // `f64`, not `i64`: the two arms below arrive as a Lua integer (whose width
-    // is the VM's — 32-bit on Luau, ADR-0028) and as a Lua number, and this is
+    // is the VM's — 32-bit on Luau) and as a Lua number, and this is
     // the one type that takes both without a conversion that is a no-op on one
     // VM and real on the other. It only ever formats the value.
     let too_big = |v: f64| {
@@ -320,7 +304,7 @@ fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Resu
     match t.get::<Value>(key)? {
         Value::Nil => Ok(default),
         // The range check is real on LuaJIT, where a Lua integer is 64-bit, and a
-        // no-op on Luau, where it is already 32-bit (ADR-0028). Written as the
+        // no-op on Luau, where it is already 32-bit. Written as the
         // intent — "refuse anything an i32 cannot hold" — and allowed rather
         // than branched, because a `#[cfg]` here would give the two VMs two
         // different pieces of code to get right.
@@ -2057,7 +2041,7 @@ mod tests {
         assert_eq!(no_details, 0, "an entry with no details gets an empty list, not nil");
     }
 
-    /// An upload answers what was actually STORED plus both ranks — under
+    /// An upload answers what was actually stored plus both ranks — under
     /// `keepBest` the stored score is not necessarily the one uploaded, and a
     /// script showing "new personal best" needs `changed` to tell.
     #[test]
@@ -2086,7 +2070,7 @@ mod tests {
         assert_eq!((rank, prev), (3, 3));
     }
 
-    /// `count` (not an end rank) is the caller-facing shape, and a NEGATIVE
+    /// `count` (not an end rank) is the caller-facing shape, and a negative
     /// start — how an around-user request asks for rows better than your own —
     /// has to survive the conversion. Getting this backwards is the off-by-one
     /// the `count` shape exists to prevent.
@@ -2224,7 +2208,7 @@ mod tests {
         assert!(e.contains("everyone") && e.contains("aroundUser"), "{e}");
     }
 
-    /// A rank too big for an `i32` is REFUSED, not truncated. `as i32` would
+    /// A rank too big for an `i32` is refused, not truncated. `as i32` would
     /// turn 4294967296 into 0 and quietly download the top of the board while
     /// reporting success — a wrong answer at exit 0, the shape 43% of this
     /// engine's filed bugs have taken.

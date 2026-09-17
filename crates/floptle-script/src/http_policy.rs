@@ -1,27 +1,25 @@
 //! Where a script's `http.*` request may go.
 //!
-//! A game's Lua runs in three places that are not the developer's own machine:
-//! a player's computer, a browser tab, and a dedicated server on a box the
-//! developer does not own. On every one of them "any URL" means the machine's
-//! own loopback services, its LAN, and — on a cloud box — the instance metadata
-//! service that hands out the box's identity. None of that is a game's
-//! business, so this module decides, **per resolved address**, whether a
-//! request may connect.
+//! A game's Lua runs on a player's computer, in a browser tab, and on a
+//! dedicated server the developer does not own. On every one of them "any
+//! URL" would include the machine's loopback services, its LAN, and on a
+//! cloud box the instance metadata service that hands out the box's identity.
+//! So this module decides, per resolved address, whether a request may
+//! connect.
 //!
-//! **The decision is made after DNS, not on the URL string.** A string check
-//! is bypassed by a hostname that resolves to a private address and by a
-//! redirect to one; a resolver that drops every refused address and fails the
-//! request when none remain closes both, in one place, for every request the
-//! agent makes. The names in [`refuse_host`] are refused up front as well, so
-//! the error names the hostname the developer wrote rather than the address
-//! it became.
+//! The decision is made after DNS, not on the URL string: a string check is
+//! bypassed by a hostname that resolves to a private address and by a redirect
+//! to one. A resolver that drops every refused address and fails the request
+//! when none remain closes both, for every request the agent makes. The names
+//! in [`refuse_host`] are refused up front as well, so the error names the
+//! hostname the developer wrote rather than the address it became.
 //!
-//! **One knob, set by the driver.** [`HttpPolicy::allow_local`] is `true` only
-//! in the editor's Play — hitting `http://localhost:3000` while developing is
-//! the ordinary case and must keep working — and `false` for an exported game,
-//! a dedicated server and the browser. Link-local addresses (`169.254/16`,
-//! `fe80::/10`) are refused **everywhere, the editor included**: there is no
-//! development reason to reach a metadata service.
+//! One knob, set by the driver: [`HttpPolicy::allow_local`] is `true` only in
+//! the editor's Play, where `http://localhost:3000` is the ordinary case, and
+//! `false` for an exported game, a dedicated server and the browser.
+//! Link-local addresses (`169.254/16`, `fe80::/10`) are refused everywhere,
+//! the editor included: there is no development reason to reach a metadata
+//! service.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -61,7 +59,7 @@ pub fn refuse(ip: IpAddr) -> Option<&'static str> {
 }
 
 /// [`refuse`] under a given policy. With `allow_local` the loopback, private,
-/// CGNAT and unique-local classes pass; link-local, multicast, broadcast and
+/// Cgnat and unique-local classes pass; link-local, multicast, broadcast and
 /// the unspecified address are refused whatever the policy says.
 pub fn refuse_under(ip: IpAddr, policy: HttpPolicy) -> Option<&'static str> {
     let reason = refuse(ip)?;

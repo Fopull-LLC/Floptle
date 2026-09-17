@@ -1,8 +1,8 @@
-//! `nav.*` — asking the scene's navmesh where a character can go.
+//! `nav.*`: asking the scene's navmesh where a character can go.
 //!
-//! Everything here is in **world coordinates**. The bake itself is measured
-//! around its own node so that a level a million units out stays exact, and that
-//! offset is the mesh's business rather than a script's.
+//! Everything here is in world coordinates. The bake is measured around its
+//! own node so a level a million units out stays exact; that offset is the
+//! mesh's business, not a script's.
 //!
 //! ```lua
 //! local route = nav.path(self.node.position, target.position)
@@ -11,26 +11,17 @@
 //! end
 //! ```
 //!
-//! # Getting nil back
+//! `nav.path` answers `nil` when an end is not on the navmesh: off the edge of
+//! the level, or inside a wall. A goal that is on the mesh but cut off comes
+//! back as a real route to the nearest reachable point with a second return
+//! value of `false`, so a character walks to the near side of a chasm and
+//! stops rather than standing still.
 //!
-//! `nav.path` answers `nil` when an end is not on the navmesh — off the edge of
-//! the level, or inside a wall. That is a different thing from a goal that is on
-//! the mesh but cut off, which comes back as a real route to the nearest
-//! reachable point with a second return value of `false`. A character that walks
-//! to the near side of a chasm and stops is behaving; one that stands still
-//! because the answer was empty looks broken.
-//!
-//! # Why the shape data comes back as a flat array
-//!
-//! [`nav.areas`](install_nav_api) and `nav.links` hand back **one array of
-//! numbers**, not an array of tables. A real bake is thousands of polygons — the
-//! scene this was built against has 1,640 — and mlua keeps held Lua values in a
-//! fixed pool of a few thousand auxiliary slots. A table per polygon exhausts
-//! that pool and `create_table` *panics*: not an error a script can handle, the
-//! whole editor. One array of numbers costs one slot however big the level is.
-//!
-//! It is a worse thing to read and a thing that works, which is the correct
-//! trade for a function whose whole purpose is bulk. The stride is a constant
+//! `nav.areas` and `nav.links` hand back one array of numbers, not an array of
+//! tables. A real bake is thousands of polygons, and mlua keeps held Lua values
+//! in a fixed pool of a few thousand auxiliary slots; a table per polygon
+//! exhausts that pool and `create_table` panics. One array of numbers costs
+//! one slot however big the level is. The stride is a constant
 //! (`nav.AREA_STRIDE`) so the arithmetic is written once:
 //!
 //! ```lua
@@ -397,7 +388,7 @@ impl UserData for LuaAgent {
         fields.add_field_method_get("linkProgress", |_, a| {
             Ok(a.with(|ag, _| ag.crossing().map(|r| r.progress as f64)).flatten())
         });
-        // What KIND of crossing it is: "placed" for a Nav Link node somebody
+        // What kind of crossing it is: "placed" for a Nav Link node somebody
         // put there, "drop" or "jump" for one the bake worked out. The name
         // alone cannot answer this, and a climb and a fall are not the same
         // animation — a level with six hundred generated drops in it needs one
@@ -746,7 +737,7 @@ pub(crate) fn install_nav_api(
     // through that space stops existing and everything walking one repaths —
     // without the whole level being measured again.
     //
-    // It is an OPTION and not the only answer. The editor's background rebake
+    // It is an option and not the only answer. The editor's background rebake
     // is still there and is still the thing that is always right; this is the
     // cheap way to say "something is standing here now", and it is cheap by a
     // factor of hundreds on a big level (`examples/carve_probe.rs` prints it).
@@ -912,7 +903,7 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
 
     // nav.distance(from, to) -> metres | nil
     //
-    // How far it is to WALK, which is the number a decision is made on — the
+    // How far it is to walk, which is the number a decision is made on — the
     // straight-line distance to something on the far side of a wall is a lie
     // that makes every "chase the nearest one" pick the wrong one.
     let m = mesh.clone();
@@ -949,7 +940,7 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
 
     // nav.random(u, v[, near, radius]) -> vec3 | nil
     //
-    // The two random numbers come from the CALLER — `nav.random(math.random(),
+    // The two random numbers come from the caller — `nav.random(math.random(),
     // math.random())`. This engine rolls back and re-simulates, so a wander
     // destination has to come out of the same seeded stream as everything else
     // the tick decided; a navmesh that reached for its own randomness would
@@ -980,7 +971,7 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
     // cache around the engine. A squad wanders around the same
     // place, so the gather is the part worth holding.
     //
-    // It is a SNAPSHOT of the mesh at the moment it was made. `nav.splice`
+    // It is a snapshot of the mesh at the moment it was made. `nav.splice`
     // re-baking part of the level does not reach a sampler already built —
     // rebuild it when the ground changes.
     let m = mesh.clone();

@@ -76,9 +76,9 @@ use crate::{
 pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment"];
 
 /// Render any Lua value as readable Console text: primitives plainly, engine
-/// handles by IDENTITY (`node "Player" (#4)`, `component "RigidBody" of …`),
+/// handles by identity (`node "Player" (#4)`, `component "RigidBody" of …`),
 /// userdata via `__tostring` (vec3/vec2 print their components), and tables
-/// DEEPLY — short arrays inline, everything else as an indented block with
+/// Deeply — short arrays inline, everything else as an indented block with
 /// sorted keys, cycle detection, and depth/entry caps so a self-referential
 /// or huge table can never wedge a frame.
 fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>) -> String {
@@ -96,7 +96,7 @@ fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
         Value::Thread(_) => "<thread>".into(),
         Value::LightUserData(_) => "<pointer>".into(),
         Value::UserData(_) => v.to_string().unwrap_or_else(|_| "<userdata>".into()),
-        // Luau's native vector — a `fast` vec3 (ADR-0028), written the way
+        // Luau's native vector — a `fast` vec3, written the way
         // `exact`'s `__tostring` writes one so `print(v)` reads `vec3(1, 2, 3)`
         // in both modes. Not `Value::to_string`: mlua formats a vector itself
         // (`vector(1, 2, 3)`) rather than through the metatable, and not
@@ -218,7 +218,7 @@ fn pretty_table(t: &Table, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
 /// Which lifecycle pass a script run is: the per-frame pass (`start`/`update`),
 /// the per-gameplay-tick pass (`fixedUpdate`), or the post-physics camera pass
 /// (`lateUpdate` — after the interpolated transform writeback, so followers
-/// sample this frame's FINAL poses instead of last frame's).
+/// sample this frame's final poses instead of last frame's).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pass {
     Frame,
@@ -545,7 +545,7 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
             })
             .ok(),
         );
-        // The ACTION layer sits on the same table, so a project can migrate
+        // The action layer sits on the same table, so a project can migrate
         // one call at a time: `input.key("w")` and `input.action("Jump")`
         // coexist for as long as a game wants them to.
         crate::input_api::install(lua, &t, &input_sys, &input_domain);
@@ -583,7 +583,7 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
     // `hit.node:getscript("combat")`. The caster's own body is excluded (a ray from
     // your center must not hit you). Use it for ground checks, line-of-sight,
     // shooting. Scripts speak world coordinates; the sim runs origin-relative
-    // (ADR-0015), so convert in f64 on the way in and out.
+    //, so convert in f64 on the way in and out.
     let colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>> =
         Rc::new(RefCell::new(Vec::new()));
     let hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>> =
@@ -616,7 +616,7 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
             // Which spelling this is, asked as "is the first argument a
             // vector" rather than "is it one of these two Value variants".
             // The variant test was right until a vec3 could also be the
-            // VM's own `vector` (ADR-0028 Phase 3) — a native one matched
+            // VM's own `vector` — a native one matched
             // neither arm, fell through to the six-number form and failed
             // there, which is how `raycast(node.pos, vec3(0,-1,0), n)`
             // stopped working the moment a project chose `fast`. Asking
@@ -657,7 +657,7 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
             // Bodies the ray passes through: the caster's own, plus an
             // optional explicit ignore (a node handle or entity id) — e.g.
             // an orbit camera skipping the character it follows. The 8th
-            // arg is either that ignore directly, or an OPTIONS table:
+            // arg is either that ignore directly, or an options table:
             // `{ ignore = node, layers = "Ground" | {"Ground", "Props"} }`
             // — `layers` filters both static geometry and body hulls by
             // the project's named layers (a misspelled name is an error,
@@ -1055,7 +1055,7 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 // breaking a script that passed one. That reasoning was
                 // wrong in the one direction that matters: a typo'd
                 // `addative = true` reads as `additive = false`, which
-                // DESTROYS the running scene instead of layering onto it.
+                // Destroys the running scene instead of layering onto it.
                 // Every node it held is gone, the request queue is cleared,
                 // and nothing anywhere mentions a key.
                 //
@@ -1306,7 +1306,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
         );
         // `ui.make(container, tree)` — a screen described as data, and
         // reconciled against the one already there. The counterpart to
-        // `ui.bind`: bind keeps a value true, make keeps a TREE true.
+        // `ui.bind`: bind keeps a value true, make keeps a tree true.
         let makes = ui_makes.clone();
         let _ = t.set(
             "make",
@@ -1361,7 +1361,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
                     let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
                     let key = lua.create_registry_value(f)?;
                     let mut ls = listeners.borrow_mut();
-                    // Same owner, same element, same hook REPLACES — like
+                    // Same owner, same element, same hook replaces — like
                     // `ui.bind`. That makes `ui.on` safe to call from
                     // `update`, and makes the classic mistake (registering
                     // every frame) cost one closure instead of thousands.
@@ -1381,7 +1381,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
             .ok(),
         );
         // `ui.off(element)` / `ui.off(element, hook)` — stop listening.
-        // Only the CALLER's listeners go: two managers on one element must
+        // Only the caller's listeners go: two managers on one element must
         // not be able to unregister each other.
         let listeners = ui_listeners.clone();
         let n = net.clone();
@@ -1577,7 +1577,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // line pass: draw.* is the game's visual telegraph layer
             // (attach markers, selection outlines, range rings), rendered
             // unconditionally in the game view — unlike `gizmo.*`, the
-            // DEBUG layer the editor's gizmos toggle gates.
+            // Debug layer the editor's gizmos toggle gates.
             let ring_segs = |q: &mut Vec<crate::DrawLine>,
                              c: glam::DVec3,
                              n: glam::DVec3,
@@ -1662,7 +1662,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     let _ = t.set("box", f);
                 }
             }
-            // ── FILLED triangle layer: solid gizmos & world markers ──
+            // ── filled triangle layer: solid gizmos & world markers ──
             // `draw.tri(x1..z3, r,g,b[,a])` — one raw triangle.
             {
                 let q = draw_tris.clone();
@@ -1779,7 +1779,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             }
             // ---- screen space -------------------------------------
             // `draw.rect(x, y, w, h, r,g,b[,a][,radius])` — a filled
-            // rectangle in PIXELS, and `draw.rectOutline(..., [thickness])`
+            // rectangle in pixels, and `draw.rectOutline(..., [thickness])`
             // its hollow twin. The pixels are `input.mouse()`'s, so an RTS
             // marquee is the two corners you dragged between — the 3D line
             // version of the same box has to be projected onto a ground
@@ -1813,7 +1813,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // `draw.circle(x, y, radius, r,g,b[,a])` and its outline twin —
             // a rect with a corner radius of half its side is a circle to
             // the UI quad shader, so a debug ring, a minimap blip or a
-            // reticle costs nothing new. `x, y` is the CENTRE, which is what
+            // reticle costs nothing new. `x, y` is the centre, which is what
             // anyone drawing a circle has in hand.
             for (name, outline_default) in [("circle", 0.0f32), ("circleOutline", 2.0f32)] {
                 let q = draw_rects.clone();
@@ -1948,7 +1948,7 @@ fn install_node_queues(lua: &Lua) -> NodeQueueCells {
             let _ = lua.globals().set("spawn", f);
         }
     }
-    // `createNode(name [, parentNode] [, fn])` — queue a PLAIN node (Empty
+    // `createNode(name [, parentNode] [, fn])` — queue a plain node (Empty
     // matter, identity transform). The driver creates it after this pass;
     // the callback receives its handle — combine with `setTerrain`/
     // `setCelestial`/`setPrimitive`/`setMaterial` to build content from
@@ -2023,11 +2023,11 @@ impl ScriptHost {
         // The two limits a script runs under, before it can run at all: how
         // long a pass may take (`budget`) and how much the state may hold. The
         // memory limit is Luau's; LuaJIT's allocator is not ours to bound, and
-        // that build is on its way out (ADR-0028).
+        // that build is on its way out.
         let budget = crate::budget::Budget::new();
         budget.install(&lua);
         // Before anything else touches the globals: make the documented Lua
-        // surface the same on both VMs (ADR-0028). No-op under LuaJIT.
+        // surface the same on both VMs. No-op under LuaJIT.
         if let Err(e) = crate::vm::install_compat(&lua) {
             // A failure here means a shipped script loses a documented library
             // silently, which is the one outcome this migration promised not to
@@ -2508,7 +2508,7 @@ impl ScriptHost {
     /// How many bytes of Lua heap are in use right now.
     ///
     /// A level, not a total: the collector's work is invisible in it. To learn
-    /// what a frame ALLOCATES, stop the collector across a window and take the
+    /// what a frame allocates, stop the collector across a window and take the
     /// difference — see [`gc_stop`](Self::gc_stop).
     pub fn lua_used_memory(&self) -> usize {
         self.lua.used_memory()
@@ -2590,7 +2590,7 @@ impl ScriptHost {
     }
 
     /// Choose which `vec3` this host's scripts get — a project's
-    /// `script_vec3` setting (ADR-0028, Phase 3).
+    /// `script_vec3` setting.
     ///
     /// Called when a project is opened, before its scripts run. Answering `Err`
     /// rather than quietly falling back is the point: a project that asked for
@@ -2656,7 +2656,7 @@ impl ScriptHost {
     /// userdata and are covered by the annotation list in the editor instead.
     pub fn api_surface() -> Vec<String> {
         let bare = Lua::new();
-        // The baseline gets the compatibility layer too (ADR-0028).
+        // The baseline gets the compatibility layer too.
         //
         // It is not engine API — it is *standard library*, put back under a VM
         // that spells it differently, so that the surface a script sees is the
@@ -2680,7 +2680,7 @@ impl ScriptHost {
 
     /// Every method a node handle answers to — `setSprite`, `sorting`, `shake`…
     ///
-    /// [`api_surface`](Self::api_surface) walks the GLOBALS, so no `node:` method
+    /// [`api_surface`](Self::api_surface) walks the globals, so no `node:` method
     /// has ever been in it: the whole handle surface was covered by no test at
     /// all, and six 2D bindings were in the reference only because somebody
     /// typed them there. Read off the metatable the handles actually use, so a
@@ -2824,7 +2824,7 @@ impl ScriptHost {
             .collect()
     }
 
-    /// Drop every scatter source — a scene SWITCH. A source names a region of
+    /// Drop every scatter source — a scene switch. A source names a region of
     /// the world that is about to stop existing.
     pub fn clear_scatter(&mut self) {
         self.scatter_sources.borrow_mut().clear();
@@ -2881,7 +2881,7 @@ impl ScriptHost {
     /// Evaluate every live `ui.bind` and queue what it returned.
     ///
     /// A binding whose node no longer exists is dropped silently — a screen
-    /// closing should not be an error. A binding whose function THROWS is
+    /// closing should not be an error. A binding whose function throws is
     /// dropped **loudly, once**: left in place it would report the same
     /// failure sixty times a second and bury everything else in the Console.
     fn run_ui_bindings(&mut self) {
@@ -2978,36 +2978,26 @@ impl ScriptHost {
         found.unwrap_or_else(|| "UiElement".to_string())
     }
 
-    /// Forget every diagnostic this host has already said once — a **fresh
-    /// PLAY**, not a scene switch.
+    /// Forget every diagnostic this host has already said once: a fresh Play,
+    /// not a scene switch.
     ///
-    /// Nearly every warning in here is deliberately said once and then
-    /// suppressed, because the thing that provokes it is per-frame and sixty
-    /// identical lines a second is how a Console stops being read
-    /// (`fail_load`'s doc says exactly that). The suppression key is the file's
-    /// generation or the (node, name) pair — **not the play session** — and
-    /// pressing Play clears the Console (`toggle_play`). So the second run of
-    /// an unedited project cleared the panel and then re-suppressed every line
-    /// that would have refilled it: *the same broken script that explained
-    /// itself the first time ran silently for the rest of the session.*
+    /// Nearly every warning here is said once and then suppressed, since the
+    /// thing that provokes it is per-frame and sixty identical lines a second
+    /// is how a Console stops being read. The suppression key is the file's
+    /// generation or the (node, name) pair, not the play session, and pressing
+    /// Play clears the Console, so without this the second run of an unedited
+    /// project would clear the panel and then suppress every line that would
+    /// refill it. A script that fails to load is reported on the first frame
+    /// of every run; within a run the generation key still collapses it to one
+    /// line.
     ///
-    /// That is worse than the noise it was avoiding. A script that fails to
-    /// load is reported on the first frame of every run; within a run the
-    /// generation key still collapses it to one line.
-    ///
-    /// A script held back by the budget comes back for the same reason. It is
-    /// stopped "until its file changes" so the editor does not freeze for the
-    /// budget every frame — a rule about *frames*, not about runs. Pressing
-    /// Play is a person asking for this game to run; answering with a scene
-    /// whose scripts were disqualified by a previous session, and no line
-    /// saying so, is the silent failure the budget message exists to avoid. It
-    /// trips again on its first frame and says so again.
-    ///
-    /// What frees it is the cached error on the source, below — not
-    /// `self.stopped`, which `ensure_instance` empties itself the moment the
-    /// script rebuilds. Clearing `stopped` here as well was written first and
-    /// removed after breaking it changed nothing: every path that fills it
-    /// fills `Source::error` in the same breath, so the two can never disagree.
+    /// A script held back by the budget comes back for the same reason: it is
+    /// stopped until its file changes so the editor does not freeze every
+    /// frame, a rule about frames rather than runs. On the next Play it trips
+    /// again on its first frame and says so again. What frees it is the cached
+    /// error on the source, below; `ensure_instance` empties `self.stopped`
+    /// itself the moment the script rebuilds, and every path that fills it
+    /// fills `Source::error` in the same breath.
     pub fn reset_diagnostics(&mut self) {
         self.load_failure_reported.clear();
         self.upvalue_warned.clear();
@@ -3039,7 +3029,7 @@ impl ScriptHost {
     }
 
     /// Drop every per-(node, script) environment plus its net handlers and
-    /// synced stores — a scene SWITCH: the next `run` rebuilds fresh instances
+    /// synced stores — a scene switch: the next `run` rebuilds fresh instances
     /// against the new world, and every `start` re-fires. Compiled sources stay
     /// cached (rebuilding is per-instance, not per-file).
     pub fn reset_instances(&mut self) {
@@ -3051,7 +3041,7 @@ impl ScriptHost {
     /// running untouched.
     ///
     /// This is what `node.persistent` costs the script host. A persistent node
-    /// keeps its ENTITY across the swap — the driver despawns the old scene in
+    /// keeps its entity across the swap — the driver despawns the old scene in
     /// place rather than building a new world, so the surviving index cannot be
     /// handed out again while it is alive — and because instances are keyed by
     /// entity index, keeping the instance keeps the running script: its state,
@@ -3559,7 +3549,7 @@ impl ScriptHost {
     /// Play is how one run inherits the previous one's network.
     pub fn set_playing(&self, playing: bool) {
         self.http.borrow_mut().set_playing(playing);
-        // The account's SESSION survives Stop — it is the player's, stored in
+        // The account's session survives Stop — it is the player's, stored in
         // the OS keyring, and signing in again every time you press Play would
         // be absurd. Only the callbacks and an unfinished sign-in are dropped.
         self.account.borrow_mut().set_playing(playing);
@@ -3589,7 +3579,7 @@ impl ScriptHost {
         std::mem::take(&mut *self.draw_texts.borrow_mut())
     }
 
-    /// Feed this frame's solved UI element rects in WINDOW physical pixels
+    /// Feed this frame's solved UI element rects in window physical pixels
     /// (entity index → [x, y, w, h]); `node:uiRect()` reads it. Window, not
     /// viewport-local, so it lines up with `input.mouse()`.
     pub fn set_ui_rects(&self, map: HashMap<u32, [f32; 4]>) {
@@ -3688,7 +3678,7 @@ impl ScriptHost {
     /// Forget the behaviour closures on entities that no longer exist.
     ///
     /// Called with the set that just went away rather than sweeping every
-    /// frame: entity indices are REUSED, so a handler left behind by a
+    /// frame: entity indices are reused, so a handler left behind by a
     /// destroyed element would fire on whatever node inherits its slot.
     pub fn drop_ui_handlers(&mut self, gone: &[u32]) {
         if gone.is_empty() {
@@ -3791,7 +3781,7 @@ impl ScriptHost {
     /// The full write flush runs (not just transforms): a `createNode` callback
     /// configures its node with the construction API (`setTerrain`/`setCelestial`/
     /// `setPrimitive`/…), and those are RichSet-queued — in the play loop the next
-    /// pass's flush would catch them a tick late, but an editor ACTION drain has
+    /// pass's flush would catch them a tick late, but an editor action drain has
     /// no next pass, and the components simply never landed (the "generated field
     /// … but no node carries it" bug: generator bodies stayed Matter::Empty).
     pub fn call_spawn_callback(
@@ -3869,7 +3859,7 @@ impl ScriptHost {
         }
     }
 
-    /// editor ACTIONS (`--@editorButton`): run one named function of one
+    /// editor actions (`--@editorButton`): run one named function of one
     /// script on one node against the (edit-mode) world. Syncs the scene
     /// mirror, builds the script's env if needed — without firing `start()`
     /// or any update pass — calls `func(node)`, and flushes every node/
@@ -4278,7 +4268,7 @@ impl ScriptHost {
 
     /// Lend the sim's colliders to the script host for one frame so `raycast(...)` can see
     /// them (the editor takes them back with [`take_colliders`](Self::take_colliders)
-    /// before stepping physics). `origin` is the sim's world origin (ADR-0015) so ray
+    /// before stepping physics). `origin` is the sim's world origin so ray
     /// origins/hits convert between the world coordinates scripts speak and the sim frame.
     /// Call before [`run`](Self::run).
     pub fn set_colliders(&self, cols: Vec<floptle_physics::AnchoredCollider>, origin: glam::DVec3) {
@@ -4508,7 +4498,7 @@ impl ScriptHost {
     }
 
     /// Hand `eid`'s scripts a previously captured state through their
-    /// `restore(s)` hooks. Each script sees a FRESH table built from the
+    /// `restore(s)` hooks. Each script sees a fresh table built from the
     /// capture, so re-simulating after the restore cannot corrupt the snapshot
     /// it came from — which would otherwise make the second replay of a tick
     /// disagree with the first.
@@ -4845,7 +4835,7 @@ impl ScriptHost {
     /// Run every script's `fixedUpdate(node, dt)` for one gameplay tick (the netcode-era
     /// fixed step, `docs/multiplayer.md` §3). Called zero or more times per frame by
     /// the play loop, between [`Self::run`] (which handles `start`/`update`, instance
-    /// lifecycle, and hot reload) and the physics tick — so `dt` here is the CONSTANT
+    /// lifecycle, and hot reload) and the physics tick — so `dt` here is the constant
     /// tick delta and gameplay code sees the same cadence the sim steps at.
     ///
     /// Instances are the ones `run` built this frame; a not-yet-`start`ed script is
@@ -4877,7 +4867,7 @@ impl ScriptHost {
     /// Run every script's `lateUpdate(node, dt)` — the camera pass. The driver
     /// calls it once per frame after scripts, animation, physics, and the
     /// interpolated transform writeback, so a follower (orbit camera, name
-    /// tag, listener) samples this frame's FINAL poses. Positioning a camera
+    /// tag, listener) samples this frame's final poses. Positioning a camera
     /// in `update` reads the previous frame's pose — a follow error of
     /// `velocity × dt` that turns frame-time noise into visible jitter.
     pub fn run_late(&mut self, world: &mut World, dt: f32, time: f32) {
@@ -4958,7 +4948,7 @@ impl ScriptHost {
         self.script_skip.contains(&eid) || self.driver_skip.contains(&eid)
     }
 
-    /// Is `eid` in the SNAPSHOT-driven filter — the one that gates every pass,
+    /// Is `eid` in the snapshot-driven filter — the one that gates every pass,
     /// `lateUpdate` included? A driver-owned node must never be in here: no
     /// driver replays the late pass, so it would simply stop.
     pub fn is_snapshot_filtered(&self, eid: u32) -> bool {
@@ -4976,24 +4966,19 @@ impl ScriptHost {
         self.frame_skip = skip;
     }
 
-    /// Add to the filters instead of replacing them, for a caller that owns
-    /// only part of the set (the rollback driver's nodes, which leave both
-    /// passes on top of whatever the session already skips).
     /// A driver (the rollback driver, the replayed-input pass) is taking over
-    /// this node's **ticks**. Its `fixedUpdate` and `update` run from there
-    /// instead of the global passes — but its `lateUpdate` does not, and must
-    /// keep running here.
+    /// these nodes' ticks: their `fixedUpdate` and `update` run from there
+    /// instead of the global passes, and their `lateUpdate` keeps running
+    /// here. Adds to the set rather than replacing it, since a driver owns
+    /// only part of it.
     ///
-    /// That distinction is the whole reason this is a separate set from
-    /// [`Self::set_script_filter`]. A snapshot-driven node is not simulated
-    /// locally at all, so skipping every pass is right. A driver-owned node is
-    /// locally simulated — only the *scheduling* of its ticks moved. Its
-    /// per-frame cosmetic pass has no substitute anywhere, and putting it in
-    /// `script_skip` silently stopped it: `lateUpdate` is where the docs send
-    /// you to write a node's presentation transform (it runs after the
-    /// interpolated writeback, which would otherwise overwrite it), so a game
-    /// that follows that advice broke the moment the node became a Rollback
-    /// node — offline it was perfect, and it produced no error and no log line.
+    /// A separate set from [`Self::set_script_filter`]: a snapshot-driven node
+    /// is not simulated locally at all, so skipping every pass is right, while
+    /// a driver-owned node is locally simulated and only the scheduling of its
+    /// ticks moved. `lateUpdate` is where a node's presentation transform is
+    /// written, after the interpolated writeback, and it has no substitute
+    /// anywhere; skipped, a game breaks the moment a node becomes a Rollback
+    /// node, with no error and no log line.
     pub fn extend_filters(&mut self, skip: impl IntoIterator<Item = u32> + Clone) {
         self.driver_skip.extend(skip);
     }
@@ -5007,14 +4992,14 @@ impl ScriptHost {
     /// Undo an [`Self::extend_filters`] — the same caller taking its own half
     /// back out. Needed because the whole-set setters do not always run after a
     /// caller stops owning a set (an entity index left behind here is later
-    /// REUSED by the allocator, and would then silently skip an unrelated
+    /// Reused by the allocator, and would then silently skip an unrelated
     /// node's scripts).
     pub fn shrink_filters(&mut self, drop: impl IntoIterator<Item = u32> + Clone) {
         for eid in drop.clone() {
             self.driver_skip.remove(&eid);
         }
         // Historic entries: drivers used to write into both of these sets, and
-        // a stale index here would silently skip an UNRELATED node once the
+        // a stale index here would silently skip an unrelated node once the
         // allocator reused it.
         for eid in drop.clone() {
             self.script_skip.remove(&eid);
@@ -5062,11 +5047,11 @@ impl ScriptHost {
             let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
-                    // Per-SCRIPT attribution. One `Instant` pair
+                    // Per-script attribution. One `Instant` pair
                     // per instance per pass would be thousands of syscalls in a
                     // crowded scene, so it is skipped entirely unless somebody is
                     // collecting — the profiler must not be a frame cost itself.
-                    // Named by KIND, because "which of my scripts is doing this"
+                    // Named by kind, because "which of my scripts is doing this"
                     // is the whole question and a game author says `planet_walker`,
                     // not entity 4173.
                     let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
@@ -5103,7 +5088,7 @@ impl ScriptHost {
                 }
             }
             // Only write back when the script moved its own node via the `node` argument.
-            // If it didn't, leave the transform alone so a write from ANOTHER script's
+            // If it didn't, leave the transform alone so a write from another script's
             // handle (which lands in the mirror) isn't clobbered by a no-op rewrite. A
             // later script reading this node via a handle then sees the move this frame.
             if ran && tr != tr0 {
@@ -5136,27 +5121,23 @@ impl ScriptHost {
                 crate::api::apply_rich_sets(world, &ents, sets, &tilesets);
             }
         }
-        // 2D sprite batches. IMMEDIATE mode, scoped to the
-        // FRAME: whatever the scripts drew since the frame began is the node's
-        // whole set of sprites, and a batch nobody drew to all frame draws
-        // nothing. That is what makes `b:draw` behave like `draw.*` — no
-        // retained list, so no pool to grow and no `clear()` anyone can forget
-        // on the frame a wave dies.
+        // 2D sprite batches: immediate mode, scoped to the frame. Whatever the
+        // scripts drew since the frame began is the node's whole set of
+        // sprites, and a batch nobody drew to all frame draws nothing, so
+        // `b:draw` behaves like `draw.*`: no retained list, no pool to grow, no
+        // `clear()` to forget on the frame a wave dies.
         //
-        // The frame, not the pass, is the unit — and that distinction was worth
-        // a silent, total blackout. Emptying per pass meant
-        // the fixed and late passes wiped whatever `update` drew, so a game
-        // that put its renderer where every tutorial puts per-frame work saw
-        // nothing at all: not a flicker, not a subset, every batch in the game.
-        // `draw.rect` and `draw.line` are drained once a frame by the driver
-        // and always behaved this way; these are described in the same sentence
-        // in the docs and now have the same lifetime to go with it.
+        // The frame, not the pass, is the unit. Emptying per pass would let the
+        // fixed and late passes wipe whatever `update` drew, and a game with
+        // its renderer in `update` would draw nothing at all. `draw.rect` and
+        // `draw.line` are drained once a frame by the driver, and these have
+        // the same lifetime.
         //
         // `sprites_written` is how a pass that drew nothing new costs nothing:
         // the accumulator only grows within a frame, so an unchanged total
-        // means unchanged contents. It is reset (not zeroed) at the frame
-        // boundary, because a frame that happens to draw the same NUMBER of
-        // sprites as the last one is still drawing them somewhere else.
+        // means unchanged contents. It is reset rather than zeroed at the frame
+        // boundary, since a frame that draws the same number of sprites as the
+        // last one is still drawing them somewhere else.
         {
             let drawn = self.sprite_draws.borrow();
             let n: usize = drawn.values().map(Vec::len).sum();
@@ -5177,7 +5158,7 @@ impl ScriptHost {
             }
         }
         // Persist `params.X = ...` writes into the node's stored ScriptInst —
-        // the next pass seeds from them (the write STICKS) and the Inspector
+        // the next pass seeds from them (the write sticks) and the Inspector
         // shows them live. Stop reverts them with the rest of the play state.
         {
             let scene = self.scene.borrow();
@@ -5316,7 +5297,7 @@ impl ScriptHost {
             for (eid, part, name, v) in param_sets {
                 let Some(&ent) = scene.ents.get(&eid) else { continue };
                 // **One part of a model**: the write lands on
-                // that part's EXISTING override, and only on one that wears a
+                // that part's existing override, and only on one that wears a
                 // shader. It never creates an override — an override is a whole
                 // material, so creating one for a uniform would blank the part
                 // to default white with nothing for the uniform to drive, and
@@ -5354,7 +5335,7 @@ impl ScriptHost {
                     // is what a scene with a single screen shader wants and what
                     // it will almost always be.
                     //
-                    // Matched on the file STEM, because the file name is what
+                    // Matched on the file stem, because the file name is what
                     // the Inspector shows and what a script author is looking
                     // at — not the project-relative path they never typed.
                     if let Some(Matter::PostProcess { screen_shaders, .. }) =
@@ -5402,13 +5383,13 @@ impl ScriptHost {
             // `node:setShaderTexture(slot, ref)`: point one of the shader's
             // declared texture slots somewhere else, this frame.
             //
-            // A shader could always DECLARE up to eight textures; what it could
+            // A shader could always declare up to eight textures; what it could
             // not do was change one at runtime, so every multi-texture effect
             // was frozen at whatever the Inspector was set to when the scene was
             // saved. A damage state, a swapped decal, a screen showing what
             // another camera sees — all of them are this one call.
             //
-            // Empty CLEARS the slot rather than binding an empty path: a slot
+            // Empty clears the slot rather than binding an empty path: a slot
             // pointed at "" would otherwise fail to resolve every frame and the
             // shader would read whatever the fallback is, silently.
             let texture_sets: Vec<_> = self.shader_texture_sets.borrow_mut().drain(..).collect();
@@ -5601,7 +5582,7 @@ impl ScriptHost {
         //
         // The world says which case this is. `revision()` counts every
         // mutation; `revision_of::<Transform>()` counts mutable access to
-        // transforms alone; their difference moves on anything ELSE — a spawn,
+        // transforms alone; their difference moves on anything else — a spawn,
         // a despawn, an attach, a rename, a material edit, a script's queued
         // writes landing. Unchanged difference means transforms-only, and
         // transforms-only means the cheap path. The world is deliberately
@@ -5787,7 +5768,7 @@ impl ScriptHost {
             if !cols.is_empty() {
                 s.component_colors.insert(id, cols);
             }
-            // The string half — what a material is WEARING, what an element
+            // The string half — what a material is wearing, what an element
             // says. Mirrored for the same reason the numbers are: a field a
             // script can write and cannot read is half a field.
             let strs = crate::mirror_component_strings(world, e);
@@ -5879,7 +5860,7 @@ impl ScriptHost {
             match v {
                 mlua::Value::Number(n) => nums.push((k, n as f32)),
                 mlua::Value::Integer(n) => nums.push((k, n as f32)),
-                // A `flag = false` default is a BOOLEAN tunable: stored as 0/1
+                // A `flag = false` default is a boolean tunable: stored as 0/1
                 // (the param vec is floats), drawn as a checkbox, and handed
                 // back to Lua as a real boolean by `params_table` — so the
                 // script sees the type it declared.
@@ -6012,12 +5993,12 @@ impl ScriptHost {
         true
     }
 
-    /// A script instance's REFERENCE params, resolved against the scene by name.
+    /// A script instance's reference params, resolved against the scene by name.
     ///
     /// Its own function because two callers need the same answer and used to
     /// have one and a half: the editor-action path resolved them, and the
     /// pass-1 seed passed an empty list — so a library script's wired node
-    /// reference read nil, and for a HOOKLESS script (which never ticks) it
+    /// reference read nil, and for a hookless script (which never ticks) it
     /// stayed nil for the whole session.
     fn resolve_refs(
         &self,
@@ -6046,22 +6027,16 @@ impl ScriptHost {
 
     /// Give a freshly built environment its `params` before any script runs.
     ///
-    /// `tick` seeds `params` too, but only for the instance it is ticking — so
-    /// until an instance has had its first tick, its `params` is **nil**, not
-    /// the defaults-seeded table `params_table` promises. That is invisible for
-    /// a script that only reads its own tunables, and fatal for the pair that
-    /// pass 1 exists to support: a script whose `update` runs early calls a
-    /// LIBRARY script through `findScript`, the callee reads `params.foo`, and
-    /// it raises on `params` being nil. Whether it raises depends on the two
-    /// nodes' order in the scene file, which is why it reads as random.
-    ///
-    /// A hookless library script never ticks at all, so for it this is the only
-    /// seed it ever gets.
+    /// `tick` seeds `params` too, but only for the instance it is ticking, so
+    /// until then an instance's `params` would be nil. A script whose `update`
+    /// runs early and calls a library script through `findScript` would have
+    /// the callee raise on `params.foo`, depending on the two nodes' order in
+    /// the scene file. A hookless library script never ticks at all, so this is
+    /// the only seed it gets.
     ///
     /// Only when unset: once an instance has ticked, `tick`'s table is the live
-    /// one — it carries the resolved reference params, which need the world and
-    /// so cannot be built here. Two-way param writes live in that table too, and
-    /// re-seeding would discard them.
+    /// one, carrying the resolved reference params (which need the world) and
+    /// the two-way param writes, which re-seeding would discard.
     fn seed_params(
         &self,
         e: Entity,
@@ -6077,7 +6052,7 @@ impl ScriptHost {
         if env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil()) {
             return;
         }
-        // REFERENCE params too, resolved the same way every other caller
+        // Reference params too, resolved the same way every other caller
         // resolves them. Seeding without them looked harmless — the tick would
         // fill them in — but a hookless library script never ticks, so its
         // wired-up node reference would have been nil for the entire session.
@@ -6095,7 +6070,7 @@ impl ScriptHost {
     ///
     /// **Why at load.** The handle is a proxy, so the export is reachable from
     /// inside the script and from nowhere else: every cross-script caller gets
-    /// the handle's own value instead. What arrives is the wrong TYPE, not a nil
+    /// the handle's own value instead. What arrives is the wrong type, not a nil
     /// — so nothing raises when the handle resolves, nothing raises when the
     /// field is read, and the eventual `attempt to call field 'x' (a string
     /// value)` points at the caller rather than at the script that took the
@@ -6245,7 +6220,7 @@ impl ScriptHost {
                 inst.started = true;
             }
             // No hook for this pass: the script cannot observe anything the
-            // full setup below would do, EXCEPT through the node table — a
+            // full setup below would do, except through the node table — a
             // handle stashed in `start()` must keep reading the live transform,
             // and a write made to it from a timer callback must still reach the
             // world. So the node is stamped and drained exactly as before, and
@@ -6299,7 +6274,7 @@ impl ScriptHost {
         let body = self.bodies.borrow().get(&eid).copied();
         // Resolve reference params by name through the O(1) index — a target
         // spawned or renamed mid-play rebinds when the table is next built. The
-        // KIND (node / script / component) comes from the declared `defaults`
+        // Kind (node / script / component) comes from the declared `defaults`
         // sentinel, and script/component targets validate against the live
         // scene so an invalid wire reads nil rather than a dead handle. Only
         // when the params table is going to be rebuilt: they are part of what
@@ -6390,7 +6365,7 @@ impl ScriptHost {
     ///
     /// one node table per instance, re-stamped each pass — see `node_table`. A
     /// handle kept from `start()` is therefore the same table, and stays live.
-    /// Held as a REGISTRY key, not a live `Table`: a `Table` alive in Rust
+    /// Held as a registry key, not a live `Table`: a `Table` alive in Rust
     /// occupies a slot on mlua's auxiliary ref stack, which is bounded at
     /// ~8,000, and one per script instance was a hard ceiling on how big a
     /// scene may be. The registry has no such bound.
@@ -6448,7 +6423,7 @@ impl ScriptHost {
     /// two-way — a script's write sticks across frames (the next seed reads it
     /// back) and lands in the node's stored params, so the Inspector shows it
     /// live during Play (and Stop reverts it with everything else). Numbers
-    /// and strings; only DECLARED tunables persist — a key present in
+    /// and strings; only declared tunables persist — a key present in
     /// `defaults` or the stored params; ad-hoc keys stay frame-local, and
     /// reference params (node/script/component handles) never round-trip.
     fn collect_param_writes(
@@ -6484,7 +6459,7 @@ impl ScriptHost {
                         Value::Integer(i) => i as f32,
                         _ => unreachable!(),
                     };
-                    // The value this key was SEEDED with: the stored override,
+                    // The value this key was seeded with: the stored override,
                     // else the declared default. (f32 → f64 → f32 is exact, so
                     // an untouched param compares bit-equal and costs nothing.)
                     let seed = seeded
@@ -6509,7 +6484,7 @@ impl ScriptHost {
                 }
                 Value::String(s) => {
                     let new = s.to_string_lossy().to_string();
-                    // Declared = stored string override, or a NON-SENTINEL
+                    // Declared = stored string override, or a non-sentinel
                     // string default (ref sentinels never round-trip).
                     let seed = seeded_strs
                         .iter()
@@ -6619,7 +6594,7 @@ impl ScriptHost {
                     f.call::<()>((node.clone(), dt as f64))?;
                 }
                 Pass::Late => {
-                    // The post-physics camera pass — followers sample FINAL poses.
+                    // The post-physics camera pass — followers sample final poses.
                     let Some(f) = lifecycle_fn(env, &["lateUpdate", "onLateUpdate"])? else {
                         return Ok(false);
                     };
@@ -6687,7 +6662,7 @@ impl ScriptHost {
             if h as f32 != b.height {
                 self.body_height_changes.borrow_mut().insert(eid, h as f32);
             }
-            // OWN-node position writes on a body entity teleport the body,
+            // Own-node position writes on a body entity teleport the body,
             // exactly like cross-node handle writes do — without this, the
             // physics writeback reverts the transform next frame and
             // `node.x = spawn_x` (respawns!) silently does nothing.
@@ -6771,7 +6746,7 @@ impl ScriptHost {
         }
     }
 
-    /// A script failed while RUNNING — a hook raised. The script itself loaded,
+    /// A script failed while running — a hook raised. The script itself loaded,
     /// so this is not [`fail_load`](Self::fail_load): nothing here touches
     /// `broken`, and the Console wants every occurrence.
     fn fail(&mut self, name: &str, msg: String) {
@@ -6853,8 +6828,8 @@ impl ScriptHost {
     /// has the file open.
     fn warn_upvalue_pressure(&mut self, name: &str, generation: u64, src: &str) {
         use crate::load_error::{file_scope_locals, UPVALUE_LIMIT, UPVALUE_WARN};
-        // No ceiling, nothing to warn about. Under Luau there is none (ADR-0028,
-        // measured in `tests/vm_dialect.rs`), and a warning about a wall that is
+        // No ceiling, nothing to warn about. Under Luau there is none
+        // (measured in `tests/vm_dialect.rs`), and a warning about a wall that is
         // not there would send somebody to restructure a script for no reason.
         let (Some(limit), Some(warn)) = (UPVALUE_LIMIT, UPVALUE_WARN) else {
             return;
@@ -7173,7 +7148,7 @@ mod host_tests {
     /// **A data file round-trips through `assets.writeJson` / `readJson`.** A
     /// chart written by one script — into a folder that did not exist — is
     /// read back by another with its numbers, strings, nested tables and
-    /// LISTS intact (an empty list stays `[]`, and a decoded list is still
+    /// Lists intact (an empty list stays `[]`, and a decoded list is still
     /// tagged as one). `readText` sees the same bytes, and `pretty` indents.
     #[test]
     fn a_json_file_written_by_a_script_reads_back_whole() {
@@ -7378,7 +7353,7 @@ mod host_tests {
         }
         let scripts = dir.join("scripts");
 
-        // What one run puts in the CONSOLE — `drain_logs`, which is exactly
+        // What one run puts in the console — `drain_logs`, which is exactly
         // what `adopt_script_logs` moves into the panel. Deliberately not
         // `errors()`: that feeds the Scripting tab, it is re-pushed every
         // frame from the cached failure, and asserting on it passes while the
@@ -7412,7 +7387,7 @@ mod host_tests {
     /// **A loop without an exit stops the script, not the editor.** With a
     /// 50 ms budget, `while true do end` in `update` returns the frame, the
     /// error names the budget, the script is `broken`, and the next frame does
-    /// not call it. Luau only: LuaJIT has no interrupt (ADR-0028).
+    /// not call it. Luau only: LuaJIT has no interrupt.
     #[test]
     fn a_script_that_runs_past_its_budget_is_stopped_and_not_called_again() {
         let dir = std::env::temp_dir().join(format!("floptle-budget-{}", std::process::id()));
@@ -7637,7 +7612,7 @@ mod host_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `createNode` and `spawn` are QUEUED, so neither can return a node — and
+    /// `createNode` and `spawn` are queued, so neither can return a node — and
     /// returning nothing made `local n = createNode("Stain")`, which is the
     /// obvious thing to write, fail one line later as `attempt to index nil
     /// with 'position'`.

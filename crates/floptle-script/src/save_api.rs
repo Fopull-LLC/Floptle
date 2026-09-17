@@ -179,7 +179,7 @@ pub(crate) fn install_save_api(
     }
 
     // save.deleteSlot(name) — delete a slot's store file from disk (save-slot
-    // management UIs: "delete this save"). Deleting the ACTIVE slot also wipes
+    // management UIs: "delete this save"). Deleting the active slot also wipes
     // the in-memory store, so the slot is immediately reusable as a fresh save.
     // Returns true if a file was actually removed. Terrain a game persisted per
     // slot is its own directory — see terrain.deleteSaveDir.

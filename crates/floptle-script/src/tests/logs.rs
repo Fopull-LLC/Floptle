@@ -119,7 +119,7 @@ fn a_mistyped_hook_name_raises() {
 }
 
 /// A bad table shape passed to a construction API is a script error in the Console,
-/// never a process abort. It used to take the whole editor down with SIGABRT
+/// never a process abort. It used to take the whole editor down with sigabrt
 /// ("panic in a function that cannot unwind"), losing unsaved work and telling the
 /// author nothing about what they got wrong.
 #[test]
