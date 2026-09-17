@@ -2,7 +2,7 @@
 //
 // It runs over the frame the raster and raymarch passes have drawn and BEFORE
 // the 2D light composite, which is the whole point of it existing as its own
-// pass rather than as two lines at the end of `post.wgsl` (`floptle/0127`).
+// pass rather than as two lines at the end of `post.wgsl`.
 //
 // ## Why the order is the feature
 //
@@ -74,7 +74,7 @@ fn quantize(c: vec3<f32>, px: vec2<i32>) -> vec3<f32> {
     if (p.q.y > 0.5) {
         t = bayer4(vec2<u32>(u32(px.x), u32(px.y)));
     }
-    // ---- brightness only, chroma carried along (`floptle/0126`) -------------
+    // ---- brightness only, chroma carried along ----------------------------
     //
     // Quantizing each channel on its own is a real look, and it is what a
     // *surface* usually wants — but a warm tint whose channels cross their band

@@ -13,7 +13,7 @@ struct P {
     a: vec4<f32>, // xy = texel (1/size of src), z = bloom_threshold, w = bloom_intensity
     b: vec4<f32>, // x = vignette_strength, y = vignette_radius, zw = blur_dir (texels)
                   // a in fs_finish: x = simulate deficiency, z = colour filter mode,
-                  //   w = filter strength (floptle/0079)
+                  //   w = filter strength
     c: vec4<f32>, // grade: x exposure (stops), y contrast, z saturation, w temperature
     d: vec4<f32>, // grade: x tint, y lift, z gamma, w gain
     e: vec4<f32>, // lens: x aberration, y distortion, z grain amount, w time (seconds)
@@ -87,7 +87,7 @@ fn fs_ssao_apply(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(c * ao, 1.0);
 }
 
-// Colour-vision filter (`floptle/0079`). `mode`: 1 = protanopia, 2 = deuteranopia,
+// Colour-vision filter. `mode`: 1 = protanopia, 2 = deuteranopia,
 // 3 = tritanopia; 0 returns the colour untouched. `simulate` shows the deficiency
 // (for the developer) instead of correcting for it (for the player).
 //
@@ -351,9 +351,8 @@ fn dof_view_depth(uv: vec2<f32>) -> f32 {
 // The two sides get their own range because they are not the same thing. A lens
 // goes soft almost immediately on the near side and holds shape much further on
 // the far side, and more to the point they are the two numbers people reach for:
-// a portrait wants the foreground gone and the background readable. The old
-// single `range` is still expressible — the near side defaults to half of it,
-// which is exactly what this used to hardcode.
+// a portrait wants the foreground gone and the background readable. A single
+// `range` is still expressible: the near side defaults to half of it.
 fn dof_signed(uv: vec2<f32>) -> f32 {
     let z = dof_view_depth(uv);
     let d = z - p.f.z;
@@ -452,10 +451,10 @@ fn fs_dof(in: VsOut) -> @location(0) vec4<f32> {
 // the one pass serves either or both. Runs last, at the scene's composited
 // (retro) resolution and BEFORE the upscale.
 //
-// **Posterize is not here.** It used to be, and that was the bug (`floptle/0127`):
-// quantizing the finished frame quantizes the light along with the palette, and a
-// light is a multiplier on the palette rather than a value in it. It now runs as
-// its own pass over the art, before the 2D light composite — see `palette.wgsl`.
+// Posterize is not here. Quantizing the finished frame quantizes the light
+// along with the palette, and a light is a multiplier on the palette rather
+// than a value in it, so it runs as its own pass over the art, before the 2D
+// light composite; see `palette.wgsl`.
 // The vignette is downstream of that quantize for the same reason, and it is the
 // corroboration that the rule is the right one: a vignette is a smooth radial
 // darkening, and it was banding for exactly the reason a light was.
@@ -533,7 +532,7 @@ fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
     // recording — both belong after the picture has been mapped, not before it.
     c = tonemap(max(c, vec3<f32>(0.0)), p.g.w);
     // Colour-vision filter first: it corrects the picture the game made, so it
-    // belongs before the looks the scene applies on top (`floptle/0079`).
+    // belongs before the looks the scene applies on top.
     // a.x = simulate, a.z = filter mode, a.w = strength — lanes the bloom pass
     // uses and this one does not.
     c = color_vision(c, p.a.z, p.a.x, p.a.w);

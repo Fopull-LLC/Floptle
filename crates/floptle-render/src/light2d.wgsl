@@ -16,16 +16,14 @@
 // in front of a flat surface still occludes it. Without that the composite would
 // paint lit tiles over anything drawn between them and the camera.
 //
-// ## Why a difference, and not `over` (`floptle/0121`)
+// ## Why a difference, and not `over`
 //
-// The composite used to write `albedo * light` over the frame at the surface's
-// own alpha. For an opaque surface that is exact. For a translucent one it is
-// the same sprite blended **twice**: the raster pass had already put
-// `C·a + B·(1-a)` there, and compositing `C·light` over that again lands at an
-// effective alpha of `1 - (1-a)²`. A sprite authored at 0.5 reached the screen
-// at 0.75 and one at 0.72 at 0.92 — silently, in every 2D project, with no light
-// placed and nothing switched on, and invisible in every place an author could
-// look: the source said 0.72, the Inspector said 0.72, the screen said 0.92.
+// A composite that writes `albedo * light` over the frame at the surface's
+// own alpha is exact for an opaque surface and blends a translucent one
+// twice: the raster pass has already put `C·a + B·(1-a)` there, and
+// compositing `C·light` over that again lands at an effective alpha of
+// `1 - (1-a)²`. A sprite authored at 0.5 would reach the screen at 0.75 and
+// one at 0.72 at 0.92, with the source and the Inspector both saying 0.72.
 //
 // So this pass never contributes colour of its own. It adds
 //
@@ -227,7 +225,7 @@ fn reaches(i: u32, r: u32) -> bool {
     return (L.mask[i][r >> 5u] & (1u << (r & 31u))) != 0u;
 }
 
-/// How bright light `i` is at distance `d` — the authorable ramp (`floptle/0126`).
+/// How bright light `i` is at distance `d` — the authorable ramp.
 ///
 /// Full brightness out to the inner radius, then falling to exactly zero at the
 /// range. A real edge and not an inverse-square tail that never quite ends and
@@ -247,7 +245,7 @@ fn falloff_at(i: u32, d: f32) -> f32 {
     return pow(x, e);
 }
 
-/// Is light `i` stopped by something between it and this pixel (`floptle/0125`)?
+/// Is light `i` stopped by something between it and this pixel?
 ///
 /// The G-buffer already holds every flat surface in the frame, and its `a`
 /// channel says which of them cast — so occlusion is a walk along the segment

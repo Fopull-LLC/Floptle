@@ -3669,15 +3669,13 @@ impl Raster {
         gpu.queue.submit([encoder.finish()]);
     }
 
-    /// **Returns nothing, deliberately.** It used to answer "was the target
-    /// (re)allocated?", which callers read as "does the bind group need
-    /// refreshing?" — and those are not the same question. A frame that draws
-    /// two views claims a different cached slot for each, so after the first few
-    /// frames neither is ever reallocated and the answer is permanently `false`
-    /// while the correct answer is "yes, every view, every frame". The window
-    /// path believed it and spent releases drawing with the docked Game panel's
-    /// depth buffer and stored picture. Run this, then bind
-    /// [`prepass_view`](Self::prepass_view) unconditionally.
+    /// Returns nothing. "Was the target reallocated?" is not "does the bind
+    /// group need refreshing?": a frame that draws two views claims a
+    /// different cached slot for each, so after the first few frames neither
+    /// is ever reallocated while every view needs binding every frame, and a
+    /// caller that trusted the first answer would draw the window with the
+    /// docked Game panel's depth buffer and stored picture. Run this, then
+    /// bind [`prepass_view`](Self::prepass_view) unconditionally.
     pub fn depth_prepass_with(
         &mut self,
         gpu: &Gpu,

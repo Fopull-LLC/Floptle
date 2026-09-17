@@ -162,4 +162,4 @@ strip = true
 # process — meaning ANY script mistake that reaches a Rust callback (a wrong table shape,
 # a bad argument) took the whole editor down with SIGABRT, losing unsaved work, and not
 # even `pcall` could catch it. `cargo test` silently ignores this setting, so no unit
-# test can guard it; `examples/error_path.rs` in floptle-script is the check. floptle/0025.
+# test can guard it; `examples/error_path.rs` in floptle-script is the check.

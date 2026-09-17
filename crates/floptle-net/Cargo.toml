@@ -16,7 +16,7 @@ postcard = { workspace = true }
 ron = { workspace = true }
 bytes = "1"
 
-# The voice codec + mixer, for the end-to-end voice test only (`floptle/0180`).
+# The voice codec + mixer, for the end-to-end voice test only.
 # A dev-dependency rather than a real one: this crate carries voice FRAMES and
 # has no opinion about what is inside them, which is what keeps the codec off
 # the wasm build and out of a dedicated server that only forwards.
@@ -45,6 +45,6 @@ rcgen = "0.13"
 ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
 # The relay's UDP socket is built by hand so its kernel buffers can be sized
-# before quinn takes it (`floptle/0234`). Already under quinn; here for
+# before quinn takes it. Already under quinn; here for
 # `SO_RCVBUF`/`SO_SNDBUF`, which std's `UdpSocket` cannot set.
 socket2 = "0.6"

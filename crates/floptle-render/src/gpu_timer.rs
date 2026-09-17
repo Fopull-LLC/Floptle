@@ -174,8 +174,8 @@ impl GpuTimer {
             let ticks: Vec<u64> = view
                 .as_chunks::<8>().0
                 .iter()
-                // `as_chunks` hands over a real `[u8; 8]`, so the fallible
-                // conversion that used to guard a slice has nothing left to fail.
+                // `as_chunks` hands over a real `[u8; 8]`, so nothing here can
+                // fail.
                 .map(|c| u64::from_le_bytes(*c))
                 .collect();
             self.last.clear();

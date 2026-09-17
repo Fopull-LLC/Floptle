@@ -1089,10 +1089,10 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
     for (var i = 0u; i < pc; i = i + 1u) {
         let range = max(G.point_pos[i].w, 1e-4);
         let to = G.point_pos[i].xyz - p;
-        // **Out of range before anything is computed.** This test used to sit
-        // after the emitter evaluation, so a lamp at the far end of a level was
-        // fully evaluated and then multiplied by zero — once per light, per
-        // step, per pixel. Widened by the emitter's own size so it can only ever
+        // Out of range before anything is computed. After the emitter
+        // evaluation, a lamp at the far end of a level would be fully evaluated
+        // and then multiplied by zero, once per light, per step, per pixel.
+        // Widened by the emitter's own size so it can only ever
         // reject a lamp the evaluation would have rejected too.
         let reach = range + fog_extent(G.point_shape[i]);
         if (dot(to, to) > reach * reach) {
@@ -1182,15 +1182,11 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
 // out of the world, and leaving it out is what put a hard seam at the horizon
 // and hid every shaft that had sky behind it.
 //
-// The flat depth RAMP used to stop at the geometry, on the theory that it is a
-// stylistic distance ramp rather than a medium. That theory does not survive
-// contact with a dark fog colour. Tint only the surfaces and fog reads as fog
-// exactly when its colour is near the sky's — which in practice means light fog
-// under a light sky, and a scene author concluding that fog can only wash the
-// picture out and never deepen it. A dark fog turned distant hills into
-// silhouettes against an untouched bright sky: the geometry visibly changed and
-// the *fog* was nowhere. The ramp reaches the background now, by
-// `fog_extra.x`.
+// The flat depth ramp reaches the background too, by `fog_extra.x`. Stopped at
+// the geometry, fog reads as fog exactly when its colour is near the sky's,
+// which in practice means light fog under a light sky; a dark fog turns
+// distant hills into silhouettes against an untouched bright sky, and the fog
+// itself is nowhere.
 //
 // Weighted toward the HORIZON rather than applied flat, because the two ends of
 // the sky are not the same question. A ray along the ground travels through the
@@ -2053,9 +2049,9 @@ fn point_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
 // This is what a transparent surface needs and could never ask for: the SDF
 // field (`map_d`) knows about terrain and blobs, and nothing at all about the
 // ordinary polygon geometry most of a level is made of. Shoreline foam, soft
-// particles and contact glow are all the same measurement — "how much room is
-// there between me and whatever is behind me" — and all of them used to be
-// impossible against a mesh.
+// particles and contact glow are all the same measurement, "how much room is
+// there between me and whatever is behind me", and this is what makes them
+// possible against a mesh.
 //
 // Reads the opaque depth prepass, and reprojects `p` itself to find the texel
 // rather than taking a screen position, so it is exact for the fragment that

@@ -2395,11 +2395,11 @@ mod tests {
         cy + row_h + 1
     }
 
-    /// A real project's text — the printable ASCII range at eight sizes, which
-    /// is what the card measured Fofighter's HUD and training room at, and
-    /// which used to reach ~51% at 1388p and OVERFLOW at 4K. Interleaved by
-    /// character (not grouped by size), because that is the order a UI actually
-    /// asks for glyphs in and the order the old packer was worst at.
+    /// A real project's text: the printable ASCII range at eight sizes, what a
+    /// fighting game's HUD and training room use, which a row packer fills to
+    /// ~51% at 1388p and overflows at 4K. Interleaved by character rather than
+    /// grouped by size, because that is the order a UI asks for glyphs in and
+    /// the order a row packer is worst at.
     #[test]
     fn a_real_ui_s_alphabet_fits_with_room_to_spare() {
         let font = fontdue::Font::from_bytes(

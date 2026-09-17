@@ -773,7 +773,7 @@ impl Raymarch {
         self.mask_pipeline = mask_pipeline;
         // …and the capture, from the same module: a spliced Sky shader that did
         // not reach the environment map would leave every reflection showing
-        // the sky the scene used to have.
+        // the previous sky.
         self.env_pipeline = Self::build_env_pipeline(gpu, &self.pipeline_layout, &module);
     }
 

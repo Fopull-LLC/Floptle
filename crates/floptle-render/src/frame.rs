@@ -178,8 +178,8 @@ mod tests {
         // Exactly the shape of a 2D scene: an ortho camera at the origin and a
         // tilemap in the XY plane at the origin.
         let p = Projection::of_camera(1.05, true, 9.5, 0.05, 300_000.0);
-        // What the gameplay camera used to build, kept so this stays a
-        // regression test and not a description of the current code.
+        // The projection a camera must not build for a flat scene, so this
+        // stays a regression test and not a description of the current code.
         let was = Projection::Orthographic { height: 9.5, near: 0.05, far: 300_000.0 };
         assert!(!visible(was, glam::Vec3::ZERO), "the bug: the map was clipped by its own camera");
         assert!(visible(p, glam::Vec3::ZERO), "the plane the camera sits in must be in frame");

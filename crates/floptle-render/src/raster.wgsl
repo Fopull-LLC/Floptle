@@ -54,7 +54,7 @@ struct RasterGlobals {
 @group(0) @binding(4) var terrain_pal_samp: sampler;
 @group(0) @binding(11) var terrain_pal_nearest: texture_2d_array<f32>;
 @group(0) @binding(5) var terrain_pal_samp_nearest: sampler;
-// GPU skinning (`floptle/0080`). Three stores, all read in `vs_skin` and nowhere
+// GPU skinning. Three stores, all read in `vs_skin` and nowhere
 // else, all following the `vpaint` pattern: ONE buffer per scene, indexed by a
 // per-instance base, so skinned characters stay ordinary instanced draws instead
 // of each needing a bind group of its own.
@@ -227,12 +227,10 @@ fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
 // below is box-filtered, so level m blurs by one texel × 2^m: the level whose
 // blur matches the lobe is log2(lobe ÷ texel).
 //
-// **This used to be `sqrt(roughness) × levels` everywhere, which is backwards.**
-// The stated intent was to spend more of the chain on the polished end, but sqrt
-// LIFTS small values: roughness 0.1 came out at 0.32 and landed three levels up
-// the chain — an eightfold blur on a surface the author had asked to be nearly a
-// mirror. Only an exact 0 stayed sharp, and no slider sits exactly on 0. That
-// one line is why a mirror was easy to frost and hard to polish.
+// Not `sqrt(roughness) × levels`: sqrt lifts small values, so roughness 0.1
+// would come out at 0.32 and land three levels up the chain, an eightfold blur
+// on a surface the author asked to be nearly a mirror. Only an exact 0 would
+// stay sharp, and no slider sits exactly on 0.
 fn lobe_alpha(rough: f32) -> f32 {
     let r = clamp(rough, 0.0, 1.0);
     return max(r * r, 1e-5);
@@ -701,8 +699,8 @@ fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
-        // See `area_terms` in field.wgsl — an emitter with no size gives back
-        // exactly the point light this used to compute inline.
+        // See `area_terms` in field.wgsl; an emitter with no size is exactly a
+        // point light.
         let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
         acc = acc + g.point_color[i].rgb * (a.ndl * x * x * a.atten);
@@ -815,7 +813,7 @@ fn vs(in: VsIn) -> VsOut {
     return build_vs(in, in.pos, in.normal, u32(in.n0.w), in.n2.w);
 }
 
-/// The skinned entry point (`floptle/0080`): deform the vertex by the bone
+/// The skinned entry point: deform the vertex by the bone
 /// palette here instead of on the CPU, then run the identical shading tail.
 ///
 /// The arithmetic is the same as `cpu_skin_part` line for line — weights
@@ -1444,7 +1442,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
 
     // A newly meshed terrain chunk DISSOLVES in rather than popping
-    // (`floptle/0067`): the streamer ramps `color.a` 0 → 1 over its first
+    //: the streamer ramps `color.a` 0 → 1 over its first
     // moments and the fraction of pixels that survive follows it.
     //
     // A dissolve and not a blend, because terrain is opaque and must stay in
@@ -1612,7 +1610,7 @@ fn fs_depth(in: VsOut) {
     let texel_a = base_texel(in).a;
     // Terrain is always opaque and its vcolor.a is a SLOT, not opacity — prime depth for it
     // unconditionally (else a hill wouldn't cap the raymarch and blobs would show through it).
-    // The one exception is a chunk still dissolving in (`floptle/0067`): priming depth for a
+    // The one exception is a chunk still dissolving in: priming depth for a
     // pixel the color pass then discards would punch a hole in whatever is behind it, so the
     // SAME test runs here. Identical inputs, identical result — see `fs`.
     if (in.imeta.x > 0.5) {
