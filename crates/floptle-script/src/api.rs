@@ -3418,808 +3418,3263 @@ pub fn read_sprite_frame(world: &World, ent: Entity) -> Option<(String, u32, u32
 /// access) and the `find` / `findAll` / `findScript` globals. The handle closures share
 /// the scene mirror + body bridges + env map via `shared`.
 pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
-    // ---- node metatable -------------------------------------------------------------
-    let node_mt = lua.create_table()?;
-    {
-        let scene = shared.scene.clone();
-        let bodies = shared.bodies.clone();
-        let body_changes = shared.body_changes.clone();
-        let ui_text_changes = shared.ui_text_changes.clone();
-        let ui_style_changes = shared.ui_style_changes.clone();
-        let node_strs_r = shared.component_strs.clone();
-        let ui_focus = shared.ui_focus.clone();
-        let layer_changes = shared.layer_changes.clone();
-        let enabled_changes = shared.enabled_changes.clone();
-        let persistent_changes = shared.persistent_changes.clone();
-        let tag_changes = shared.tag_changes.clone();
-        let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
-            let e: u32 = this.raw_get("__id")?;
-            // `node.pos` — the position as a vec3 value. The script's OWN node
-            // table carries live raw x/y/z (possibly written earlier this
-            // hook), so prefer those; cross-node handles read the mirror.
-            if key == "pos" {
-                if let (Ok(x), Ok(y), Ok(z)) = (
-                    this.raw_get::<f64>("x"),
-                    this.raw_get::<f64>("y"),
-                    this.raw_get::<f64>("z"),
-                ) {
-                    return crate::math_api::LuaVec3(glam::DVec3::new(x, y, z)).into_lua(lua);
-                }
-                if let Some(tr) = scene.borrow().transforms.get(&e) {
-                    return crate::math_api::LuaVec3(tr.translation).into_lua(lua);
-                }
-                return Ok(Value::Nil);
+    install_node_metatable(lua, shared)?;
+    install_component_metatable(lua, shared)?;
+    install_sprite_metatable(lua, shared)?;
+    install_list_mt(lua)?;
+    install_node_methods(lua, shared)?;
+    install_script_metatable(lua, shared)?;
+    install_find_globals(lua, shared)?;
+    Ok(())
+}
+
+/// Every `find*` takes the same optional trailing options table, so the rule
+/// is learned once. See [`FindScope`] for why enabled-only is the default.
+///
+/// ```lua
+/// find("Player")                        -- enabled only (the default)
+/// find("Player", { scope = "all" })     -- switched-off ones too
+/// find("Spawner", { scope = "disabled" })
+/// findAll("Enemy", { includeDisabled = true })   -- sugar for scope="all"
+/// ```
+///
+/// A wrong key and a wrong value both raise, listing what is accepted: a
+/// defaulted typo is an options table nobody can see the effect of.
+fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
+    let t = match opts {
+        None | Some(Value::Nil) => return Ok(crate::FindScope::default()),
+        Some(Value::Table(t)) => t,
+        Some(_) => {
+            return Err(mlua::Error::RuntimeError(
+                "the second argument to find/findAll/findScript/findTagged is an options \
+                 TABLE, e.g. { scope = \"all\" }"
+                    .into(),
+            ));
+        }
+    };
+    for pair in t.clone().pairs::<String, Value>() {
+        let (k, _) = pair?;
+        if !matches!(k.as_str(), "scope" | "includeDisabled" | "onlyDisabled") {
+            return Err(mlua::Error::RuntimeError(format!(
+                "find options: unknown key '{k}' — accepted: scope, includeDisabled, \
+                 onlyDisabled"
+            )));
+        }
+    }
+    if let Some(s) = t.get::<Option<String>>("scope")? {
+        return crate::FindScope::parse(&s).ok_or_else(|| {
+            mlua::Error::RuntimeError(format!(
+                "find options: scope = '{s}' — accepted: {}",
+                crate::FindScope::ACCEPTS.join(", ")
+            ))
+        });
+    }
+    if t.get::<Option<bool>>("onlyDisabled")?.unwrap_or(false) {
+        return Ok(crate::FindScope::Disabled);
+    }
+    if t.get::<Option<bool>>("includeDisabled")?.unwrap_or(false) {
+        return Ok(crate::FindScope::All);
+    }
+    Ok(crate::FindScope::default())
+}
+
+/// The node handle's metatable: `node.x`, `node.pos`, the component fields and every write a script makes through a node.
+fn install_node_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+// ---- node metatable -------------------------------------------------------------
+let node_mt = lua.create_table()?;
+{
+    let scene = shared.scene.clone();
+    let bodies = shared.bodies.clone();
+    let body_changes = shared.body_changes.clone();
+    let ui_text_changes = shared.ui_text_changes.clone();
+    let ui_style_changes = shared.ui_style_changes.clone();
+    let node_strs_r = shared.component_strs.clone();
+    let ui_focus = shared.ui_focus.clone();
+    let layer_changes = shared.layer_changes.clone();
+    let enabled_changes = shared.enabled_changes.clone();
+    let persistent_changes = shared.persistent_changes.clone();
+    let tag_changes = shared.tag_changes.clone();
+    let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
+        let e: u32 = this.raw_get("__id")?;
+        // `node.pos` — the position as a vec3 value. The script's OWN node
+        // table carries live raw x/y/z (possibly written earlier this
+        // hook), so prefer those; cross-node handles read the mirror.
+        if key == "pos" {
+            if let (Ok(x), Ok(y), Ok(z)) = (
+                this.raw_get::<f64>("x"),
+                this.raw_get::<f64>("y"),
+                this.raw_get::<f64>("z"),
+            ) {
+                return crate::math_api::LuaVec3(glam::DVec3::new(x, y, z)).into_lua(lua);
             }
-            // `node.tickPos` / `node.tickX|Y|Z` — the BODY's pose at the start
-            // of this tick, in absolute world coordinates.
-            //
-            // `x`/`y`/`z` are the *interpolated render pose* between ticks, so
-            // building a hurtbox from them inside `fixedUpdate` is an
-            // alpha-dependent read: frame-rate-dependent, and therefore
-            // impossible for any replay to reproduce
-            // (`docs/multiplayer.md` §3). The own-node table
-            // carries live raw tick fields (possibly written earlier this
-            // hook), so prefer those; a cross-node handle reads the body
-            // bridge. Neither answers on a node with no body.
-            if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
-                let own = (
-                    this.raw_get::<f64>("tickX"),
-                    this.raw_get::<f64>("tickY"),
-                    this.raw_get::<f64>("tickZ"),
-                );
-                let p = match own {
-                    (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
-                    _ => bodies.borrow().get(&e).map(|b| b.pos),
-                };
-                let Some(p) = p else { return Ok(Value::Nil) };
+            if let Some(tr) = scene.borrow().transforms.get(&e) {
+                return crate::math_api::LuaVec3(tr.translation).into_lua(lua);
+            }
+            return Ok(Value::Nil);
+        }
+        // `node.tickPos` / `node.tickX|Y|Z` — the BODY's pose at the start
+        // of this tick, in absolute world coordinates.
+        //
+        // `x`/`y`/`z` are the *interpolated render pose* between ticks, so
+        // building a hurtbox from them inside `fixedUpdate` is an
+        // alpha-dependent read: frame-rate-dependent, and therefore
+        // impossible for any replay to reproduce
+        // (`docs/multiplayer.md` §3). The own-node table
+        // carries live raw tick fields (possibly written earlier this
+        // hook), so prefer those; a cross-node handle reads the body
+        // bridge. Neither answers on a node with no body.
+        if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
+            let own = (
+                this.raw_get::<f64>("tickX"),
+                this.raw_get::<f64>("tickY"),
+                this.raw_get::<f64>("tickZ"),
+            );
+            let p = match own {
+                (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
+                _ => bodies.borrow().get(&e).map(|b| b.pos),
+            };
+            let Some(p) = p else { return Ok(Value::Nil) };
+            return Ok(match key.as_str() {
+                "tickX" => Value::Number(p[0]),
+                "tickY" => Value::Number(p[1]),
+                "tickZ" => Value::Number(p[2]),
+                _ => crate::math_api::LuaVec3(
+                    glam::DVec3::new(p[0], p[1], p[2]),
+                ).into_lua(lua)?,
+            });
+        }
+        // Transform reads.
+        {
+            let s = scene.borrow();
+            // `node.worldX/worldY/worldZ` / `node.worldPos` — the position in
+            // WORLD space, composed up the parent chain. Read-only, and the
+            // answer to a whole class of "my unit walked off forever": x/y/z
+            // are LOCAL, so a script that compares a node under a moved
+            // parent against a world-space target never arrives.
+            if matches!(key.as_str(), "worldX" | "worldY" | "worldZ" | "worldPos") {
+                if !s.transforms.contains_key(&e) {
+                    return Ok(Value::Nil);
+                }
+                // Live local position when this is the script's own node, so
+                // `node.pos = p` is visible to `node.worldX` on the very next
+                // line rather than one hook later.
+                let w = world_transform_of_handle(&s, &this, e).translation;
                 return Ok(match key.as_str() {
-                    "tickX" => Value::Number(p[0]),
-                    "tickY" => Value::Number(p[1]),
-                    "tickZ" => Value::Number(p[2]),
-                    _ => crate::math_api::LuaVec3(
-                        glam::DVec3::new(p[0], p[1], p[2]),
-                    ).into_lua(lua)?,
+                    "worldX" => Value::Number(w.x),
+                    "worldY" => Value::Number(w.y),
+                    "worldZ" => Value::Number(w.z),
+                    _ => crate::math_api::LuaVec3(w).into_lua(lua)?,
                 });
             }
-            // Transform reads.
-            {
-                let s = scene.borrow();
-                // `node.worldX/worldY/worldZ` / `node.worldPos` — the position in
-                // WORLD space, composed up the parent chain. Read-only, and the
-                // answer to a whole class of "my unit walked off forever": x/y/z
-                // are LOCAL, so a script that compares a node under a moved
-                // parent against a world-space target never arrives.
-                if matches!(key.as_str(), "worldX" | "worldY" | "worldZ" | "worldPos") {
-                    if !s.transforms.contains_key(&e) {
-                        return Ok(Value::Nil);
+            if let Some(tr) = s.transforms.get(&e) {
+                match key.as_str() {
+                    "x" => return Ok(Value::Number(tr.translation.x)),
+                    "y" => return Ok(Value::Number(tr.translation.y)),
+                    "z" => return Ok(Value::Number(tr.translation.z)),
+                    "scale" | "scale_x" | "scaleX" => {
+                        return Ok(Value::Number(tr.scale.x as f64));
                     }
-                    // Live local position when this is the script's own node, so
-                    // `node.pos = p` is visible to `node.worldX` on the very next
-                    // line rather than one hook later.
-                    let w = world_transform_of_handle(&s, &this, e).translation;
-                    return Ok(match key.as_str() {
-                        "worldX" => Value::Number(w.x),
-                        "worldY" => Value::Number(w.y),
-                        "worldZ" => Value::Number(w.z),
-                        _ => crate::math_api::LuaVec3(w).into_lua(lua)?,
-                    });
+                    "scale_y" | "scaleY" => return Ok(Value::Number(tr.scale.y as f64)),
+                    "scale_z" | "scaleZ" => return Ok(Value::Number(tr.scale.z as f64)),
+                    // `node.size` — the whole scale as a vec3, for the
+                    // non-uniform case (`node.scale` stays the uniform
+                    // shortcut it has always been).
+                    "size" => {
+                        return crate::math_api::LuaVec3(glam::DVec3::new(
+                                tr.scale.x as f64,
+                                tr.scale.y as f64,
+                                tr.scale.z as f64,
+                            )).into_lua(lua);
+                    }
+                    "yaw" | "pitch" | "roll" => {
+                        let (y, p, r) = tr.rotation.to_euler(EulerRot::YXZ);
+                        let v = match key.as_str() {
+                            "yaw" => y,
+                            "pitch" => p,
+                            _ => r,
+                        };
+                        return Ok(Value::Number(v as f64));
+                    }
+                    _ => {}
                 }
-                if let Some(tr) = s.transforms.get(&e) {
+            }
+        }
+        // Identity / hierarchy fields.
+        match key.as_str() {
+            "id" => return Ok(Value::Integer(e as mlua::Integer)),
+            "name" => {
+                let n = scene.borrow().names.get(&e).cloned();
+                return Ok(match n {
+                    Some(n) => Value::String(lua.create_string(&n)?),
+                    None => Value::Nil,
+                });
+            }
+            "valid" => return Ok(Value::Boolean(scene.borrow().transforms.contains_key(&e))),
+            "parent" => {
+                let p = scene.borrow().parent.get(&e).copied();
+                return Ok(match p {
+                    Some(p) => Value::Table(new_node_handle(lua, p)?),
+                    None => Value::Nil,
+                });
+            }
+            // `node.scripts` — every script on this node, as handles, in
+            // the order they were attached. Possibly empty, never nil.
+            //
+            // This is the plural of `node:getScript(name)`, and it exists
+            // because the singular is unanswerable until you already know
+            // the answer: a script reaching across to a sibling or a parent
+            // has to spell the name exactly, a wrong spelling reads `nil`,
+            // and `nil` is also what "no such node" and "not running yet"
+            // look like. `for _, s in ipairs(n.scripts) do print(s.kind)
+            // end` settles which of those it is in one line, and reaching
+            // for the plural first is what people actually type.
+            "scripts" => {
+                let kinds = scene.borrow().kinds_on(e).to_vec();
+                let arr = lua.create_table()?;
+                for (i, k) in kinds.iter().enumerate() {
+                    arr.set(i + 1, new_script_handle(lua, e, k)?)?;
+                }
+                return Ok(Value::Table(arr));
+            }
+            // The mesh node's current model path (nil on non-mesh nodes). Assigning it
+            // (see __newindex) swaps the model at runtime.
+            "model" => {
+                let m = scene.borrow().models.get(&e).cloned();
+                return Ok(match m {
+                    Some(p) => Value::String(lua.create_string(&p)?),
+                    None => Value::Nil,
+                });
+            }
+            // Whether the node's geometry is drawn (true unless explicitly hidden).
+            "visible" => {
+                let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
+                return Ok(Value::Boolean(v));
+            }
+            // Read-your-writes within the frame, then the scene mirror.
+            "enabled" => {
+                let v = enabled_changes
+                    .borrow()
+                    .get(&e)
+                    .copied()
+                    .unwrap_or_else(|| !scene.borrow().disabled.contains(&e));
+                return Ok(Value::Boolean(v));
+            }
+            // Whether the node survives a scene swap (read-your-writes, as
+            // above). Reports what was SET on this node — the subtree rule
+            // means a child of a persistent folder also survives, but it is
+            // the folder that carries the flag.
+            "persistent" => {
+                let v = persistent_changes
+                    .borrow()
+                    .get(&e)
+                    .copied()
+                    .unwrap_or_else(|| scene.borrow().persistent.contains(&e));
+                return Ok(Value::Boolean(v));
+            }
+            // The node's collision/query layer, by name ("Default" when unset) —
+            // read-your-writes within the frame via the pending-changes map.
+            "layer" => {
+                let l = layer_changes
+                    .borrow()
+                    .get(&e)
+                    .cloned()
+                    .or_else(|| scene.borrow().layers.get(&e).cloned())
+                    .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string());
+                return Ok(Value::String(lua.create_string(&l)?));
+            }
+            // The node's tags as a fresh array table (possibly empty) —
+            // read-your-writes via the pending map, like `layer`.
+            "tags" => {
+                let tags = tag_changes
+                    .borrow()
+                    .get(&e)
+                    .cloned()
+                    .or_else(|| scene.borrow().tags.get(&e).cloned())
+                    .unwrap_or_default();
+                let arr = lua.create_table()?;
+                for (i, t) in tags.iter().enumerate() {
+                    arr.set(i + 1, lua.create_string(t)?)?;
+                }
+                return Ok(Value::Table(arr));
+            }
+            // A UI element's text (nil on non-text nodes). Assigning it (see
+            // __newindex) changes what the label shows — read-your-writes within
+            // the frame via the pending-changes map.
+            "text" => {
+                let t = ui_text_changes
+                    .borrow()
+                    .get(&e)
+                    .cloned()
+                    .or_else(|| scene.borrow().ui_texts.get(&e).cloned());
+                return Ok(match t {
+                    Some(t) => Value::String(lua.create_string(&t)?),
+                    None => Value::Nil,
+                });
+            }
+            // A UI image's texture path (nil on elements with no image).
+            // Readable as well as writable, so `node.texture` behaves like
+            // `node.text` rather than being a write-only corner.
+            "texture" => {
+                let t = node_strs_r
+                    .borrow()
+                    .get(&(e, "UiElement".to_string(), "texture".to_string()))
+                    .cloned()
+                    .or_else(|| scene.borrow().ui_textures.get(&e).cloned());
+                return Ok(match t {
+                    Some(t) => Value::String(lua.create_string(&t)?),
+                    None => Value::Nil,
+                });
+            }
+            // The element's style name. Same read-your-writes rule as
+            // `text`: a write earlier this frame reads back before the
+            // flush to the ECS.
+            "style" => {
+                let s = ui_style_changes
+                    .borrow()
+                    .get(&e)
+                    .cloned()
+                    .or_else(|| scene.borrow().ui_styles.get(&e).cloned());
+                return Ok(match s {
+                    Some(s) => Value::String(lua.create_string(&s)?),
+                    None => Value::Nil,
+                });
+            }
+            // Is the keyboard/gamepad ring on this element right now? Read
+            // only — moving focus is `ui.focus(node)`, so there is exactly
+            // one place that can change it and one place to look for bugs.
+            "focused" => return Ok(Value::Boolean(*ui_focus.borrow() == Some(e))),
+            // Which row of a repeater this is, 0-based. `nil` on anything
+            // a repeater didn't spawn — so `if node.index then` is a
+            // perfectly good "am I a row".
+            "index" => {
+                return Ok(match scene.borrow().repeat_index.get(&e) {
+                    Some(i) => Value::Integer(*i as mlua::Integer),
+                    None => Value::Nil,
+                });
+            }
+            _ => {}
+        }
+        // Physics body fields.
+        match key.as_str() {
+            "vx" | "vy" | "vz" => {
+                let vel = body_changes
+                    .borrow()
+                    .get(&e)
+                    .copied()
+                    .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
+                return Ok(match vel {
+                    Some(v) => Value::Number(match key.as_str() {
+                        "vx" => v[0],
+                        "vy" => v[1],
+                        _ => v[2],
+                    } as f64),
+                    None => Value::Nil,
+                });
+            }
+            "up_x" | "up_y" | "up_z" | "upX" | "upY" | "upZ" => {
+                return Ok(match bodies.borrow().get(&e) {
+                    Some(b) => Value::Number(match key.as_str() {
+                        "up_x" | "upX" => b.up[0],
+                        "up_y" | "upY" => b.up[1],
+                        _ => b.up[2],
+                    } as f64),
+                    None => Value::Nil,
+                });
+            }
+            // ---- the VECTOR reads ------------------------------------
+            // `node.vel`, `node.up`, `node.forward`, `node.right`: the same
+            // state the scalar fields above expose, as one vec3 each — so a
+            // controller writes `node.vel = node.vel + up * jump` instead of
+            // three lines and a hand-rolled `norm(x, y, z)`.
+            "vel" => {
+                let vel = body_changes
+                    .borrow()
+                    .get(&e)
+                    .copied()
+                    .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
+                return Ok(match vel {
+                    Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
+                            v[0] as f64,
+                            v[1] as f64,
+                            v[2] as f64,
+                        )).into_lua(lua)?,
+                    None => Value::Nil,
+                });
+            }
+            "up" => {
+                return Ok(match bodies.borrow().get(&e) {
+                    Some(b) => crate::math_api::LuaVec3(glam::DVec3::new(
+                            b.up[0] as f64,
+                            b.up[1] as f64,
+                            b.up[2] as f64,
+                        )).into_lua(lua)?,
+                    None => Value::Nil,
+                });
+            }
+            // What the body is touching: the floor under it, and the
+            // steepest thing it is pressed against. `nil` when there is no
+            // such surface this step — `if node.wallNormal then` is the
+            // whole test. A controller uses the second one to stop pushing
+            // into a cliff, which is what otherwise fires it into the sky.
+            "groundNormal" | "wallNormal" => {
+                let n = bodies.borrow().get(&e).and_then(|b| {
+                    if key == "groundNormal" { b.ground_normal } else { b.wall_normal }
+                });
+                return Ok(match n {
+                    Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
+                            v[0] as f64,
+                            v[1] as f64,
+                            v[2] as f64,
+                        )).into_lua(lua)?,
+                    None => Value::Nil,
+                });
+            }
+            // Facing, from the node's ROTATION (not the body) so it answers
+            // on anything with a transform. −Z forward matches the camera
+            // convention (`floptle_render::camera`), +X right, +Y local up.
+            "forward" | "right" | "localUp" => {
+                let rot = scene.borrow().transforms.get(&e).map(|t| t.rotation);
+                return Ok(match rot {
+                    Some(r) => {
+                        let v = match key.as_str() {
+                            "forward" => r * glam::Vec3::NEG_Z,
+                            "right" => r * glam::Vec3::X,
+                            _ => r * glam::Vec3::Y,
+                        };
+                        crate::math_api::LuaVec3(
+                            glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64),
+                        ).into_lua(lua)?
+                    }
+                    None => Value::Nil,
+                });
+            }
+            "grounded" => {
+                return Ok(Value::Boolean(
+                    bodies.borrow().get(&e).map(|b| b.grounded).unwrap_or(false),
+                ));
+            }
+            "height" => {
+                return Ok(match bodies.borrow().get(&e) {
+                    Some(b) => Value::Number(b.height as f64),
+                    None => Value::Nil,
+                });
+            }
+            _ => {}
+        }
+        // Otherwise a method (children / getChild / getscript / find …) or nil.
+        let methods: Table = lua.named_registry_value("floptle_node_methods")?;
+        let hit = methods.get::<Value>(key.as_str())?;
+        if hit != Value::Nil {
+            return Ok(hit);
+        }
+        // A CASING slip on a real method used to die at the CALL — "attempt
+        // to call method 'getChild' (a nil value)" — which names the symptom
+        // and not one thing to do about it. Answer it here instead, the way
+        // the animator metatable does. Only a case-insensitive exact match
+        // raises: anything genuinely unknown still indexes to nil, so
+        // feature probes (`if node.someday then`) keep working.
+        for pair in methods.pairs::<String, Value>() {
+            let (known, _) = pair?;
+            if known.eq_ignore_ascii_case(&key) {
+                return Err(mlua::Error::runtime(format!(
+                    "a node has no `{key}` — did you mean `{known}`?"
+                )));
+            }
+        }
+        Ok(Value::Nil)
+    })?;
+    node_mt.set("__index", idx)?;
+}
+{
+    let scene = shared.scene.clone();
+    let bodies = shared.bodies.clone();
+    let body_changes = shared.body_changes.clone();
+    let body_height = shared.body_height_changes.clone();
+    let body_pos = shared.body_pos_changes.clone();
+    let model_changes = shared.model_changes.clone();
+    let material_changes = shared.material_changes.clone();
+    let visible_changes = shared.visible_changes.clone();
+    let enabled_changes = shared.enabled_changes.clone();
+    let persistent_changes = shared.persistent_changes.clone();
+    let layer_changes = shared.layer_changes.clone();
+    let tag_changes = shared.tag_changes.clone();
+    let layer_table = shared.layer_table.clone();
+    let ui_text_changes = shared.ui_text_changes.clone();
+    let ui_style_changes = shared.ui_style_changes.clone();
+    let node_strs = shared.component_strs.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.miss_warned.clone();
+    let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+        let e: u32 = this.raw_get("__id")?;
+        // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
+        // table writes its live raw fields (the normal read-back path);
+        // cross-node handles write the mirror.
+        if key == "pos" {
+            let Some(v) = crate::math_api::vec3_of(&val) else {
+                return Err(mlua::Error::RuntimeError(
+                    "node.pos takes a vec3 (or anything with x/y/z)".into(),
+                ));
+            };
+            let own = this.raw_get::<f64>("x").is_ok();
+            if own {
+                this.raw_set("x", v.x)?;
+                this.raw_set("y", v.y)?;
+                this.raw_set("z", v.z)?;
+            } else {
+                let mut s = scene.borrow_mut();
+                if let Some(tr) = s.transforms.get_mut(&e) {
+                    tr.translation = v;
+                    s.dirty.insert(e);
+                    // A body node: the physics writeback would stomp this —
+                    // queue a real TELEPORT for the driver.
+                    if bodies.borrow().contains_key(&e) {
+                        body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // `node.tickPos = vec3(...)` / `node.tickX = n` — move the BODY in
+        // the tick channel, without touching the render transform. The
+        // transform would be overwritten by the interpolated writeback
+        // anyway, which is what makes `node.x = node.x + d` inside
+        // fixedUpdate teleport a fighter back onto its visual position:
+        // the classic "the visuals take the knockback, the hitbox stays
+        // put" bug (`docs/multiplayer.md` §3).
+        if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
+            let own = this.raw_get::<f64>("tickX").is_ok();
+            let mut p = match (
+                this.raw_get::<f64>("tickX"),
+                this.raw_get::<f64>("tickY"),
+                this.raw_get::<f64>("tickZ"),
+            ) {
+                (Ok(x), Ok(y), Ok(z)) => [x, y, z],
+                _ => match bodies.borrow().get(&e) {
+                    Some(b) => b.pos,
+                    // No body means no tick channel; a silent no-op here
+                    // would look exactly like a working teleport.
+                    None => {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.tickPos is the physics body's tick pose — this node has \
+                             no RigidBody. Use node.pos for a plain transform move."
+                                .into(),
+                        ))
+                    }
+                },
+            };
+            match key.as_str() {
+                "tickX" => p[0] = as_num(&val).unwrap_or(p[0]),
+                "tickY" => p[1] = as_num(&val).unwrap_or(p[1]),
+                "tickZ" => p[2] = as_num(&val).unwrap_or(p[2]),
+                _ => {
+                    let Some(v) = crate::math_api::vec3_of(&val) else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.tickPos takes a vec3 (or anything with x/y/z)".into(),
+                        ));
+                    };
+                    p = [v.x, v.y, v.z];
+                }
+            }
+            if own {
+                // The own-node read-back picks these up after the hook,
+                // alongside every other body write.
+                this.raw_set("tickX", p[0])?;
+                this.raw_set("tickY", p[1])?;
+                this.raw_set("tickZ", p[2])?;
+            } else {
+                body_pos.borrow_mut().insert(e, p);
+            }
+            return Ok(());
+        }
+        // Transform writes.
+        {
+            let mut s = scene.borrow_mut();
+            if let Some(tr) = s.transforms.get_mut(&e) {
+                let mut handled = true;
+                match key.as_str() {
+                    "x" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.translation.x = n;
+                        }
+                    }
+                    "y" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.translation.y = n;
+                        }
+                    }
+                    "z" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.translation.z = n;
+                        }
+                    }
+                    // A number splats (the classic form); a vec3 sets each
+                    // axis, so `node.scale = vec3(2, 1, 1)` no longer needs
+                    // three statements. `node.size` is the same setter.
+                    "scale" | "size" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.scale = Vec3::splat(n as f32);
+                        } else if let Some(v) = crate::math_api::vec3_of(&val) {
+                            tr.scale = Vec3::new(v.x as f32, v.y as f32, v.z as f32);
+                        }
+                    }
+                    "scale_x" | "scaleX" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.scale.x = n as f32;
+                        }
+                    }
+                    "scale_y" | "scaleY" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.scale.y = n as f32;
+                        }
+                    }
+                    "scale_z" | "scaleZ" => {
+                        if let Some(n) = as_num(&val) {
+                            tr.scale.z = n as f32;
+                        }
+                    }
+                    "yaw" | "pitch" | "roll" => {
+                        if let Some(n) = as_num(&val) {
+                            let (mut y, mut p, mut r) = tr.rotation.to_euler(EulerRot::YXZ);
+                            let changed = match key.as_str() {
+                                "yaw" => n != y as f64,
+                                "pitch" => n != p as f64,
+                                _ => n != r as f64,
+                            };
+                            if changed {
+                                match key.as_str() {
+                                    "yaw" => y = n as f32,
+                                    "pitch" => p = n as f32,
+                                    _ => r = n as f32,
+                                }
+                                tr.rotation = Quat::from_euler(EulerRot::YXZ, y, p, r);
+                            }
+                        }
+                    }
+                    _ => handled = false,
+                }
+                if handled {
+                    // Position writes on a BODY node also teleport the body
+                    // (the writeback would revert the transform otherwise).
+                    if matches!(key.as_str(), "x" | "y" | "z")
+                        && bodies.borrow().contains_key(&e)
+                    {
+                        let t = tr.translation;
+                        body_pos.borrow_mut().insert(e, [t.x, t.y, t.z]);
+                    }
+                    s.dirty.insert(e);
+                    return Ok(());
+                }
+            }
+        }
+        // Physics body writes.
+        match key.as_str() {
+            "vx" | "vy" | "vz" => {
+                if let Some(n) = as_num(&val) {
+                    let mut bc = body_changes.borrow_mut();
+                    let mut v = bc
+                        .get(&e)
+                        .copied()
+                        .or_else(|| bodies.borrow().get(&e).map(|b| b.vel))
+                        .unwrap_or([0.0; 3]);
                     match key.as_str() {
-                        "x" => return Ok(Value::Number(tr.translation.x)),
-                        "y" => return Ok(Value::Number(tr.translation.y)),
-                        "z" => return Ok(Value::Number(tr.translation.z)),
-                        "scale" | "scale_x" | "scaleX" => {
-                            return Ok(Value::Number(tr.scale.x as f64));
-                        }
-                        "scale_y" | "scaleY" => return Ok(Value::Number(tr.scale.y as f64)),
-                        "scale_z" | "scaleZ" => return Ok(Value::Number(tr.scale.z as f64)),
-                        // `node.size` — the whole scale as a vec3, for the
-                        // non-uniform case (`node.scale` stays the uniform
-                        // shortcut it has always been).
-                        "size" => {
-                            return crate::math_api::LuaVec3(glam::DVec3::new(
-                                    tr.scale.x as f64,
-                                    tr.scale.y as f64,
-                                    tr.scale.z as f64,
-                                )).into_lua(lua);
-                        }
-                        "yaw" | "pitch" | "roll" => {
-                            let (y, p, r) = tr.rotation.to_euler(EulerRot::YXZ);
-                            let v = match key.as_str() {
-                                "yaw" => y,
-                                "pitch" => p,
-                                _ => r,
-                            };
-                            return Ok(Value::Number(v as f64));
-                        }
-                        _ => {}
+                        "vx" => v[0] = n as f32,
+                        "vy" => v[1] = n as f32,
+                        _ => v[2] = n as f32,
                     }
+                    bc.insert(e, v);
                 }
+                return Ok(());
             }
-            // Identity / hierarchy fields.
-            match key.as_str() {
-                "id" => return Ok(Value::Integer(e as mlua::Integer)),
-                "name" => {
-                    let n = scene.borrow().names.get(&e).cloned();
-                    return Ok(match n {
-                        Some(n) => Value::String(lua.create_string(&n)?),
-                        None => Value::Nil,
-                    });
-                }
-                "valid" => return Ok(Value::Boolean(scene.borrow().transforms.contains_key(&e))),
-                "parent" => {
-                    let p = scene.borrow().parent.get(&e).copied();
-                    return Ok(match p {
-                        Some(p) => Value::Table(new_node_handle(lua, p)?),
-                        None => Value::Nil,
-                    });
-                }
-                // `node.scripts` — every script on this node, as handles, in
-                // the order they were attached. Possibly empty, never nil.
-                //
-                // This is the plural of `node:getScript(name)`, and it exists
-                // because the singular is unanswerable until you already know
-                // the answer: a script reaching across to a sibling or a parent
-                // has to spell the name exactly, a wrong spelling reads `nil`,
-                // and `nil` is also what "no such node" and "not running yet"
-                // look like. `for _, s in ipairs(n.scripts) do print(s.kind)
-                // end` settles which of those it is in one line, and reaching
-                // for the plural first is what people actually type.
-                "scripts" => {
-                    let kinds = scene.borrow().kinds_on(e).to_vec();
-                    let arr = lua.create_table()?;
-                    for (i, k) in kinds.iter().enumerate() {
-                        arr.set(i + 1, new_script_handle(lua, e, k)?)?;
-                    }
-                    return Ok(Value::Table(arr));
-                }
-                // The mesh node's current model path (nil on non-mesh nodes). Assigning it
-                // (see __newindex) swaps the model at runtime.
-                "model" => {
-                    let m = scene.borrow().models.get(&e).cloned();
-                    return Ok(match m {
-                        Some(p) => Value::String(lua.create_string(&p)?),
-                        None => Value::Nil,
-                    });
-                }
-                // Whether the node's geometry is drawn (true unless explicitly hidden).
-                "visible" => {
-                    let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
-                    return Ok(Value::Boolean(v));
-                }
-                // Read-your-writes within the frame, then the scene mirror.
-                "enabled" => {
-                    let v = enabled_changes
-                        .borrow()
-                        .get(&e)
-                        .copied()
-                        .unwrap_or_else(|| !scene.borrow().disabled.contains(&e));
-                    return Ok(Value::Boolean(v));
-                }
-                // Whether the node survives a scene swap (read-your-writes, as
-                // above). Reports what was SET on this node — the subtree rule
-                // means a child of a persistent folder also survives, but it is
-                // the folder that carries the flag.
-                "persistent" => {
-                    let v = persistent_changes
-                        .borrow()
-                        .get(&e)
-                        .copied()
-                        .unwrap_or_else(|| scene.borrow().persistent.contains(&e));
-                    return Ok(Value::Boolean(v));
-                }
-                // The node's collision/query layer, by name ("Default" when unset) —
-                // read-your-writes within the frame via the pending-changes map.
-                "layer" => {
-                    let l = layer_changes
-                        .borrow()
-                        .get(&e)
-                        .cloned()
-                        .or_else(|| scene.borrow().layers.get(&e).cloned())
-                        .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string());
-                    return Ok(Value::String(lua.create_string(&l)?));
-                }
-                // The node's tags as a fresh array table (possibly empty) —
-                // read-your-writes via the pending map, like `layer`.
-                "tags" => {
-                    let tags = tag_changes
-                        .borrow()
-                        .get(&e)
-                        .cloned()
-                        .or_else(|| scene.borrow().tags.get(&e).cloned())
-                        .unwrap_or_default();
-                    let arr = lua.create_table()?;
-                    for (i, t) in tags.iter().enumerate() {
-                        arr.set(i + 1, lua.create_string(t)?)?;
-                    }
-                    return Ok(Value::Table(arr));
-                }
-                // A UI element's text (nil on non-text nodes). Assigning it (see
-                // __newindex) changes what the label shows — read-your-writes within
-                // the frame via the pending-changes map.
-                "text" => {
-                    let t = ui_text_changes
-                        .borrow()
-                        .get(&e)
-                        .cloned()
-                        .or_else(|| scene.borrow().ui_texts.get(&e).cloned());
-                    return Ok(match t {
-                        Some(t) => Value::String(lua.create_string(&t)?),
-                        None => Value::Nil,
-                    });
-                }
-                // A UI image's texture path (nil on elements with no image).
-                // Readable as well as writable, so `node.texture` behaves like
-                // `node.text` rather than being a write-only corner.
-                "texture" => {
-                    let t = node_strs_r
-                        .borrow()
-                        .get(&(e, "UiElement".to_string(), "texture".to_string()))
-                        .cloned()
-                        .or_else(|| scene.borrow().ui_textures.get(&e).cloned());
-                    return Ok(match t {
-                        Some(t) => Value::String(lua.create_string(&t)?),
-                        None => Value::Nil,
-                    });
-                }
-                // The element's style name. Same read-your-writes rule as
-                // `text`: a write earlier this frame reads back before the
-                // flush to the ECS.
-                "style" => {
-                    let s = ui_style_changes
-                        .borrow()
-                        .get(&e)
-                        .cloned()
-                        .or_else(|| scene.borrow().ui_styles.get(&e).cloned());
-                    return Ok(match s {
-                        Some(s) => Value::String(lua.create_string(&s)?),
-                        None => Value::Nil,
-                    });
-                }
-                // Is the keyboard/gamepad ring on this element right now? Read
-                // only — moving focus is `ui.focus(node)`, so there is exactly
-                // one place that can change it and one place to look for bugs.
-                "focused" => return Ok(Value::Boolean(*ui_focus.borrow() == Some(e))),
-                // Which row of a repeater this is, 0-based. `nil` on anything
-                // a repeater didn't spawn — so `if node.index then` is a
-                // perfectly good "am I a row".
-                "index" => {
-                    return Ok(match scene.borrow().repeat_index.get(&e) {
-                        Some(i) => Value::Integer(*i as mlua::Integer),
-                        None => Value::Nil,
-                    });
-                }
-                _ => {}
-            }
-            // Physics body fields.
-            match key.as_str() {
-                "vx" | "vy" | "vz" => {
-                    let vel = body_changes
-                        .borrow()
-                        .get(&e)
-                        .copied()
-                        .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
-                    return Ok(match vel {
-                        Some(v) => Value::Number(match key.as_str() {
-                            "vx" => v[0],
-                            "vy" => v[1],
-                            _ => v[2],
-                        } as f64),
-                        None => Value::Nil,
-                    });
-                }
-                "up_x" | "up_y" | "up_z" | "upX" | "upY" | "upZ" => {
-                    return Ok(match bodies.borrow().get(&e) {
-                        Some(b) => Value::Number(match key.as_str() {
-                            "up_x" | "upX" => b.up[0],
-                            "up_y" | "upY" => b.up[1],
-                            _ => b.up[2],
-                        } as f64),
-                        None => Value::Nil,
-                    });
-                }
-                // ---- the VECTOR reads ------------------------------------
-                // `node.vel`, `node.up`, `node.forward`, `node.right`: the same
-                // state the scalar fields above expose, as one vec3 each — so a
-                // controller writes `node.vel = node.vel + up * jump` instead of
-                // three lines and a hand-rolled `norm(x, y, z)`.
-                "vel" => {
-                    let vel = body_changes
-                        .borrow()
-                        .get(&e)
-                        .copied()
-                        .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
-                    return Ok(match vel {
-                        Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
-                                v[0] as f64,
-                                v[1] as f64,
-                                v[2] as f64,
-                            )).into_lua(lua)?,
-                        None => Value::Nil,
-                    });
-                }
-                "up" => {
-                    return Ok(match bodies.borrow().get(&e) {
-                        Some(b) => crate::math_api::LuaVec3(glam::DVec3::new(
-                                b.up[0] as f64,
-                                b.up[1] as f64,
-                                b.up[2] as f64,
-                            )).into_lua(lua)?,
-                        None => Value::Nil,
-                    });
-                }
-                // What the body is touching: the floor under it, and the
-                // steepest thing it is pressed against. `nil` when there is no
-                // such surface this step — `if node.wallNormal then` is the
-                // whole test. A controller uses the second one to stop pushing
-                // into a cliff, which is what otherwise fires it into the sky.
-                "groundNormal" | "wallNormal" => {
-                    let n = bodies.borrow().get(&e).and_then(|b| {
-                        if key == "groundNormal" { b.ground_normal } else { b.wall_normal }
-                    });
-                    return Ok(match n {
-                        Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
-                                v[0] as f64,
-                                v[1] as f64,
-                                v[2] as f64,
-                            )).into_lua(lua)?,
-                        None => Value::Nil,
-                    });
-                }
-                // Facing, from the node's ROTATION (not the body) so it answers
-                // on anything with a transform. −Z forward matches the camera
-                // convention (`floptle_render::camera`), +X right, +Y local up.
-                "forward" | "right" | "localUp" => {
-                    let rot = scene.borrow().transforms.get(&e).map(|t| t.rotation);
-                    return Ok(match rot {
-                        Some(r) => {
-                            let v = match key.as_str() {
-                                "forward" => r * glam::Vec3::NEG_Z,
-                                "right" => r * glam::Vec3::X,
-                                _ => r * glam::Vec3::Y,
-                            };
-                            crate::math_api::LuaVec3(
-                                glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64),
-                            ).into_lua(lua)?
-                        }
-                        None => Value::Nil,
-                    });
-                }
-                "grounded" => {
-                    return Ok(Value::Boolean(
-                        bodies.borrow().get(&e).map(|b| b.grounded).unwrap_or(false),
+            // `node.vel = vec3(...)` — the whole velocity in one write (or
+            // anything with x/y/z, so `node.vel = other.vel` works).
+            "vel" => {
+                let Some(v) = crate::math_api::vec3_of(&val) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.vel takes a vec3 (or anything with x/y/z)".into(),
                     ));
-                }
-                "height" => {
-                    return Ok(match bodies.borrow().get(&e) {
-                        Some(b) => Value::Number(b.height as f64),
-                        None => Value::Nil,
-                    });
-                }
-                _ => {}
+                };
+                body_changes.borrow_mut().insert(e, [v.x as f32, v.y as f32, v.z as f32]);
+                return Ok(());
             }
-            // Otherwise a method (children / getChild / getscript / find …) or nil.
-            let methods: Table = lua.named_registry_value("floptle_node_methods")?;
-            let hit = methods.get::<Value>(key.as_str())?;
-            if hit != Value::Nil {
-                return Ok(hit);
+            "height" => {
+                if let Some(n) = as_num(&val) {
+                    body_height.borrow_mut().insert(e, n as f32);
+                }
+                return Ok(());
             }
-            // A CASING slip on a real method used to die at the CALL — "attempt
-            // to call method 'getChild' (a nil value)" — which names the symptom
-            // and not one thing to do about it. Answer it here instead, the way
-            // the animator metatable does. Only a case-insensitive exact match
-            // raises: anything genuinely unknown still indexes to nil, so
-            // feature probes (`if node.someday then`) keep working.
-            for pair in methods.pairs::<String, Value>() {
-                let (known, _) = pair?;
-                if known.eq_ignore_ascii_case(&key) {
-                    return Err(mlua::Error::runtime(format!(
-                        "a node has no `{key}` — did you mean `{known}`?"
+            _ => {}
+        }
+        // Component swaps (applied to the ECS at the end of `run`): the mesh model path
+        // and a material (preset name or `assets.getFile("materials/X.ron")`).
+        match key.as_str() {
+            "model" => {
+                if let Value::String(s) = &val {
+                    model_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                }
+                return Ok(());
+            }
+            "material" => {
+                if let Value::String(s) = &val {
+                    material_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                }
+                return Ok(());
+            }
+            "visible" => {
+                if let Value::Boolean(b) = val {
+                    visible_changes.borrow_mut().insert(e, b);
+                }
+                return Ok(());
+            }
+            // Switch the node — and everything under it — off or on. Stronger than
+            // `visible`, which only stops the draw: this also takes the node out of
+            // physics and stops its scripts. A node cannot re-enable ITSELF (its
+            // scripts aren't running); something else has to.
+            "enabled" => {
+                if let Value::Boolean(b) = val {
+                    enabled_changes.borrow_mut().insert(e, b);
+                }
+                return Ok(());
+            }
+            // Carry the node — and everything under it — across a scene
+            // swap: the DontDestroyOnLoad equivalent. Its scripts keep
+            // running rather than re-`start`ing, because the node never
+            // stopped existing.
+            "persistent" => {
+                let Value::Boolean(b) = val else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.persistent takes a boolean".into(),
+                    ));
+                };
+                persistent_changes.borrow_mut().insert(e, b);
+                return Ok(());
+            }
+            // `node.layer = "Enemies"` — validated against the project's
+            // layer table NOW, so a typo errors at the assignment (never a
+            // silently-Default node). Applied to the ECS after the pass;
+            // a dynamic body re-resolves its bit next frame (live).
+            "layer" => {
+                let Value::String(s) = &val else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.layer takes a layer name (a string)".into(),
+                    ));
+                };
+                let name = s.to_string_lossy().to_string();
+                let lt = layer_table.borrow();
+                if lt.index_of(&name).is_none() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "no layer named '{name}' (project layers: {})",
+                        lt.names.join(", ")
                     )));
+                }
+                drop(lt);
+                layer_changes.borrow_mut().insert(e, name);
+                return Ok(());
+            }
+            // `node.tags = {"enemy", "boss"}` — replace the whole list
+            // (use node:addTag / node:removeTag for single edits).
+            "tags" => {
+                let Value::Table(t) = &val else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.tags takes an array of strings".into(),
+                    ));
+                };
+                let mut tags: Vec<String> = Vec::new();
+                for v in t.sequence_values::<String>() {
+                    let v = v?;
+                    if !tags.contains(&v) {
+                        tags.push(v);
+                    }
+                }
+                tag_changes.borrow_mut().insert(e, tags);
+                return Ok(());
+            }
+            // Which named style paints this element ("" = none).
+            "style" => {
+                if let Value::String(s) = &val {
+                    ui_style_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                }
+                return Ok(());
+            }
+            // `node.texture = "textures/ui/portrait.png"` — the UI image's
+            // texture, creating the image slot if the element has none, so
+            // a bare element can become a sprite. Raises on a non-string
+            // rather than dropping it: this write did NOTHING for months and
+            // nobody could tell, which is the whole of.
+            "texture" => {
+                let Value::String(s) = &val else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.texture takes an asset path (a string)".into(),
+                    ));
+                };
+                node_strs.borrow_mut().insert(
+                    (e, "UiElement".to_string(), "texture".to_string()),
+                    s.to_string_lossy().to_string(),
+                );
+                return Ok(());
+            }
+            // UI element text: numbers coerce (hp counters write numbers directly).
+            "text" => {
+                match &val {
+                    Value::String(s) => {
+                        ui_text_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                    }
+                    Value::Number(n) => {
+                        ui_text_changes.borrow_mut().insert(e, format_lua_number(*n));
+                    }
+                    Value::Integer(n) => {
+                        ui_text_changes.borrow_mut().insert(e, n.to_string());
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        // Unknown key: stash it on the handle table. That is a real
+        // affordance on the script's OWN `node` — there is one table per
+        // instance, re-stamped each hook rather than rebuilt (see
+        // `env::node_table`), so `node.myFlag = true` in `start` is still
+        // there in `update`.
+        //
+        // On a handle from `find(...)` / `:getchild(...)` it is not. Those
+        // are built fresh per call, so the write lands on a table nobody
+        // will hold again and reads back nil from the very next lookup —
+        // and the same is true of a casing slip on a field that does exist
+        // (`node.Yaw = 3`). Both used to be silent. Say it once.
+        let own = this.raw_get::<f64>("x").is_ok();
+        if !own {
+            warn_once(&logs, &warned, format!("nodestash:{e}:{key}"), || {
+                format!(
+                    "a node has no `{key}` to write, so `.{key} = ...` on a handle from \
+                     find/getChild/findTagged goes nowhere — that handle is built fresh \
+                     each time you ask for it. Check the spelling, or keep the value in \
+                     your own script (or on your own `node`, which does persist)."
+                )
+            });
+        }
+        this.raw_set(key, val)?;
+        Ok(())
+    })?;
+    node_mt.set("__newindex", newidx)?;
+}
+lua.set_named_registry_value("floptle_node_mt", node_mt)?;
+    Ok(())
+}
+
+/// The component handle's metatable (`node:getcomponent`).
+fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+// ---- component handle metatable (node:getcomponent) -----------------------------
+// A component handle reads its numeric fields from the mirror (or this frame's pending
+// writes) and records assignments; the writes are flushed to the ECS after `run`.
+{
+    let comp_mt = lua.create_table()?;
+    // **A material handle's shader knobs**: the four
+    // methods below mirror `node:setShaderParam` / `setShaderTexture`, but
+    // address the material the HANDLE names — the node's own for
+    // `node:material()`, one part's override for `node:material("Head#2")`.
+    // The node-level call folds into the node's own Material and could
+    // never reach a part, so a character whose parts wear `.flsl` shaders
+    // had every uniform authored in the scene and not one of them changeable
+    // at runtime. Built once and handed out by `__index`, not created per
+    // lookup: a script calls these every tick.
+    let which_material = |comp: &str| -> Option<Option<String>> {
+        if comp == "Material" {
+            Some(None)
+        } else {
+            comp.strip_prefix(OBJECT_MATERIAL_PREFIX).map(|k| Some(k.to_string()))
+        }
+    };
+    let set_shader_param = {
+        let sets = shared.shader_param_sets.clone();
+        lua.create_function(
+            move |_,
+                  (this, name, x, y, z, w): (
+                Table,
+                String,
+                f32,
+                Option<f32>,
+                Option<f32>,
+                Option<f32>,
+            )| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                let part = which_material(&comp).expect("only handed to a material handle");
+                sets.borrow_mut().push((
+                    e,
+                    part,
+                    name,
+                    [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
+                ));
+                Ok(())
+            },
+        )?
+    };
+    let set_shader_texture = {
+        let sets = shared.shader_texture_sets.clone();
+        lua.create_function(move |_, (this, slot, path): (Table, String, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let comp: String = this.raw_get("__comp")?;
+            if slot.trim().is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "material:setShaderTexture(slot, ref) — slot is the name the shader \
+                     declares, e.g. \"ramp\" for `texture ramp`"
+                        .into(),
+                ));
+            }
+            let part = which_material(&comp).expect("only handed to a material handle");
+            sets.borrow_mut().push((e, part, slot, path));
+            Ok(())
+        })?
+    };
+    // Read-back: this frame's pending write first, then the mirror — the
+    // same order the numeric fields answer in, so `m:shaderParam("glow")`
+    // is true in the line after `m:setShaderParam("glow", 2)`.
+    let shader_param = {
+        let sets = shared.shader_param_sets.clone();
+        let scene = shared.scene.clone();
+        lua.create_function(move |lua, (this, name): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let comp: String = this.raw_get("__comp")?;
+            let part = which_material(&comp).expect("only handed to a material handle");
+            let pending = sets
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(qe, qp, qn, _)| *qe == e && *qp == part && *qn == name)
+                .map(|(_, _, _, v)| *v);
+            let v = pending.or_else(|| {
+                scene.borrow().shader_state.get(&e)?.get(&comp)?.0.get(&name).copied()
+            });
+            match v {
+                Some(v) => (v[0], v[1], v[2], v[3]).into_lua_multi(lua),
+                None => Ok(MultiValue::new()),
+            }
+        })?
+    };
+    let shader_texture = {
+        let sets = shared.shader_texture_sets.clone();
+        let scene = shared.scene.clone();
+        lua.create_function(move |lua, (this, slot): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let comp: String = this.raw_get("__comp")?;
+            let part = which_material(&comp).expect("only handed to a material handle");
+            let pending = sets
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(qe, qp, qs, _)| *qe == e && *qp == part && *qs == slot)
+                .map(|(_, _, _, p)| p.clone());
+            let p = pending.or_else(|| {
+                scene.borrow().shader_state.get(&e)?.get(&comp)?.1.get(&slot).cloned()
+            });
+            match p {
+                // A cleared slot reads as `""`, the spelling that clears one.
+                Some(p) => Ok(Value::String(lua.create_string(&p)?)),
+                None => Ok(Value::Nil),
+            }
+        })?
+    };
+    {
+        let scene = shared.scene.clone();
+        let changes = shared.component_changes.clone();
+        let colors = shared.component_colors.clone();
+        let strs_r = shared.component_strs.clone();
+        let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let comp: String = this.raw_get("__comp")?;
+            if which_material(&comp).is_some() {
+                let method = match key.as_str() {
+                    "setShaderParam" => Some(&set_shader_param),
+                    "setShaderTexture" => Some(&set_shader_texture),
+                    "shaderParam" => Some(&shader_param),
+                    "shaderTexture" => Some(&shader_texture),
+                    _ => None,
+                };
+                if let Some(f) = method {
+                    return Ok(Value::Function(f.clone()));
+                }
+            }
+            // Colours first: a colour field never has a numeric twin.
+            if let Some(c) = colors.borrow().get(&(e, comp.clone(), key.clone())) {
+                return Ok(Value::Table(new_color(lua, *c)?));
+            }
+            let s = scene.borrow();
+            if let Some(c) =
+                s.component_colors.get(&e).and_then(|m| m.get(&comp)).and_then(|m| m.get(&key))
+            {
+                return Ok(Value::Table(new_color(lua, *c)?));
+            }
+            // Booleans read back as booleans, because 0 is truthy in Lua
+            // and `if el.visible then` was always taken.
+            let wrap = |v: f64| {
+                if is_bool_field(&comp, &key) {
+                    Value::Boolean(v != 0.0)
+                } else {
+                    Value::Number(v)
+                }
+            };
+            if let Some(v) = changes.borrow().get(&(e, comp.clone(), key.clone())) {
+                return Ok(wrap(*v));
+            }
+            if let Some(v) =
+                s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
+            {
+                return Ok(wrap(*v));
+            }
+            // **Strings, which used to be write-only.** `mat.texture = p`
+            // worked and `mat.texture` answered nil, however many times it
+            // had been set — so a script could tell a material what to wear
+            // and never ask. This frame's pending write first, then the
+            // mirror, exactly as the numbers above do it.
+            if let Some(v) = strs_r.borrow().get(&(e, comp.clone(), key.clone())) {
+                return Ok(Value::String(lua.create_string(v)?));
+            }
+            if let Some(v) =
+                s.component_strings.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
+            {
+                return Ok(Value::String(lua.create_string(v)?));
+            }
+            // `rb.lockRotX` → the mirror's `lock_rot_x`: the camelCase
+            // spelling the docs teach, over the snake_case names a few
+            // components still store.
+            if let Some(alt) = snake_of(&key) {
+                if let Some(v) = changes.borrow().get(&(e, comp.clone(), alt.clone())) {
+                    return Ok(wrap(*v));
+                }
+                if let Some(v) =
+                    s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&alt))
+                {
+                    return Ok(wrap(*v));
+                }
+            }
+            // **A per-object material answers before it exists.**
+            //
+            // `node:material("Clothing")` hands back a handle whether or not
+            // that part has an override yet — writing one is how it comes to
+            // exist. But nothing is mirrored until it does, so every field
+            // read back nil and the ordinary first line anybody writes,
+            // `m.alpha = m.alpha * 0.5`, raised on arithmetic against nil.
+            //
+            // A fresh override IS the engine's default material, so that is
+            // what it reads as. The value is true before the write and after
+            // it, which is the only thing a reader can rely on.
+            if comp.starts_with(OBJECT_MATERIAL_PREFIX) {
+                let d = floptle_core::Material::default();
+                if let Some(v) = material_fields(&d, d.cell).get(&key) {
+                    return Ok(wrap(*v));
+                }
+                if MATERIAL_STR_FIELDS.contains(&key.as_str()) {
+                    let s = if key == "shading" { d.shading.as_str() } else { "" };
+                    return Ok(Value::String(lua.create_string(s)?));
+                }
+                if matches!(key.as_str(), "color" | "emissive" | "specular" | "rim") {
+                    let c = match key.as_str() {
+                        "color" => [d.color[0], d.color[1], d.color[2], d.alpha],
+                        "emissive" => [d.emissive[0], d.emissive[1], d.emissive[2], 1.0],
+                        "specular" => [d.specular[0], d.specular[1], d.specular[2], 1.0],
+                        _ => [d.rim[0], d.rim[1], d.rim[2], 1.0],
+                    };
+                    return Ok(Value::Table(new_color(lua, c)?));
                 }
             }
             Ok(Value::Nil)
         })?;
-        node_mt.set("__index", idx)?;
+        comp_mt.set("__index", idx)?;
+    }
+    {
+        let changes = shared.component_changes.clone();
+        let colors = shared.component_colors.clone();
+        let strs = shared.component_strs.clone();
+        let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+            let e: u32 = this.raw_get("__id")?;
+            let comp: String = this.raw_get("__comp")?;
+            // A table is a colour: `e.fill = color(1, 0.85, 0.35)`, or any
+            // `{r,g,b,a}` / `{1,0,0}` table, so a palette read out of a
+            // save file works without a conversion step.
+            // A camelCase spelling of a legacy snake_case field writes the
+            // field it names (see `snake_of`), so the mirror keeps ONE key
+            // per field. An unknown camelCase name is left alone — its
+            // "unknown field" behaviour is unchanged.
+            let key = snake_of(&key)
+                .filter(|alt| LEGACY_SNAKE_FIELDS.contains(&alt.as_str()))
+                .unwrap_or(key);
+            if let Value::Table(t) = &val {
+                let c = read_color(t)?;
+                colors.borrow_mut().insert((e, comp, key), c);
+                return Ok(());
+            }
+            // A string is a path or a label: a UI image's texture, a
+            // Material's texture, a text element's string. This used to
+            // raise "must be a number, a boolean or a color", which was the
+            // one path that failed LOUDLY and it pointed nowhere useful.
+            if let Value::String(s) = &val {
+                strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
+                return Ok(());
+            }
+            let n = match val {
+                Value::Number(n) => n,
+                Value::Integer(n) => n as f64,
+                Value::Boolean(b) => f64::from(u8::from(b)),
+                _ => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "component field '{key}' must be a number, a boolean, a string or a \
+                         color"
+                    )));
+                }
+            };
+            changes.borrow_mut().insert((e, comp, key), n);
+            Ok(())
+        })?;
+        comp_mt.set("__newindex", newidx)?;
+    }
+    lua.set_named_registry_value("floptle_component_mt", comp_mt)?;
+}
+    Ok(())
+}
+
+/// The sprite handle's metatable (`node:sprite`).
+fn install_sprite_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+// ---- sprite handle metatable (node:sprite) -------------------------------------
+// The Sprite component as something you hold: `local sp = node:sprite()`,
+// then `sp.flipX = mx > 0`. `node:setSprite{...}` shipped as the only route,
+// which makes the commonest 2D line in any game — face the way you are
+// walking — a table literal rebuilt every frame, and gives no way at all to
+// ASK which way the sprite is facing.
+//
+// Reads answer from the mirror and every write updates it as it queues, so a
+// read straight after an assignment is the value just assigned rather than
+// the one the frame started with. An unknown field RAISES on both sides: a
+// handle is where somebody guesses a name, and `sp.flipx = true` doing
+// nothing at all is the failure this whole feature exists to end.
+{
+    let sprite_mt = lua.create_table()?;
+    {
+        let scene = shared.scene.clone();
+        let idx = lua.create_function(move |_, (this, key): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let Some(m) = scene.borrow().sprites.get(&e).copied() else {
+                return Err(mlua::Error::runtime(
+                    "node:sprite(): this node is not a sprite any more — something \
+                     changed its Matter after the handle was taken.",
+                ));
+            };
+            Ok(match key.as_str() {
+                "ppu" => Value::Number(f64::from(m.ppu)),
+                "size" => Value::Number(f64::from(m.size)),
+                "cell" => Value::Integer(m.cell as mlua::Integer),
+                // Booleans as BOOLEANS: 0 is truthy in Lua, so a number here
+                // would make `if sp.flipX then` a branch that is always taken.
+                "flipX" => Value::Boolean(m.flip_x),
+                "flipY" => Value::Boolean(m.flip_y),
+                "pivotX" => Value::Number(f64::from(m.pivot[0])),
+                "pivotY" => Value::Number(f64::from(m.pivot[1])),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "node:sprite() has no field `{other}`{}",
+                        crate::opts::near_miss_hint(other, SPRITE_KEYS)
+                    )));
+                }
+            })
+        })?;
+        sprite_mt.set("__index", idx)?;
     }
     {
         let scene = shared.scene.clone();
-        let bodies = shared.bodies.clone();
-        let body_changes = shared.body_changes.clone();
-        let body_height = shared.body_height_changes.clone();
-        let body_pos = shared.body_pos_changes.clone();
-        let model_changes = shared.model_changes.clone();
-        let material_changes = shared.material_changes.clone();
-        let visible_changes = shared.visible_changes.clone();
-        let enabled_changes = shared.enabled_changes.clone();
-        let persistent_changes = shared.persistent_changes.clone();
-        let layer_changes = shared.layer_changes.clone();
-        let tag_changes = shared.tag_changes.clone();
-        let layer_table = shared.layer_table.clone();
-        let ui_text_changes = shared.ui_text_changes.clone();
-        let ui_style_changes = shared.ui_style_changes.clone();
-        let node_strs = shared.component_strs.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.miss_warned.clone();
+        let q = shared.rich_sets.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
-            // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
-            // table writes its live raw fields (the normal read-back path);
-            // cross-node handles write the mirror.
-            if key == "pos" {
-                let Some(v) = crate::math_api::vec3_of(&val) else {
-                    return Err(mlua::Error::RuntimeError(
-                        "node.pos takes a vec3 (or anything with x/y/z)".into(),
-                    ));
-                };
-                let own = this.raw_get::<f64>("x").is_ok();
-                if own {
-                    this.raw_set("x", v.x)?;
-                    this.raw_set("y", v.y)?;
-                    this.raw_set("z", v.z)?;
-                } else {
-                    let mut s = scene.borrow_mut();
-                    if let Some(tr) = s.transforms.get_mut(&e) {
-                        tr.translation = v;
-                        s.dirty.insert(e);
-                        // A body node: the physics writeback would stomp this —
-                        // queue a real TELEPORT for the driver.
-                        if bodies.borrow().contains_key(&e) {
-                            body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
-                        }
-                    }
+            // A number is a number; a flip is a boolean, but a number is
+            // taken too (past the halfway point is flipped) because that is
+            // what an animation lane writes and what a value restored from a
+            // save file arrives as.
+            let num = |field: &str| -> mlua::Result<f64> {
+                match &val {
+                    Value::Number(n) => Ok(*n),
+                    Value::Integer(n) => Ok(*n as f64),
+                    Value::Boolean(b) => Ok(f64::from(u8::from(*b))),
+                    other => Err(mlua::Error::runtime(format!(
+                        "sprite field `{field}` takes a number, got {}",
+                        other.type_name()
+                    ))),
                 }
-                return Ok(());
-            }
-            // `node.tickPos = vec3(...)` / `node.tickX = n` — move the BODY in
-            // the tick channel, without touching the render transform. The
-            // transform would be overwritten by the interpolated writeback
-            // anyway, which is what makes `node.x = node.x + d` inside
-            // fixedUpdate teleport a fighter back onto its visual position:
-            // the classic "the visuals take the knockback, the hitbox stays
-            // put" bug (`docs/multiplayer.md` §3).
-            if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
-                let own = this.raw_get::<f64>("tickX").is_ok();
-                let mut p = match (
-                    this.raw_get::<f64>("tickX"),
-                    this.raw_get::<f64>("tickY"),
-                    this.raw_get::<f64>("tickZ"),
-                ) {
-                    (Ok(x), Ok(y), Ok(z)) => [x, y, z],
-                    _ => match bodies.borrow().get(&e) {
-                        Some(b) => b.pos,
-                        // No body means no tick channel; a silent no-op here
-                        // would look exactly like a working teleport.
-                        None => {
-                            return Err(mlua::Error::RuntimeError(
-                                "node.tickPos is the physics body's tick pose — this node has \
-                                 no RigidBody. Use node.pos for a plain transform move."
-                                    .into(),
-                            ))
-                        }
-                    },
-                };
-                match key.as_str() {
-                    "tickX" => p[0] = as_num(&val).unwrap_or(p[0]),
-                    "tickY" => p[1] = as_num(&val).unwrap_or(p[1]),
-                    "tickZ" => p[2] = as_num(&val).unwrap_or(p[2]),
-                    _ => {
-                        let Some(v) = crate::math_api::vec3_of(&val) else {
-                            return Err(mlua::Error::RuntimeError(
-                                "node.tickPos takes a vec3 (or anything with x/y/z)".into(),
-                            ));
-                        };
-                        p = [v.x, v.y, v.z];
-                    }
-                }
-                if own {
-                    // The own-node read-back picks these up after the hook,
-                    // alongside every other body write.
-                    this.raw_set("tickX", p[0])?;
-                    this.raw_set("tickY", p[1])?;
-                    this.raw_set("tickZ", p[2])?;
-                } else {
-                    body_pos.borrow_mut().insert(e, p);
-                }
-                return Ok(());
-            }
-            // Transform writes.
-            {
-                let mut s = scene.borrow_mut();
-                if let Some(tr) = s.transforms.get_mut(&e) {
-                    let mut handled = true;
-                    match key.as_str() {
-                        "x" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.translation.x = n;
-                            }
-                        }
-                        "y" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.translation.y = n;
-                            }
-                        }
-                        "z" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.translation.z = n;
-                            }
-                        }
-                        // A number splats (the classic form); a vec3 sets each
-                        // axis, so `node.scale = vec3(2, 1, 1)` no longer needs
-                        // three statements. `node.size` is the same setter.
-                        "scale" | "size" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.scale = Vec3::splat(n as f32);
-                            } else if let Some(v) = crate::math_api::vec3_of(&val) {
-                                tr.scale = Vec3::new(v.x as f32, v.y as f32, v.z as f32);
-                            }
-                        }
-                        "scale_x" | "scaleX" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.scale.x = n as f32;
-                            }
-                        }
-                        "scale_y" | "scaleY" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.scale.y = n as f32;
-                            }
-                        }
-                        "scale_z" | "scaleZ" => {
-                            if let Some(n) = as_num(&val) {
-                                tr.scale.z = n as f32;
-                            }
-                        }
-                        "yaw" | "pitch" | "roll" => {
-                            if let Some(n) = as_num(&val) {
-                                let (mut y, mut p, mut r) = tr.rotation.to_euler(EulerRot::YXZ);
-                                let changed = match key.as_str() {
-                                    "yaw" => n != y as f64,
-                                    "pitch" => n != p as f64,
-                                    _ => n != r as f64,
-                                };
-                                if changed {
-                                    match key.as_str() {
-                                        "yaw" => y = n as f32,
-                                        "pitch" => p = n as f32,
-                                        _ => r = n as f32,
-                                    }
-                                    tr.rotation = Quat::from_euler(EulerRot::YXZ, y, p, r);
-                                }
-                            }
-                        }
-                        _ => handled = false,
-                    }
-                    if handled {
-                        // Position writes on a BODY node also teleport the body
-                        // (the writeback would revert the transform otherwise).
-                        if matches!(key.as_str(), "x" | "y" | "z")
-                            && bodies.borrow().contains_key(&e)
-                        {
-                            let t = tr.translation;
-                            body_pos.borrow_mut().insert(e, [t.x, t.y, t.z]);
-                        }
-                        s.dirty.insert(e);
-                        return Ok(());
-                    }
-                }
-            }
-            // Physics body writes.
+            };
+            let flag = |field: &str| -> mlua::Result<bool> { Ok(num(field)? >= 0.5) };
+            let mut set = crate::RichSet::MatterSprite {
+                ppu: None,
+                size: None,
+                cell: None,
+                flip_x: None,
+                flip_y: None,
+                pivot_x: None,
+                pivot_y: None,
+            };
+            let crate::RichSet::MatterSprite {
+                ppu,
+                size,
+                cell,
+                flip_x,
+                flip_y,
+                pivot_x,
+                pivot_y,
+            } = &mut set
+            else {
+                unreachable!("built one line above")
+            };
             match key.as_str() {
-                "vx" | "vy" | "vz" => {
-                    if let Some(n) = as_num(&val) {
-                        let mut bc = body_changes.borrow_mut();
-                        let mut v = bc
-                            .get(&e)
-                            .copied()
-                            .or_else(|| bodies.borrow().get(&e).map(|b| b.vel))
-                            .unwrap_or([0.0; 3]);
-                        match key.as_str() {
-                            "vx" => v[0] = n as f32,
-                            "vy" => v[1] = n as f32,
-                            _ => v[2] = n as f32,
-                        }
-                        bc.insert(e, v);
-                    }
-                    return Ok(());
-                }
-                // `node.vel = vec3(...)` — the whole velocity in one write (or
-                // anything with x/y/z, so `node.vel = other.vel` works).
-                "vel" => {
-                    let Some(v) = crate::math_api::vec3_of(&val) else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node.vel takes a vec3 (or anything with x/y/z)".into(),
-                        ));
-                    };
-                    body_changes.borrow_mut().insert(e, [v.x as f32, v.y as f32, v.z as f32]);
-                    return Ok(());
-                }
-                "height" => {
-                    if let Some(n) = as_num(&val) {
-                        body_height.borrow_mut().insert(e, n as f32);
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            }
-            // Component swaps (applied to the ECS at the end of `run`): the mesh model path
-            // and a material (preset name or `assets.getFile("materials/X.ron")`).
-            match key.as_str() {
-                "model" => {
-                    if let Value::String(s) = &val {
-                        model_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
-                    }
-                    return Ok(());
-                }
-                "material" => {
-                    if let Value::String(s) = &val {
-                        material_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
-                    }
-                    return Ok(());
-                }
-                "visible" => {
-                    if let Value::Boolean(b) = val {
-                        visible_changes.borrow_mut().insert(e, b);
-                    }
-                    return Ok(());
-                }
-                // Switch the node — and everything under it — off or on. Stronger than
-                // `visible`, which only stops the draw: this also takes the node out of
-                // physics and stops its scripts. A node cannot re-enable ITSELF (its
-                // scripts aren't running); something else has to.
-                "enabled" => {
-                    if let Value::Boolean(b) = val {
-                        enabled_changes.borrow_mut().insert(e, b);
-                    }
-                    return Ok(());
-                }
-                // Carry the node — and everything under it — across a scene
-                // swap: the DontDestroyOnLoad equivalent. Its scripts keep
-                // running rather than re-`start`ing, because the node never
-                // stopped existing.
-                "persistent" => {
-                    let Value::Boolean(b) = val else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node.persistent takes a boolean".into(),
-                        ));
-                    };
-                    persistent_changes.borrow_mut().insert(e, b);
-                    return Ok(());
-                }
-                // `node.layer = "Enemies"` — validated against the project's
-                // layer table NOW, so a typo errors at the assignment (never a
-                // silently-Default node). Applied to the ECS after the pass;
-                // a dynamic body re-resolves its bit next frame (live).
-                "layer" => {
-                    let Value::String(s) = &val else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node.layer takes a layer name (a string)".into(),
-                        ));
-                    };
-                    let name = s.to_string_lossy().to_string();
-                    let lt = layer_table.borrow();
-                    if lt.index_of(&name).is_none() {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "no layer named '{name}' (project layers: {})",
-                            lt.names.join(", ")
+                "ppu" => *ppu = Some(num("ppu")? as f32),
+                "size" => *size = Some(num("size")? as f32),
+                "cell" => {
+                    let n = num("cell")?;
+                    // A cell is an index into the sheet. `as u32` on a
+                    // negative would wrap to four billion and draw whatever
+                    // that lands on, which is the kind of wrong that reads
+                    // as a corrupt spritesheet.
+                    if n < 0.0 || n.is_nan() {
+                        return Err(mlua::Error::runtime(format!(
+                            "sprite field `cell` is an index into the sheet, so it cannot \
+                             be {n}"
                         )));
                     }
-                    drop(lt);
-                    layer_changes.borrow_mut().insert(e, name);
-                    return Ok(());
+                    *cell = Some(n as u32);
                 }
-                // `node.tags = {"enemy", "boss"}` — replace the whole list
-                // (use node:addTag / node:removeTag for single edits).
-                "tags" => {
-                    let Value::Table(t) = &val else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node.tags takes an array of strings".into(),
-                        ));
-                    };
-                    let mut tags: Vec<String> = Vec::new();
-                    for v in t.sequence_values::<String>() {
-                        let v = v?;
-                        if !tags.contains(&v) {
-                            tags.push(v);
-                        }
-                    }
-                    tag_changes.borrow_mut().insert(e, tags);
-                    return Ok(());
+                "flipX" => *flip_x = Some(flag("flipX")?),
+                "flipY" => *flip_y = Some(flag("flipY")?),
+                "pivotX" => *pivot_x = Some(num("pivotX")? as f32),
+                "pivotY" => *pivot_y = Some(num("pivotY")? as f32),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "node:sprite() has no field `{other}`{}",
+                        crate::opts::near_miss_hint(other, SPRITE_KEYS)
+                    )));
                 }
-                // Which named style paints this element ("" = none).
-                "style" => {
-                    if let Value::String(s) = &val {
-                        ui_style_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
-                    }
-                    return Ok(());
-                }
-                // `node.texture = "textures/ui/portrait.png"` — the UI image's
-                // texture, creating the image slot if the element has none, so
-                // a bare element can become a sprite. Raises on a non-string
-                // rather than dropping it: this write did NOTHING for months and
-                // nobody could tell, which is the whole of.
-                "texture" => {
-                    let Value::String(s) = &val else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node.texture takes an asset path (a string)".into(),
-                        ));
-                    };
-                    node_strs.borrow_mut().insert(
-                        (e, "UiElement".to_string(), "texture".to_string()),
-                        s.to_string_lossy().to_string(),
-                    );
-                    return Ok(());
-                }
-                // UI element text: numbers coerce (hp counters write numbers directly).
-                "text" => {
-                    match &val {
-                        Value::String(s) => {
-                            ui_text_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
-                        }
-                        Value::Number(n) => {
-                            ui_text_changes.borrow_mut().insert(e, format_lua_number(*n));
-                        }
-                        Value::Integer(n) => {
-                            ui_text_changes.borrow_mut().insert(e, n.to_string());
-                        }
-                        _ => {}
-                    }
-                    return Ok(());
-                }
-                _ => {}
             }
-            // Unknown key: stash it on the handle table. That is a real
-            // affordance on the script's OWN `node` — there is one table per
-            // instance, re-stamped each hook rather than rebuilt (see
-            // `env::node_table`), so `node.myFlag = true` in `start` is still
-            // there in `update`.
-            //
-            // On a handle from `find(...)` / `:getchild(...)` it is not. Those
-            // are built fresh per call, so the write lands on a table nobody
-            // will hold again and reads back nil from the very next lookup —
-            // and the same is true of a casing slip on a field that does exist
-            // (`node.Yaw = 3`). Both used to be silent. Say it once.
-            let own = this.raw_get::<f64>("x").is_ok();
-            if !own {
-                warn_once(&logs, &warned, format!("nodestash:{e}:{key}"), || {
-                    format!(
-                        "a node has no `{key}` to write, so `.{key} = ...` on a handle from \
-                         find/getChild/findTagged goes nowhere — that handle is built fresh \
-                         each time you ask for it. Check the spelling, or keep the value in \
-                         your own script (or on your own `node`, which does persist)."
-                    )
-                });
-            }
-            this.raw_set(key, val)?;
+            // The mirror first, so a read on the next line answers with what
+            // was just written; the queue is what reaches the component
+            // after the pass.
+            scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
+            q.borrow_mut().push((e, set));
             Ok(())
         })?;
-        node_mt.set("__newindex", newidx)?;
+        sprite_mt.set("__newindex", newidx)?;
     }
-    lua.set_named_registry_value("floptle_node_mt", node_mt)?;
+    lua.set_named_registry_value("floptle_sprite_mt", sprite_mt)?;
+}
+    Ok(())
+}
 
-    // ---- component handle metatable (node:getcomponent) -----------------------------
-    // A component handle reads its numeric fields from the mirror (or this frame's pending
-    // writes) and records assignments; the writes are flushed to the ECS after `run`.
-    {
-        let comp_mt = lua.create_table()?;
-        // **A material handle's shader knobs**: the four
-        // methods below mirror `node:setShaderParam` / `setShaderTexture`, but
-        // address the material the HANDLE names — the node's own for
-        // `node:material()`, one part's override for `node:material("Head#2")`.
-        // The node-level call folds into the node's own Material and could
-        // never reach a part, so a character whose parts wear `.flsl` shaders
-        // had every uniform authored in the scene and not one of them changeable
-        // at runtime. Built once and handed out by `__index`, not created per
-        // lookup: a script calls these every tick.
-        let which_material = |comp: &str| -> Option<Option<String>> {
-            if comp == "Material" {
-                Some(None)
-            } else {
-                comp.strip_prefix(OBJECT_MATERIAL_PREFIX).map(|k| Some(k.to_string()))
+/// The script handle's metatable: another script's exported fields and functions.
+fn install_script_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+// ---- script metatable -----------------------------------------------------------
+let script_mt = lua.create_table()?;
+{
+    let envs = shared.envs.clone();
+    let broken = shared.broken.clone();
+    let broken_read_warned = shared.broken_read_warned.clone();
+    let logs = shared.logs.clone();
+    let scene = shared.scene.clone();
+    let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
+        let e: u32 = this.raw_get("__id")?;
+        let name: String = this.raw_get("__script")?;
+        // Resolved from the registry rather than held as a live table —
+        // see `Shared::envs`.
+        let env =
+            envs.borrow().get(&(e, name.clone())).and_then(|k| lua.registry_value::<Table>(k).ok());
+        match key.as_str() {
+            "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
+            "kind" => return Ok(Value::String(lua.create_string(&name)?)),
+            // `name` asks the SCRIPT first. The handle used
+            // to answer it itself, so a script exporting `function name(id)`
+            // — the obvious name for "turn an id into a display name" —
+            // could call it from inside itself and from nowhere else: every
+            // cross-script caller got the script's own kind back, as a
+            // string, and died at the call site with `attempt to call field
+            // 'name' (a string value)`. Nothing raised until something
+            // called it, which for a display-name function is the first
+            // moment there is anything to display.
+            //
+            // `kind` is the same string and is not shadowable, so nothing
+            // loses the ability to ask which script a handle is.
+            "name" => {
+                if let Some(env) = &env
+                    && let Ok(v) = env.get::<Value>("name")
+                    && !matches!(v, Value::Nil)
+                {
+                    return Ok(v);
+                }
+                return Ok(Value::String(lua.create_string(&name)?));
+            }
+            "valid" => {
+                return Ok(Value::Boolean(envs.borrow().contains_key(&(e, name.clone()))));
+            }
+            _ => {}
+        }
+        match env {
+            Some(env) => env.get::<Value>(key),
+            // No environment. Two very different things read `nil` here: a
+            // script that has no such export, and a script that FAILED TO
+            // LOAD and therefore has no exports at all. The second wants a
+            // completely different fix and used to be indistinguishable
+            // from the first at every call site, so say
+            // which it is — once per `(script, key)`, because a handle
+            // polled in `update` would otherwise say it sixty times a
+            // second.
+            None => {
+                if broken_read_warned.borrow_mut().insert((name.clone(), key.clone())) {
+                    // Three things reach here and they want three different
+                    // fixes. A script that FAILED TO LOAD has no exports at
+                    // all; one that is attached but SWITCHED OFF never got
+                    // an environment built; and a live script simply has no
+                    // export by that name — which is the only one of the
+                    // three a bare `nil` describes.
+                    let msg = if broken.borrow().contains(&name) {
+                        Some(crate::load_error::unavailable(&name, &key))
+                    } else if scene.borrow().kinds_on(e).iter().any(|k| k == &name) {
+                        Some(format!(
+                            "reading `.{key}` from the \"{name}\" script on node #{e}: that \
+                             script is attached but not running — its tickbox is off in the \
+                             Inspector, or the node itself is switched off — so it has no \
+                             state to read and everything on this handle is nil."
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(msg) = msg {
+                        logs.borrow_mut().push(crate::ScriptLog {
+                            level: crate::LogLevel::Warn,
+                            msg,
+                            source: None,
+                        });
+                    }
+                }
+                Ok(Value::Nil)
+            }
+        }
+    })?;
+    script_mt.set("__index", idx)?;
+}
+{
+    let envs = shared.envs.clone();
+    let newidx = lua.create_function(move |lua, (this, key, val): (Table, String, Value)| {
+        let e: u32 = this.raw_get("__id")?;
+        let name: String = this.raw_get("__script")?;
+        let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
+        if let Some(env) = env {
+            env.set(key, val)?;
+        }
+        Ok(())
+    })?;
+    script_mt.set("__newindex", newidx)?;
+}
+lua.set_named_registry_value("floptle_script_mt", script_mt)?;
+    Ok(())
+}
+
+/// The globals: `find`, `findAll`, `findScript`, `findScripts`, `findTagged`, `noderef`, `scriptref`, `moveTowards`, `EMPTY_TILE`.
+fn install_find_globals(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+// ---- globals: find / findAll / findScript / noderef -----------------------------
+{
+    let scene = shared.scene.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.find_scope_warned.clone();
+    lua.globals().set(
+        "find",
+        lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
+            let scope = find_scope(&opts)?;
+            let s = scene.borrow();
+            // O(1) against the name index when the default scope can take
+            // its answer (first node in scene order wins, as always). A
+            // narrowed scope has to walk, because the index holds the FIRST
+            // node of that name and it may be the one being filtered out —
+            // returning nil while a perfectly good second one exists would
+            // be worse than the bug this fixes.
+            let found = match s.by_name.get(&name).copied() {
+                Some(e) if s.in_scope(e, scope) => Some(e),
+                _ => s
+                    .order
+                    .iter()
+                    .copied()
+                    .find(|e| s.names.get(e).is_some_and(|n| n == &name) && s.in_scope(*e, scope)),
+            };
+            // Came up empty, but a node of that name IS in the scene and is
+            // simply switched off. Say so — once. Without this the only
+            // symptom of the enabled-only default is a `nil` in somebody
+            // else's code.
+            if found.is_none()
+                && scope == crate::FindScope::Enabled
+                && s.order.iter().any(|e| s.names.get(e).is_some_and(|n| n == &name))
+                && warned.borrow_mut().insert(name.clone())
+            {
+                logs.borrow_mut().push(crate::ScriptLog {
+                    level: crate::LogLevel::Warn,
+                    msg: format!(
+                        "find(\"{name}\") found nothing — a node called \"{name}\" IS in this \
+                         scene, but it is switched OFF, and find skips switched-off nodes now. \
+                         Turn it on in the Hierarchy, or ask for it with \
+                         find(\"{name}\", {{ scope = \"all\" }})."
+                    ),
+                    source: None,
+                });
+            }
+            drop(s);
+            Ok(match found {
+                Some(e) => Value::Table(new_node_handle(lua, e)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+}
+// EMPTY_TILE: the cell value that leaves a square empty. The editor's own
+// autocomplete has told people to pass this since tilemaps shipped, and for
+// that whole time it was a Rust constant Lua could not name — so following
+// the documentation produced `nil`. Negative cells mean the
+// same thing now; this exists so the documented spelling resolves.
+lua.globals().set("EMPTY_TILE", floptle_core::EMPTY_TILE)?;
+// noderef(): mark a `defaults` entry as a node-reference param — the Inspector
+// shows a node picker for it and the script receives a node handle (or nil).
+lua.globals().set(
+    "noderef",
+    lua.create_function(|_, ()| Ok(crate::env::NODEREF_SENTINEL))?,
+)?;
+// scriptref("health"): the param binds to that SCRIPT on the wired node — the
+// Inspector only lists nodes carrying it, and the script gets a script handle
+// directly (call its functions, read its state). componentref("RigidBody"):
+// same idea for a component handle. Both read nil while unwired/invalid.
+lua.globals().set(
+    "scriptref",
+    lua.create_function(|_, kind: String| {
+        Ok(format!("{}{kind}", crate::env::SCRIPTREF_PREFIX))
+    })?,
+)?;
+lua.globals().set(
+    "componentref",
+    lua.create_function(|_, name: String| {
+        Ok(format!("{}{name}", crate::env::COMPREF_PREFIX))
+    })?,
+)?;
+// moveTowards(node, target, maxDelta) — the free-function spelling of
+// `node:moveTowards`, so it reads the same way as `dirTo` and `distance`
+// beside it. One implementation; this is a forward.
+lua.globals().set(
+    "moveTowards",
+    lua.create_function(|lua, (node, target, max): (Table, Value, f64)| {
+        let methods: Table = lua.named_registry_value("floptle_node_methods")?;
+        let f: mlua::Function = methods.get("moveTowards")?;
+        f.call::<bool>((node, target, max))
+    })?,
+)?;
+{
+    let scene = shared.scene.clone();
+    lua.globals().set(
+        "findAll",
+        lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
+            let scope = find_scope(&opts)?;
+            let ids: Vec<u32> = {
+                let s = scene.borrow();
+                s.order
+                    .iter()
+                    .copied()
+                    .filter(|e| {
+                        s.names.get(e).map(|n| n == &name).unwrap_or(false)
+                            && s.in_scope(*e, scope)
+                    })
+                    .collect()
+            };
+            list_table(lua, &ids, new_node_handle)
+        })?,
+    )?;
+}
+{
+    let scene = shared.scene.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.miss_warned.clone();
+    let f = lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
+        let scope = find_scope(&opts)?;
+        // Resolve the name the caller typed to the kind the scene stores —
+        // the bare file name reaches a script filed in a folder, same rule as
+        // `node:getscript`. See [`crate::match_kind`].
+        let resolved = {
+            let s = scene.borrow();
+            crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
+        };
+        let canonical = match resolved {
+            crate::KindMatch::One(k) => k,
+            crate::KindMatch::Ambiguous(hits) => {
+                return Err(crate::ambiguous_kind_error("findScript", &kind, &hits));
+            }
+            // Nothing in the scene carries it. Worth saying out loud: the
+            // alternative is a `nil` that surfaces as an unset value in a
+            // different script several frames later.
+            crate::KindMatch::None => {
+                warn_once(&logs, &warned, format!("findScript:{kind}"), || {
+                    no_such_kind_in_scene("findScript", &kind, &scene.borrow())
+                });
+                return Ok(Value::Nil);
             }
         };
-        let set_shader_param = {
-            let sets = shared.shader_param_sets.clone();
+        // O(1) against the kind index. Still the FIRST in
+        // scene order, because the index is built in scene order — call
+        // sites depend on which one they get. The scope filter runs over the
+        // index rather than replacing it, so the ordering guarantee holds.
+        let found = {
+            let s = scene.borrow();
+            s.by_kind
+                .get(&canonical)
+                .and_then(|v| v.iter().copied().find(|e| s.in_scope(*e, scope)))
+        };
+        Ok(match found {
+            Some(e) => Value::Table(new_script_handle(lua, e, &canonical)?),
+            None => Value::Nil,
+        })
+    })?;
+    lua.globals().set("findScript", f.clone())?;
+    lua.globals().set("findScriptInScene", f)?;
+}
+// findScripts(kind): EVERY node carrying that script, as script handles in
+// scene order — for picking among several instances (e.g. a camera finding
+// the one player controller that is net.isMine, out of many avatars).
+{
+    let scene = shared.scene.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.miss_warned.clone();
+    lua.globals().set(
+        "findScripts",
+        lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
+            let scope = find_scope(&opts)?;
+            let resolved = {
+                let s = scene.borrow();
+                crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
+            };
+            let canonical = match resolved {
+                crate::KindMatch::One(k) => k,
+                crate::KindMatch::Ambiguous(hits) => {
+                    return Err(crate::ambiguous_kind_error("findScripts", &kind, &hits));
+                }
+                crate::KindMatch::None => {
+                    warn_once(&logs, &warned, format!("findScripts:{kind}"), || {
+                        no_such_kind_in_scene("findScripts", &kind, &scene.borrow())
+                    });
+                    return list_table(lua, &[], |_, _| unreachable!("empty"));
+                }
+            };
+            let ids: Vec<u32> = {
+                let s = scene.borrow();
+                s.by_kind
+                    .get(&canonical)
+                    .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
+                    .unwrap_or_default()
+            };
+            list_table(lua, &ids, |lua, e| new_script_handle(lua, e, &canonical))
+        })?,
+    )?;
+}
+// findTagged(tag): EVERY node carrying that tag, as node handles in scene
+// order (an empty table when none). `findTagged("enemy")[1]` for the first.
+{
+    let scene = shared.scene.clone();
+    lua.globals().set(
+        "findTagged",
+        lua.create_function(move |lua, (tag, opts): (String, Option<Value>)| {
+            let scope = find_scope(&opts)?;
+            let ids: Vec<u32> = {
+                let s = scene.borrow();
+                s.by_tag
+                    .get(&tag)
+                    .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
+                    .unwrap_or_default()
+            };
+            list_table(lua, &ids, new_node_handle)
+        })?,
+    )?;
+}
+    Ok(())
+}
+
+/// `children`, `getChild`, `getParent`, `getscript`, `getcomponent`, `setTint`, `material`, `materials`, `uiRect`.
+fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+{
+    let scene = shared.scene.clone();
+    methods.set(
+        "children",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let kids = scene.borrow().children.get(&e).cloned().unwrap_or_default();
+            list_table(lua, &kids, new_node_handle)
+        })?,
+    )?;
+}
+{
+    let scene = shared.scene.clone();
+    let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+        let e: u32 = this.raw_get("__id")?;
+        let found = {
+            let s = scene.borrow();
+            s.children
+                .get(&e)
+                .into_iter()
+                .flatten()
+                .copied()
+                .find(|c| s.names.get(c).map(|n| n == &name).unwrap_or(false))
+        };
+        Ok(match found {
+            Some(c) => Value::Table(new_node_handle(lua, c)?),
+            None => Value::Nil,
+        })
+    })?;
+    methods.set("child", f.clone())?;
+    methods.set("getchild", f.clone())?;
+    methods.set("getChild", f)?;
+}
+{
+    let scene = shared.scene.clone();
+    let f = lua.create_function(move |lua, this: Table| {
+        let e: u32 = this.raw_get("__id")?;
+        let p = scene.borrow().parent.get(&e).copied();
+        Ok(match p {
+            Some(p) => Value::Table(new_node_handle(lua, p)?),
+            None => Value::Nil,
+        })
+    })?;
+    methods.set("getparent", f.clone())?;
+    methods.set("getParent", f)?;
+}
+// node:getscript("health") — a handle on that script, by the name the editor
+// shows. The kind stored on the node is its PATH under `scripts/` without the
+// extension, so a file in a folder is "forgery/playermovement" while every
+// surface a person reads — the tab, the Inspector row, the Console prefix —
+// says `playermovement`. Matching the stored kind exactly meant asking by the
+// name on screen returned `nil` and said nothing; the lookup
+// takes either spelling now, and a genuine miss names what the node does
+// carry. See [`crate::match_kind`].
+{
+    let scene = shared.scene.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.miss_warned.clone();
+    let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+        let e: u32 = this.raw_get("__id")?;
+        let matched = {
+            let s = scene.borrow();
+            crate::match_kind(s.kinds_on(e).iter().map(String::as_str), &name)
+        };
+        match matched {
+            crate::KindMatch::One(kind) => Ok(Value::Table(new_script_handle(lua, e, &kind)?)),
+            crate::KindMatch::Ambiguous(hits) => {
+                Err(crate::ambiguous_kind_error("node:getscript", &name, &hits))
+            }
+            crate::KindMatch::None => {
+                let (who, has) = {
+                    let s = scene.borrow();
+                    let who = s
+                        .names
+                        .get(&e)
+                        .cloned()
+                        .unwrap_or_else(|| format!("#{e}"));
+                    (who, s.kinds_on(e).to_vec())
+                };
+                warn_once(&logs, &warned, format!("getscript:{e}:{name}"), || {
+                    if has.is_empty() {
+                        format!(
+                            "{who}:getscript(\"{name}\") found nothing — that node has no \
+                             scripts attached at all. Attach one in the Inspector, or check \
+                             this is the node you meant."
+                        )
+                    } else {
+                        format!(
+                            "{who}:getscript(\"{name}\") found nothing — that node carries \
+                             {}. A script is named by its file without the .lua, and the \
+                             folder in front of it is optional.",
+                            has.join(", ")
+                        )
+                    }
+                });
+                Ok(Value::Nil)
+            }
+        }
+    })?;
+    methods.set("script", f.clone())?;
+    methods.set("getscript", f.clone())?;
+    methods.set("getScript", f)?;
+}
+// node:getcomponent("PointLight" | "RigidBody") → a component handle whose numeric
+// fields you can read + assign (writes flush to the ECS after the frame), or nil if the
+// node has no such component.
+{
+    let scene = shared.scene.clone();
+    let logs = shared.logs.clone();
+    let warned = shared.miss_warned.clone();
+    let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+        let e: u32 = this.raw_get("__id")?;
+        let has =
+            scene.borrow().components.get(&e).map(|c| c.contains_key(&name)).unwrap_or(false);
+        if has {
+            return Ok(Value::Table(new_component_handle(lua, e, &name)?));
+        }
+        // A miss here is nearly always a casing slip on a name the node does
+        // carry ("rigidbody" for "RigidBody"), and the old answer to that was
+        // a bare nil. Say which components are actually on the node — that
+        // list is the did-you-mean, and it is short.
+        let (who, mut have) = {
+            let s = scene.borrow();
+            let who = s.names.get(&e).cloned().unwrap_or_else(|| format!("#{e}"));
+            let have: Vec<String> = s
+                .components
+                .get(&e)
+                .map(|c| c.keys().cloned().collect())
+                .unwrap_or_default();
+            (who, have)
+        };
+        have.sort();
+        warn_once(&logs, &warned, format!("getcomponent:{e}:{name}"), || {
+            if have.is_empty() {
+                format!(
+                    "{who}:getcomponent(\"{name}\") found nothing — that node has no \
+                     components with script-readable fields. Add one in the Inspector."
+                )
+            } else {
+                let known: Vec<&str> = have.iter().map(String::as_str).collect();
+                // `near_miss_hint` falls back to listing everything when
+                // nothing is close, and the sentence already does that — so
+                // only the pointed half of it is worth appending.
+                let hint = crate::opts::near_miss_hint(&name, &known);
+                let hint = if hint.starts_with(" (did you mean") { hint } else { String::new() };
+                format!(
+                    "{who}:getcomponent(\"{name}\") found nothing — that node carries {}.{hint}",
+                    have.join(", ")
+                )
+            }
+        });
+        Ok(Value::Nil)
+    })?;
+    methods.set("component", f.clone())?;
+    methods.set("getcomponent", f.clone())?;
+    methods.set("getComponent", f)?;
+}
+// node:setTint(color [, alpha]) / node:setTint{ ... } / node:setTint() — the
+// modifiers over everything this node draws, its own textures and its parts'
+// own colours included. The easy "same model, but red" — and, in the table
+// form, the additive rim and ambient lift that a multiply alone cannot do.
+{
+    let q = shared.rich_sets.clone();
+    methods.set(
+        "setTint",
+        lua.create_function(move |_, (this, c, a): (Table, Value, Option<f32>)| {
+            let e: u32 = this.raw_get("__id")?;
+            let mut set = crate::RichSet::NodeTint {
+                color: None,
+                alpha: a,
+                rim: None,
+                rim_strength: None,
+                ambient: None,
+                clear: false,
+            };
+            let crate::RichSet::NodeTint {
+                color, alpha, rim, rim_strength, ambient, clear,
+            } = &mut set
+            else {
+                unreachable!()
+            };
+            match &c {
+                // No argument clears it. `node:setTint()` reads as "no
+                // tint", and a caller turning a highlight off should not
+                // have to know that white is the identity.
+                Value::Nil => *clear = true,
+                Value::Table(t) => {
+                    // **A COLOUR or AN OPTIONS TABLE, decided by name.** A
+                    // colour is `{1,0.5,0.2}` or `{r=,g=,b=}` and never
+                    // carries any of these names, so their presence is the
+                    // whole test — a positional list stays a colour and
+                    // keeps working exactly as it did.
+                    //
+                    // **`alpha` has to be in this list**, and leaving it out
+                    // was not a no-op: `read_color` defaults a missing r/g/b
+                    // to zero, so `setTint{ alpha = 0.5 }` read as a colour
+                    // is BLACK at full opacity — the model goes dark, the
+                    // fade never happens, and nothing is logged. It cannot
+                    // collide with a colour, because a `color(...)` table
+                    // carries `r/g/b/a` and `[1]..[4]` and never `alpha`.
+                    let opts = ["color", "alpha", "rim", "rimStrength", "ambient"]
+                        .iter()
+                        .any(|k| t.contains_key(*k).unwrap_or(false));
+                    if opts {
+                        // Each field is read STRICTLY: present and wrong is
+                        // an error naming the field, never a silent skip.
+                        // A field that quietly does nothing is the failure
+                        // this whole API keeps being bitten by.
+                        let colour_at = |key: &str| -> mlua::Result<Option<[f32; 3]>> {
+                            match t.get::<Value>(key) {
+                                Ok(Value::Nil) | Err(_) => Ok(None),
+                                Ok(Value::Table(ct)) => {
+                                    let v = read_color(&ct)?;
+                                    Ok(Some([v[0], v[1], v[2]]))
+                                }
+                                // `vec3` is a colour everywhere else this
+                                // API takes one, so it is one here too.
+                                Ok(other) => match crate::math_api::vec3_of(&other) {
+                                    Some(v) => {
+                                        Ok(Some([v.x as f32, v.y as f32, v.z as f32]))
+                                    }
+                                    None => Err(mlua::Error::runtime(format!(
+                                        "node:setTint{{ {key} = … }} takes a colour: \
+                                         color(r,g,b), {{r,g,b}}, {{1,0.5,0.2}} or vec3"
+                                    ))),
+                                },
+                            }
+                        };
+                        let number_at = |key: &str| -> mlua::Result<Option<f32>> {
+                            match t.get::<Value>(key) {
+                                Ok(Value::Nil) | Err(_) => Ok(None),
+                                Ok(v) => match crate::math_api::num_of(&v) {
+                                    Some(n) => Ok(Some(n as f32)),
+                                    None => Err(mlua::Error::runtime(format!(
+                                        "node:setTint{{ {key} = … }} takes a number"
+                                    ))),
+                                },
+                            }
+                        };
+                        *color = colour_at("color")?;
+                        if let Some(r) = colour_at("rim")? {
+                            *rim = Some(r);
+                            // A rim with no strength named is a rim you
+                            // asked for: default it on rather than writing
+                            // a colour at strength 0, which would look like
+                            // the call did nothing.
+                            *rim_strength = Some(1.0);
+                        }
+                        if let Some(s) = number_at("rimStrength")? {
+                            *rim_strength = Some(s);
+                        }
+                        *ambient = number_at("ambient")?;
+                        if let Some(v) = number_at("alpha")? {
+                            *alpha = Some(v);
+                        }
+                    } else {
+                        // Any spelling of a colour the rest of the API
+                        // takes: `color(...)`, `{r=,g=,b=}`, `{1,0.5,0.2}`.
+                        let v = read_color(t)?;
+                        *color = Some([v[0], v[1], v[2]]);
+                        *alpha = Some(a.unwrap_or(1.0));
+                    }
+                }
+                other => {
+                    let v = crate::math_api::vec3_of(other).ok_or_else(|| {
+                        mlua::Error::runtime(
+                            "node:setTint(color [, alpha]): a colour takes color(r,g,b), \
+                             {r,g,b}, {1,0.5,0.2} or vec3; node:setTint{ color =, alpha =, \
+                             rim =, rimStrength =, ambient = } sets the rest — and \
+                             node:setTint() with nothing clears it",
+                        )
+                    })?;
+                    *color = Some([v.x as f32, v.y as f32, v.z as f32]);
+                    *alpha = Some(a.unwrap_or(1.0));
+                }
+            }
+            q.borrow_mut().push((e, set));
+            Ok(())
+        })?,
+    )?;
+}
+// node:material() / node:material("Clothing") — the node's own Material, or
+// one part of a model's materials, as a handle you can read and assign.
+{
+    let scene = shared.scene.clone();
+    let q = shared.rich_sets.clone();
+    methods.set(
+        "material",
+        lua.create_function(move |lua, (this, key): (Table, Option<String>)| {
+            let e: u32 = this.raw_get("__id")?;
+            let Some(key) = key else {
+                // No name: the node's own Material — the one that covers the
+                // whole model. Refused rather than invented when the node has
+                // none, because a handle whose writes create a component
+                // nobody asked for is how a typo becomes a look change.
+                let has = scene
+                    .borrow()
+                    .components
+                    .get(&e)
+                    .is_some_and(|c| c.contains_key("Material"))
+                    // …or it is about to have one: `setMaterial` is queued
+                    // and applied after the pass, so the two lines anybody
+                    // writes — give it a material, then take its handle —
+                    // have to work in that order. The batch handle makes the
+                    // same allowance for `setSpriteBatch`.
+                    || q.borrow().iter().any(|(qe, set)| {
+                        *qe == e && matches!(set, crate::RichSet::Material(_))
+                    });
+                if !has {
+                    return Err(mlua::Error::runtime(
+                        "node:material(): this node has no Material. Add one in the \
+                         Inspector, or call node:setMaterial{ ... } first — on a MODEL a \
+                         Material covers every part, and node:material(\"<name>\") is how \
+                         you reach one part instead.",
+                    ));
+                }
+                return crate::env::new_component_handle(lua, e, "Material");
+            };
+            if key.trim().is_empty() {
+                return Err(mlua::Error::runtime(
+                    "node:material(name): the name is one of node:materials() — an \
+                     object like \"Torso#2\" or a material like \"Clothing\".",
+                ));
+            }
+            // A part's material handle is not refused when the part has no
+            // override yet: writing one is how an override comes to exist,
+            // and that is the whole point of the call. It starts as the
+            // engine's default material (white, untextured) rather than as
+            // the part's imported look, because the imported look lives in
+            // the model file and this side of the engine has never read it —
+            // so state what you want, don't tweak what you assume.
+            crate::env::new_component_handle(lua, e, &format!("{}{key}", crate::api::OBJECT_MATERIAL_PREFIX))
+        })?,
+    )?;
+}
+// node:materials() -> the model's material slots, so a script can find out
+// what the parts are called before trying to address one.
+{
+    let scene = shared.scene.clone();
+    methods.set(
+        "materials",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = scene.borrow();
+            let arr = lua.create_table()?;
+            let Some(model) = s.models.get(&e) else { return Ok(arr) };
+            let Some(slots) = s.model_slots.get(model) else { return Ok(arr) };
+            let overridden = |k: &str| {
+                s.components
+                    .get(&e)
+                    .is_some_and(|c| c.contains_key(&format!("{}{k}", crate::api::OBJECT_MATERIAL_PREFIX)))
+            };
+            for (i, slot) in slots.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("object", slot.object.as_str())?;
+                t.set("material", slot.material.as_str())?;
+                t.set("textured", slot.textured)?;
+                // Whether this node has already said something about it —
+                // either by its object name or by its material name.
+                t.set("overridden", overridden(&slot.object) || overridden(&slot.material))?;
+                arr.set(i + 1, t)?;
+            }
+            Ok(arr)
+        })?,
+    )?;
+}
+// node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
+// WINDOW physical pixels: the same space input.mouse() reports and
+// camera.worldToScreen() returns, so a docked editor Game tab's rects carry
+// that tab's offset. Lets a script hit-test the cursor against a panel's
+// actual rendered position instead of guessing its geometry.
+//
+// **`nil` when it has no screen-space rect this frame** — not a UI
+// element, not laid out yet, or no surface to lay out against at all,
+// which is every frame of `floptle run`. It answered
+// `0, 0, 0, 0` for all three, and under `run` that is a measurement a
+// script cannot tell from a real one: a four-button menu "verified"
+// headless was verified against zeros. The reference always said nil,
+// and every shipped caller already guards for it (`if rx and rw > 1`).
+{
+    let ui_rects = shared.ui_rects.clone();
+    methods.set(
+        "uiRect",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            match ui_rects.borrow().get(&e).copied() {
+                Some(r) => (r[0], r[1], r[2], r[3]).into_lua_multi(lua),
+                None => Ok(MultiValue::new()),
+            }
+        })?,
+    )?;
+}
+{
+    let scene = shared.scene.clone();
+    methods.set(
+        "find",
+        lua.create_function(move |lua, (this, name, opts): (Table, String, Option<Value>)| {
+            let e: u32 = this.raw_get("__id")?;
+            let scope = find_scope(&opts)?;
+            let found = {
+                let s = scene.borrow();
+                let mut stack: Vec<u32> =
+                    s.children.get(&e).cloned().unwrap_or_default();
+                let mut hit = None;
+                while let Some(c) = stack.pop() {
+                    if s.names.get(&c).map(|n| n == &name).unwrap_or(false)
+                        && s.in_scope(c, scope)
+                    {
+                        hit = Some(c);
+                        break;
+                    }
+                    if let Some(cc) = s.children.get(&c) {
+                        stack.extend(cc.iter().copied());
+                    }
+                }
+                hit
+            };
+            Ok(match found {
+                Some(c) => Value::Table(new_node_handle(lua, c)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+}
+    Ok(())
+}
+
+/// The construction API: `setCelestial`, `setMaterial`, `setTerrain`, `setPrimitive` and the other component writes a procgen script makes.
+fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+// ---- the construction API (editor actions / procgen scripts) ----------
+// node:setCelestial{mu=..., bodyRadius=..., parent="Sun", atmoColor={r,g,b}, ...}
+// node:setMaterial{color={..}, emissive={..}, emissiveStrength=2, unlit=true, texture="..."}
+// node:setTerrain(id)   node:setPrimitive("Sphere" [, {r,g,b}])
+// All queued as RichSet writes; the component is inserted (defaults) if
+// the node doesn't have it. Field names are the Lua-facing camelCase.
+{
+    let q = shared.rich_sets.clone();
+    // A 3-vector in any of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
+    /// Every spelling of a three-component value the docs promise: a `vec3`, an
+    /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
+    /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
+    /// and named in this function's own error message while being the one shape it
+    /// refused.
+    fn triple_of(v: &Value) -> Option<[f64; 3]> {
+        if let Some(p) = crate::math_api::vec3_of(v) {
+            return Some([p.x, p.y, p.z]);
+        }
+        if let Value::Table(t) = v {
+            if let (Ok(Some(r)), Ok(Some(g)), Ok(Some(b))) = (
+                t.get::<Option<f64>>("r"),
+                t.get::<Option<f64>>("g"),
+                t.get::<Option<f64>>("b"),
+            ) {
+                // Alpha is accepted and dropped: these fields are all three-component.
+                return Some([r, g, b]);
+            }
+            let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
+            let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
+            let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
+            return Some([a, b, c]);
+        }
+        None
+    }
+    let fields_of = |t: &Table| -> mlua::Result<Vec<(String, crate::CompVal)>> {
+        let mut out = Vec::new();
+        for pair in t.pairs::<String, Value>() {
+            let (k, v) = pair?;
+            let cv = match &v {
+                Value::Number(n) => crate::CompVal::Num(*n),
+                Value::Integer(n) => crate::CompVal::Num(*n as f64),
+                Value::Boolean(b) => crate::CompVal::Num(if *b { 1.0 } else { 0.0 }),
+                Value::String(st) => crate::CompVal::Str(st.to_string_lossy().to_string()),
+                other => match triple_of(other) {
+                    Some(p) => crate::CompVal::Vec3(p),
+                    None => {
+                        return Err(mlua::Error::runtime(format!(
+                            "set*: field '{k}' must be a number, bool, string, vec3/{{x,y,z}} or {{r,g,b}}"
+                        )))
+                    }
+                },
+            };
+            out.push((k, cv));
+        }
+        Ok(out)
+    };
+    {
+        let q = q.clone();
+        let fo = fields_of;
+        methods.set(
+            "setCelestial",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, CELESTIAL_KEYS, "node:setCelestial")?;
+                q.borrow_mut().push((e, crate::RichSet::Celestial(fo(&t)?)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        let fo = fields_of;
+        methods.set(
+            "setMaterial",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, MATERIAL_KEYS, "node:setMaterial")?;
+                q.borrow_mut().push((e, crate::RichSet::Material(fo(&t)?)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        methods.set(
+            "setTerrain",
+            lua.create_function(move |_, (this, id): (Table, u32)| {
+                let e: u32 = this.raw_get("__id")?;
+                q.borrow_mut().push((e, crate::RichSet::MatterTerrain(id)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the
+        // same opts table terrain.generatePlanet takes): the body's field
+        // generates from it, on a background thread, when something first
+        // approaches — no .cfield on disk, no up-front generation (G2 galaxy
+        // streaming; docs/subsystems/large-world-space.md). Player edits saved
+        // under terrain.saveDir take priority over regeneration. nil clears.
+        let q = q.clone();
+        methods.set(
+            "setTerrainGen",
+            lua.create_function(move |_, (this, opts): (Table, Option<Table>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let spec = match &opts {
+                    Some(t) => {
+                        let fill = crate::terrain_api::planet_fill_from_table(Some(t))?;
+                        Some(ron::to_string(&fill).map_err(|err| {
+                            mlua::Error::runtime(format!("setTerrainGen: {err}"))
+                        })?)
+                    }
+                    None => None,
+                };
+                q.borrow_mut().push((e, crate::RichSet::TerrainGen(spec)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+    // ---- 2D: node:setTilemap{...} and node:tilemap() ----
+    {
+        let q = q.clone();
+        methods.set(
+            "setTilemap",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, TILEMAP_KEYS, "node:setTilemap")?;
+                let cols: u32 = t.get::<Option<u32>>("cols")?.unwrap_or(0);
+                let rows: u32 = t.get::<Option<u32>>("rows")?.unwrap_or(0);
+                let tile: f32 = t.get::<Option<f32>>("tile")?.unwrap_or(1.0);
+                if cols == 0 || rows == 0 {
+                    return Err(mlua::Error::runtime(
+                        "setTilemap{ cols =, rows =, tile = }: cols and rows must be > 0",
+                    ));
+                }
+                // `data` is optional: a grid with no cells yet is a blank
+                // room you then paint with tm:set, which is how a game that
+                // re-dresses a floor actually works.
+                let data: Vec<u32> = match t.get::<Option<Table>>("data")? {
+                    Some(list) => {
+                        let mut v = Vec::with_capacity(list.raw_len());
+                        for i in 1..=list.raw_len() {
+                            // Lua is 1-based; a nil hole — and, since
+                            // an earlier task, any negative — is an empty tile.
+                            v.push(tile_cell(&list.raw_get::<Value>(i)?)?);
+                        }
+                        v
+                    }
+                    None => Vec::new(),
+                };
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterTilemap {
+                        cols,
+                        rows,
+                        tile,
+                        data,
+                        tileset: crate::opts::opt_str(&t, "node:setTilemap", "tileset")?,
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        methods.set(
+            "setSpriteBatch",
+            lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
+                let e: u32 = this.raw_get("__id")?;
+                // `size` is the quad's edge; every sprite scales it. One
+                // optional argument, so `nd:setSpriteBatch()` is the whole
+                // call for the common case.
+                let size: f32 = match &t {
+                    Some(t) => {
+                        crate::opts::check_keys(
+                            t,
+                            SPRITE_BATCH_KEYS,
+                            "node:setSpriteBatch",
+                        )?;
+                        t.get::<Option<f32>>("size")?.unwrap_or(1.0)
+                    }
+                    None => 1.0,
+                };
+                // NaN spelled out rather than `!(size > 0.0)`: same guard,
+                // and it says which two things it is refusing.
+                if size.is_nan() || size <= 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "setSpriteBatch{ size = }: size must be greater than 0",
+                    ));
+                }
+                q.borrow_mut().push((e, crate::RichSet::MatterSpriteBatch { size }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        // node:setSorting{ layer = "Terrain", order = 3 } — where this 2D
+        // node draws in the stack. Sorting layers shipped
+        // with no script access at all, which rules out a character walking
+        // behind a counter.
+        methods.set(
+            "setSorting",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, SORTING_KEYS, "node:setSorting")?;
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterSorting {
+                        layer: t.get::<Option<String>>("layer")?,
+                        order: t.get::<Option<i32>>("order")?,
+                        mode: t.get::<Option<String>>("mode")?,
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        let scene = shared.scene.clone();
+        // node:setSprite{ ppu = 32, cell = 3, pivotY = 0 } — make this node
+        // one sprite, or retune one. Every key optional and every key keeps
+        // what the node had.
+        methods.set(
+            "setSprite",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, SPRITE_KEYS, "node:setSprite")?;
+                let px = t.get::<Option<f32>>("pivotX")?;
+                let py = t.get::<Option<f32>>("pivotY")?;
+                let set = crate::RichSet::MatterSprite {
+                    ppu: t.get::<Option<f32>>("ppu")?,
+                    size: t.get::<Option<f32>>("size")?,
+                    cell: t.get::<Option<u32>>("cell")?,
+                    flip_x: t.get::<Option<bool>>("flipX")?,
+                    flip_y: t.get::<Option<bool>>("flipY")?,
+                    // One axis at a time, and the other KEEPS what the node
+                    // had. Defaulting the unmentioned axis to 0.5 here made
+                    // `setSprite{ pivotY = 0 }` — the documented way to put
+                    // a character's origin at its feet — silently recentre
+                    // it horizontally.
+                    pivot_x: px,
+                    pivot_y: py,
+                };
+                // The mirror moves with the queue, so `node:sprite()` on the
+                // next line reads what this call just set — and so a node
+                // BECOMING a sprite here can be read at all, since the
+                // component itself does not exist until after the pass.
+                scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
+                q.borrow_mut().push((e, set));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        // node:setParallax{ x = 0.3 } — how much of the camera's movement
+        // this layer keeps. The one 2D feature that could not be had at all
+        // before: distance parallaxes under a perspective camera and does
+        // nothing under an orthographic one, and a flat game wants
+        // orthographic for its pixels.
+        methods.set(
+            "setParallax",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, PARALLAX_KEYS, "node:setParallax")?;
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterParallax {
+                        x: t.get::<Option<f32>>("x")?,
+                        y: t.get::<Option<f32>>("y")?,
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        // node:setCamera2D{ follow = "Player", smoothing = 0.12 } — how this
+        // orthographic camera follows. The target is the reason this is a
+        // script call and not only an Inspector one: which node the camera
+        // chases is a game decision, made at a character select or when a
+        // level hands control to something else.
+        methods.set(
+            "setCamera2D",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, CAMERA_2D_KEYS, "node:setCamera2D")?;
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterCamera2D {
+                        follow: t.get::<Option<String>>("follow")?,
+                        smoothing: t.get::<Option<f32>>("smoothing")?,
+                        dead_zone_x: t.get::<Option<f32>>("deadZoneX")?,
+                        dead_zone_y: t.get::<Option<f32>>("deadZoneY")?,
+                        limits_on: t.get::<Option<bool>>("limits")?,
+                        min_x: t.get::<Option<f32>>("minX")?,
+                        min_y: t.get::<Option<f32>>("minY")?,
+                        max_x: t.get::<Option<f32>>("maxX")?,
+                        max_y: t.get::<Option<f32>>("maxY")?,
+                        pixel_snap: t.get::<Option<f32>>("pixelSnap")?,
+                        off: t.get::<Option<bool>>("off")?.unwrap_or(false),
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        // node:shake(amount, seconds) — the one camera move every 2D game
+        // wants and nobody should have to write. It is added to what is
+        // DRAWN and never fed back into the follow, so it composes with a
+        // chase and with the world limits instead of fighting them.
+        methods.set(
+            "shake",
+            lua.create_function(move |_, (this, amount, seconds): (Table, f32, Option<f32>)| {
+                let e: u32 = this.raw_get("__id")?;
+                if !amount.is_finite() || amount < 0.0 {
+                    return Err(mlua::Error::RuntimeError(
+                        "node:shake(amount, seconds): amount is a distance in world units and cannot be negative"
+                            .into(),
+                    ));
+                }
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::CameraShake {
+                        amount,
+                        seconds: seconds.unwrap_or(0.3).max(0.0),
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        // node:sorting() -> { layer =, order =, mode = } — the read half of
+        // the pair above, which shipped without one.
+        //
+        // A node that has said nothing about sorting answers with the
+        // DEFAULT rather than nil. "Default layer, order 0, order mode" is
+        // the true answer for such a node, and nil would make every caller
+        // that wants to nudge something one in front write the same three
+        // lines of fallback before it could add 1.
+        let f = lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let (layer, order, mode) = scene
+                .borrow()
+                .sorting
+                .get(&e)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), 0, "order"));
+            let t = lua.create_table()?;
+            let layer = if layer.trim().is_empty() {
+                floptle_core::DEFAULT_SORTING_LAYER.to_string()
+            } else {
+                layer
+            };
+            t.set("layer", layer)?;
+            t.set("order", order)?;
+            t.set("mode", mode)?;
+            Ok(t)
+        })?;
+        methods.set("sorting", f.clone())?;
+        methods.set("getsorting", f.clone())?;
+        methods.set("getSorting", f)?;
+    }
+    {
+        let q = q.clone();
+        // node:setLighting2D{ mode = "2d", layers = {"Terrain"}, blocks = "on" }.
+        // A torch that flickers is a script writing an
+        // intensity; a torch that stops lighting the background is a script
+        // writing this.
+        methods.set(
+            "setLighting2D",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, LIGHTING_2D_KEYS, "node:setLighting2D")?;
+                // Both enums answer through their own parsers, so a typo
+                // names the accepted set instead of silently meaning `auto`
+                // — the exact bug an earlier task was filed for.
+                let mode = match t.get::<Option<String>>("mode")? {
+                    None => None,
+                    Some(s) => Some(floptle_core::Lit2D::parse(&s).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "setLighting2D{{ mode = }}: `{s}` is not one of {}",
+                            floptle_core::Lit2D::ACCEPTS.join(", ")
+                        ))
+                    })?),
+                };
+                let blocks = match t.get::<Option<String>>("blocks")? {
+                    None => None,
+                    Some(s) => Some(floptle_core::Cast2D::parse(&s).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "setLighting2D{{ blocks = }}: `{s}` is not one of {}",
+                            floptle_core::Cast2D::ACCEPTS.join(", ")
+                        ))
+                    })?),
+                };
+                // An EMPTY list means every layer, and so does no list — but
+                // `layers = {}` is somebody saying "reset this to all of
+                // them", which is a different thing from not mentioning it.
+                let layers = match t.get::<Option<Table>>("layers")? {
+                    None => None,
+                    Some(list) => Some(
+                        list.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?,
+                    ),
+                };
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterLighting2D {
+                        mode,
+                        layers,
+                        blocks,
+                        inner: t.get::<Option<f32>>("inner")?,
+                        falloff: t.get::<Option<f32>>("falloff")?,
+                        shadows: t.get::<Option<bool>>("shadows")?,
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        // node:setPointLight{ color = {r,g,b}, intensity =, range = }
+        //
+        // The one Matter kind a script could edit but never create.
+        // Every field is optional and keeps what the node
+        // had, so the same call makes a light and retunes one.
+        methods.set(
+            "setPointLight",
+            lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let (mut color, mut intensity, mut range) = (None, None, None);
+                if let Some(t) = t {
+                    crate::opts::check_keys(&t, POINT_LIGHT_KEYS, "node:setPointLight")?;
+                    if let Some(c) = t.get::<Option<Table>>("color")? {
+                        let lane = |i: i64| -> mlua::Result<f32> {
+                            Ok(c.get::<Option<f32>>(i)?.unwrap_or(1.0))
+                        };
+                        color = Some([lane(1)?, lane(2)?, lane(3)?]);
+                    }
+                    intensity = t.get::<Option<f32>>("intensity")?;
+                    range = t.get::<Option<f32>>("range")?;
+                }
+                // A NaN would sort as neither greater nor less when the
+                // sixteen are ranked, which is a light that flickers for a
+                // reason nobody could ever find.
+                for (name, v) in [("intensity", intensity), ("range", range)] {
+                    if v.is_some_and(|v| v.is_nan()) {
+                        return Err(mlua::Error::runtime(format!(
+                            "setPointLight{{ {name} = }}: not a number"
+                        )));
+                    }
+                }
+                q.borrow_mut()
+                    .push((e, crate::RichSet::MatterPointLight { color, intensity, range }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setTextSpans{ {len =, color =}, … } — colour stretches of
+        // this element's text.
+        //
+        // A run carried ONE colour for the whole string, so a keyword tinted
+        // to match the key it names, or a proper noun in the speaker's
+        // colour, meant splitting the line into sibling elements laid out by
+        // hand — which re-wraps wrong at every resolution and cannot be
+        // revealed a glyph at a time.
+        //
+        // `len` is CHARACTERS of the authored string, not bytes: "the fifth
+        // character" and "the fifth byte" disagree the moment anyone types
+        // anything but ASCII, and in bytes this would fail in front of
+        // whoever was writing the dialogue.
+        let q = q.clone();
+        methods.set(
+            "setTextSpans",
+            lua.create_function(move |_, (this, list): (Table, Table)| {
+                use crate::opts::{check_keys, opt_num};
+                const CALL: &str = "node:setTextSpans";
+                let e: u32 = this.raw_get("__id")?;
+                let mut spans = Vec::new();
+                for (i, v) in list.sequence_values::<Value>().enumerate() {
+                    let Value::Table(t) = v? else {
+                        return Err(mlua::Error::runtime(format!(
+                            "{CALL}: entry {} is not a table — each span is \
+                             {{ len = n, color = {{r, g, b}} }}",
+                            i + 1
+                        )));
+                    };
+                    check_keys(&t, &["len", "color"], CALL)?;
+                    // Required, and refused rather than defaulted: a span
+                    // with no length is a colour with nothing to paint, and
+                    // silently skipping it would slide every later span.
+                    let len = opt_num(&t, CALL, "len", 0.0, u32::MAX as f64)?.ok_or_else(
+                        || {
+                            mlua::Error::runtime(format!(
+                                "{CALL}: span {} has no `len` — every span says how many \
+                                 characters it covers, or the ones after it land in the \
+                                 wrong place",
+                                i + 1
+                            ))
+                        },
+                    )? as u32;
+                    let color = match t.get::<Value>("color")? {
+                        Value::Nil => None,
+                        Value::Table(c) => Some(crate::api::read_color(&c).map_err(|e| {
+                            mlua::Error::runtime(format!("{CALL}: span {}: {e}", i + 1))
+                        })?),
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: span {}: `color` is {}, not a colour",
+                                i + 1,
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    spans.push(floptle_ui::TextSpan {
+                        len,
+                        color,
+                    });
+                }
+                q.borrow_mut().push((e, crate::RichSet::TextSpans(spans)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setGlyphOffsets{ vec2(…), … } — displace characters at draw
+        // time.
+        //
+        // The half spans cannot do. Glyph positions are computed inside the
+        // renderer and never surfaced, so a game could not move one letter
+        // at any price. This applies AFTER layout: a displaced glyph never
+        // re-wraps its line and never moves its neighbours, which is what
+        // makes wobble, jitter and per-glyph reveal the game's own to write
+        // rather than a catalogue of named effects the engine maintains.
+        let q = q.clone();
+        methods.set(
+            "setGlyphOffsets",
+            lua.create_function(move |_, (this, list): (Table, Table)| {
+                const CALL: &str = "node:setGlyphOffsets";
+                let e: u32 = this.raw_get("__id")?;
+                let mut offsets = Vec::new();
+                for (i, v) in list.sequence_values::<Value>().enumerate() {
+                    let p = crate::vec3_of(&v?).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "{CALL}: entry {} is not a vec2 — one offset per character, \
+                             in design units",
+                            i + 1
+                        ))
+                    })?;
+                    offsets.push([p.x as f32, p.y as f32]);
+                }
+                q.borrow_mut().push((e, crate::RichSet::GlyphOffsets(offsets)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setCamera{ fovY =, active =, target =, width =, height =,
+        // hz =, cullMask = } — the whole camera surface a game needs.
+        // With a `target` the camera renders into a live
+        // texture any material or UI image wears as `rt:<name>`: minimaps,
+        // mirrors, security monitors, scopes, split-screen.
+        //
+        // Every value is checked HERE, at the call. `hz = "10"` and
+        // `width = 0` raise with the property, the value and the range —
+        // not three frames later as a black rectangle.
+        let q = q.clone();
+        methods.set(
+            "setCamera",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                use crate::opts::{check_keys, opt_bool, opt_num, opt_str};
+                const CALL: &str = "node:setCamera";
+                let e: u32 = this.raw_get("__id")?;
+                check_keys(&t, CAMERA_KEYS, CALL)?;
+                let target = opt_str(&t, CALL, "target")?;
+                if let Some(name) = &target
+                    && let Some(bare) = name.strip_prefix("rt:")
+                {
+                    // `target = "rt:minimap"` would make the texture
+                    // `rt:rt:minimap`, which resolves to nothing and says
+                    // nothing. The prefix belongs to the texture ref, not
+                    // to the name.
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL}: `target = \"{name}\"` — the target name is bare; write \
+                         `target = \"{bare}\"` and then use the texture \"rt:{bare}\""
+                    )));
+                }
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::MatterCamera {
+                        fov_y: opt_num(&t, CALL, "fovY", 0.05, 3.0)?.map(|v| v as f32),
+                        active: opt_bool(&t, CALL, "active")?,
+                        target,
+                        target_w: opt_num(
+                            &t,
+                            CALL,
+                            "width",
+                            floptle_core::Matter::TARGET_MIN as f64,
+                            floptle_core::Matter::TARGET_MAX as f64,
+                        )?
+                        .map(|v| v as u32),
+                        target_h: opt_num(
+                            &t,
+                            CALL,
+                            "height",
+                            floptle_core::Matter::TARGET_MIN as f64,
+                            floptle_core::Matter::TARGET_MAX as f64,
+                        )?
+                        .map(|v| v as u32),
+                        target_hz: opt_num(&t, CALL, "hz", 0.0, 240.0)?.map(|v| v as f32),
+                        cull_mask: opt_num(&t, CALL, "cullMask", 0.0, u32::MAX as f64)?
+                            .map(|v| v as u32),
+                        ortho: match opt_str(&t, CALL, "projection")? {
+                            Some(s) => Some(crate::opts::parse_enum(
+                                CALL,
+                                "projection",
+                                &s,
+                                floptle_core::Matter::PROJECTION_ACCEPTS,
+                                floptle_core::Matter::parse_projection,
+                            )?),
+                            None => None,
+                        },
+                        ortho_height: opt_num(
+                            &t,
+                            CALL,
+                            "orthoHeight",
+                            floptle_core::Matter::ORTHO_MIN as f64,
+                            floptle_core::Matter::ORTHO_MAX as f64,
+                        )?
+                        .map(|v| v as f32),
+                    },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let q = q.clone();
+        let scene = shared.scene.clone();
+        methods.set(
+            "tilemap",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                new_tilemap_handle(lua, e, q.clone(), scene.clone())
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        // node:sprite() -> the Sprite component as a handle: read and assign
+        // `flipX`, `flipY`, `cell`, `ppu`, `size`, `pivotX`, `pivotY`.
+        methods.set(
+            "sprite",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let (is_sprite, is_batch) = {
+                    let s = scene.borrow();
+                    (s.sprites.contains_key(&e), s.sprite_batches.contains(&e))
+                };
+                // Refuse rather than hand back a handle whose every write is
+                // queued and then dropped — the same call the batch handle
+                // makes, for the same reason. The two names are one letter
+                // apart, so each error names the other.
+                if !is_sprite {
+                    return Err(mlua::Error::runtime(if is_batch {
+                        "node:sprite(): this node is a sprite BATCH. Its sprites are the \
+                         ones you draw into it — take node:sprites() (plural) and call \
+                         b:draw(...) per sprite."
+                    } else {
+                        "node:sprite(): this node is not a sprite. Set Matter to Sprite in \
+                         the Inspector, or call node:setSprite{ ppu = 32 } first — a handle \
+                         to a component that is not there could only throw its writes away."
+                    }));
+                }
+                crate::env::new_sprite_handle(lua, e)
+            })?,
+        )?;
+    }
+    {
+        let draws = shared.sprite_draws.clone();
+        let scene = shared.scene.clone();
+        let q = q.clone();
+        methods.set(
+            "sprites",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                // Refuse a node that is not a batch, rather than handing
+                // back a handle whose every `draw` is collected and then
+                // dropped by the renderer's own filter. That silence cost a
+                // real project an afternoon: the calls all
+                // returned, nothing was ever drawn, and there was no line
+                // anywhere to say why.
+                let is_batch = scene.borrow().sprite_batches.contains(&e)
+                    // …or it is about to be one: `setSpriteBatch` is queued
+                    // and applied after the pass, so the obvious two lines
+                    // — make it a batch, then take its handle — have to
+                    // work in the order anybody would write them.
+                    || q.borrow().iter().any(|(qe, set)| {
+                        *qe == e && matches!(set, crate::RichSet::MatterSpriteBatch { .. })
+                    });
+                if !is_batch {
+                    // A plain Sprite is the near miss worth naming: the two
+                    // calls differ by one letter and do different jobs.
+                    return Err(mlua::Error::runtime(
+                        if scene.borrow().sprites.contains_key(&e) {
+                            "node:sprites(): this node is one SPRITE, not a batch. To \
+                             change how it draws — flipX, cell, pivot — take \
+                             node:sprite() (singular). node:sprites() is for a node that \
+                             draws many sprites a frame, which needs \
+                             node:setSpriteBatch{ size = 1.0 } first."
+                        } else {
+                            "node:sprites(): this node is not a sprite batch. Call \
+                             node:setSpriteBatch{ size = 1.0 } first (or set Matter to \
+                             Sprite Batch in the Inspector) — without it every draw is \
+                             thrown away."
+                        },
+                    ));
+                }
+                new_sprite_batch_handle(lua, e, draws.clone())
+            })?,
+        )?;
+    }
+        methods.set(
+            "setPrimitive",
+            lua.create_function(move |_, (this, shape, color): (Table, String, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let c = match &color {
+                    Value::Nil => [0.8, 0.8, 0.8],
+                    other => triple_of(other).ok_or_else(|| {
+                        mlua::Error::runtime(
+                            "setPrimitive(shape [, color]): a colour takes {r,g,b}, \
+                             {x,y,z}, {1,0.5,0.2} or vec3",
+                        )
+                    })?,
+                };
+                // Checked HERE, through the parser the write itself uses: a
+                // misspelled shape used to become a CUBE, silently — a
+                // different object standing exactly where you put it.
+                let shape = crate::opts::parse_enum(
+                    "node:setPrimitive",
+                    "shape",
+                    &shape,
+                    floptle_core::Shape::ACCEPTS,
+                    floptle_core::Shape::parse,
+                )?;
+                q.borrow_mut().push((e, crate::RichSet::MatterPrimitive(shape, c)));
+                Ok(())
+            })?,
+        )?;
+    }
+}
+    Ok(())
+}
+
+/// `hasTag`, `addTag`, `removeTag`.
+fn node_tag_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+// Tags: node:hasTag("enemy") → bool; node:addTag / node:removeTag edit the
+// list (dedup on add, no-op removes are fine). Reads see this frame's
+// node:destroy() — remove this node (and its whole subtree) from the scene.
+// Queued like every other write: the driver despawns after the pass, so the
+// handle stays safely readable for the rest of this call.
+{
+    let q = shared.destroy_queue.clone();
+    methods.set(
+        "destroy",
+        lua.create_function(move |_, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            q.borrow_mut().push(e);
+            Ok(())
+        })?,
+    )?;
+}
+// pending edits (read-your-writes), the ECS component updates after the pass.
+{
+    let scene = shared.scene.clone();
+    let tag_changes = shared.tag_changes.clone();
+    methods.set(
+        "hasTag",
+        lua.create_function(move |_, (this, tag): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let has = tag_changes
+                .borrow()
+                .get(&e)
+                .map(|t| t.contains(&tag))
+                .unwrap_or_else(|| {
+                    scene.borrow().tags.get(&e).map(|t| t.contains(&tag)).unwrap_or(false)
+                });
+            Ok(has)
+        })?,
+    )?;
+}
+{
+    let scene = shared.scene.clone();
+    let tag_changes = shared.tag_changes.clone();
+    methods.set(
+        "addTag",
+        lua.create_function(move |_, (this, tag): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let mut ch = tag_changes.borrow_mut();
+            let tags = ch
+                .entry(e)
+                .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+            Ok(())
+        })?,
+    )?;
+}
+{
+    let scene = shared.scene.clone();
+    let tag_changes = shared.tag_changes.clone();
+    methods.set(
+        "removeTag",
+        lua.create_function(move |_, (this, tag): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let mut ch = tag_changes.borrow_mut();
+            let tags = ch
+                .entry(e)
+                .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
+            tags.retain(|t| t != &tag);
+            Ok(())
+        })?,
+    )?;
+}
+    Ok(())
+}
+
+/// `node:animator()` and the animation handle it returns.
+fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+// node:animator() → the animation handle: play/stop/fade animation states on the
+// node's AnimationController (or a rigged model's embedded clips). Setters queue
+// into `anim_commands` (applied before the animators advance, same frame); getters
+// read the `anim_info` mirror the editor feeds each frame.
+{
+    let anim_methods = lua.create_table()?;
+    let queue = |cmds: &Rc<RefCell<Vec<(u32, AnimCmd)>>>, e: u32, c: AnimCmd| {
+        cmds.borrow_mut().push((e, c));
+    };
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "play",
+            lua.create_function(
+                move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::Play {
+                        state,
+                        layer,
+                        fade: fade.map(|f| f as f32),
+                        restart: false,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "restart",
+            lua.create_function(
+                move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::Play {
+                        state,
+                        layer,
+                        fade: fade.map(|f| f as f32),
+                        restart: true,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "crossfade",
+            lua.create_function(
+                move |_, (this, state, fade, layer): (Table, String, f64, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::Play {
+                        state,
+                        layer,
+                        fade: Some(fade as f32),
+                        restart: false,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "stop",
+            lua.create_function(
+                move |_, (this, layer, fade): (Table, Option<String>, Option<f64>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::Stop { layer, fade: fade.map(|f| f as f32) });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setSpeed",
+            lua.create_function(move |_, (this, s): (Table, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SetSpeed(s as f32));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setLayerWeight",
+            lua.create_function(move |_, (this, layer, w): (Table, String, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SetLayerWeight { layer, weight: w as f32 });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "seek",
+            lua.create_function(move |_, (this, t, layer): (Table, f64, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::Seek { t: t as f32, layer });
+                Ok(())
+            })?,
+        )?;
+    }
+    // The layer whose state "shows": the topmost active layer, else the base.
+    fn showing(info: &AnimInfo) -> Option<&(String, Option<String>, f32, bool)> {
+        info.layers.iter().rev().find(|(_, s, _, _)| s.is_some()).or(info.layers.first())
+    }
+    {
+        let inf = shared.anim_info.clone();
+        let f = lua.create_function(move |lua, (this, layer): (Table, Option<String>)| {
+            let e: u32 = this.raw_get("__id")?;
+            let info = inf.borrow();
+            let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+            let slot = match &layer {
+                Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                None => showing(i),
+            };
+            Ok(match slot.and_then(|(_, s, _, _)| s.as_ref()) {
+                Some(s) => Value::String(lua.create_string(s)?),
+                None => Value::Nil,
+            })
+        })?;
+        anim_methods.set("state", f.clone())?;
+        anim_methods.set("current", f)?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "time",
+            lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                let slot = match &layer {
+                    Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                    None => showing(i),
+                };
+                Ok(slot.map(|(_, _, t, _)| Value::Number(*t as f64)).unwrap_or(Value::Nil))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "finished",
+            lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
+                let slot = match &layer {
+                    Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                    None => showing(i),
+                };
+                Ok(Value::Boolean(slot.map(|(_, _, _, f)| *f).unwrap_or(false)))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "isPlaying",
+            lua.create_function(move |_, (this, state): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
+                Ok(Value::Boolean(match &state {
+                    Some(s) => i
+                        .layers
+                        .iter()
+                        .any(|(_, cur, _, fin)| cur.as_deref() == Some(s) && !fin),
+                    None => i.layers.iter().any(|(_, cur, _, _)| cur.is_some()),
+                }))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "clips",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let arr = lua.create_table()?;
+                if let Some(i) = inf.borrow().get(&e) {
+                    for (n, c) in i.clips.iter().enumerate() {
+                        arr.set(n + 1, lua.create_string(&c.name)?)?;
+                    }
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
+    // A clip's AUTHORED duration + events, read from the asset rather than from
+    // playback — so a game can bake integer frame data once at load. Runtime event
+    // dispatch is unchanged; these are read-only.
+    //
+    // A fighter cannot let clip events drive gameplay: they fire off float playback
+    // time, stepped playback (`sample_fps`) quantises them to the step grid, clip
+    // time and state frame disagree mid-crossfade, and a prediction replay
+    // deliberately does not re-fire them. Baking at load sidesteps all four — every
+    // machine loads the same `.anim.ron`, so the numbers are identical and constant.
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "duration",
+            lua.create_function(move |_, (this, clip): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                Ok(i.clips
+                    .iter()
+                    .find(|c| c.name == clip)
+                    .map(|c| Value::Number(c.duration as f64))
+                    .unwrap_or(Value::Nil))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "events",
+            lua.create_function(move |lua, (this, clip): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                // Unknown clip → nil, so `if anim:events(c) then` guards work; a
+                // clip with no events → an empty array, which is a different answer.
+                let Some(c) = i.clips.iter().find(|c| c.name == clip) else {
+                    return Ok(Value::Nil);
+                };
+                let arr = lua.create_table()?;
+                for (n, (t, func)) in c.events.iter().enumerate() {
+                    let ev = lua.create_table()?;
+                    ev.set("t", *t as f64)?;
+                    ev.set("func", lua.create_string(func)?)?;
+                    arr.set(n + 1, ev)?;
+                }
+                Ok(Value::Table(arr))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.anim_info.clone();
+        anim_methods.set(
+            "layers",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let arr = lua.create_table()?;
+                if let Some(i) = inf.borrow().get(&e) {
+                    for (n, (name, _, _, _)) in i.layers.iter().enumerate() {
+                        arr.set(n + 1, lua.create_string(name)?)?;
+                    }
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
+    // Method lookup goes through a function so a CASING typo fails with a
+    // fix instead of a bare nil-call: the animator API is camelCase
+    // (`anim:isPlaying`), and `anim:IsPlaying(...)` used to die with
+    // "attempt to call a nil value (method 'IsPlaying')" — no hint at all.
+    // A case-insensitive near-miss now errors with "did you mean
+    // 'isPlaying'?". Genuinely unknown keys still index to nil, so
+    // feature probes (`if anim.someday then`) keep working.
+    let anim_mt = lua.create_table()?;
+    anim_mt.set(
+        "__index",
+        lua.create_function(move |_, (_this, key): (Table, Value)| {
+            let Value::String(k) = &key else { return Ok(Value::Nil) };
+            let name = k.to_string_lossy().to_string();
+            let hit: Value = anim_methods.raw_get(name.as_str())?;
+            if hit != Value::Nil {
+                return Ok(hit);
+            }
+            for pair in anim_methods.pairs::<String, Value>() {
+                let (known, _) = pair?;
+                if known.eq_ignore_ascii_case(&name) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "animator has no method '{name}' — did you mean '{known}'? \
+                         (animator methods are camelCase)"
+                    )));
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+    lua.set_named_registry_value("floptle_anim_mt", anim_mt)?;
+
+    methods.set(
+        "animator",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let t = lua.create_table()?;
+            t.raw_set("__id", e)?;
+            if let Ok(mt) = lua.named_registry_value::<Table>("floptle_anim_mt") {
+                t.set_metatable(Some(mt));
+            }
+            Ok(t)
+        })?,
+    )?;
+}
+    Ok(())
+}
+
+/// `node:particles()` and the particle handle it returns.
+fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+// node:particles() → the particle-system handle: play / stop / restart the node's
+// ParticleSystem effect, and read its live state. Setters queue into `vfx_commands`
+// (applied before the effects advance, same frame); getters read the `vfx_info`
+// mirror the editor feeds each frame.
+{
+    let vfx_methods = lua.create_table()?;
+    for (name, cmd) in
+        [("play", VfxCmd::Play), ("stop", VfxCmd::Stop), ("restart", VfxCmd::Restart)]
+    {
+        let cmds = shared.vfx_commands.clone();
+        let cmd = cmd.clone();
+        vfx_methods.set(
+            name,
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                cmds.borrow_mut().push((e, cmd.clone()));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.vfx_commands.clone();
+        vfx_methods.set(
+            "setIntensity",
+            lua.create_function(move |_, (this, i): (Table, f32)| {
+                let e: u32 = this.raw_get("__id")?;
+                cmds.borrow_mut().push((e, VfxCmd::Intensity(i)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // ps:setBeamEnd(x, y, z) — aim every Beam track of the node's effect at a
+        // WORLD-space point (the engine converts it to effect-local, so the beam
+        // tracks the target as the emitter moves/rotates).
+        let cmds = shared.vfx_commands.clone();
+        vfx_methods.set(
+            "setBeamEnd",
+            lua.create_function(move |_, (this, x, y, z): (Table, f64, f64, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                cmds.borrow_mut().push((e, VfxCmd::SetBeamEnd([x, y, z])));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.vfx_info.clone();
+        vfx_methods.set(
+            "isPlaying",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(Value::Boolean(inf.borrow().get(&e).map(|i| i.playing).unwrap_or(false)))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.vfx_info.clone();
+        vfx_methods.set(
+            "alive",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(Value::Number(inf.borrow().get(&e).map(|i| i.alive as f64).unwrap_or(0.0)))
+            })?,
+        )?;
+    }
+    {
+        let inf = shared.vfx_info.clone();
+        vfx_methods.set(
+            "asset",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                match inf.borrow().get(&e) {
+                    Some(i) => Ok(Value::String(lua.create_string(&i.asset)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+    }
+    let vfx_mt = lua.create_table()?;
+    vfx_mt.set("__index", vfx_methods)?;
+    lua.set_named_registry_value("floptle_vfx_mt", vfx_mt)?;
+
+    methods.set(
+        "particles",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let t = lua.create_table()?;
+            t.raw_set("__id", e)?;
+            if let Ok(mt) = lua.named_registry_value::<Table>("floptle_vfx_mt") {
+                t.set_metatable(Some(mt));
+            }
+            Ok(t)
+        })?,
+    )?;
+
+    // node:setShaderParam(name, x, y?, z?, w?) — drive a `.flsl` uniform
+    // from a script every tick (a uniform write on the GPU, never a
+    // recompile). Works on a mesh Material's shader AND on a UI element's
+    // `stage ui` shader — instruments like the navball live on this.
+    {
+        let sets = shared.shader_param_sets.clone();
+        methods.set(
+            "setShaderParam",
             lua.create_function(
                 move |_,
                       (this, name, x, y, z, w): (
@@ -4231,2734 +6686,344 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     Option<f32>,
                 )| {
                     let e: u32 = this.raw_get("__id")?;
-                    let comp: String = this.raw_get("__comp")?;
-                    let part = which_material(&comp).expect("only handed to a material handle");
                     sets.borrow_mut().push((
                         e,
-                        part,
+                        None,
                         name,
                         [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
                     ));
                     Ok(())
                 },
-            )?
-        };
-        let set_shader_texture = {
-            let sets = shared.shader_texture_sets.clone();
+            )?,
+        )?;
+    }
+
+    // node:setShaderTexture(slot, ref) — point one of a `.flsl` shader's
+    // declared texture slots at a different image, at runtime.
+    //
+    // `ref` is a project-relative path ("textures/rust.png"), an `rt:` render
+    // target ("rt:securityCam" — what another camera is looking at, live), or
+    // "" to clear the slot back to nothing.
+    //
+    // The slot NAME is the one the shader declares (`texture ramp` → "ramp"),
+    // so a script names what the artist named, not an index that shifts the
+    // moment a slot is added.
+    {
+        let sets = shared.shader_texture_sets.clone();
+        methods.set(
+            "setShaderTexture",
             lua.create_function(move |_, (this, slot, path): (Table, String, String)| {
                 let e: u32 = this.raw_get("__id")?;
-                let comp: String = this.raw_get("__comp")?;
                 if slot.trim().is_empty() {
                     return Err(mlua::Error::RuntimeError(
-                        "material:setShaderTexture(slot, ref) — slot is the name the shader \
+                        "node:setShaderTexture(slot, ref) — slot is the name the shader \
                          declares, e.g. \"ramp\" for `texture ramp`"
                             .into(),
                     ));
                 }
-                let part = which_material(&comp).expect("only handed to a material handle");
-                sets.borrow_mut().push((e, part, slot, path));
+                sets.borrow_mut().push((e, None, slot, path));
                 Ok(())
-            })?
-        };
-        // Read-back: this frame's pending write first, then the mirror — the
-        // same order the numeric fields answer in, so `m:shaderParam("glow")`
-        // is true in the line after `m:setShaderParam("glow", 2)`.
-        let shader_param = {
-            let sets = shared.shader_param_sets.clone();
-            let scene = shared.scene.clone();
-            lua.create_function(move |lua, (this, name): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let comp: String = this.raw_get("__comp")?;
-                let part = which_material(&comp).expect("only handed to a material handle");
-                let pending = sets
-                    .borrow()
-                    .iter()
-                    .rev()
-                    .find(|(qe, qp, qn, _)| *qe == e && *qp == part && *qn == name)
-                    .map(|(_, _, _, v)| *v);
-                let v = pending.or_else(|| {
-                    scene.borrow().shader_state.get(&e)?.get(&comp)?.0.get(&name).copied()
-                });
-                match v {
-                    Some(v) => (v[0], v[1], v[2], v[3]).into_lua_multi(lua),
-                    None => Ok(MultiValue::new()),
-                }
-            })?
-        };
-        let shader_texture = {
-            let sets = shared.shader_texture_sets.clone();
-            let scene = shared.scene.clone();
-            lua.create_function(move |lua, (this, slot): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let comp: String = this.raw_get("__comp")?;
-                let part = which_material(&comp).expect("only handed to a material handle");
-                let pending = sets
-                    .borrow()
-                    .iter()
-                    .rev()
-                    .find(|(qe, qp, qs, _)| *qe == e && *qp == part && *qs == slot)
-                    .map(|(_, _, _, p)| p.clone());
-                let p = pending.or_else(|| {
-                    scene.borrow().shader_state.get(&e)?.get(&comp)?.1.get(&slot).cloned()
-                });
-                match p {
-                    // A cleared slot reads as `""`, the spelling that clears one.
-                    Some(p) => Ok(Value::String(lua.create_string(&p)?)),
-                    None => Ok(Value::Nil),
-                }
-            })?
-        };
-        {
-            let scene = shared.scene.clone();
-            let changes = shared.component_changes.clone();
-            let colors = shared.component_colors.clone();
-            let strs_r = shared.component_strs.clone();
-            let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let comp: String = this.raw_get("__comp")?;
-                if which_material(&comp).is_some() {
-                    let method = match key.as_str() {
-                        "setShaderParam" => Some(&set_shader_param),
-                        "setShaderTexture" => Some(&set_shader_texture),
-                        "shaderParam" => Some(&shader_param),
-                        "shaderTexture" => Some(&shader_texture),
-                        _ => None,
-                    };
-                    if let Some(f) = method {
-                        return Ok(Value::Function(f.clone()));
-                    }
-                }
-                // Colours first: a colour field never has a numeric twin.
-                if let Some(c) = colors.borrow().get(&(e, comp.clone(), key.clone())) {
-                    return Ok(Value::Table(new_color(lua, *c)?));
-                }
-                let s = scene.borrow();
-                if let Some(c) =
-                    s.component_colors.get(&e).and_then(|m| m.get(&comp)).and_then(|m| m.get(&key))
-                {
-                    return Ok(Value::Table(new_color(lua, *c)?));
-                }
-                // Booleans read back as booleans, because 0 is truthy in Lua
-                // and `if el.visible then` was always taken.
-                let wrap = |v: f64| {
-                    if is_bool_field(&comp, &key) {
-                        Value::Boolean(v != 0.0)
-                    } else {
-                        Value::Number(v)
-                    }
-                };
-                if let Some(v) = changes.borrow().get(&(e, comp.clone(), key.clone())) {
-                    return Ok(wrap(*v));
-                }
-                if let Some(v) =
-                    s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
-                {
-                    return Ok(wrap(*v));
-                }
-                // **Strings, which used to be write-only.** `mat.texture = p`
-                // worked and `mat.texture` answered nil, however many times it
-                // had been set — so a script could tell a material what to wear
-                // and never ask. This frame's pending write first, then the
-                // mirror, exactly as the numbers above do it.
-                if let Some(v) = strs_r.borrow().get(&(e, comp.clone(), key.clone())) {
-                    return Ok(Value::String(lua.create_string(v)?));
-                }
-                if let Some(v) =
-                    s.component_strings.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
-                {
-                    return Ok(Value::String(lua.create_string(v)?));
-                }
-                // `rb.lockRotX` → the mirror's `lock_rot_x`: the camelCase
-                // spelling the docs teach, over the snake_case names a few
-                // components still store.
-                if let Some(alt) = snake_of(&key) {
-                    if let Some(v) = changes.borrow().get(&(e, comp.clone(), alt.clone())) {
-                        return Ok(wrap(*v));
-                    }
-                    if let Some(v) =
-                        s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&alt))
-                    {
-                        return Ok(wrap(*v));
-                    }
-                }
-                // **A per-object material answers before it exists.**
-                //
-                // `node:material("Clothing")` hands back a handle whether or not
-                // that part has an override yet — writing one is how it comes to
-                // exist. But nothing is mirrored until it does, so every field
-                // read back nil and the ordinary first line anybody writes,
-                // `m.alpha = m.alpha * 0.5`, raised on arithmetic against nil.
-                //
-                // A fresh override IS the engine's default material, so that is
-                // what it reads as. The value is true before the write and after
-                // it, which is the only thing a reader can rely on.
-                if comp.starts_with(OBJECT_MATERIAL_PREFIX) {
-                    let d = floptle_core::Material::default();
-                    if let Some(v) = material_fields(&d, d.cell).get(&key) {
-                        return Ok(wrap(*v));
-                    }
-                    if MATERIAL_STR_FIELDS.contains(&key.as_str()) {
-                        let s = if key == "shading" { d.shading.as_str() } else { "" };
-                        return Ok(Value::String(lua.create_string(s)?));
-                    }
-                    if matches!(key.as_str(), "color" | "emissive" | "specular" | "rim") {
-                        let c = match key.as_str() {
-                            "color" => [d.color[0], d.color[1], d.color[2], d.alpha],
-                            "emissive" => [d.emissive[0], d.emissive[1], d.emissive[2], 1.0],
-                            "specular" => [d.specular[0], d.specular[1], d.specular[2], 1.0],
-                            _ => [d.rim[0], d.rim[1], d.rim[2], 1.0],
-                        };
-                        return Ok(Value::Table(new_color(lua, c)?));
-                    }
-                }
-                Ok(Value::Nil)
-            })?;
-            comp_mt.set("__index", idx)?;
-        }
-        {
-            let changes = shared.component_changes.clone();
-            let colors = shared.component_colors.clone();
-            let strs = shared.component_strs.clone();
-            let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
-                let e: u32 = this.raw_get("__id")?;
-                let comp: String = this.raw_get("__comp")?;
-                // A table is a colour: `e.fill = color(1, 0.85, 0.35)`, or any
-                // `{r,g,b,a}` / `{1,0,0}` table, so a palette read out of a
-                // save file works without a conversion step.
-                // A camelCase spelling of a legacy snake_case field writes the
-                // field it names (see `snake_of`), so the mirror keeps ONE key
-                // per field. An unknown camelCase name is left alone — its
-                // "unknown field" behaviour is unchanged.
-                let key = snake_of(&key)
-                    .filter(|alt| LEGACY_SNAKE_FIELDS.contains(&alt.as_str()))
-                    .unwrap_or(key);
-                if let Value::Table(t) = &val {
-                    let c = read_color(t)?;
-                    colors.borrow_mut().insert((e, comp, key), c);
-                    return Ok(());
-                }
-                // A string is a path or a label: a UI image's texture, a
-                // Material's texture, a text element's string. This used to
-                // raise "must be a number, a boolean or a color", which was the
-                // one path that failed LOUDLY and it pointed nowhere useful.
-                if let Value::String(s) = &val {
-                    strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
-                    return Ok(());
-                }
-                let n = match val {
-                    Value::Number(n) => n,
-                    Value::Integer(n) => n as f64,
-                    Value::Boolean(b) => f64::from(u8::from(b)),
-                    _ => {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "component field '{key}' must be a number, a boolean, a string or a \
-                             color"
-                        )));
-                    }
-                };
-                changes.borrow_mut().insert((e, comp, key), n);
-                Ok(())
-            })?;
-            comp_mt.set("__newindex", newidx)?;
-        }
-        lua.set_named_registry_value("floptle_component_mt", comp_mt)?;
+            })?,
+        )?;
     }
 
-    // ---- sprite handle metatable (node:sprite) -------------------------------------
-    // The Sprite component as something you hold: `local sp = node:sprite()`,
-    // then `sp.flipX = mx > 0`. `node:setSprite{...}` shipped as the only route,
-    // which makes the commonest 2D line in any game — face the way you are
-    // walking — a table literal rebuilt every frame, and gives no way at all to
-    // ASK which way the sprite is facing.
+    // node:setScreenShader(name, on) — switch one of the PostProcess node's
+    // screen shaders on or off.
     //
-    // Reads answer from the mirror and every write updates it as it queues, so a
-    // read straight after an assignment is the value just assigned rather than
-    // the one the frame started with. An unknown field RAISES on both sides: a
-    // handle is where somebody guesses a name, and `sp.flipx = true` doing
-    // nothing at all is the failure this whole feature exists to end.
+    // `name` is the shader's file name without the extension ("inkOutline"),
+    // which is what the Inspector lists and what the author is looking at.
+    // Empty means every pass on the node — the whole authored look, off.
+    //
+    // The pass and its knobs stay in the scene, so this is a switch and not
+    // a deletion: turn the outline on for a boss fight and off again after.
     {
-        let sprite_mt = lua.create_table()?;
-        {
-            let scene = shared.scene.clone();
-            let idx = lua.create_function(move |_, (this, key): (Table, String)| {
+        let toggles = shared.screen_shader_toggles.clone();
+        methods.set(
+            "setScreenShader",
+            lua.create_function(move |_, (this, name, on): (Table, String, bool)| {
                 let e: u32 = this.raw_get("__id")?;
-                let Some(m) = scene.borrow().sprites.get(&e).copied() else {
-                    return Err(mlua::Error::runtime(
-                        "node:sprite(): this node is not a sprite any more — something \
-                         changed its Matter after the handle was taken.",
+                toggles.borrow_mut().push((e, name, on));
+                Ok(())
+            })?,
+        )?;
+    }
+}
+    Ok(())
+}
+
+/// Orientation, local ↔ world conversion and movement.
+fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+
+// ---- orientation, local ↔ world, movement ---------------------------------------
+//
+// The half of the API that used to be written out longhand in every script:
+// `atan2` with two minus signs, a four-line project-onto-plane, and an
+// inverse-parent-transform nobody wanted to derive. Each one names the
+// intent, so it cannot get the sign wrong.
+//
+// They all go through the handle's own `__index`/`__newindex` (`this.get` /
+// `this.set`, never `raw_*`), so the own-node-vs-mirror rule, the body
+// teleport queue and the read-your-writes behaviour stay in ONE place.
+{
+    // node:lookAt(target [, up]) — point at a node handle or a world point.
+    // Sets yaw + pitch; roll only when you pass an `up` (and then it is
+    // whatever puts that up over the node's head — a level horizon on a
+    // planet, in one call instead of twenty lines of undo-yaw-then-pitch).
+    //
+    // WORLD space on both ends: the node's own world position against the
+    // target's, then the angles written back as the LOCAL yaw/pitch the
+    // fields are. Under an unrotated parent (the overwhelmingly common
+    // case) those coincide; under a rotated one, aim with `:lookAt` on the
+    // parent or read `node:worldForward()` to see what actually happened.
+    let scene = shared.scene.clone();
+    methods.set(
+        "lookAt",
+        lua.create_function(move |_, (this, target, up): (Table, Value, Option<Value>)| {
+            let e: u32 = this.raw_get("__id")?;
+            // A node handle aims at where it WORLD is; a bare vec3 is taken
+            // as the world point it plainly is.
+            let (t, here) = {
+                let s = scene.borrow();
+                let Some(t) = world_pos_of_value(&s, &target) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node:lookAt(target [, up]) — target is a node or a vec3".into(),
                     ));
                 };
-                Ok(match key.as_str() {
-                    "ppu" => Value::Number(f64::from(m.ppu)),
-                    "size" => Value::Number(f64::from(m.size)),
-                    "cell" => Value::Integer(m.cell as mlua::Integer),
-                    // Booleans as BOOLEANS: 0 is truthy in Lua, so a number here
-                    // would make `if sp.flipX then` a branch that is always taken.
-                    "flipX" => Value::Boolean(m.flip_x),
-                    "flipY" => Value::Boolean(m.flip_y),
-                    "pivotX" => Value::Number(f64::from(m.pivot[0])),
-                    "pivotY" => Value::Number(f64::from(m.pivot[1])),
-                    other => {
-                        return Err(mlua::Error::runtime(format!(
-                            "node:sprite() has no field `{other}`{}",
-                            crate::opts::near_miss_hint(other, SPRITE_KEYS)
-                        )));
-                    }
-                })
-            })?;
-            sprite_mt.set("__index", idx)?;
-        }
-        {
-            let scene = shared.scene.clone();
-            let q = shared.rich_sets.clone();
-            let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
-                let e: u32 = this.raw_get("__id")?;
-                // A number is a number; a flip is a boolean, but a number is
-                // taken too (past the halfway point is flipped) because that is
-                // what an animation lane writes and what a value restored from a
-                // save file arrives as.
-                let num = |field: &str| -> mlua::Result<f64> {
-                    match &val {
-                        Value::Number(n) => Ok(*n),
-                        Value::Integer(n) => Ok(*n as f64),
-                        Value::Boolean(b) => Ok(f64::from(u8::from(*b))),
-                        other => Err(mlua::Error::runtime(format!(
-                            "sprite field `{field}` takes a number, got {}",
-                            other.type_name()
-                        ))),
-                    }
-                };
-                let flag = |field: &str| -> mlua::Result<bool> { Ok(num(field)? >= 0.5) };
-                let mut set = crate::RichSet::MatterSprite {
-                    ppu: None,
-                    size: None,
-                    cell: None,
-                    flip_x: None,
-                    flip_y: None,
-                    pivot_x: None,
-                    pivot_y: None,
-                };
-                let crate::RichSet::MatterSprite {
-                    ppu,
-                    size,
-                    cell,
-                    flip_x,
-                    flip_y,
-                    pivot_x,
-                    pivot_y,
-                } = &mut set
-                else {
-                    unreachable!("built one line above")
-                };
-                match key.as_str() {
-                    "ppu" => *ppu = Some(num("ppu")? as f32),
-                    "size" => *size = Some(num("size")? as f32),
-                    "cell" => {
-                        let n = num("cell")?;
-                        // A cell is an index into the sheet. `as u32` on a
-                        // negative would wrap to four billion and draw whatever
-                        // that lands on, which is the kind of wrong that reads
-                        // as a corrupt spritesheet.
-                        if n < 0.0 || n.is_nan() {
-                            return Err(mlua::Error::runtime(format!(
-                                "sprite field `cell` is an index into the sheet, so it cannot \
-                                 be {n}"
-                            )));
-                        }
-                        *cell = Some(n as u32);
-                    }
-                    "flipX" => *flip_x = Some(flag("flipX")?),
-                    "flipY" => *flip_y = Some(flag("flipY")?),
-                    "pivotX" => *pivot_x = Some(num("pivotX")? as f32),
-                    "pivotY" => *pivot_y = Some(num("pivotY")? as f32),
-                    other => {
-                        return Err(mlua::Error::runtime(format!(
-                            "node:sprite() has no field `{other}`{}",
-                            crate::opts::near_miss_hint(other, SPRITE_KEYS)
-                        )));
-                    }
-                }
-                // The mirror first, so a read on the next line answers with what
-                // was just written; the queue is what reaches the component
-                // after the pass.
-                scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
-                q.borrow_mut().push((e, set));
-                Ok(())
-            })?;
-            sprite_mt.set("__newindex", newidx)?;
-        }
-        lua.set_named_registry_value("floptle_sprite_mt", sprite_mt)?;
-    }
-
-    install_list_mt(lua)?;
-
-    // ---- node methods (children / getChild / getParent / getscript / find) ----------
-    let methods = lua.create_table()?;
-    {
-        let scene = shared.scene.clone();
-        methods.set(
-            "children",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let kids = scene.borrow().children.get(&e).cloned().unwrap_or_default();
-                list_table(lua, &kids, new_node_handle)
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
-            let e: u32 = this.raw_get("__id")?;
-            let found = {
-                let s = scene.borrow();
-                s.children
-                    .get(&e)
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .find(|c| s.names.get(c).map(|n| n == &name).unwrap_or(false))
+                (t, world_transform_of_handle(&s, &this, e).translation)
             };
-            Ok(match found {
-                Some(c) => Value::Table(new_node_handle(lua, c)?),
-                None => Value::Nil,
-            })
-        })?;
-        methods.set("child", f.clone())?;
-        methods.set("getchild", f.clone())?;
-        methods.set("getChild", f)?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let f = lua.create_function(move |lua, this: Table| {
-            let e: u32 = this.raw_get("__id")?;
-            let p = scene.borrow().parent.get(&e).copied();
-            Ok(match p {
-                Some(p) => Value::Table(new_node_handle(lua, p)?),
-                None => Value::Nil,
-            })
-        })?;
-        methods.set("getparent", f.clone())?;
-        methods.set("getParent", f)?;
-    }
-    // node:getscript("health") — a handle on that script, by the name the editor
-    // shows. The kind stored on the node is its PATH under `scripts/` without the
-    // extension, so a file in a folder is "forgery/playermovement" while every
-    // surface a person reads — the tab, the Inspector row, the Console prefix —
-    // says `playermovement`. Matching the stored kind exactly meant asking by the
-    // name on screen returned `nil` and said nothing; the lookup
-    // takes either spelling now, and a genuine miss names what the node does
-    // carry. See [`crate::match_kind`].
-    {
-        let scene = shared.scene.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.miss_warned.clone();
-        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
-            let e: u32 = this.raw_get("__id")?;
-            let matched = {
-                let s = scene.borrow();
-                crate::match_kind(s.kinds_on(e).iter().map(String::as_str), &name)
+            let up = match up {
+                Some(u) => Some(crate::math_api::vec3_of(&u).ok_or_else(|| {
+                    mlua::Error::RuntimeError("node:lookAt's up is a vec3".into())
+                })?),
+                None => None,
             };
-            match matched {
-                crate::KindMatch::One(kind) => Ok(Value::Table(new_script_handle(lua, e, &kind)?)),
-                crate::KindMatch::Ambiguous(hits) => {
-                    Err(crate::ambiguous_kind_error("node:getscript", &name, &hits))
-                }
-                crate::KindMatch::None => {
-                    let (who, has) = {
-                        let s = scene.borrow();
-                        let who = s
-                            .names
-                            .get(&e)
-                            .cloned()
-                            .unwrap_or_else(|| format!("#{e}"));
-                        (who, s.kinds_on(e).to_vec())
-                    };
-                    warn_once(&logs, &warned, format!("getscript:{e}:{name}"), || {
-                        if has.is_empty() {
-                            format!(
-                                "{who}:getscript(\"{name}\") found nothing — that node has no \
-                                 scripts attached at all. Attach one in the Inspector, or check \
-                                 this is the node you meant."
-                            )
-                        } else {
-                            format!(
-                                "{who}:getscript(\"{name}\") found nothing — that node carries \
-                                 {}. A script is named by its file without the .lua, and the \
-                                 folder in front of it is optional.",
-                                has.join(", ")
-                            )
-                        }
-                    });
-                    Ok(Value::Nil)
-                }
+            let (yaw, pitch, roll) = crate::math_api::look_rotation(t - here, up);
+            this.set("yaw", yaw)?;
+            this.set("pitch", pitch)?;
+            if up.is_some() {
+                this.set("roll", roll)?;
             }
-        })?;
-        methods.set("script", f.clone())?;
-        methods.set("getscript", f.clone())?;
-        methods.set("getScript", f)?;
-    }
-    // node:getcomponent("PointLight" | "RigidBody") → a component handle whose numeric
-    // fields you can read + assign (writes flush to the ECS after the frame), or nil if the
-    // node has no such component.
-    {
-        let scene = shared.scene.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.miss_warned.clone();
-        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+            Ok(())
+        })?,
+    )?;
+}
+{
+    // node:turnTowards(target, maxRadians) — the shortest-arc step toward
+    // facing something, capped. Pass `rate * dt` and the turn is
+    // frame-rate independent; the ±π seam is handled (`math.approachAngle`),
+    // which is where every hand-written version went the long way round.
+    // The target may be a node, a world point, or a DIRECTION vector.
+    let scene = shared.scene.clone();
+    methods.set(
+        "turnTowards",
+        lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
             let e: u32 = this.raw_get("__id")?;
-            let has =
-                scene.borrow().components.get(&e).map(|c| c.contains_key(&name)).unwrap_or(false);
-            if has {
-                return Ok(Value::Table(new_component_handle(lua, e, &name)?));
-            }
-            // A miss here is nearly always a casing slip on a name the node does
-            // carry ("rigidbody" for "RigidBody"), and the old answer to that was
-            // a bare nil. Say which components are actually on the node — that
-            // list is the did-you-mean, and it is short.
-            let (who, mut have) = {
-                let s = scene.borrow();
-                let who = s.names.get(&e).cloned().unwrap_or_else(|| format!("#{e}"));
-                let have: Vec<String> = s
-                    .components
-                    .get(&e)
-                    .map(|c| c.keys().cloned().collect())
-                    .unwrap_or_default();
-                (who, have)
-            };
-            have.sort();
-            warn_once(&logs, &warned, format!("getcomponent:{e}:{name}"), || {
-                if have.is_empty() {
-                    format!(
-                        "{who}:getcomponent(\"{name}\") found nothing — that node has no \
-                         components with script-readable fields. Add one in the Inspector."
-                    )
-                } else {
-                    let known: Vec<&str> = have.iter().map(String::as_str).collect();
-                    // `near_miss_hint` falls back to listing everything when
-                    // nothing is close, and the sentence already does that — so
-                    // only the pointed half of it is worth appending.
-                    let hint = crate::opts::near_miss_hint(&name, &known);
-                    let hint = if hint.starts_with(" (did you mean") { hint } else { String::new() };
-                    format!(
-                        "{who}:getcomponent(\"{name}\") found nothing — that node carries {}.{hint}",
-                        have.join(", ")
-                    )
-                }
-            });
-            Ok(Value::Nil)
-        })?;
-        methods.set("component", f.clone())?;
-        methods.set("getcomponent", f.clone())?;
-        methods.set("getComponent", f)?;
-    }
-    // node:setTint(color [, alpha]) / node:setTint{ ... } / node:setTint() — the
-    // modifiers over everything this node draws, its own textures and its parts'
-    // own colours included. The easy "same model, but red" — and, in the table
-    // form, the additive rim and ambient lift that a multiply alone cannot do.
-    {
-        let q = shared.rich_sets.clone();
-        methods.set(
-            "setTint",
-            lua.create_function(move |_, (this, c, a): (Table, Value, Option<f32>)| {
-                let e: u32 = this.raw_get("__id")?;
-                let mut set = crate::RichSet::NodeTint {
-                    color: None,
-                    alpha: a,
-                    rim: None,
-                    rim_strength: None,
-                    ambient: None,
-                    clear: false,
-                };
-                let crate::RichSet::NodeTint {
-                    color, alpha, rim, rim_strength, ambient, clear,
-                } = &mut set
-                else {
-                    unreachable!()
-                };
-                match &c {
-                    // No argument clears it. `node:setTint()` reads as "no
-                    // tint", and a caller turning a highlight off should not
-                    // have to know that white is the identity.
-                    Value::Nil => *clear = true,
-                    Value::Table(t) => {
-                        // **A COLOUR or AN OPTIONS TABLE, decided by name.** A
-                        // colour is `{1,0.5,0.2}` or `{r=,g=,b=}` and never
-                        // carries any of these names, so their presence is the
-                        // whole test — a positional list stays a colour and
-                        // keeps working exactly as it did.
-                        //
-                        // **`alpha` has to be in this list**, and leaving it out
-                        // was not a no-op: `read_color` defaults a missing r/g/b
-                        // to zero, so `setTint{ alpha = 0.5 }` read as a colour
-                        // is BLACK at full opacity — the model goes dark, the
-                        // fade never happens, and nothing is logged. It cannot
-                        // collide with a colour, because a `color(...)` table
-                        // carries `r/g/b/a` and `[1]..[4]` and never `alpha`.
-                        let opts = ["color", "alpha", "rim", "rimStrength", "ambient"]
-                            .iter()
-                            .any(|k| t.contains_key(*k).unwrap_or(false));
-                        if opts {
-                            // Each field is read STRICTLY: present and wrong is
-                            // an error naming the field, never a silent skip.
-                            // A field that quietly does nothing is the failure
-                            // this whole API keeps being bitten by.
-                            let colour_at = |key: &str| -> mlua::Result<Option<[f32; 3]>> {
-                                match t.get::<Value>(key) {
-                                    Ok(Value::Nil) | Err(_) => Ok(None),
-                                    Ok(Value::Table(ct)) => {
-                                        let v = read_color(&ct)?;
-                                        Ok(Some([v[0], v[1], v[2]]))
-                                    }
-                                    // `vec3` is a colour everywhere else this
-                                    // API takes one, so it is one here too.
-                                    Ok(other) => match crate::math_api::vec3_of(&other) {
-                                        Some(v) => {
-                                            Ok(Some([v.x as f32, v.y as f32, v.z as f32]))
-                                        }
-                                        None => Err(mlua::Error::runtime(format!(
-                                            "node:setTint{{ {key} = … }} takes a colour: \
-                                             color(r,g,b), {{r,g,b}}, {{1,0.5,0.2}} or vec3"
-                                        ))),
-                                    },
-                                }
-                            };
-                            let number_at = |key: &str| -> mlua::Result<Option<f32>> {
-                                match t.get::<Value>(key) {
-                                    Ok(Value::Nil) | Err(_) => Ok(None),
-                                    Ok(v) => match crate::math_api::num_of(&v) {
-                                        Some(n) => Ok(Some(n as f32)),
-                                        None => Err(mlua::Error::runtime(format!(
-                                            "node:setTint{{ {key} = … }} takes a number"
-                                        ))),
-                                    },
-                                }
-                            };
-                            *color = colour_at("color")?;
-                            if let Some(r) = colour_at("rim")? {
-                                *rim = Some(r);
-                                // A rim with no strength named is a rim you
-                                // asked for: default it on rather than writing
-                                // a colour at strength 0, which would look like
-                                // the call did nothing.
-                                *rim_strength = Some(1.0);
-                            }
-                            if let Some(s) = number_at("rimStrength")? {
-                                *rim_strength = Some(s);
-                            }
-                            *ambient = number_at("ambient")?;
-                            if let Some(v) = number_at("alpha")? {
-                                *alpha = Some(v);
-                            }
-                        } else {
-                            // Any spelling of a colour the rest of the API
-                            // takes: `color(...)`, `{r=,g=,b=}`, `{1,0.5,0.2}`.
-                            let v = read_color(t)?;
-                            *color = Some([v[0], v[1], v[2]]);
-                            *alpha = Some(a.unwrap_or(1.0));
-                        }
-                    }
-                    other => {
-                        let v = crate::math_api::vec3_of(other).ok_or_else(|| {
-                            mlua::Error::runtime(
-                                "node:setTint(color [, alpha]): a colour takes color(r,g,b), \
-                                 {r,g,b}, {1,0.5,0.2} or vec3; node:setTint{ color =, alpha =, \
-                                 rim =, rimStrength =, ambient = } sets the rest — and \
-                                 node:setTint() with nothing clears it",
-                            )
-                        })?;
-                        *color = Some([v.x as f32, v.y as f32, v.z as f32]);
-                        *alpha = Some(a.unwrap_or(1.0));
-                    }
-                }
-                q.borrow_mut().push((e, set));
-                Ok(())
-            })?,
-        )?;
-    }
-    // node:material() / node:material("Clothing") — the node's own Material, or
-    // one part of a model's materials, as a handle you can read and assign.
-    {
-        let scene = shared.scene.clone();
-        let q = shared.rich_sets.clone();
-        methods.set(
-            "material",
-            lua.create_function(move |lua, (this, key): (Table, Option<String>)| {
-                let e: u32 = this.raw_get("__id")?;
-                let Some(key) = key else {
-                    // No name: the node's own Material — the one that covers the
-                    // whole model. Refused rather than invented when the node has
-                    // none, because a handle whose writes create a component
-                    // nobody asked for is how a typo becomes a look change.
-                    let has = scene
-                        .borrow()
-                        .components
-                        .get(&e)
-                        .is_some_and(|c| c.contains_key("Material"))
-                        // …or it is about to have one: `setMaterial` is queued
-                        // and applied after the pass, so the two lines anybody
-                        // writes — give it a material, then take its handle —
-                        // have to work in that order. The batch handle makes the
-                        // same allowance for `setSpriteBatch`.
-                        || q.borrow().iter().any(|(qe, set)| {
-                            *qe == e && matches!(set, crate::RichSet::Material(_))
-                        });
-                    if !has {
-                        return Err(mlua::Error::runtime(
-                            "node:material(): this node has no Material. Add one in the \
-                             Inspector, or call node:setMaterial{ ... } first — on a MODEL a \
-                             Material covers every part, and node:material(\"<name>\") is how \
-                             you reach one part instead.",
-                        ));
-                    }
-                    return crate::env::new_component_handle(lua, e, "Material");
-                };
-                if key.trim().is_empty() {
-                    return Err(mlua::Error::runtime(
-                        "node:material(name): the name is one of node:materials() — an \
-                         object like \"Torso#2\" or a material like \"Clothing\".",
-                    ));
-                }
-                // A part's material handle is not refused when the part has no
-                // override yet: writing one is how an override comes to exist,
-                // and that is the whole point of the call. It starts as the
-                // engine's default material (white, untextured) rather than as
-                // the part's imported look, because the imported look lives in
-                // the model file and this side of the engine has never read it —
-                // so state what you want, don't tweak what you assume.
-                crate::env::new_component_handle(lua, e, &format!("{}{key}", crate::api::OBJECT_MATERIAL_PREFIX))
-            })?,
-        )?;
-    }
-    // node:materials() -> the model's material slots, so a script can find out
-    // what the parts are called before trying to address one.
-    {
-        let scene = shared.scene.clone();
-        methods.set(
-            "materials",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let s = scene.borrow();
-                let arr = lua.create_table()?;
-                let Some(model) = s.models.get(&e) else { return Ok(arr) };
-                let Some(slots) = s.model_slots.get(model) else { return Ok(arr) };
-                let overridden = |k: &str| {
-                    s.components
-                        .get(&e)
-                        .is_some_and(|c| c.contains_key(&format!("{}{k}", crate::api::OBJECT_MATERIAL_PREFIX)))
-                };
-                for (i, slot) in slots.iter().enumerate() {
-                    let t = lua.create_table()?;
-                    t.set("object", slot.object.as_str())?;
-                    t.set("material", slot.material.as_str())?;
-                    t.set("textured", slot.textured)?;
-                    // Whether this node has already said something about it —
-                    // either by its object name or by its material name.
-                    t.set("overridden", overridden(&slot.object) || overridden(&slot.material))?;
-                    arr.set(i + 1, t)?;
-                }
-                Ok(arr)
-            })?,
-        )?;
-    }
-    // node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
-    // WINDOW physical pixels: the same space input.mouse() reports and
-    // camera.worldToScreen() returns, so a docked editor Game tab's rects carry
-    // that tab's offset. Lets a script hit-test the cursor against a panel's
-    // actual rendered position instead of guessing its geometry.
-    //
-    // **`nil` when it has no screen-space rect this frame** — not a UI
-    // element, not laid out yet, or no surface to lay out against at all,
-    // which is every frame of `floptle run`. It answered
-    // `0, 0, 0, 0` for all three, and under `run` that is a measurement a
-    // script cannot tell from a real one: a four-button menu "verified"
-    // headless was verified against zeros. The reference always said nil,
-    // and every shipped caller already guards for it (`if rx and rw > 1`).
-    {
-        let ui_rects = shared.ui_rects.clone();
-        methods.set(
-            "uiRect",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                match ui_rects.borrow().get(&e).copied() {
-                    Some(r) => (r[0], r[1], r[2], r[3]).into_lua_multi(lua),
-                    None => Ok(MultiValue::new()),
-                }
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        methods.set(
-            "find",
-            lua.create_function(move |lua, (this, name, opts): (Table, String, Option<Value>)| {
-                let e: u32 = this.raw_get("__id")?;
-                let scope = find_scope(&opts)?;
-                let found = {
+            // A node handle or a point is somewhere to face; a short vector
+            // that isn't a position would be ambiguous, so the rule is
+            // simple and stated: handles resolve to their world position,
+            // everything else is taken as a DIRECTION.
+            let dir = match &target {
+                Value::Table(tt) if tt.raw_get::<u32>("__id").is_ok() => {
                     let s = scene.borrow();
-                    let mut stack: Vec<u32> =
-                        s.children.get(&e).cloned().unwrap_or_default();
-                    let mut hit = None;
-                    while let Some(c) = stack.pop() {
-                        if s.names.get(&c).map(|n| n == &name).unwrap_or(false)
-                            && s.in_scope(c, scope)
-                        {
-                            hit = Some(c);
-                            break;
-                        }
-                        if let Some(cc) = s.children.get(&c) {
-                            stack.extend(cc.iter().copied());
-                        }
-                    }
-                    hit
-                };
-                Ok(match found {
-                    Some(c) => Value::Table(new_node_handle(lua, c)?),
-                    None => Value::Nil,
-                })
-            })?,
-        )?;
-    }
-    // ---- the construction API (editor actions / procgen scripts) ----------
-    // node:setCelestial{mu=..., bodyRadius=..., parent="Sun", atmoColor={r,g,b}, ...}
-    // node:setMaterial{color={..}, emissive={..}, emissiveStrength=2, unlit=true, texture="..."}
-    // node:setTerrain(id)   node:setPrimitive("Sphere" [, {r,g,b}])
-    // All queued as RichSet writes; the component is inserted (defaults) if
-    // the node doesn't have it. Field names are the Lua-facing camelCase.
-    {
-        let q = shared.rich_sets.clone();
-        // A 3-vector in any of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
-        /// Every spelling of a three-component value the docs promise: a `vec3`, an
-        /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
-        /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
-        /// and named in this function's own error message while being the one shape it
-        /// refused.
-        fn triple_of(v: &Value) -> Option<[f64; 3]> {
-            if let Some(p) = crate::math_api::vec3_of(v) {
-                return Some([p.x, p.y, p.z]);
-            }
-            if let Value::Table(t) = v {
-                if let (Ok(Some(r)), Ok(Some(g)), Ok(Some(b))) = (
-                    t.get::<Option<f64>>("r"),
-                    t.get::<Option<f64>>("g"),
-                    t.get::<Option<f64>>("b"),
-                ) {
-                    // Alpha is accepted and dropped: these fields are all three-component.
-                    return Some([r, g, b]);
+                    world_pos_of_value(&s, &target).unwrap_or_default()
+                        - world_transform_of_handle(&s, &this, e).translation
                 }
-                let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
-                let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
-                let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
-                return Some([a, b, c]);
+                _ => crate::math_api::vec3_of(&target).ok_or_else(|| {
+                    mlua::Error::RuntimeError(
+                        "node:turnTowards(target, maxRadians) — target is a node, a world \
+                         point or a direction"
+                            .into(),
+                    )
+                })?,
+            };
+            if dir.length_squared() < 1e-18 {
+                return Ok(()); // nowhere to turn: leave the facing alone
             }
-            None
-        }
-        let fields_of = |t: &Table| -> mlua::Result<Vec<(String, crate::CompVal)>> {
-            let mut out = Vec::new();
-            for pair in t.pairs::<String, Value>() {
-                let (k, v) = pair?;
-                let cv = match &v {
-                    Value::Number(n) => crate::CompVal::Num(*n),
-                    Value::Integer(n) => crate::CompVal::Num(*n as f64),
-                    Value::Boolean(b) => crate::CompVal::Num(if *b { 1.0 } else { 0.0 }),
-                    Value::String(st) => crate::CompVal::Str(st.to_string_lossy().to_string()),
-                    other => match triple_of(other) {
-                        Some(p) => crate::CompVal::Vec3(p),
-                        None => {
-                            return Err(mlua::Error::runtime(format!(
-                                "set*: field '{k}' must be a number, bool, string, vec3/{{x,y,z}} or {{r,g,b}}"
-                            )))
-                        }
-                    },
-                };
-                out.push((k, cv));
-            }
-            Ok(out)
+            let step = |cur: f64, want: f64| -> f64 {
+                let d = wrap_pi_f64(want - cur);
+                if d.abs() <= max.abs() { want } else { cur + d.signum() * max.abs() }
+            };
+            let yaw: f64 = this.get("yaw").unwrap_or(0.0);
+            let pitch: f64 = this.get("pitch").unwrap_or(0.0);
+            this.set("yaw", step(yaw, crate::math_api::yaw_of(dir)))?;
+            this.set("pitch", step(pitch, crate::math_api::pitch_of(dir)))?;
+            Ok(())
+        })?,
+    )?;
+}
+{
+    // node:toWorld(v) / node:toLocal(v) — a point through this node's own
+    // frame (its position, rotation AND scale, composed up the parent
+    // chain). "Where is the muzzle?" is `gun:toWorld(vec3(0, 0, -1.2))`.
+    let scene = shared.scene.clone();
+    let f = lua.create_function(move |lua, (this, v, to_local): (Table, Value, bool)| {
+        let e: u32 = this.raw_get("__id")?;
+        let Some(v) = crate::math_api::vec3_of(&v) else {
+            return Err(mlua::Error::RuntimeError(
+                "node:toWorld/toLocal take a vec3 (or anything with x/y/z)".into(),
+            ));
         };
-        {
-            let q = q.clone();
-            let fo = fields_of;
-            methods.set(
-                "setCelestial",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, CELESTIAL_KEYS, "node:setCelestial")?;
-                    q.borrow_mut().push((e, crate::RichSet::Celestial(fo(&t)?)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            let fo = fields_of;
-            methods.set(
-                "setMaterial",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, MATERIAL_KEYS, "node:setMaterial")?;
-                    q.borrow_mut().push((e, crate::RichSet::Material(fo(&t)?)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            methods.set(
-                "setTerrain",
-                lua.create_function(move |_, (this, id): (Table, u32)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    q.borrow_mut().push((e, crate::RichSet::MatterTerrain(id)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            // node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the
-            // same opts table terrain.generatePlanet takes): the body's field
-            // generates from it, on a background thread, when something first
-            // approaches — no .cfield on disk, no up-front generation (G2 galaxy
-            // streaming; docs/subsystems/large-world-space.md). Player edits saved
-            // under terrain.saveDir take priority over regeneration. nil clears.
-            let q = q.clone();
-            methods.set(
-                "setTerrainGen",
-                lua.create_function(move |_, (this, opts): (Table, Option<Table>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let spec = match &opts {
-                        Some(t) => {
-                            let fill = crate::terrain_api::planet_fill_from_table(Some(t))?;
-                            Some(ron::to_string(&fill).map_err(|err| {
-                                mlua::Error::runtime(format!("setTerrainGen: {err}"))
-                            })?)
-                        }
-                        None => None,
-                    };
-                    q.borrow_mut().push((e, crate::RichSet::TerrainGen(spec)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-        // ---- 2D: node:setTilemap{...} and node:tilemap() ----
-        {
-            let q = q.clone();
-            methods.set(
-                "setTilemap",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, TILEMAP_KEYS, "node:setTilemap")?;
-                    let cols: u32 = t.get::<Option<u32>>("cols")?.unwrap_or(0);
-                    let rows: u32 = t.get::<Option<u32>>("rows")?.unwrap_or(0);
-                    let tile: f32 = t.get::<Option<f32>>("tile")?.unwrap_or(1.0);
-                    if cols == 0 || rows == 0 {
-                        return Err(mlua::Error::runtime(
-                            "setTilemap{ cols =, rows =, tile = }: cols and rows must be > 0",
-                        ));
-                    }
-                    // `data` is optional: a grid with no cells yet is a blank
-                    // room you then paint with tm:set, which is how a game that
-                    // re-dresses a floor actually works.
-                    let data: Vec<u32> = match t.get::<Option<Table>>("data")? {
-                        Some(list) => {
-                            let mut v = Vec::with_capacity(list.raw_len());
-                            for i in 1..=list.raw_len() {
-                                // Lua is 1-based; a nil hole — and, since
-                                // an earlier task, any negative — is an empty tile.
-                                v.push(tile_cell(&list.raw_get::<Value>(i)?)?);
-                            }
-                            v
-                        }
-                        None => Vec::new(),
-                    };
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterTilemap {
-                            cols,
-                            rows,
-                            tile,
-                            data,
-                            tileset: crate::opts::opt_str(&t, "node:setTilemap", "tileset")?,
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            methods.set(
-                "setSpriteBatch",
-                lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    // `size` is the quad's edge; every sprite scales it. One
-                    // optional argument, so `nd:setSpriteBatch()` is the whole
-                    // call for the common case.
-                    let size: f32 = match &t {
-                        Some(t) => {
-                            crate::opts::check_keys(
-                                t,
-                                SPRITE_BATCH_KEYS,
-                                "node:setSpriteBatch",
-                            )?;
-                            t.get::<Option<f32>>("size")?.unwrap_or(1.0)
-                        }
-                        None => 1.0,
-                    };
-                    // NaN spelled out rather than `!(size > 0.0)`: same guard,
-                    // and it says which two things it is refusing.
-                    if size.is_nan() || size <= 0.0 {
-                        return Err(mlua::Error::runtime(
-                            "setSpriteBatch{ size = }: size must be greater than 0",
-                        ));
-                    }
-                    q.borrow_mut().push((e, crate::RichSet::MatterSpriteBatch { size }));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            // node:setSorting{ layer = "Terrain", order = 3 } — where this 2D
-            // node draws in the stack. Sorting layers shipped
-            // with no script access at all, which rules out a character walking
-            // behind a counter.
-            methods.set(
-                "setSorting",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, SORTING_KEYS, "node:setSorting")?;
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterSorting {
-                            layer: t.get::<Option<String>>("layer")?,
-                            order: t.get::<Option<i32>>("order")?,
-                            mode: t.get::<Option<String>>("mode")?,
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            let scene = shared.scene.clone();
-            // node:setSprite{ ppu = 32, cell = 3, pivotY = 0 } — make this node
-            // one sprite, or retune one. Every key optional and every key keeps
-            // what the node had.
-            methods.set(
-                "setSprite",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, SPRITE_KEYS, "node:setSprite")?;
-                    let px = t.get::<Option<f32>>("pivotX")?;
-                    let py = t.get::<Option<f32>>("pivotY")?;
-                    let set = crate::RichSet::MatterSprite {
-                        ppu: t.get::<Option<f32>>("ppu")?,
-                        size: t.get::<Option<f32>>("size")?,
-                        cell: t.get::<Option<u32>>("cell")?,
-                        flip_x: t.get::<Option<bool>>("flipX")?,
-                        flip_y: t.get::<Option<bool>>("flipY")?,
-                        // One axis at a time, and the other KEEPS what the node
-                        // had. Defaulting the unmentioned axis to 0.5 here made
-                        // `setSprite{ pivotY = 0 }` — the documented way to put
-                        // a character's origin at its feet — silently recentre
-                        // it horizontally.
-                        pivot_x: px,
-                        pivot_y: py,
-                    };
-                    // The mirror moves with the queue, so `node:sprite()` on the
-                    // next line reads what this call just set — and so a node
-                    // BECOMING a sprite here can be read at all, since the
-                    // component itself does not exist until after the pass.
-                    scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
-                    q.borrow_mut().push((e, set));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            // node:setParallax{ x = 0.3 } — how much of the camera's movement
-            // this layer keeps. The one 2D feature that could not be had at all
-            // before: distance parallaxes under a perspective camera and does
-            // nothing under an orthographic one, and a flat game wants
-            // orthographic for its pixels.
-            methods.set(
-                "setParallax",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, PARALLAX_KEYS, "node:setParallax")?;
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterParallax {
-                            x: t.get::<Option<f32>>("x")?,
-                            y: t.get::<Option<f32>>("y")?,
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            // node:setCamera2D{ follow = "Player", smoothing = 0.12 } — how this
-            // orthographic camera follows. The target is the reason this is a
-            // script call and not only an Inspector one: which node the camera
-            // chases is a game decision, made at a character select or when a
-            // level hands control to something else.
-            methods.set(
-                "setCamera2D",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, CAMERA_2D_KEYS, "node:setCamera2D")?;
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterCamera2D {
-                            follow: t.get::<Option<String>>("follow")?,
-                            smoothing: t.get::<Option<f32>>("smoothing")?,
-                            dead_zone_x: t.get::<Option<f32>>("deadZoneX")?,
-                            dead_zone_y: t.get::<Option<f32>>("deadZoneY")?,
-                            limits_on: t.get::<Option<bool>>("limits")?,
-                            min_x: t.get::<Option<f32>>("minX")?,
-                            min_y: t.get::<Option<f32>>("minY")?,
-                            max_x: t.get::<Option<f32>>("maxX")?,
-                            max_y: t.get::<Option<f32>>("maxY")?,
-                            pixel_snap: t.get::<Option<f32>>("pixelSnap")?,
-                            off: t.get::<Option<bool>>("off")?.unwrap_or(false),
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            // node:shake(amount, seconds) — the one camera move every 2D game
-            // wants and nobody should have to write. It is added to what is
-            // DRAWN and never fed back into the follow, so it composes with a
-            // chase and with the world limits instead of fighting them.
-            methods.set(
-                "shake",
-                lua.create_function(move |_, (this, amount, seconds): (Table, f32, Option<f32>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    if !amount.is_finite() || amount < 0.0 {
-                        return Err(mlua::Error::RuntimeError(
-                            "node:shake(amount, seconds): amount is a distance in world units and cannot be negative"
-                                .into(),
-                        ));
-                    }
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::CameraShake {
-                            amount,
-                            seconds: seconds.unwrap_or(0.3).max(0.0),
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let scene = shared.scene.clone();
-            // node:sorting() -> { layer =, order =, mode = } — the read half of
-            // the pair above, which shipped without one.
-            //
-            // A node that has said nothing about sorting answers with the
-            // DEFAULT rather than nil. "Default layer, order 0, order mode" is
-            // the true answer for such a node, and nil would make every caller
-            // that wants to nudge something one in front write the same three
-            // lines of fallback before it could add 1.
-            let f = lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let (layer, order, mode) = scene
-                    .borrow()
-                    .sorting
-                    .get(&e)
-                    .cloned()
-                    .unwrap_or_else(|| (String::new(), 0, "order"));
-                let t = lua.create_table()?;
-                let layer = if layer.trim().is_empty() {
-                    floptle_core::DEFAULT_SORTING_LAYER.to_string()
-                } else {
-                    layer
-                };
-                t.set("layer", layer)?;
-                t.set("order", order)?;
-                t.set("mode", mode)?;
-                Ok(t)
-            })?;
-            methods.set("sorting", f.clone())?;
-            methods.set("getsorting", f.clone())?;
-            methods.set("getSorting", f)?;
-        }
-        {
-            let q = q.clone();
-            // node:setLighting2D{ mode = "2d", layers = {"Terrain"}, blocks = "on" }.
-            // A torch that flickers is a script writing an
-            // intensity; a torch that stops lighting the background is a script
-            // writing this.
-            methods.set(
-                "setLighting2D",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    crate::opts::check_keys(&t, LIGHTING_2D_KEYS, "node:setLighting2D")?;
-                    // Both enums answer through their own parsers, so a typo
-                    // names the accepted set instead of silently meaning `auto`
-                    // — the exact bug an earlier task was filed for.
-                    let mode = match t.get::<Option<String>>("mode")? {
-                        None => None,
-                        Some(s) => Some(floptle_core::Lit2D::parse(&s).ok_or_else(|| {
-                            mlua::Error::runtime(format!(
-                                "setLighting2D{{ mode = }}: `{s}` is not one of {}",
-                                floptle_core::Lit2D::ACCEPTS.join(", ")
-                            ))
-                        })?),
-                    };
-                    let blocks = match t.get::<Option<String>>("blocks")? {
-                        None => None,
-                        Some(s) => Some(floptle_core::Cast2D::parse(&s).ok_or_else(|| {
-                            mlua::Error::runtime(format!(
-                                "setLighting2D{{ blocks = }}: `{s}` is not one of {}",
-                                floptle_core::Cast2D::ACCEPTS.join(", ")
-                            ))
-                        })?),
-                    };
-                    // An EMPTY list means every layer, and so does no list — but
-                    // `layers = {}` is somebody saying "reset this to all of
-                    // them", which is a different thing from not mentioning it.
-                    let layers = match t.get::<Option<Table>>("layers")? {
-                        None => None,
-                        Some(list) => Some(
-                            list.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?,
-                        ),
-                    };
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterLighting2D {
-                            mode,
-                            layers,
-                            blocks,
-                            inner: t.get::<Option<f32>>("inner")?,
-                            falloff: t.get::<Option<f32>>("falloff")?,
-                            shadows: t.get::<Option<bool>>("shadows")?,
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            // node:setPointLight{ color = {r,g,b}, intensity =, range = }
-            //
-            // The one Matter kind a script could edit but never create.
-            // Every field is optional and keeps what the node
-            // had, so the same call makes a light and retunes one.
-            methods.set(
-                "setPointLight",
-                lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let (mut color, mut intensity, mut range) = (None, None, None);
-                    if let Some(t) = t {
-                        crate::opts::check_keys(&t, POINT_LIGHT_KEYS, "node:setPointLight")?;
-                        if let Some(c) = t.get::<Option<Table>>("color")? {
-                            let lane = |i: i64| -> mlua::Result<f32> {
-                                Ok(c.get::<Option<f32>>(i)?.unwrap_or(1.0))
-                            };
-                            color = Some([lane(1)?, lane(2)?, lane(3)?]);
-                        }
-                        intensity = t.get::<Option<f32>>("intensity")?;
-                        range = t.get::<Option<f32>>("range")?;
-                    }
-                    // A NaN would sort as neither greater nor less when the
-                    // sixteen are ranked, which is a light that flickers for a
-                    // reason nobody could ever find.
-                    for (name, v) in [("intensity", intensity), ("range", range)] {
-                        if v.is_some_and(|v| v.is_nan()) {
-                            return Err(mlua::Error::runtime(format!(
-                                "setPointLight{{ {name} = }}: not a number"
-                            )));
-                        }
-                    }
-                    q.borrow_mut()
-                        .push((e, crate::RichSet::MatterPointLight { color, intensity, range }));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            // node:setTextSpans{ {len =, color =}, … } — colour stretches of
-            // this element's text.
-            //
-            // A run carried ONE colour for the whole string, so a keyword tinted
-            // to match the key it names, or a proper noun in the speaker's
-            // colour, meant splitting the line into sibling elements laid out by
-            // hand — which re-wraps wrong at every resolution and cannot be
-            // revealed a glyph at a time.
-            //
-            // `len` is CHARACTERS of the authored string, not bytes: "the fifth
-            // character" and "the fifth byte" disagree the moment anyone types
-            // anything but ASCII, and in bytes this would fail in front of
-            // whoever was writing the dialogue.
-            let q = q.clone();
-            methods.set(
-                "setTextSpans",
-                lua.create_function(move |_, (this, list): (Table, Table)| {
-                    use crate::opts::{check_keys, opt_num};
-                    const CALL: &str = "node:setTextSpans";
-                    let e: u32 = this.raw_get("__id")?;
-                    let mut spans = Vec::new();
-                    for (i, v) in list.sequence_values::<Value>().enumerate() {
-                        let Value::Table(t) = v? else {
-                            return Err(mlua::Error::runtime(format!(
-                                "{CALL}: entry {} is not a table — each span is \
-                                 {{ len = n, color = {{r, g, b}} }}",
-                                i + 1
-                            )));
-                        };
-                        check_keys(&t, &["len", "color"], CALL)?;
-                        // Required, and refused rather than defaulted: a span
-                        // with no length is a colour with nothing to paint, and
-                        // silently skipping it would slide every later span.
-                        let len = opt_num(&t, CALL, "len", 0.0, u32::MAX as f64)?.ok_or_else(
-                            || {
-                                mlua::Error::runtime(format!(
-                                    "{CALL}: span {} has no `len` — every span says how many \
-                                     characters it covers, or the ones after it land in the \
-                                     wrong place",
-                                    i + 1
-                                ))
-                            },
-                        )? as u32;
-                        let color = match t.get::<Value>("color")? {
-                            Value::Nil => None,
-                            Value::Table(c) => Some(crate::api::read_color(&c).map_err(|e| {
-                                mlua::Error::runtime(format!("{CALL}: span {}: {e}", i + 1))
-                            })?),
-                            other => {
-                                return Err(mlua::Error::runtime(format!(
-                                    "{CALL}: span {}: `color` is {}, not a colour",
-                                    i + 1,
-                                    other.type_name()
-                                )));
-                            }
-                        };
-                        spans.push(floptle_ui::TextSpan {
-                            len,
-                            color,
-                        });
-                    }
-                    q.borrow_mut().push((e, crate::RichSet::TextSpans(spans)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            // node:setGlyphOffsets{ vec2(…), … } — displace characters at draw
-            // time.
-            //
-            // The half spans cannot do. Glyph positions are computed inside the
-            // renderer and never surfaced, so a game could not move one letter
-            // at any price. This applies AFTER layout: a displaced glyph never
-            // re-wraps its line and never moves its neighbours, which is what
-            // makes wobble, jitter and per-glyph reveal the game's own to write
-            // rather than a catalogue of named effects the engine maintains.
-            let q = q.clone();
-            methods.set(
-                "setGlyphOffsets",
-                lua.create_function(move |_, (this, list): (Table, Table)| {
-                    const CALL: &str = "node:setGlyphOffsets";
-                    let e: u32 = this.raw_get("__id")?;
-                    let mut offsets = Vec::new();
-                    for (i, v) in list.sequence_values::<Value>().enumerate() {
-                        let p = crate::vec3_of(&v?).ok_or_else(|| {
-                            mlua::Error::runtime(format!(
-                                "{CALL}: entry {} is not a vec2 — one offset per character, \
-                                 in design units",
-                                i + 1
-                            ))
-                        })?;
-                        offsets.push([p.x as f32, p.y as f32]);
-                    }
-                    q.borrow_mut().push((e, crate::RichSet::GlyphOffsets(offsets)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            // node:setCamera{ fovY =, active =, target =, width =, height =,
-            // hz =, cullMask = } — the whole camera surface a game needs.
-            // With a `target` the camera renders into a live
-            // texture any material or UI image wears as `rt:<name>`: minimaps,
-            // mirrors, security monitors, scopes, split-screen.
-            //
-            // Every value is checked HERE, at the call. `hz = "10"` and
-            // `width = 0` raise with the property, the value and the range —
-            // not three frames later as a black rectangle.
-            let q = q.clone();
-            methods.set(
-                "setCamera",
-                lua.create_function(move |_, (this, t): (Table, Table)| {
-                    use crate::opts::{check_keys, opt_bool, opt_num, opt_str};
-                    const CALL: &str = "node:setCamera";
-                    let e: u32 = this.raw_get("__id")?;
-                    check_keys(&t, CAMERA_KEYS, CALL)?;
-                    let target = opt_str(&t, CALL, "target")?;
-                    if let Some(name) = &target
-                        && let Some(bare) = name.strip_prefix("rt:")
-                    {
-                        // `target = "rt:minimap"` would make the texture
-                        // `rt:rt:minimap`, which resolves to nothing and says
-                        // nothing. The prefix belongs to the texture ref, not
-                        // to the name.
-                        return Err(mlua::Error::runtime(format!(
-                            "{CALL}: `target = \"{name}\"` — the target name is bare; write \
-                             `target = \"{bare}\"` and then use the texture \"rt:{bare}\""
-                        )));
-                    }
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterCamera {
-                            fov_y: opt_num(&t, CALL, "fovY", 0.05, 3.0)?.map(|v| v as f32),
-                            active: opt_bool(&t, CALL, "active")?,
-                            target,
-                            target_w: opt_num(
-                                &t,
-                                CALL,
-                                "width",
-                                floptle_core::Matter::TARGET_MIN as f64,
-                                floptle_core::Matter::TARGET_MAX as f64,
-                            )?
-                            .map(|v| v as u32),
-                            target_h: opt_num(
-                                &t,
-                                CALL,
-                                "height",
-                                floptle_core::Matter::TARGET_MIN as f64,
-                                floptle_core::Matter::TARGET_MAX as f64,
-                            )?
-                            .map(|v| v as u32),
-                            target_hz: opt_num(&t, CALL, "hz", 0.0, 240.0)?.map(|v| v as f32),
-                            cull_mask: opt_num(&t, CALL, "cullMask", 0.0, u32::MAX as f64)?
-                                .map(|v| v as u32),
-                            ortho: match opt_str(&t, CALL, "projection")? {
-                                Some(s) => Some(crate::opts::parse_enum(
-                                    CALL,
-                                    "projection",
-                                    &s,
-                                    floptle_core::Matter::PROJECTION_ACCEPTS,
-                                    floptle_core::Matter::parse_projection,
-                                )?),
-                                None => None,
-                            },
-                            ortho_height: opt_num(
-                                &t,
-                                CALL,
-                                "orthoHeight",
-                                floptle_core::Matter::ORTHO_MIN as f64,
-                                floptle_core::Matter::ORTHO_MAX as f64,
-                            )?
-                            .map(|v| v as f32),
-                        },
-                    ));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let q = q.clone();
-            let scene = shared.scene.clone();
-            methods.set(
-                "tilemap",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    new_tilemap_handle(lua, e, q.clone(), scene.clone())
-                })?,
-            )?;
-        }
-        {
-            let scene = shared.scene.clone();
-            // node:sprite() -> the Sprite component as a handle: read and assign
-            // `flipX`, `flipY`, `cell`, `ppu`, `size`, `pivotX`, `pivotY`.
-            methods.set(
-                "sprite",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let (is_sprite, is_batch) = {
-                        let s = scene.borrow();
-                        (s.sprites.contains_key(&e), s.sprite_batches.contains(&e))
-                    };
-                    // Refuse rather than hand back a handle whose every write is
-                    // queued and then dropped — the same call the batch handle
-                    // makes, for the same reason. The two names are one letter
-                    // apart, so each error names the other.
-                    if !is_sprite {
-                        return Err(mlua::Error::runtime(if is_batch {
-                            "node:sprite(): this node is a sprite BATCH. Its sprites are the \
-                             ones you draw into it — take node:sprites() (plural) and call \
-                             b:draw(...) per sprite."
-                        } else {
-                            "node:sprite(): this node is not a sprite. Set Matter to Sprite in \
-                             the Inspector, or call node:setSprite{ ppu = 32 } first — a handle \
-                             to a component that is not there could only throw its writes away."
-                        }));
-                    }
-                    crate::env::new_sprite_handle(lua, e)
-                })?,
-            )?;
-        }
-        {
-            let draws = shared.sprite_draws.clone();
-            let scene = shared.scene.clone();
-            let q = q.clone();
-            methods.set(
-                "sprites",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    // Refuse a node that is not a batch, rather than handing
-                    // back a handle whose every `draw` is collected and then
-                    // dropped by the renderer's own filter. That silence cost a
-                    // real project an afternoon: the calls all
-                    // returned, nothing was ever drawn, and there was no line
-                    // anywhere to say why.
-                    let is_batch = scene.borrow().sprite_batches.contains(&e)
-                        // …or it is about to be one: `setSpriteBatch` is queued
-                        // and applied after the pass, so the obvious two lines
-                        // — make it a batch, then take its handle — have to
-                        // work in the order anybody would write them.
-                        || q.borrow().iter().any(|(qe, set)| {
-                            *qe == e && matches!(set, crate::RichSet::MatterSpriteBatch { .. })
-                        });
-                    if !is_batch {
-                        // A plain Sprite is the near miss worth naming: the two
-                        // calls differ by one letter and do different jobs.
-                        return Err(mlua::Error::runtime(
-                            if scene.borrow().sprites.contains_key(&e) {
-                                "node:sprites(): this node is one SPRITE, not a batch. To \
-                                 change how it draws — flipX, cell, pivot — take \
-                                 node:sprite() (singular). node:sprites() is for a node that \
-                                 draws many sprites a frame, which needs \
-                                 node:setSpriteBatch{ size = 1.0 } first."
-                            } else {
-                                "node:sprites(): this node is not a sprite batch. Call \
-                                 node:setSpriteBatch{ size = 1.0 } first (or set Matter to \
-                                 Sprite Batch in the Inspector) — without it every draw is \
-                                 thrown away."
-                            },
-                        ));
-                    }
-                    new_sprite_batch_handle(lua, e, draws.clone())
-                })?,
-            )?;
-        }
-            methods.set(
-                "setPrimitive",
-                lua.create_function(move |_, (this, shape, color): (Table, String, Value)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let c = match &color {
-                        Value::Nil => [0.8, 0.8, 0.8],
-                        other => triple_of(other).ok_or_else(|| {
-                            mlua::Error::runtime(
-                                "setPrimitive(shape [, color]): a colour takes {r,g,b}, \
-                                 {x,y,z}, {1,0.5,0.2} or vec3",
-                            )
-                        })?,
-                    };
-                    // Checked HERE, through the parser the write itself uses: a
-                    // misspelled shape used to become a CUBE, silently — a
-                    // different object standing exactly where you put it.
-                    let shape = crate::opts::parse_enum(
-                        "node:setPrimitive",
-                        "shape",
-                        &shape,
-                        floptle_core::Shape::ACCEPTS,
-                        floptle_core::Shape::parse,
-                    )?;
-                    q.borrow_mut().push((e, crate::RichSet::MatterPrimitive(shape, c)));
-                    Ok(())
-                })?,
-            )?;
-        }
-    }
-    // Tags: node:hasTag("enemy") → bool; node:addTag / node:removeTag edit the
-    // list (dedup on add, no-op removes are fine). Reads see this frame's
-    // node:destroy() — remove this node (and its whole subtree) from the scene.
-    // Queued like every other write: the driver despawns after the pass, so the
-    // handle stays safely readable for the rest of this call.
-    {
-        let q = shared.destroy_queue.clone();
-        methods.set(
-            "destroy",
-            lua.create_function(move |_, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                q.borrow_mut().push(e);
-                Ok(())
-            })?,
-        )?;
-    }
-    // pending edits (read-your-writes), the ECS component updates after the pass.
-    {
-        let scene = shared.scene.clone();
-        let tag_changes = shared.tag_changes.clone();
-        methods.set(
-            "hasTag",
-            lua.create_function(move |_, (this, tag): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let has = tag_changes
-                    .borrow()
-                    .get(&e)
-                    .map(|t| t.contains(&tag))
-                    .unwrap_or_else(|| {
-                        scene.borrow().tags.get(&e).map(|t| t.contains(&tag)).unwrap_or(false)
-                    });
-                Ok(has)
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let tag_changes = shared.tag_changes.clone();
-        methods.set(
-            "addTag",
-            lua.create_function(move |_, (this, tag): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let mut ch = tag_changes.borrow_mut();
-                let tags = ch
-                    .entry(e)
-                    .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
-                if !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let tag_changes = shared.tag_changes.clone();
-        methods.set(
-            "removeTag",
-            lua.create_function(move |_, (this, tag): (Table, String)| {
-                let e: u32 = this.raw_get("__id")?;
-                let mut ch = tag_changes.borrow_mut();
-                let tags = ch
-                    .entry(e)
-                    .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
-                tags.retain(|t| t != &tag);
-                Ok(())
-            })?,
-        )?;
-    }
-    // node:animator() → the animation handle: play/stop/fade animation states on the
-    // node's AnimationController (or a rigged model's embedded clips). Setters queue
-    // into `anim_commands` (applied before the animators advance, same frame); getters
-    // read the `anim_info` mirror the editor feeds each frame.
-    {
-        let anim_methods = lua.create_table()?;
-        let queue = |cmds: &Rc<RefCell<Vec<(u32, AnimCmd)>>>, e: u32, c: AnimCmd| {
-            cmds.borrow_mut().push((e, c));
+        let w = world_transform_of_handle(&scene.borrow(), &this, e);
+        let p = if to_local {
+            w.inv_mul(&floptle_core::Transform::from_translation(v)).translation
+        } else {
+            w.mul_transform(&floptle_core::Transform::from_translation(v)).translation
         };
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "play",
-                lua.create_function(
-                    move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
-                        let e: u32 = this.raw_get("__id")?;
-                        queue(&cmds, e, AnimCmd::Play {
-                            state,
-                            layer,
-                            fade: fade.map(|f| f as f32),
-                            restart: false,
-                        });
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "restart",
-                lua.create_function(
-                    move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
-                        let e: u32 = this.raw_get("__id")?;
-                        queue(&cmds, e, AnimCmd::Play {
-                            state,
-                            layer,
-                            fade: fade.map(|f| f as f32),
-                            restart: true,
-                        });
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "crossfade",
-                lua.create_function(
-                    move |_, (this, state, fade, layer): (Table, String, f64, Option<String>)| {
-                        let e: u32 = this.raw_get("__id")?;
-                        queue(&cmds, e, AnimCmd::Play {
-                            state,
-                            layer,
-                            fade: Some(fade as f32),
-                            restart: false,
-                        });
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "stop",
-                lua.create_function(
-                    move |_, (this, layer, fade): (Table, Option<String>, Option<f64>)| {
-                        let e: u32 = this.raw_get("__id")?;
-                        queue(&cmds, e, AnimCmd::Stop { layer, fade: fade.map(|f| f as f32) });
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "setSpeed",
-                lua.create_function(move |_, (this, s): (Table, f64)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    queue(&cmds, e, AnimCmd::SetSpeed(s as f32));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "setLayerWeight",
-                lua.create_function(move |_, (this, layer, w): (Table, String, f64)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    queue(&cmds, e, AnimCmd::SetLayerWeight { layer, weight: w as f32 });
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let cmds = shared.anim_commands.clone();
-            anim_methods.set(
-                "seek",
-                lua.create_function(move |_, (this, t, layer): (Table, f64, Option<String>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    queue(&cmds, e, AnimCmd::Seek { t: t as f32, layer });
-                    Ok(())
-                })?,
-            )?;
-        }
-        // The layer whose state "shows": the topmost active layer, else the base.
-        fn showing(info: &AnimInfo) -> Option<&(String, Option<String>, f32, bool)> {
-            info.layers.iter().rev().find(|(_, s, _, _)| s.is_some()).or(info.layers.first())
-        }
-        {
-            let inf = shared.anim_info.clone();
-            let f = lua.create_function(move |lua, (this, layer): (Table, Option<String>)| {
-                let e: u32 = this.raw_get("__id")?;
-                let info = inf.borrow();
-                let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
-                let slot = match &layer {
-                    Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
-                    None => showing(i),
-                };
-                Ok(match slot.and_then(|(_, s, _, _)| s.as_ref()) {
-                    Some(s) => Value::String(lua.create_string(s)?),
-                    None => Value::Nil,
-                })
-            })?;
-            anim_methods.set("state", f.clone())?;
-            anim_methods.set("current", f)?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "time",
-                lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let info = inf.borrow();
-                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
-                    let slot = match &layer {
-                        Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
-                        None => showing(i),
-                    };
-                    Ok(slot.map(|(_, _, t, _)| Value::Number(*t as f64)).unwrap_or(Value::Nil))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "finished",
-                lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let info = inf.borrow();
-                    let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
-                    let slot = match &layer {
-                        Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
-                        None => showing(i),
-                    };
-                    Ok(Value::Boolean(slot.map(|(_, _, _, f)| *f).unwrap_or(false)))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "isPlaying",
-                lua.create_function(move |_, (this, state): (Table, Option<String>)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let info = inf.borrow();
-                    let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
-                    Ok(Value::Boolean(match &state {
-                        Some(s) => i
-                            .layers
-                            .iter()
-                            .any(|(_, cur, _, fin)| cur.as_deref() == Some(s) && !fin),
-                        None => i.layers.iter().any(|(_, cur, _, _)| cur.is_some()),
-                    }))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "clips",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let arr = lua.create_table()?;
-                    if let Some(i) = inf.borrow().get(&e) {
-                        for (n, c) in i.clips.iter().enumerate() {
-                            arr.set(n + 1, lua.create_string(&c.name)?)?;
-                        }
-                    }
-                    Ok(arr)
-                })?,
-            )?;
-        }
-        // A clip's AUTHORED duration + events, read from the asset rather than from
-        // playback — so a game can bake integer frame data once at load. Runtime event
-        // dispatch is unchanged; these are read-only.
-        //
-        // A fighter cannot let clip events drive gameplay: they fire off float playback
-        // time, stepped playback (`sample_fps`) quantises them to the step grid, clip
-        // time and state frame disagree mid-crossfade, and a prediction replay
-        // deliberately does not re-fire them. Baking at load sidesteps all four — every
-        // machine loads the same `.anim.ron`, so the numbers are identical and constant.
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "duration",
-                lua.create_function(move |_, (this, clip): (Table, String)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let info = inf.borrow();
-                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
-                    Ok(i.clips
-                        .iter()
-                        .find(|c| c.name == clip)
-                        .map(|c| Value::Number(c.duration as f64))
-                        .unwrap_or(Value::Nil))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "events",
-                lua.create_function(move |lua, (this, clip): (Table, String)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let info = inf.borrow();
-                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
-                    // Unknown clip → nil, so `if anim:events(c) then` guards work; a
-                    // clip with no events → an empty array, which is a different answer.
-                    let Some(c) = i.clips.iter().find(|c| c.name == clip) else {
-                        return Ok(Value::Nil);
-                    };
-                    let arr = lua.create_table()?;
-                    for (n, (t, func)) in c.events.iter().enumerate() {
-                        let ev = lua.create_table()?;
-                        ev.set("t", *t as f64)?;
-                        ev.set("func", lua.create_string(func)?)?;
-                        arr.set(n + 1, ev)?;
-                    }
-                    Ok(Value::Table(arr))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.anim_info.clone();
-            anim_methods.set(
-                "layers",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let arr = lua.create_table()?;
-                    if let Some(i) = inf.borrow().get(&e) {
-                        for (n, (name, _, _, _)) in i.layers.iter().enumerate() {
-                            arr.set(n + 1, lua.create_string(name)?)?;
-                        }
-                    }
-                    Ok(arr)
-                })?,
-            )?;
-        }
-        // Method lookup goes through a function so a CASING typo fails with a
-        // fix instead of a bare nil-call: the animator API is camelCase
-        // (`anim:isPlaying`), and `anim:IsPlaying(...)` used to die with
-        // "attempt to call a nil value (method 'IsPlaying')" — no hint at all.
-        // A case-insensitive near-miss now errors with "did you mean
-        // 'isPlaying'?". Genuinely unknown keys still index to nil, so
-        // feature probes (`if anim.someday then`) keep working.
-        let anim_mt = lua.create_table()?;
-        anim_mt.set(
-            "__index",
-            lua.create_function(move |_, (_this, key): (Table, Value)| {
-                let Value::String(k) = &key else { return Ok(Value::Nil) };
-                let name = k.to_string_lossy().to_string();
-                let hit: Value = anim_methods.raw_get(name.as_str())?;
-                if hit != Value::Nil {
-                    return Ok(hit);
-                }
-                for pair in anim_methods.pairs::<String, Value>() {
-                    let (known, _) = pair?;
-                    if known.eq_ignore_ascii_case(&name) {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "animator has no method '{name}' — did you mean '{known}'? \
-                             (animator methods are camelCase)"
-                        )));
-                    }
-                }
-                Ok(Value::Nil)
-            })?,
-        )?;
-        lua.set_named_registry_value("floptle_anim_mt", anim_mt)?;
-
-        methods.set(
-            "animator",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let t = lua.create_table()?;
-                t.raw_set("__id", e)?;
-                if let Ok(mt) = lua.named_registry_value::<Table>("floptle_anim_mt") {
-                    t.set_metatable(Some(mt));
-                }
-                Ok(t)
-            })?,
-        )?;
-    }
-    // node:particles() → the particle-system handle: play / stop / restart the node's
-    // ParticleSystem effect, and read its live state. Setters queue into `vfx_commands`
-    // (applied before the effects advance, same frame); getters read the `vfx_info`
-    // mirror the editor feeds each frame.
-    {
-        let vfx_methods = lua.create_table()?;
-        for (name, cmd) in
-            [("play", VfxCmd::Play), ("stop", VfxCmd::Stop), ("restart", VfxCmd::Restart)]
-        {
-            let cmds = shared.vfx_commands.clone();
-            let cmd = cmd.clone();
-            vfx_methods.set(
-                name,
-                lua.create_function(move |_, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    cmds.borrow_mut().push((e, cmd.clone()));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let cmds = shared.vfx_commands.clone();
-            vfx_methods.set(
-                "setIntensity",
-                lua.create_function(move |_, (this, i): (Table, f32)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    cmds.borrow_mut().push((e, VfxCmd::Intensity(i)));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            // ps:setBeamEnd(x, y, z) — aim every Beam track of the node's effect at a
-            // WORLD-space point (the engine converts it to effect-local, so the beam
-            // tracks the target as the emitter moves/rotates).
-            let cmds = shared.vfx_commands.clone();
-            vfx_methods.set(
-                "setBeamEnd",
-                lua.create_function(move |_, (this, x, y, z): (Table, f64, f64, f64)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    cmds.borrow_mut().push((e, VfxCmd::SetBeamEnd([x, y, z])));
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.vfx_info.clone();
-            vfx_methods.set(
-                "isPlaying",
-                lua.create_function(move |_, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    Ok(Value::Boolean(inf.borrow().get(&e).map(|i| i.playing).unwrap_or(false)))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.vfx_info.clone();
-            vfx_methods.set(
-                "alive",
-                lua.create_function(move |_, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    Ok(Value::Number(inf.borrow().get(&e).map(|i| i.alive as f64).unwrap_or(0.0)))
-                })?,
-            )?;
-        }
-        {
-            let inf = shared.vfx_info.clone();
-            vfx_methods.set(
-                "asset",
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    match inf.borrow().get(&e) {
-                        Some(i) => Ok(Value::String(lua.create_string(&i.asset)?)),
-                        None => Ok(Value::Nil),
-                    }
-                })?,
-            )?;
-        }
-        let vfx_mt = lua.create_table()?;
-        vfx_mt.set("__index", vfx_methods)?;
-        lua.set_named_registry_value("floptle_vfx_mt", vfx_mt)?;
-
-        methods.set(
-            "particles",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let t = lua.create_table()?;
-                t.raw_set("__id", e)?;
-                if let Ok(mt) = lua.named_registry_value::<Table>("floptle_vfx_mt") {
-                    t.set_metatable(Some(mt));
-                }
-                Ok(t)
-            })?,
-        )?;
-
-        // node:setShaderParam(name, x, y?, z?, w?) — drive a `.flsl` uniform
-        // from a script every tick (a uniform write on the GPU, never a
-        // recompile). Works on a mesh Material's shader AND on a UI element's
-        // `stage ui` shader — instruments like the navball live on this.
-        {
-            let sets = shared.shader_param_sets.clone();
-            methods.set(
-                "setShaderParam",
-                lua.create_function(
-                    move |_,
-                          (this, name, x, y, z, w): (
-                        Table,
-                        String,
-                        f32,
-                        Option<f32>,
-                        Option<f32>,
-                        Option<f32>,
-                    )| {
-                        let e: u32 = this.raw_get("__id")?;
-                        sets.borrow_mut().push((
-                            e,
-                            None,
-                            name,
-                            [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
-                        ));
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-
-        // node:setShaderTexture(slot, ref) — point one of a `.flsl` shader's
-        // declared texture slots at a different image, at runtime.
-        //
-        // `ref` is a project-relative path ("textures/rust.png"), an `rt:` render
-        // target ("rt:securityCam" — what another camera is looking at, live), or
-        // "" to clear the slot back to nothing.
-        //
-        // The slot NAME is the one the shader declares (`texture ramp` → "ramp"),
-        // so a script names what the artist named, not an index that shifts the
-        // moment a slot is added.
-        {
-            let sets = shared.shader_texture_sets.clone();
-            methods.set(
-                "setShaderTexture",
-                lua.create_function(move |_, (this, slot, path): (Table, String, String)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    if slot.trim().is_empty() {
-                        return Err(mlua::Error::RuntimeError(
-                            "node:setShaderTexture(slot, ref) — slot is the name the shader \
-                             declares, e.g. \"ramp\" for `texture ramp`"
-                                .into(),
-                        ));
-                    }
-                    sets.borrow_mut().push((e, None, slot, path));
-                    Ok(())
-                })?,
-            )?;
-        }
-
-        // node:setScreenShader(name, on) — switch one of the PostProcess node's
-        // screen shaders on or off.
-        //
-        // `name` is the shader's file name without the extension ("inkOutline"),
-        // which is what the Inspector lists and what the author is looking at.
-        // Empty means every pass on the node — the whole authored look, off.
-        //
-        // The pass and its knobs stay in the scene, so this is a switch and not
-        // a deletion: turn the outline on for a boss fight and off again after.
-        {
-            let toggles = shared.screen_shader_toggles.clone();
-            methods.set(
-                "setScreenShader",
-                lua.create_function(move |_, (this, name, on): (Table, String, bool)| {
-                    let e: u32 = this.raw_get("__id")?;
-                    toggles.borrow_mut().push((e, name, on));
-                    Ok(())
-                })?,
-            )?;
-        }
-    }
-
-    // ---- orientation, local ↔ world, movement ---------------------------------------
-    //
-    // The half of the API that used to be written out longhand in every script:
-    // `atan2` with two minus signs, a four-line project-onto-plane, and an
-    // inverse-parent-transform nobody wanted to derive. Each one names the
-    // intent, so it cannot get the sign wrong.
-    //
-    // They all go through the handle's own `__index`/`__newindex` (`this.get` /
-    // `this.set`, never `raw_*`), so the own-node-vs-mirror rule, the body
-    // teleport queue and the read-your-writes behaviour stay in ONE place.
-    {
-        // node:lookAt(target [, up]) — point at a node handle or a world point.
-        // Sets yaw + pitch; roll only when you pass an `up` (and then it is
-        // whatever puts that up over the node's head — a level horizon on a
-        // planet, in one call instead of twenty lines of undo-yaw-then-pitch).
-        //
-        // WORLD space on both ends: the node's own world position against the
-        // target's, then the angles written back as the LOCAL yaw/pitch the
-        // fields are. Under an unrotated parent (the overwhelmingly common
-        // case) those coincide; under a rotated one, aim with `:lookAt` on the
-        // parent or read `node:worldForward()` to see what actually happened.
-        let scene = shared.scene.clone();
-        methods.set(
-            "lookAt",
-            lua.create_function(move |_, (this, target, up): (Table, Value, Option<Value>)| {
-                let e: u32 = this.raw_get("__id")?;
-                // A node handle aims at where it WORLD is; a bare vec3 is taken
-                // as the world point it plainly is.
-                let (t, here) = {
-                    let s = scene.borrow();
-                    let Some(t) = world_pos_of_value(&s, &target) else {
-                        return Err(mlua::Error::RuntimeError(
-                            "node:lookAt(target [, up]) — target is a node or a vec3".into(),
-                        ));
-                    };
-                    (t, world_transform_of_handle(&s, &this, e).translation)
-                };
-                let up = match up {
-                    Some(u) => Some(crate::math_api::vec3_of(&u).ok_or_else(|| {
-                        mlua::Error::RuntimeError("node:lookAt's up is a vec3".into())
-                    })?),
-                    None => None,
-                };
-                let (yaw, pitch, roll) = crate::math_api::look_rotation(t - here, up);
-                this.set("yaw", yaw)?;
-                this.set("pitch", pitch)?;
-                if up.is_some() {
-                    this.set("roll", roll)?;
-                }
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        // node:turnTowards(target, maxRadians) — the shortest-arc step toward
-        // facing something, capped. Pass `rate * dt` and the turn is
-        // frame-rate independent; the ±π seam is handled (`math.approachAngle`),
-        // which is where every hand-written version went the long way round.
-        // The target may be a node, a world point, or a DIRECTION vector.
-        let scene = shared.scene.clone();
-        methods.set(
-            "turnTowards",
-            lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
-                let e: u32 = this.raw_get("__id")?;
-                // A node handle or a point is somewhere to face; a short vector
-                // that isn't a position would be ambiguous, so the rule is
-                // simple and stated: handles resolve to their world position,
-                // everything else is taken as a DIRECTION.
-                let dir = match &target {
-                    Value::Table(tt) if tt.raw_get::<u32>("__id").is_ok() => {
-                        let s = scene.borrow();
-                        world_pos_of_value(&s, &target).unwrap_or_default()
-                            - world_transform_of_handle(&s, &this, e).translation
-                    }
-                    _ => crate::math_api::vec3_of(&target).ok_or_else(|| {
-                        mlua::Error::RuntimeError(
-                            "node:turnTowards(target, maxRadians) — target is a node, a world \
-                             point or a direction"
-                                .into(),
-                        )
-                    })?,
-                };
-                if dir.length_squared() < 1e-18 {
-                    return Ok(()); // nowhere to turn: leave the facing alone
-                }
-                let step = |cur: f64, want: f64| -> f64 {
-                    let d = wrap_pi_f64(want - cur);
-                    if d.abs() <= max.abs() { want } else { cur + d.signum() * max.abs() }
-                };
-                let yaw: f64 = this.get("yaw").unwrap_or(0.0);
-                let pitch: f64 = this.get("pitch").unwrap_or(0.0);
-                this.set("yaw", step(yaw, crate::math_api::yaw_of(dir)))?;
-                this.set("pitch", step(pitch, crate::math_api::pitch_of(dir)))?;
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        // node:toWorld(v) / node:toLocal(v) — a point through this node's own
-        // frame (its position, rotation AND scale, composed up the parent
-        // chain). "Where is the muzzle?" is `gun:toWorld(vec3(0, 0, -1.2))`.
-        let scene = shared.scene.clone();
-        let f = lua.create_function(move |lua, (this, v, to_local): (Table, Value, bool)| {
+        crate::math_api::LuaVec3(p).into_lua(lua)
+    })?;
+    let to_world = f.clone();
+    methods.set(
+        "toWorld",
+        lua.create_function(move |_, (this, v): (Table, Value)| {
+            to_world.call::<Value>((this, v, false))
+        })?,
+    )?;
+    methods.set(
+        "toLocal",
+        lua.create_function(move |_, (this, v): (Table, Value)| {
+            f.call::<Value>((this, v, true))
+        })?,
+    )?;
+}
+{
+    // node:setWorldPos(v) — put a node at a WORLD point without deriving the
+    // parent inverse by hand. Through `Transform::inv_mul`, the componentwise
+    // TRS inverse: a matrix decomposition attributes a mirrored parent's
+    // negative determinant to X regardless of which axis is actually
+    // flipped, so a child of a mirrored character would land off by a
+    // reflection.
+    let scene = shared.scene.clone();
+    methods.set(
+        "setWorldPos",
+        lua.create_function(move |_, (this, v): (Table, Value)| {
             let e: u32 = this.raw_get("__id")?;
             let Some(v) = crate::math_api::vec3_of(&v) else {
                 return Err(mlua::Error::RuntimeError(
-                    "node:toWorld/toLocal take a vec3 (or anything with x/y/z)".into(),
+                    "node:setWorldPos takes a vec3 (or anything with x/y/z)".into(),
                 ));
             };
-            let w = world_transform_of_handle(&scene.borrow(), &this, e);
-            let p = if to_local {
-                w.inv_mul(&floptle_core::Transform::from_translation(v)).translation
-            } else {
-                w.mul_transform(&floptle_core::Transform::from_translation(v)).translation
-            };
-            crate::math_api::LuaVec3(p).into_lua(lua)
-        })?;
-        let to_world = f.clone();
-        methods.set(
-            "toWorld",
-            lua.create_function(move |_, (this, v): (Table, Value)| {
-                to_world.call::<Value>((this, v, false))
-            })?,
-        )?;
-        methods.set(
-            "toLocal",
-            lua.create_function(move |_, (this, v): (Table, Value)| {
-                f.call::<Value>((this, v, true))
-            })?,
-        )?;
-    }
-    {
-        // node:setWorldPos(v) — put a node at a WORLD point without deriving the
-        // parent inverse by hand. Through `Transform::inv_mul`, the componentwise
-        // TRS inverse: a matrix decomposition attributes a mirrored parent's
-        // negative determinant to X regardless of which axis is actually
-        // flipped, so a child of a mirrored character would land off by a
-        // reflection.
-        let scene = shared.scene.clone();
-        methods.set(
-            "setWorldPos",
-            lua.create_function(move |_, (this, v): (Table, Value)| {
-                let e: u32 = this.raw_get("__id")?;
-                let Some(v) = crate::math_api::vec3_of(&v) else {
-                    return Err(mlua::Error::RuntimeError(
-                        "node:setWorldPos takes a vec3 (or anything with x/y/z)".into(),
-                    ));
-                };
-                let local = parent_world_of(&scene.borrow(), e)
-                    .inv_mul(&floptle_core::Transform::from_translation(v))
-                    .translation;
-                this.set("pos", crate::math_api::LuaVec3(local))?;
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        // node:worldForward() / worldRight() / worldUp() — the node's axes after
-        // the parent chain. `node.forward` is the LOCAL one: a gun barrel
-        // parented to an arm points where the ARM says, not where the gun's own
-        // rotation says, and shooting along the local forward misses.
-        let scene = shared.scene.clone();
-        for (name, axis) in
-            [("worldForward", Vec3::NEG_Z), ("worldRight", Vec3::X), ("worldUp", Vec3::Y)]
-        {
-            let scene = scene.clone();
-            methods.set(
-                name,
-                lua.create_function(move |lua, this: Table| {
-                    let e: u32 = this.raw_get("__id")?;
-                    let r = world_transform_of(&scene.borrow(), e).rotation * axis;
-                    crate::math_api::LuaVec3(
-                        glam::DVec3::new(r.x as f64, r.y as f64, r.z as f64),
-                    ).into_lua(lua)
-                })?,
-            )?;
-        }
-    }
-    {
-        // node:distanceTo(other) and node:distanceFlat(other [, up]) — measured
-        // in WORLD space, because that is the answer people mean. `distance(a,
-        // b)` compares LOCAL positions, which reads correctly right up until one
-        // of the two is parented and then quietly answers about the wrong frame.
-        // `distanceFlat` drops the component along `up` (default +Y): the "have
-        // I arrived?" test for anything that walks on ground it doesn't control
-        // the height of.
-        let scene = shared.scene.clone();
-        let f = lua.create_function(
-            move |_, (this, other, up, flat): (Table, Value, Option<Value>, bool)| {
-                let e: u32 = this.raw_get("__id")?;
-                let s = scene.borrow();
-                let a = world_transform_of_handle(&s, &this, e).translation;
-                let b = world_pos_of_value(&s, &other).ok_or_else(|| {
-                    mlua::Error::RuntimeError("node:distanceTo takes a node or a vec3".into())
-                })?;
-                let d = b - a;
-                if !flat {
-                    return Ok(d.length());
-                }
-                let up = match up {
-                    Some(u) => crate::math_api::vec3_of(&u)
-                        .and_then(|u| u.try_normalize())
-                        .unwrap_or(glam::DVec3::Y),
-                    None => glam::DVec3::Y,
-                };
-                Ok((d - up * d.dot(up)).length())
-            },
-        )?;
-        let plain = f.clone();
-        methods.set(
-            "distanceTo",
-            lua.create_function(move |_, (this, other): (Table, Value)| {
-                plain.call::<f64>((this, other, Value::Nil, false))
-            })?,
-        )?;
-        methods.set(
-            "distanceFlat",
-            lua.create_function(move |_, (this, other, up): (Table, Value, Value)| {
-                f.call::<f64>((this, other, up, true))
-            })?,
-        )?;
-    }
-    {
-        // node:moveTowards(target, maxDelta) — walk toward a WORLD point at a
-        // speed, never overshooting it. Pass `speed * dt`. Returns true once it
-        // has arrived, so `if node:moveTowards(goal, s * dt) then ... end` is the
-        // whole patrol step. World-space and placed with setWorldPos, so a node
-        // under a container arrives where you actually pointed.
-        let scene = shared.scene.clone();
-        methods.set(
-            "moveTowards",
-            lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
-                let e: u32 = this.raw_get("__id")?;
-                let (here, goal, parent) = {
-                    let s = scene.borrow();
-                    let goal = world_pos_of_value(&s, &target).ok_or_else(|| {
-                        mlua::Error::RuntimeError(
-                            "node:moveTowards(target, maxDelta) — target is a node or a vec3"
-                                .into(),
-                        )
-                    })?;
-                    (
-                        world_transform_of_handle(&s, &this, e).translation,
-                        goal,
-                        parent_world_of(&s, e),
-                    )
-                };
-                let next = crate::math_api::towards(here, goal, max);
-                let local = parent
-                    .inv_mul(&floptle_core::Transform::from_translation(next))
-                    .translation;
-                this.set("pos", crate::math_api::LuaVec3(local))?;
-                Ok((next - goal).length() < 1e-9)
-            })?,
-        )?;
-    }
-
-    lua.set_named_registry_value("floptle_node_methods", methods)?;
-
-    // ---- script metatable -----------------------------------------------------------
-    let script_mt = lua.create_table()?;
-    {
-        let envs = shared.envs.clone();
-        let broken = shared.broken.clone();
-        let broken_read_warned = shared.broken_read_warned.clone();
-        let logs = shared.logs.clone();
-        let scene = shared.scene.clone();
-        let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
-            let e: u32 = this.raw_get("__id")?;
-            let name: String = this.raw_get("__script")?;
-            // Resolved from the registry rather than held as a live table —
-            // see `Shared::envs`.
-            let env =
-                envs.borrow().get(&(e, name.clone())).and_then(|k| lua.registry_value::<Table>(k).ok());
-            match key.as_str() {
-                "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
-                "kind" => return Ok(Value::String(lua.create_string(&name)?)),
-                // `name` asks the SCRIPT first. The handle used
-                // to answer it itself, so a script exporting `function name(id)`
-                // — the obvious name for "turn an id into a display name" —
-                // could call it from inside itself and from nowhere else: every
-                // cross-script caller got the script's own kind back, as a
-                // string, and died at the call site with `attempt to call field
-                // 'name' (a string value)`. Nothing raised until something
-                // called it, which for a display-name function is the first
-                // moment there is anything to display.
-                //
-                // `kind` is the same string and is not shadowable, so nothing
-                // loses the ability to ask which script a handle is.
-                "name" => {
-                    if let Some(env) = &env
-                        && let Ok(v) = env.get::<Value>("name")
-                        && !matches!(v, Value::Nil)
-                    {
-                        return Ok(v);
-                    }
-                    return Ok(Value::String(lua.create_string(&name)?));
-                }
-                "valid" => {
-                    return Ok(Value::Boolean(envs.borrow().contains_key(&(e, name.clone()))));
-                }
-                _ => {}
-            }
-            match env {
-                Some(env) => env.get::<Value>(key),
-                // No environment. Two very different things read `nil` here: a
-                // script that has no such export, and a script that FAILED TO
-                // LOAD and therefore has no exports at all. The second wants a
-                // completely different fix and used to be indistinguishable
-                // from the first at every call site, so say
-                // which it is — once per `(script, key)`, because a handle
-                // polled in `update` would otherwise say it sixty times a
-                // second.
-                None => {
-                    if broken_read_warned.borrow_mut().insert((name.clone(), key.clone())) {
-                        // Three things reach here and they want three different
-                        // fixes. A script that FAILED TO LOAD has no exports at
-                        // all; one that is attached but SWITCHED OFF never got
-                        // an environment built; and a live script simply has no
-                        // export by that name — which is the only one of the
-                        // three a bare `nil` describes.
-                        let msg = if broken.borrow().contains(&name) {
-                            Some(crate::load_error::unavailable(&name, &key))
-                        } else if scene.borrow().kinds_on(e).iter().any(|k| k == &name) {
-                            Some(format!(
-                                "reading `.{key}` from the \"{name}\" script on node #{e}: that \
-                                 script is attached but not running — its tickbox is off in the \
-                                 Inspector, or the node itself is switched off — so it has no \
-                                 state to read and everything on this handle is nil."
-                            ))
-                        } else {
-                            None
-                        };
-                        if let Some(msg) = msg {
-                            logs.borrow_mut().push(crate::ScriptLog {
-                                level: crate::LogLevel::Warn,
-                                msg,
-                                source: None,
-                            });
-                        }
-                    }
-                    Ok(Value::Nil)
-                }
-            }
-        })?;
-        script_mt.set("__index", idx)?;
-    }
-    {
-        let envs = shared.envs.clone();
-        let newidx = lua.create_function(move |lua, (this, key, val): (Table, String, Value)| {
-            let e: u32 = this.raw_get("__id")?;
-            let name: String = this.raw_get("__script")?;
-            let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
-            if let Some(env) = env {
-                env.set(key, val)?;
-            }
+            let local = parent_world_of(&scene.borrow(), e)
+                .inv_mul(&floptle_core::Transform::from_translation(v))
+                .translation;
+            this.set("pos", crate::math_api::LuaVec3(local))?;
             Ok(())
-        })?;
-        script_mt.set("__newindex", newidx)?;
-    }
-    lua.set_named_registry_value("floptle_script_mt", script_mt)?;
-
-    // Every `find*` takes the same optional trailing options table, so the rule
-    // is learned once. See [`FindScope`] for why enabled-only is the default.
-    //
-    //     find("Player")                        -- enabled only (the default)
-    //     find("Player", { scope = "all" })     -- switched-off ones too
-    //     find("Spawner", { scope = "disabled" })
-    //     findAll("Enemy", { includeDisabled = true })   -- sugar for scope="all"
-    //
-    // A wrong KEY and a wrong VALUE both raise, listing what is accepted. A
-    // defaulted typo is how `pin = "topCenter"` silently meant top-left,
-    // and an options table nobody can see the effect of is
-    // exactly the shape that goes unnoticed for a month.
-    fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
-        let t = match opts {
-            None | Some(Value::Nil) => return Ok(crate::FindScope::default()),
-            Some(Value::Table(t)) => t,
-            Some(_) => {
-                return Err(mlua::Error::RuntimeError(
-                    "the second argument to find/findAll/findScript/findTagged is an options \
-                     TABLE, e.g. { scope = \"all\" }"
-                        .into(),
-                ));
-            }
-        };
-        for pair in t.clone().pairs::<String, Value>() {
-            let (k, _) = pair?;
-            if !matches!(k.as_str(), "scope" | "includeDisabled" | "onlyDisabled") {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "find options: unknown key '{k}' — accepted: scope, includeDisabled, \
-                     onlyDisabled"
-                )));
-            }
-        }
-        if let Some(s) = t.get::<Option<String>>("scope")? {
-            return crate::FindScope::parse(&s).ok_or_else(|| {
-                mlua::Error::RuntimeError(format!(
-                    "find options: scope = '{s}' — accepted: {}",
-                    crate::FindScope::ACCEPTS.join(", ")
-                ))
-            });
-        }
-        if t.get::<Option<bool>>("onlyDisabled")?.unwrap_or(false) {
-            return Ok(crate::FindScope::Disabled);
-        }
-        if t.get::<Option<bool>>("includeDisabled")?.unwrap_or(false) {
-            return Ok(crate::FindScope::All);
-        }
-        Ok(crate::FindScope::default())
-    }
-
-    // ---- globals: find / findAll / findScript / noderef -----------------------------
+        })?,
+    )?;
+}
+{
+    // node:worldForward() / worldRight() / worldUp() — the node's axes after
+    // the parent chain. `node.forward` is the LOCAL one: a gun barrel
+    // parented to an arm points where the ARM says, not where the gun's own
+    // rotation says, and shooting along the local forward misses.
+    let scene = shared.scene.clone();
+    for (name, axis) in
+        [("worldForward", Vec3::NEG_Z), ("worldRight", Vec3::X), ("worldUp", Vec3::Y)]
     {
-        let scene = shared.scene.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.find_scope_warned.clone();
-        lua.globals().set(
-            "find",
-            lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
-                let scope = find_scope(&opts)?;
-                let s = scene.borrow();
-                // O(1) against the name index when the default scope can take
-                // its answer (first node in scene order wins, as always). A
-                // narrowed scope has to walk, because the index holds the FIRST
-                // node of that name and it may be the one being filtered out —
-                // returning nil while a perfectly good second one exists would
-                // be worse than the bug this fixes.
-                let found = match s.by_name.get(&name).copied() {
-                    Some(e) if s.in_scope(e, scope) => Some(e),
-                    _ => s
-                        .order
-                        .iter()
-                        .copied()
-                        .find(|e| s.names.get(e).is_some_and(|n| n == &name) && s.in_scope(*e, scope)),
-                };
-                // Came up empty, but a node of that name IS in the scene and is
-                // simply switched off. Say so — once. Without this the only
-                // symptom of the enabled-only default is a `nil` in somebody
-                // else's code.
-                if found.is_none()
-                    && scope == crate::FindScope::Enabled
-                    && s.order.iter().any(|e| s.names.get(e).is_some_and(|n| n == &name))
-                    && warned.borrow_mut().insert(name.clone())
-                {
-                    logs.borrow_mut().push(crate::ScriptLog {
-                        level: crate::LogLevel::Warn,
-                        msg: format!(
-                            "find(\"{name}\") found nothing — a node called \"{name}\" IS in this \
-                             scene, but it is switched OFF, and find skips switched-off nodes now. \
-                             Turn it on in the Hierarchy, or ask for it with \
-                             find(\"{name}\", {{ scope = \"all\" }})."
-                        ),
-                        source: None,
-                    });
-                }
-                drop(s);
-                Ok(match found {
-                    Some(e) => Value::Table(new_node_handle(lua, e)?),
-                    None => Value::Nil,
-                })
+        let scene = scene.clone();
+        methods.set(
+            name,
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let r = world_transform_of(&scene.borrow(), e).rotation * axis;
+                crate::math_api::LuaVec3(
+                    glam::DVec3::new(r.x as f64, r.y as f64, r.z as f64),
+                ).into_lua(lua)
             })?,
         )?;
     }
-    // EMPTY_TILE: the cell value that leaves a square empty. The editor's own
-    // autocomplete has told people to pass this since tilemaps shipped, and for
-    // that whole time it was a Rust constant Lua could not name — so following
-    // the documentation produced `nil`. Negative cells mean the
-    // same thing now; this exists so the documented spelling resolves.
-    lua.globals().set("EMPTY_TILE", floptle_core::EMPTY_TILE)?;
-    // noderef(): mark a `defaults` entry as a node-reference param — the Inspector
-    // shows a node picker for it and the script receives a node handle (or nil).
-    lua.globals().set(
-        "noderef",
-        lua.create_function(|_, ()| Ok(crate::env::NODEREF_SENTINEL))?,
+}
+{
+    // node:distanceTo(other) and node:distanceFlat(other [, up]) — measured
+    // in WORLD space, because that is the answer people mean. `distance(a,
+    // b)` compares LOCAL positions, which reads correctly right up until one
+    // of the two is parented and then quietly answers about the wrong frame.
+    // `distanceFlat` drops the component along `up` (default +Y): the "have
+    // I arrived?" test for anything that walks on ground it doesn't control
+    // the height of.
+    let scene = shared.scene.clone();
+    let f = lua.create_function(
+        move |_, (this, other, up, flat): (Table, Value, Option<Value>, bool)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = scene.borrow();
+            let a = world_transform_of_handle(&s, &this, e).translation;
+            let b = world_pos_of_value(&s, &other).ok_or_else(|| {
+                mlua::Error::RuntimeError("node:distanceTo takes a node or a vec3".into())
+            })?;
+            let d = b - a;
+            if !flat {
+                return Ok(d.length());
+            }
+            let up = match up {
+                Some(u) => crate::math_api::vec3_of(&u)
+                    .and_then(|u| u.try_normalize())
+                    .unwrap_or(glam::DVec3::Y),
+                None => glam::DVec3::Y,
+            };
+            Ok((d - up * d.dot(up)).length())
+        },
     )?;
-    // scriptref("health"): the param binds to that SCRIPT on the wired node — the
-    // Inspector only lists nodes carrying it, and the script gets a script handle
-    // directly (call its functions, read its state). componentref("RigidBody"):
-    // same idea for a component handle. Both read nil while unwired/invalid.
-    lua.globals().set(
-        "scriptref",
-        lua.create_function(|_, kind: String| {
-            Ok(format!("{}{kind}", crate::env::SCRIPTREF_PREFIX))
+    let plain = f.clone();
+    methods.set(
+        "distanceTo",
+        lua.create_function(move |_, (this, other): (Table, Value)| {
+            plain.call::<f64>((this, other, Value::Nil, false))
         })?,
     )?;
-    lua.globals().set(
-        "componentref",
-        lua.create_function(|_, name: String| {
-            Ok(format!("{}{name}", crate::env::COMPREF_PREFIX))
+    methods.set(
+        "distanceFlat",
+        lua.create_function(move |_, (this, other, up): (Table, Value, Value)| {
+            f.call::<f64>((this, other, up, true))
         })?,
     )?;
-    // moveTowards(node, target, maxDelta) — the free-function spelling of
-    // `node:moveTowards`, so it reads the same way as `dirTo` and `distance`
-    // beside it. One implementation; this is a forward.
-    lua.globals().set(
+}
+{
+    // node:moveTowards(target, maxDelta) — walk toward a WORLD point at a
+    // speed, never overshooting it. Pass `speed * dt`. Returns true once it
+    // has arrived, so `if node:moveTowards(goal, s * dt) then ... end` is the
+    // whole patrol step. World-space and placed with setWorldPos, so a node
+    // under a container arrives where you actually pointed.
+    let scene = shared.scene.clone();
+    methods.set(
         "moveTowards",
-        lua.create_function(|lua, (node, target, max): (Table, Value, f64)| {
-            let methods: Table = lua.named_registry_value("floptle_node_methods")?;
-            let f: mlua::Function = methods.get("moveTowards")?;
-            f.call::<bool>((node, target, max))
+        lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
+            let e: u32 = this.raw_get("__id")?;
+            let (here, goal, parent) = {
+                let s = scene.borrow();
+                let goal = world_pos_of_value(&s, &target).ok_or_else(|| {
+                    mlua::Error::RuntimeError(
+                        "node:moveTowards(target, maxDelta) — target is a node or a vec3"
+                            .into(),
+                    )
+                })?;
+                (
+                    world_transform_of_handle(&s, &this, e).translation,
+                    goal,
+                    parent_world_of(&s, e),
+                )
+            };
+            let next = crate::math_api::towards(here, goal, max);
+            let local = parent
+                .inv_mul(&floptle_core::Transform::from_translation(next))
+                .translation;
+            this.set("pos", crate::math_api::LuaVec3(local))?;
+            Ok((next - goal).length() < 1e-9)
         })?,
     )?;
-    {
-        let scene = shared.scene.clone();
-        lua.globals().set(
-            "findAll",
-            lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
-                let scope = find_scope(&opts)?;
-                let ids: Vec<u32> = {
-                    let s = scene.borrow();
-                    s.order
-                        .iter()
-                        .copied()
-                        .filter(|e| {
-                            s.names.get(e).map(|n| n == &name).unwrap_or(false)
-                                && s.in_scope(*e, scope)
-                        })
-                        .collect()
-                };
-                list_table(lua, &ids, new_node_handle)
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.miss_warned.clone();
-        let f = lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
-            let scope = find_scope(&opts)?;
-            // Resolve the name the caller typed to the kind the scene stores —
-            // the bare file name reaches a script filed in a folder, same rule as
-            // `node:getscript`. See [`crate::match_kind`].
-            let resolved = {
-                let s = scene.borrow();
-                crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
-            };
-            let canonical = match resolved {
-                crate::KindMatch::One(k) => k,
-                crate::KindMatch::Ambiguous(hits) => {
-                    return Err(crate::ambiguous_kind_error("findScript", &kind, &hits));
-                }
-                // Nothing in the scene carries it. Worth saying out loud: the
-                // alternative is a `nil` that surfaces as an unset value in a
-                // different script several frames later.
-                crate::KindMatch::None => {
-                    warn_once(&logs, &warned, format!("findScript:{kind}"), || {
-                        no_such_kind_in_scene("findScript", &kind, &scene.borrow())
-                    });
-                    return Ok(Value::Nil);
-                }
-            };
-            // O(1) against the kind index. Still the FIRST in
-            // scene order, because the index is built in scene order — call
-            // sites depend on which one they get. The scope filter runs over the
-            // index rather than replacing it, so the ordering guarantee holds.
-            let found = {
-                let s = scene.borrow();
-                s.by_kind
-                    .get(&canonical)
-                    .and_then(|v| v.iter().copied().find(|e| s.in_scope(*e, scope)))
-            };
-            Ok(match found {
-                Some(e) => Value::Table(new_script_handle(lua, e, &canonical)?),
-                None => Value::Nil,
-            })
-        })?;
-        lua.globals().set("findScript", f.clone())?;
-        lua.globals().set("findScriptInScene", f)?;
-    }
-    // findScripts(kind): EVERY node carrying that script, as script handles in
-    // scene order — for picking among several instances (e.g. a camera finding
-    // the one player controller that is net.isMine, out of many avatars).
-    {
-        let scene = shared.scene.clone();
-        let logs = shared.logs.clone();
-        let warned = shared.miss_warned.clone();
-        lua.globals().set(
-            "findScripts",
-            lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
-                let scope = find_scope(&opts)?;
-                let resolved = {
-                    let s = scene.borrow();
-                    crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
-                };
-                let canonical = match resolved {
-                    crate::KindMatch::One(k) => k,
-                    crate::KindMatch::Ambiguous(hits) => {
-                        return Err(crate::ambiguous_kind_error("findScripts", &kind, &hits));
-                    }
-                    crate::KindMatch::None => {
-                        warn_once(&logs, &warned, format!("findScripts:{kind}"), || {
-                            no_such_kind_in_scene("findScripts", &kind, &scene.borrow())
-                        });
-                        return list_table(lua, &[], |_, _| unreachable!("empty"));
-                    }
-                };
-                let ids: Vec<u32> = {
-                    let s = scene.borrow();
-                    s.by_kind
-                        .get(&canonical)
-                        .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
-                        .unwrap_or_default()
-                };
-                list_table(lua, &ids, |lua, e| new_script_handle(lua, e, &canonical))
-            })?,
-        )?;
-    }
-    // findTagged(tag): EVERY node carrying that tag, as node handles in scene
-    // order (an empty table when none). `findTagged("enemy")[1]` for the first.
-    {
-        let scene = shared.scene.clone();
-        lua.globals().set(
-            "findTagged",
-            lua.create_function(move |lua, (tag, opts): (String, Option<Value>)| {
-                let scope = find_scope(&opts)?;
-                let ids: Vec<u32> = {
-                    let s = scene.borrow();
-                    s.by_tag
-                        .get(&tag)
-                        .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
-                        .unwrap_or_default()
-                };
-                list_table(lua, &ids, new_node_handle)
-            })?,
-        )?;
-    }
+}
+
+    Ok(())
+}
+
+/// The node methods table, in the registry as `floptle_node_methods`.
+fn install_node_methods(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+    let methods = lua.create_table()?;
+    node_lookup_methods(lua, shared, &methods)?;
+    node_construction_methods(lua, shared, &methods)?;
+    node_tag_methods(lua, shared, &methods)?;
+    node_animator_method(lua, shared, &methods)?;
+    node_particles_method(lua, shared, &methods)?;
+    node_motion_methods(lua, shared, &methods)?;
+    lua.set_named_registry_value("floptle_node_methods", methods)?;
     Ok(())
 }
 
