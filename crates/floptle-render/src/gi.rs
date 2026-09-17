@@ -6,12 +6,10 @@
 //! has to talk to wgpu: turn a [`BakedGi`] into a 3D texture, and turn a volume
 //! into the four uniform lanes `field.wgsl` reads.
 //!
-//! The texture is `Rgba32Float` and read with `textureLoad` alone. Float32 is
-//! not filterable on every backend, and that costs nothing here: `gi_bounce`
+//! The texture is `Rgba32Float`, read with `textureLoad` alone: `gi_bounce`
 //! computes its own eight-probe weights (trilinear × facing × validity), so
-//! there is no hardware filtering to give up. Full float also means the values
-//! that come back are exactly the values that were baked, which matters when the
-//! thing you are debugging is "is this probe dark, or is it zero".
+//! there is no hardware filtering to give up, and the values that come back
+//! are exactly the values that were baked.
 
 use floptle_gi::BakedGi;
 

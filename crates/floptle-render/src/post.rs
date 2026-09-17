@@ -1135,18 +1135,11 @@ impl PostStack {
 
     /// [`run`](Self::run), plus the scene's authored `stage post` passes.
     ///
-    /// They run after depth of field and the denoise and before the colour
-    /// grade, and every part of that is a decision:
-    ///
-    /// - *after depth of field*, because focus is a property of the scene and an
-    ///   authored pass should see the picture the camera actually took.
-    /// - *after the denoise*, because the denoise wants raw sampling noise and
-    ///   an authored pass is not it.
-    /// - *before the grade, the lens and the grain*, because whatever a pass
-    ///   draws is ART: an ink outline should be graded and vignetted like
-    ///   everything else in the frame, not stencilled on top of the finished
-    ///   picture. It also keeps the pass upstream of the lens distortion, so the
-    ///   depth it reads still lines up with the pixels it is reading.
+    /// They run after depth of field and the denoise — an authored pass sees
+    /// the picture the camera took, and the denoise sees raw sampling noise —
+    /// and before the grade, the lens and the grain, so what a pass draws is
+    /// graded and vignetted like the rest of the frame and the depth it reads
+    /// still lines up with the pixels, upstream of the lens distortion.
     pub fn run_with<'a>(
         &'a self,
         gpu: &Gpu,
@@ -1254,23 +1247,13 @@ impl PostStack {
 
         // ---- the look chain -------------------------------------------------
         //
-        // order, and every step of it is a decision:
-        //
         //   denoise → grade → [bloom, above] → lens → sharpen → finish(grain)
         //
-        // *denoise first*, because it is the only pass that wants the RAW
-        // sampling noise; run it after a grade and it is trying to separate
-        // noise from detail in a picture whose contrast has already been pushed.
-        //
-        // *grade before the lens*, because a grade after chromatic aberration is
-        // grading the coloured fringe — which is not a colour anybody chose, and
-        // which saturation will happily amplify into a rainbow.
-        //
-        // *sharpen after the lens*, because the lens RESAMPLES: sharpen first
-        // and the bilinear fetch that bends the picture throws it away again.
-        //
-        // *grain last* (inside `fs_finish`), because grain is what the picture is
-        // recorded on. Sharpen it and it crawls; blur it and it is gone.
+        // Denoise first, on the raw sampling noise before a grade pushes the
+        // contrast. Grade before the lens, or saturation amplifies the chromatic
+        // fringe into a rainbow. Sharpen after the lens, whose resampling would
+        // throw an earlier sharpen away. Grain last, in `fs_finish`: it is what
+        // the picture is recorded on, and sharpening it makes it crawl.
         //
         // Each step ping-pongs between the two full-res scratch targets, and a
         // step that is off costs nothing: no pass, no copy, no target.

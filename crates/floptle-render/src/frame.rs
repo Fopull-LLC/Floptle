@@ -23,18 +23,12 @@ pub enum Projection {
 /// Half the depth range an orthographic camera spans, in world units: its box
 /// runs from `-ORTHO_DEPTH` to `+ORTHO_DEPTH` about the eye.
 ///
-/// **An orthographic near plane belongs behind the camera.** The projection does
-/// not divide by `w`, so a negative near is ordinary rather than degenerate —
-/// and it is what a flat game needs, because a flat game puts its art on one
-/// plane and its camera on that plane. A near plane in front of the eye slices
-/// that layer away entirely, which reads as "my tilemap does not render" in
-/// whichever view happens not to be pulled back.
-///
-/// Symmetric about the eye, so two views of the same scene cannot disagree about
-/// what is in it. 10,000 each way is far more room than a flat game uses and
-/// still leaves a 24-bit depth buffer about a millimetre of resolution; deriving
-/// the range from a perspective camera's `far` (300 km) would spend all of that
-/// precision on emptiness.
+/// The near plane sits behind the camera: an orthographic projection does not
+/// divide by `w`, so a negative near is ordinary, and a flat game puts its art
+/// on the very plane its camera stands on — a near plane in front of the eye
+/// would slice that layer away. Symmetric about the eye, so two views of one
+/// scene agree on what is in it. 10,000 each way leaves a 24-bit depth buffer
+/// about a millimetre of resolution.
 pub const ORTHO_DEPTH: f32 = 10_000.0;
 
 impl Projection {
@@ -52,18 +46,12 @@ impl Projection {
 
     /// The projection a `Matter::Camera` node describes.
     ///
-    /// The one place a camera component becomes a matrix, called by the editor's
-    /// Scene view, its Game view, each render target and the runtime. Four
-    /// copies of `if ortho { … } else { … }` is how a game ends up orthographic
-    /// in Play and perspective in a build — or, worse, orthographic on the
-    /// screen and perspective in the minimap, where nobody thinks to look.
-    ///
-    /// `near` and `far` are the **perspective** planes, and the orthographic
-    /// case deliberately ignores them for [`ORTHO_DEPTH`]. Centralising the
-    /// `if ortho` was not enough on its own: every caller still passed the same
-    /// `0.05` near plane, which is correct for perspective and clips a flat
-    /// game's whole world away. A depth range that has one right answer should
-    /// not be asked of four callers.
+    /// The one place a camera component becomes a matrix — the Scene view, the
+    /// Game view, each render target and the runtime all call it, so a game
+    /// cannot be orthographic in Play and perspective in a build. `near` and
+    /// `far` are the perspective planes; the orthographic case uses
+    /// [`ORTHO_DEPTH`] instead, since a perspective near plane clips a flat
+    /// game's whole world away.
     pub fn of_camera(fov_y: f32, ortho: bool, ortho_height: f32, near: f32, far: f32) -> Projection {
         if ortho {
             Projection::Orthographic {

@@ -1,31 +1,26 @@
 //! Frustum culling: what is on screen, and how big a thing is.
 //!
-//! Until this existed, culling lived in exactly one place — terrain chunks — and
-//! every other node in the scene became an instance every frame whether or not it
-//! was on screen. Roughly half of any scene is behind the camera. Scatter fields
-//! were culled by *distance* but never by *direction*, so a full field submitted
-//! its whole disc, including the part behind you.
-//!
-//! # The one thing that can go wrong
+//! Roughly half of any scene is behind the camera. Every node is tested here
+//! before it becomes an instance, and a scatter field is culled by direction as
+//! well as by distance.
 //!
 //! A bounding radius that is too small pops geometry out at the screen edge,
-//! which is far more visible than the cost being saved. So every radius here is
-//! derived from measured bounds and rounded **up**, and the source of each bound
-//! is written down:
+//! which is far more visible than the cost saved, so every radius is derived
+//! from measured bounds and rounded up:
 //!
 //! * [`radius_from_longest_edge`] — for an imported model, whose
-//!   `ImportedModel::size` is the longest edge of its AABB *after recentering
-//!   about that box's own centre*. The tightest sphere that certainly contains
-//!   such a box has radius `size · √3/2`.
+//!   `ImportedModel::size` is the longest edge of its AABB after recentering
+//!   about that box's own centre; the sphere that certainly contains such a box
+//!   has radius `size · √3/2`.
 //! * [`radius_from_half_extents`] — for anything whose extents are known
 //!   directly (a water box, a tilemap's grid).
 //! * [`inflate_for_pose`] — for a skinned mesh, whose bind-pose sphere is wrong
-//!   the moment an animation reaches outside it. The symptom of getting this
-//!   wrong is a character vanishing as it swings a weapon near the screen edge.
+//!   the moment an animation reaches outside it; a character must not vanish as
+//!   it swings a weapon near the screen edge.
 //!
-//! Camera-relative throughout (ADR-0015): the planes are built from the same
-//! `view_proj` the instance matrices are, so a position that is correct for a
-//! draw is correct for the test without conversion.
+//! Camera-relative throughout: the planes are built from the same `view_proj`
+//! the instance matrices are, so a position that is right for a draw is right
+//! for the test.
 
 use floptle_core::math::{Mat4, Vec3, Vec4};
 
@@ -146,10 +141,9 @@ pub fn radius_from_half_extents(half: Vec3, scale: Vec3) -> f32 {
 /// maximum over the joints gives a bound that holds for every vertex without
 /// touching a vertex.
 ///
-/// That is why this reads the pose rather than padding by a constant: a reach
-/// animation can put a hand a long way outside the bind box, and a fudge factor
-/// that covers the worst clip in the project makes the cull useless for
-/// everything else.
+/// The pose is read rather than padded by a constant: a reach animation puts a
+/// hand far outside the bind box, and a factor that covers the worst clip in
+/// the project makes the cull useless for everything else.
 ///
 /// `joints` are the skinning matrices for this frame (joint-space → model-space,
 /// i.e. what the shader would multiply by). An empty list means unskinned: the

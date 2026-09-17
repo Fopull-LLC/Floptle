@@ -236,19 +236,13 @@ impl Gpu {
             })
             .await
             .expect("no GPU device");
-        // A GPU validation error must not end the session.
-        //
-        // wgpu's default handler panics, and a panic here is worse than it
-        // sounds: it unwinds through a frame that is holding a surface
+        // A GPU validation error must not end the session: wgpu's default
+        // handler panics, the unwind runs through a frame holding a surface
         // texture, the swapchain destructor panics in turn, and the process
-        // takes a non-unwinding abort — everything unsaved gone, and the crash
-        // note naming the destructor rather than the cause. Twice now that has
-        // been one mismatched pipeline in a pass that draws once a frame.
-        //
-        // So: record it, keep the frame, let the editor say so. Deliberately
-        // not installed on the headless path (see `headless_with`) — a probe
-        // that swallowed a validation error would report a pass it never made,
-        // and that trade only makes sense when there is a person at the window.
+        // aborts with everything unsaved gone. So it is recorded, the frame
+        // kept, and the editor says so. Not installed on the headless path
+        // (`headless_with`): a probe that swallowed a validation error would
+        // report a pass it never made.
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| gpu_error(&e)));
 
         let caps = surface.get_capabilities(&adapter);
@@ -463,20 +457,13 @@ impl Gpu {
     /// The format every SCENE-space pass renders into, which is **not** the
     /// surface format.
     ///
-    /// A window's surface is 8-bit sRGB: it can hold nothing brighter than
-    /// white, and anything that goes over gets clipped per channel — which is
-    /// not merely "bright things go white", it is a HUE SHIFT, because the
-    /// channel that clips first drags the colour toward the other two. A sunlit
-    /// white wall and a light bulb ten times brighter store as the same pixel,
-    /// so bloom cannot tell them apart and there is nothing left for an exposure
-    /// or a tonemap to work with.
-    ///
-    /// So the scene renders into a floating-point target and stays in linear
-    /// light, at whatever intensity it actually has, all the way to the end of
-    /// the post chain — where exactly one pass maps it down to the display
-    /// ([`PostSettings::tonemap`](crate::PostSettings)). Every pass in between —
-    /// depth of field, denoise, grade, bloom, lens, sharpen — is then working on
-    /// the real values.
+    /// A window's surface is 8-bit sRGB: nothing brighter than white fits, and
+    /// a channel that clips shifts the hue toward the other two. A sunlit wall
+    /// and a bulb ten times brighter would store as the same pixel, leaving
+    /// bloom and exposure nothing to work with. So the scene renders into a
+    /// floating-point target and stays in linear light through the whole post
+    /// chain, and exactly one pass maps it to the display
+    /// ([`PostSettings::tonemap`](crate::PostSettings)).
     ///
     /// Windowed rendering uses `Rgba16Float`. A headless GPU keeps the surface
     /// format unless it was built by [`headless_hdr`](Self::headless_hdr), so

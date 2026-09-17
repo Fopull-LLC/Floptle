@@ -51,24 +51,23 @@ pub struct MeshData {
 
 /// Renderable geometry from an extracted terrain chunk ([`floptle_field::mesh_chunk`]).
 ///
-/// Positions come out FIELD-space (`origin + chunk-local`), not chunk-local, so that
-/// every chunk of one terrain can share a single instance matrix. That sharing is what
-/// makes the triplanar material continuous: triplanar projects along `lpos`, the
-/// OBJECT-space position, so per-chunk local coordinates would restart the texture at
-/// every chunk boundary — a grid of seams every 48 units. Field-space coordinates cost
-/// nothing in precision (a 4 km map is ±2000, ~1e-4 resolution in f32, against 1.5-unit
-/// voxels); the floating origin is handled where it always is, by the model matrix being
-/// camera-relative (ADR-0015).
+/// Positions are field-space (`origin + chunk-local`), so every chunk of one
+/// terrain shares a single instance matrix and the triplanar material, which
+/// projects along the object-space position, runs continuously across chunk
+/// boundaries instead of restarting at each. A 4 km map is ±2000 in f32 —
+/// 1e-4 resolution against 1.5-unit voxels; the floating origin is handled by
+/// the camera-relative model matrix as everywhere else.
 ///
-/// UVs are zero: terrain has no meaningful unwrap, and its material is triplanar.
+/// UVs are zero: terrain has no unwrap, its material is triplanar.
 ///
-/// The colour's ALPHA byte carries the painted TEXTURE-SLOT INDEX (`Terrain::flat`: "0 =
-/// untextured", 1 = palette layer 0, …), not opacity — the terrain splat shader reads it as
-/// a slot and triplanar-samples the palette. The instance's `terrain_splat` flag tells the
-/// fragment shader to interpret alpha this way and force the surface opaque; without the
-/// flag a slot index would read as a near-zero alpha and the chunk would be discarded. The
-/// rasterizer interpolates alpha across the triangle, so a boundary between two slots reads
-/// a fractional value → a smooth crossfade between the two textures (matching the raymarch).
+/// The colour's alpha byte carries the painted texture-slot index (0 =
+/// untextured, 1 = palette layer 0, …), not opacity: the splat shader reads it
+/// as a slot and samples the palette. The instance's `terrain_splat` flag makes
+/// the fragment shader read alpha that way and forces the surface opaque —
+/// without it a slot index reads as a near-zero alpha and the chunk is
+/// discarded. The rasterizer interpolates alpha across a triangle, so a
+/// boundary between two slots crossfades between the two textures, matching
+/// the raymarch.
 pub fn chunk_mesh_data(m: &floptle_field::ChunkMesh) -> MeshData {
     let o = m.origin;
     MeshData {
@@ -181,28 +180,14 @@ pub struct MeshId(pub u32);
 /// Wind every triangle so that `(v1 - v0) × (v2 - v0)` points the same way as its
 /// own vertex normals, flipping the two that disagree.
 ///
-/// ## Why every builder ends with this
-///
-/// Nothing in this renderer culls back faces — single-sided geometry has to
-/// rasterize from both sides — so a triangle's winding looks like it does not
-/// matter. It does, in exactly one place: `facing_normal` in raster.wgsl decides
-/// whether a fragment is being seen from behind by asking the hardware for
-/// `@builtin(front_facing)`, and flips the shading normal when it is. That test
-/// is by WINDING, deliberately: it is exact, where testing the interpolated
-/// normal's own sign puts a black rim around every smooth silhouette.
-///
-/// So a mesh wound against its normals is lit **inside out**. Its visible side
-/// takes the inward normal, the key light lands on the face pointing away, and
-/// what you see is a dark surface with a bright rim — which reads as a strange
-/// material rather than as a bug, and is why this survived so long.
-///
-/// A scan of the built-in shapes found `cube` correct and **every other one
-/// wrong**: `uv_sphere` and `capsule` entirely inverted, `pyramid`, `cone` and
-/// `cylinder` inverted in part, so one shape lit from both sides at once.
-///
-/// Doing it here, from the data, rather than by hand-correcting six index
-/// loops: the loops are readable as written, the rule is one sentence, and a
-/// seventh shape gets it right for free.
+/// Nothing here culls back faces, but winding still decides the lighting:
+/// `facing_normal` in raster.wgsl flips the shading normal when the hardware's
+/// `@builtin(front_facing)` says a fragment is seen from behind. That test is
+/// exact where a test on the interpolated normal's sign would put a black rim
+/// on every smooth silhouette. A mesh wound against its normals is therefore
+/// lit inside out — a dark surface with a bright rim, which reads as a strange
+/// material rather than a bug. Every built-in shape ends with this call so the
+/// rule holds from the data, and a new shape gets it for free.
 ///
 /// Degenerate triangles (a UV sphere's pole rows) have no winding to correct and
 /// are left exactly as they are.
@@ -364,23 +349,13 @@ pub fn plane(half: f32) -> MeshData {
 /// [`floptle_core::EMPTY_TILE`] (or any index past the end of the sheet's
 /// `cols * rows`) emits no geometry, so a map can have holes.
 ///
-/// ## Why this is one mesh and not one quad per tile
-///
-/// The seam this fixes is not a texture-bleed problem, it is a *geometry*
-/// problem. Give every tile its own transform and tile `i`'s right edge is
-/// computed as `origin + (i + 0.5) * tile + half`, while tile `i + 1`'s left
-/// edge is `origin + (i + 1.5) * tile - half`. Those are different float
-/// expressions for the same number, they disagree in the last bit, and as the
-/// camera moves the two edges land either side of a pixel boundary
-/// independently — a hairline of background that flickers in and out.
-///
-/// Here both edges are the single value `(i + 1) * tile - w`, written once into
-/// one vertex buffer. Two triangles that share an edge coordinate exactly are
-/// watertight under the rasterizer's fill rule: there is no gap to show
-/// through, at any zoom, from any camera position. Tiles still get their own
-/// four vertices — they must, because they have different UVs — but the
-/// coordinates along a shared edge are bit-identical, which is the part that
-/// matters.
+/// One mesh rather than one quad per tile, so neighbouring tiles share an
+/// edge coordinate bit for bit: both edges are the single value
+/// `(i + 1) * tile - w`, and two triangles that share an edge exactly are
+/// watertight under the rasterizer's fill rule at any zoom. Separate quads
+/// compute the same edge as two different float expressions, which disagree
+/// in the last bit and flicker a hairline of background as the camera moves.
+/// Tiles keep their own four vertices, since their UVs differ.
 ///
 /// UVs come from the sheet grid with a half-texel inset (see
 /// [`floptle_core::Material::cell_uv_inset`]), so a cell can never sample its

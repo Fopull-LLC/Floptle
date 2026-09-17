@@ -1,31 +1,20 @@
-//! **Where the frame actually goes**, measured on the GPU rather than guessed.
+//! Where the frame goes, measured on the GPU rather than guessed. A frame's
+//! wall-clock time says a scene is slow; this says which pass, and under vsync
+//! it is the only honest reading, since the display quantises everything else.
 //!
-//! Until this existed the engine could report one number — how long a frame took
-//! wall-clock — and nothing about what it was doing. That is enough to know a
-//! scene is slow and useless for knowing why, so every performance question came
-//! down to commenting a feature out and looking at the number again. That method
-//! has already produced one wrong answer in this codebase: under vsync every
-//! toggle reads the same, because the display quantises the result, and a whole
-//! afternoon went into features that turned out to cost nothing.
+//! Timestamps, not a wall clock: the CPU records commands and moves on, so
+//! timing the recording measures the encoder. `write_timestamp` puts a marker
+//! in the command stream, and the interval between two is time the GPU spent
+//! on the work between them.
 //!
-//! **Timestamps, not a wall clock.** The CPU records commands and moves on; the
-//! GPU runs them later, at its own pace. Timing the recording measures how fast
-//! the encoder ran, which is nearly always fast and nearly never the answer.
-//! `write_timestamp` puts a marker *in the command stream*, so the interval
-//! between two of them is time the GPU spent, in order, on the work between.
+//! One mark per group, on its own encoder: every pass submits its own, so a
+//! mark is a submission carrying a single command — ordered with everything
+//! around it and needing no change inside any pass. Nothing is submitted while
+//! the timer is off, which it is unless the panel is open.
 //!
-//! **One mark per group, on its own encoder.** Every pass in this crate makes and
-//! submits its own encoder, so there is no shared one to bracket. A mark is
-//! therefore a submission of its own carrying a single command — cheap, ordered
-//! with everything around it, and requiring no change inside any pass. Nothing is
-//! submitted at all while the timer is off, which is its state unless somebody
-//! opens the panel.
-//!
-//! **A frame's readings arrive a frame or two later.** Reading a query back means
-//! waiting for the GPU to reach it, and blocking for that would make the profiler
-//! the most expensive thing in the frame — the classic way a measurement changes
-//! what it measures. So a frame's results are collected whenever they happen to
-//! be ready, and the panel shows the most recent complete set.
+//! Readings arrive a frame or two later. Blocking for a query would make the
+//! profiler the most expensive thing in the frame, so results are collected
+//! when they are ready and the panel shows the most recent complete set.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

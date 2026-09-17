@@ -1,34 +1,20 @@
-//! The scene's environment map: the sky, captured into an equirectangular
-//! texture with a mip chain, so every surface has something to reflect.
+//! The scene's environment map: the sky, captured once a frame into an
+//! equirectangular texture with a mip chain, so every surface has something to
+//! reflect and a metal at roughness 0 is a mirror rather than a sun dot on black.
 //!
-//! **Why this exists.** The metal/rough shading model computes a perfectly good
-//! specular lobe and, until now, had nothing to put in it but the sun and the
-//! placed point lights. A metal at roughness 0 came out as a sun dot on black,
-//! which is why mirrors and crystal balls could not be made: the missing piece
-//! was never a material setting, it was that the renderer had no notion of an
-//! environment at all.
+//! Captured rather than evaluated per pixel because the sky has three sources —
+//! a solid vault, a skybox image, and a `stage sky` shader spliced into the
+//! raymarch module — and only the raymarch pass can evaluate them. One capture
+//! serves every pass through the shared field bind group and yields the mip
+//! chain a rough reflection needs.
 //!
-//! **Why a captured texture rather than calling the sky directly.** The sky has
-//! three sources — a solid vault, an equirectangular skybox image, and a `stage
-//! sky` shader spliced into the raymarch module — and only the raymarch pass can
-//! evaluate any of them. Capturing once per frame gets all three at once, hands
-//! the result to every other pass through the shared field bind group, and
-//! produces the roughness mip chain a reflection needs anyway. Evaluating a
-//! procedural sky per shaded pixel would do none of those things and cost far
-//! more.
+//! Equirectangular because the engine's skybox images already are, so capture
+//! and lookup share one formula. `u` wraps, so the back seam costs nothing.
 //!
-//! **Equirectangular, not a cube.** The engine's own skybox images are already
-//! equirectangular and `sky_color` already speaks that mapping, so the capture
-//! and the lookup share one formula with nothing to keep in sync. `u` wraps, so
-//! the seam at the back costs nothing; the poles stretch, which no reflection
-//! has ever been troubled by.
-//!
-//! **The mip chain is a box filter, not a GGX prefilter.** Each level is a plain
-//! 2×2 average of the one above, and roughness picks a level. That is an
-//! approximation — a true prefilter would integrate the GGX lobe per level — and
-//! it is a good one for skies, which are overwhelmingly low-frequency. What it
-//! gets exactly right is the case that matters most here: at roughness 0 a
-//! mirror samples level 0, which is the sky.
+//! Each mip level is a 2×2 box average of the one above and roughness picks a
+//! level — an approximation of a GGX prefilter that is good for a sky, which is
+//! low-frequency, and exact where it matters: at roughness 0 a mirror samples
+//! level 0.
 
 /// Width of the captured sky. Height is half (equirectangular), and the chain
 /// runs down to 1×1 — nine levels, which is enough that the roughest surface

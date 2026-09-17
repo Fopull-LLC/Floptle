@@ -1,37 +1,21 @@
-//! **2D lighting** — the deferred pass (`docs/2d.md`, step 2).
+//! 2D lighting: the deferred pass (`docs/2d.md`, step 2).
 //!
-//! A flat scene's surfaces are drawn a second time into a small G-buffer, and one
-//! full-screen pass adds every 2D light that reaches each pixel's sorting layer.
+//! A flat scene's surfaces are drawn a second time into a small G-buffer, and
+//! one full-screen pass adds every 2D light that reaches each pixel's sorting
+//! layer. Deferred because its cost is screen pixels × lights rather than
+//! pixels drawn × lights, so a deep parallax stack with many lights does not
+//! multiply the work.
 //!
-//! ## Why deferred, and what that costs
+//! The price is a second draw path, and two paths drift apart unless one feeds
+//! the other. So the G-buffer is filled from the list the main gather already
+//! produced: the editor builds [`Light2dInstance`]s in the same loop, from the
+//! same transforms, as the instances it hands the raster pass. Nothing is kept
+//! in step by hand.
 //!
-//! Forward accumulation would have been cheaper to build and would have inherited
-//! every view for free, because it *is* the existing path. Deferred was chosen
-//! because its cost is screen pixels × lights rather than pixels
-//! *drawn* × lights, so a deep parallax stack with many lights does not multiply
-//! the work.
-//!
-//! The bill for that is a **second draw path**, in a renderer where two paths
-//! drifting apart has cost three releases — most recently tilemaps invisible in
-//! the Game view from v0.25.0 to v0.37.0. So the rule here is not optional:
-//!
-//! > **The G-buffer is filled from the list the main gather already produced.**
-//!
-//! The editor builds [`Light2dInstance`]s in the same loop, from the same
-//! transforms, as the instances it hands the raster pass. There is no second
-//! query of the world, no second `match` over `Matter`, and nothing to keep in
-//! step by hand.
-//!
-//! ## Why the rank rides the geometry
-//!
-//! A light reaches a *set of sorting layers*, so accumulation has to know which
-//! layer each pixel belongs to. That cannot come from a uniform (one draw covers
-//! one layer, but the accumulation covers the screen), so the surface's rank is
-//! written into the G-buffer by the geometry that produced it.
-//!
-//! It rides a vertex attribute of this pass's **own** instance type rather than
-//! being packed into a spare bit of `InstanceRaw`, whose 16 attribute slots are
-//! full and whose spare lanes are already carrying two other packings.
+//! A light reaches a set of sorting layers, so the accumulation has to know
+//! which layer each pixel is on. The surface's rank is written into the
+//! G-buffer by the geometry that produced it, as a vertex attribute of this
+//! pass's own instance type — `InstanceRaw`'s sixteen attribute slots are full.
 
 use crate::device::Gpu;
 
@@ -84,19 +68,13 @@ impl Light2dInstance {
     /// Derive the G-buffer instance from the raster instance the main gather
     /// just built.
     ///
-    /// **This is the mitigation, in one function.** The deferred pass does not
-    /// re-derive a transform or re-decide a tint: it takes them from the very
-    /// value handed to the colour pass, so the two cannot place a surface
-    /// differently. The only things added are the sorting rank and whether the
-    /// surface blocks light, neither of which the raster instance has anywhere
-    /// to put.
-    ///
-    /// "Takes them from the very value handed to the colour pass" has to mean
-    /// *everything that pass samples with*, not only the transform and the
-    /// tint. The tiling window was left out of it, and a spritesheet is nothing
-    /// but a tiling window: the raster pass drew cell 3 and the G-buffer drew
-    /// all thirty-two cells squashed across the same quad, so the composite
-    /// laid a stretched copy of the whole sheet over the sprite.
+    /// The deferred pass never re-derives a transform, a tint or a tiling
+    /// window: it takes everything the colour pass samples with from the very
+    /// value handed to that pass, so the two cannot draw a surface differently.
+    /// The tiling window counts — a spritesheet cell is nothing but a window,
+    /// and without it the G-buffer draws the whole sheet across the quad. The
+    /// only additions are the sorting rank and whether the surface blocks
+    /// light, which the raster instance has nowhere to put.
     pub fn from_raster(raw: &crate::raster::InstanceRaw, rank: u32, casts: bool) -> Self {
         Self {
             model: raw.model,
@@ -148,9 +126,8 @@ pub struct Light2dUniform {
     pub color: [[f32; 4]; 16],
     /// Per light: `[inner radius, exponent, casts-are-honoured, spare]`.
     ///
-    /// `[0, 2, …]` is the curve every light had before an earlier task — a ramp
-    /// that starts at the light and falls as `x²` — so the defaults leave every
-    /// existing scene where it was.
+    /// `[0, 2, …]` is the default: a ramp that starts at the light and falls
+    /// as `x²`, so a scene that never set a falloff looks as it always did.
     pub falloff: [[f32; 4]; 16],
     /// A bitmask over sorting-layer RANK, one `vec4` per light: bit `r` of word
     /// `r / 32` set means this light reaches rank `r`.
@@ -168,29 +145,18 @@ impl Light2dUniform {
     /// as a 64-bit set — the union of every live light's layer mask, and every
     /// rank at once when the base light is not white.
     ///
-    /// This is the filter the gather applies before it builds a single
-    /// instance. `Lit2D::Auto` answers *true* for every tilemap and every
-    /// sprite batch, so without it the whole flat scene is instanced, bucketed,
-    /// uploaded and rasterized a second time each frame — and then discarded on
-    /// a bit test in `fs_light`. Reported from a bullet hell paying that for
-    /// **366 batches and ~500 sprites a frame against zero lights that could
-    /// reach any of them**.
+    /// The gather filters on this before it builds a single instance:
+    /// `Lit2D::Auto` is true for every tilemap and sprite batch, and without
+    /// the filter a flat scene with no light in reach is instanced, uploaded
+    /// and rasterized a second time each frame only to be discarded in
+    /// `fs_light`.
     ///
-    /// Two things it must get right, both of which are why it lives here beside
-    /// the uniform rather than in the gather:
-    ///
-    /// * **The base light is not a light.** It has no mask and it reaches
-    ///   everything, so a base that has been turned down means every rank — or
-    ///   a dimmed room would quietly stop being dim the moment you deleted the
-    ///   last torch.
-    /// * **A parked light holds no slot** and is already absent from `count`,
-    ///   so it cannot put a rank back in the set. A pool of
-    ///   spares at `intensity = 0` is the shape that card blessed, and it must
-    ///   stay free.
-    ///
-    /// `0` therefore means the pass has nothing to do at all, which is the
-    /// "a scene with 2D lighting available but no light placed does zero 2D
-    /// lighting work" property — as a consequence rather than a special case.
+    /// The base light is not a light — it has no mask and reaches everything —
+    /// so a base turned down means every rank, and a dimmed room stays dim
+    /// after its last torch is deleted. A parked light (`intensity = 0`) holds
+    /// no slot and adds no rank, so a pool of spares stays free. `0` means the
+    /// pass has nothing to do: a scene with no light placed does no 2D lighting
+    /// work.
     pub fn reach(&self) -> u64 {
         // Not white: the base alone changes every flat surface in the scene.
         if self.ambient[..3] != [1.0, 1.0, 1.0] {
@@ -238,8 +204,8 @@ pub const SHADOW_STEPS: f32 = 28.0;
 /// arithmetic on — going through an sRGB encode and decode between the two
 /// stages would darken every lit pixel by the gamma curve.
 ///
-/// **Half-float and not `Rgba8Unorm`**, since an earlier task made the composite a
-/// *difference* rather than a redraw. Eight linear bits put a 0.004 floor under
+/// Half-float and not `Rgba8Unorm`, because the composite is a *difference*
+/// rather than a redraw. Eight linear bits put a 0.004 floor under
 /// every value, which is nothing when you multiply by it and a visible step when
 /// you subtract it back out of a dark pixel — linear 8-bit has ~1/255 of its
 /// range between "black" and "the darkest thing you can see", and a dark room
@@ -623,9 +589,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<Light2dUniform>(), 16 * 3 + 64 * 2 + 16 * 16 * 4);
     }
 
-    /// The defaults are "what a light did before any of this was authorable",
-    /// and that is the whole compatibility story for an earlier task and `0126`:
-    /// a caller that fills only what it always filled gets the old picture.
+    /// The defaults are what a light did before any of this was authorable: a
+    /// caller that fills only what it always filled gets the old picture.
     #[test]
     fn an_unfilled_light_keeps_the_curve_it_always_had() {
         let u = Light2dUniform::default();
@@ -702,20 +667,13 @@ mod tests {
         assert_eq!(Light2dInstance::LAYOUT.array_stride, 112);
     }
 
-    /// **The G-buffer draws the cell the raster pass drew, not the whole sheet.**
+    /// The G-buffer draws the cell the raster pass drew, not the whole sheet.
     ///
-    /// A `Matter::Sprite` on a spritesheet is drawn through a UV window — the
-    /// material's tiling lanes are how one cell of a sheet becomes one quad.
-    /// `from_raster` took the model and the tint and left the window behind, so
-    /// the deferred pass sampled the whole image across the quad and the delta
-    /// composite laid a squashed copy of every frame of the animation over the
-    /// sprite. The raster pass had the cell right the entire time, which is what
-    /// made it read as a glitch rather than as a wrong frame.
-    ///
-    /// The header states the invariant this broke: `C` and `a` in the G-buffer
-    /// must be exactly what the raster pass drew, or the difference the
-    /// composite subtracts is the difference between two different pictures. A
-    /// UV window is part of `C`.
+    /// A sprite on a spritesheet is drawn through a UV window — the material's
+    /// tiling lanes are how one cell becomes one quad — and that window is part
+    /// of the colour the composite subtracts. `C` and `a` in the G-buffer must
+    /// be exactly what the raster pass drew, or the difference the composite
+    /// takes is the difference between two different pictures.
     #[test]
     fn the_g_buffer_samples_the_cell_the_raster_pass_drew() {
         // One cell of a 16x2 sheet: a sixteenth across, a half down, scrolled to

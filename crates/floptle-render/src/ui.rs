@@ -7,9 +7,8 @@
 //! layer is a handful of draw calls regardless of element count — the GPU does
 //! the visual work, the CPU only packs instances for layers that changed.
 //!
-//! Text: the engine embeds one neutral fallback font (Roboto, Apache-2.0 — a
-//! technical necessity like the untextured-cube checker, not a look). Project
-//! fonts land in a later phase.
+//! Text: the engine embeds one fallback font (Roboto, Apache-2.0), and a
+//! project supplies its own.
 
 use std::collections::{HashMap, HashSet};
 
@@ -163,9 +162,8 @@ fn blend_state(b: Blend) -> wgpu::BlendState {
 /// as a fraction of the patch's rect (routinely outside 0..1, which is fine).
 /// Where a run of width `run_w` starts inside `rect`, per its alignment.
 ///
-/// One function because the glyph pass, the caret and the selection band must
-/// agree to the pixel — three copies of this arithmetic is exactly how a caret
-/// ends up half a character off in centred text.
+/// One function, so the glyph pass, the caret and the selection band agree to
+/// the pixel.
 fn align_x(align: Align, rect: [f32; 4], run_w: f32) -> f32 {
     match align {
         Align::Start | Align::Stretch => rect[0],
@@ -551,20 +549,11 @@ impl Ui {
                 count: None,
             }],
         });
-        // Group 1 is the raster material-texture layout, so project textures
-        // bind here without re-registration (the same trick particles use).
-        //
-        // Taken from `raster::surface_bind_layout` rather than written out
-        // again, because a hand-copied mirror of it is a mirror that goes
-        // stale: it did, when the surface grew from one texture to five
-        // (base + normal + roughness + metallic + occlusion). A `ui.image`
-        // pointing at a project texture then bound a ten-entry group into a
-        // two-entry pipeline layout and took the process down on the first
-        // frame that drew one — which is every menu in every game.
-        //
-        // The shader still only declares bindings 0 and 1; the other four
-        // pairs are present in the layout and simply unused, which is exactly
-        // how particles.wgsl reads the same group.
+        // Group 1 is the raster material-texture layout, taken from
+        // `raster::surface_bind_layout` rather than copied, so project textures
+        // bind here without re-registration and the layout cannot drift from
+        // the groups the raster pass builds. The shader declares bindings 0 and
+        // 1; the other pairs are present and unused, as in particles.wgsl.
         let elem_layout = crate::raster::surface_bind_layout(device);
         // The PLAIN texture+sampler shape, for the two internal groups that are
         // never a project texture: the backdrop (group 3) and the capture blit's
@@ -2147,18 +2136,11 @@ fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str
 mod tests {
     use super::*;
 
-    /// a text run carried one colour for the whole string, so
-    /// a game could not put a proper noun in the speaker's colour or tint the
-    /// key inside the sentence telling you to press it. The only workaround was
-    /// to split the line into sibling elements laid out by hand, which re-wraps
-    /// wrong at every resolution and is impossible for text revealed a glyph at
-    /// a time.
-    ///
-    /// **The assertion that matters is the first one.** Spans style; they must
-    /// never lay out. If a span boundary became a break opportunity, the
-    /// sibling-element workaround would have been reproduced inside the engine
-    /// — text that reflows when a word changes colour — and it would only show
-    /// up at some window widths.
+    /// Spans colour a word inside a run — a proper noun in the speaker's
+    /// colour, the key inside the sentence telling you to press it — and the
+    /// first assertion is the one that matters: spans style and never lay out.
+    /// A span boundary that became a break opportunity would reflow text when
+    /// a word changed colour, and only at some window widths.
     #[test]
     fn a_coloured_word_changes_the_colour_and_nothing_else() {
         let gpu = Gpu::headless_hdr(64, 64);

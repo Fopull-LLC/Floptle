@@ -294,12 +294,10 @@ fn make_bind(
 /// The largest whole-number upscale of a `src`-sized image that fits inside
 /// `dest`, centred: `[x, y, w, h]` in pixels.
 ///
-/// A fractional upscale is the whole reason a pixel-art game looks different in
-/// every window. At 6.0x every source row is six screen rows; at 2.025x some
-/// are two and some are three, so a row of an 8px font is a different thickness
-/// depending where it sits — and it changes as you resize. Rounding down is
-/// what makes every source pixel the same size as its neighbours, and the
-/// remainder becomes bars.
+/// A whole-number scale makes every source pixel the same size as its
+/// neighbours; at 2.025x some rows are two screen rows and some three, and an
+/// 8px font changes thickness as the window resizes. The remainder becomes
+/// bars.
 ///
 /// Never smaller than 1x: a window too small for one whole pixel each is a
 /// window, not a reason to draw nothing.

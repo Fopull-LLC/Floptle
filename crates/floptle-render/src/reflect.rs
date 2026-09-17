@@ -1,36 +1,21 @@
-//! **Reflection probes**: what a room reflects, captured from inside it.
+//! Reflection probes: what a room reflects, captured from inside it.
 //!
-//! **The gap this closes.** A screen-space reflection can only show what is
-//! already on screen, and the environment map behind it holds the *sky*. Outdoors
-//! that pair is nearly complete — a ray that leaves the frame leaves toward the
-//! horizon, and the sky is genuinely what is out there. Indoors it is badly
-//! wrong: a polished floor in a corridor reflects a strip of what the camera can
-//! see and then, for everything else, **daylight** — through the ceiling, through
-//! the walls, from inside a sealed room. That is not a subtle artefact. It is the
-//! single most conspicuous way an interior can fail to look like an interior.
+//! A screen-space reflection shows only what is on screen, and the environment
+//! map behind it is the sky. Outdoors that pair is nearly complete; indoors a
+//! polished floor would reflect daylight through the ceiling. A probe captures
+//! the surroundings from a point inside the room and hands every surface there
+//! that instead — only *which* environment a surface falls back to changes.
 //!
-//! A probe answers it the way the sky already does: capture the surroundings
-//! once, from a point inside the room, and hand every surface in that room the
-//! result. What changes is only *which* environment a surface falls back to.
+//! A capture is six 90° renders folded into one equirectangular map per probe,
+//! in an array, in the sky's own projection: the shader's direction→uv formula
+//! and [`crate::env`]'s roughness mip chain are reused as they are, and there
+//! are no cube-face seams to cross a mirror.
 //!
-//! **Equirectangular, in an array, exactly like the sky.** The capture is six
-//! 90° renders — a probe is a camera, the same conclusion the GI bake reached —
-//! folded into one equirectangular map per probe. Keeping the sky's projection
-//! rather than a hardware cube map buys three things: the shader's existing
-//! direction→uv formula is reused unchanged, the roughness mip chain is the same
-//! box filter [`crate::env`] already builds, and there are no cube-face seams to
-//! show up as a cross on a mirror. The pole stretch an equirect map has instead
-//! is the one artefact no reflection has ever been troubled by.
-//!
-//! **Parallax is the whole difference between this and a second sky.** An
-//! environment map is a picture at infinity: sampled by direction alone, it slides
-//! with the camera and a reflected wall never lands on the wall. Each probe
-//! therefore carries a **box** — the room it was captured in — and a reflected ray
-//! is intersected with that box before the map is read. The sample direction is
-//! taken from the *probe* to that intersection, so the wall in the reflection sits
-//! where the wall is. The box is also the probe's region of influence, so one
-//! rectangle authored once says both "this is the room" and "these are its
-//! surfaces".
+//! Each probe carries a box — the room it was captured in. A reflected ray is
+//! intersected with the box and the map is read in the direction from the probe
+//! to that hit, so a reflected wall lands on the wall instead of sliding with
+//! the camera the way a map at infinity does. The same box is the probe's
+//! region of influence.
 
 use crate::device::Gpu;
 

@@ -1,36 +1,23 @@
-//! The **scene colour history**: last frame's composited picture, kept with a
-//! mip chain so a surface can reflect the scene and not only the sky.
+//! The scene colour history: last frame's composited picture, kept with a mip
+//! chain, so a surface can reflect the scene and not only the sky.
 //!
-//! **Why a history and not this frame.** The engine shades forward: when a
-//! fragment runs, the colours of the other pixels do not exist yet. Half of them
-//! belong to draws that have not been issued. So there is no "current frame
-//! colour" to sample, and the choice is between a deferred renderer — a G-buffer
-//! written by every one of the raster pass's pipeline variants, and the specular
-//! term moved out of the forward shader entirely — and reflecting the frame that
-//! has finished. This is the second. What it costs is one frame of lag on the
-//! contents of a reflection, which is invisible on anything but a mirror bolted
-//! to a whip-panning camera; what it saves is the entire deferred rewrite.
+//! Last frame rather than this one because the engine shades forward — when a
+//! fragment runs, the rest of the picture does not exist yet. A reflection
+//! therefore lags one frame, which shows only on a mirror under a whip-pan.
 //!
-//! **It is captured after compositing, before post.** So it holds the scene in
-//! linear HDR with the raymarched world, the raster meshes, the palette quantise
-//! and the 2D light pass already in it — but no tonemap, no bloom, no grade.
-//! That is the correct thing to reflect: a reflection is part of the scene and
-//! must go through the tonemap with it, not arrive pre-tonemapped and get
-//! mapped a second time.
+//! The capture is taken after compositing and before post: linear HDR with the
+//! raymarched world, the meshes, the palette quantise and the 2D lights in it,
+//! and no tonemap, bloom or grade. A reflection is part of the scene and goes
+//! through the tonemap with it, rather than arriving mapped and being mapped
+//! twice.
 //!
-//! **The mip chain is what makes a rough reflection cheap.** Roughness picks a
-//! level, exactly as it does for the sky in [`crate::env`], so a blurred
-//! reflection costs the same one tap a mirror does instead of a spiral of them.
-//! Both chains index by `sqrt(roughness)` so a surface that reflects some sky
-//! and some scene blurs both by the same amount — otherwise the two halves of
-//! one reflection would disagree, which reads as the effect being broken at
-//! exactly the roughness where it should be least noticeable.
+//! Roughness picks a mip level, one tap for a blur as for a mirror. Both this
+//! chain and the sky's in [`crate::env`] index by `sqrt(roughness)`, so a
+//! surface reflecting some sky and some scene blurs both alike.
 //!
-//! **The history carries the camera it was taken from.** The world is
-//! camera-relative (ADR-0015), so the previous frame's view-projection cannot be
-//! used as it was taken — a point standing still in the world has different
-//! coordinates in each frame. `prev_view_proj` folds in how far the camera moved,
-//! the same correction motion blur makes; see `SceneHistory::prev_view_proj`.
+//! The history carries the camera it was taken from: the world is
+//! camera-relative, so the stored view-projection is shifted by how far the
+//! camera has moved before it is reused — see `SceneHistory::prev_view_proj`.
 
 use floptle_core::math::{DVec3, Mat4};
 
@@ -319,17 +306,12 @@ impl SceneHistory {
     /// The matrix that turns a point in **this** frame's camera-relative space
     /// into the stored picture's clip space, or `None` when nothing is stored.
     ///
-    /// The world is camera-relative, so the recorded view-projection is not
-    /// usable as it was taken: a rock that has not moved sits at `world - cam`
-    /// in each frame's coordinates and those differ by exactly how far the camera
-    /// went. Pre-translating by that delta is what turns "where is this point in
-    /// the old picture" into a question about the scene instead of about the
-    /// origin — the same correction motion blur makes, and the same one that,
-    /// left out, makes every reflection slide whenever the camera dollies.
-    ///
-    /// The delta is computed in `f64` and narrowed after subtracting, so a
-    /// camera a million units from the origin still gets a millimetre-accurate
-    /// frame-to-frame offset.
+    /// The world is camera-relative, so a rock that has not moved has different
+    /// coordinates in each frame — by exactly the camera's motion. The stored
+    /// matrix is pre-translated by that delta; without it every reflection
+    /// slides whenever the camera dollies. The delta is taken in `f64` and
+    /// narrowed after the subtraction, so a camera a million units out still
+    /// gets a millimetre-accurate offset.
     pub fn prev_view_proj(&self, cam_world: DVec3) -> Option<Mat4> {
         let (vp, at) = self.taken?;
         Some(reproject(vp, at, cam_world))

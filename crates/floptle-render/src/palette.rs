@@ -1,17 +1,14 @@
 //! The palette pass: posterize, run over the art and before the light.
 //!
-//! See `palette.wgsl` for why this is its own pass and not the tail of the post
-//! chain. The short version: posterize quantizes the *palette*,
-//! and a light is a multiplier on the palette rather than a member of it, so the
-//! quantize has to happen while the frame still holds only art. Everything the
-//! renderer adds after this point — the 2D light delta, SSAO, bloom, the
-//! vignette — is light-shaped and stays smooth.
+//! Its own pass rather than the tail of the post chain: posterize quantizes the
+//! palette, and a light is a multiplier on the palette rather than a member of
+//! it, so the quantize happens while the frame holds only art. Everything
+//! added after — the 2D light delta, SSAO, bloom, the vignette — is
+//! light-shaped and stays smooth.
 //!
-//! Two full-screen passes, because a pass cannot read the target it writes: the
-//! frame is quantized into a scratch target and copied straight back. At the
-//! resolutions this runs at (the retro internal res in retro mode) that is
-//! nothing, and it keeps the caller's contract to one line — hand it the view
-//! the scene was drawn into and it comes back quantized in place.
+//! Two full-screen passes, since a pass cannot read the target it writes: the
+//! frame is quantized into a scratch target and copied back, so the caller
+//! hands over the view the scene was drawn into and gets it back quantized.
 
 use crate::device::Gpu;
 

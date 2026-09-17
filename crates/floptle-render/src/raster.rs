@@ -1,17 +1,12 @@
-//! The forward raster pass — the seed of the mesh/material path (Phase 2).
+//! The forward raster pass: a registry of meshes, each instanced any number of
+//! times, drawn depth-tested in one render pass. Per-object data — the
+//! camera-relative model matrix (`Transform::render_matrix`), its normal matrix
+//! and a tint — rides a per-instance vertex buffer rewritten once per frame.
 //!
-//! Draws a registry of meshes, each instanced any number of times, in a single
-//! depth-tested render pass with simple directional diffuse lighting. Per-object
-//! data — the **camera-relative** model matrix (`Transform::render_matrix`,
-//! ADR-0015), its inverse-transpose normal matrix, and a tint — rides a
-//! per-instance vertex buffer rewritten once per frame.
-//!
-//! Each registered mesh carries its own **base-color texture** (group 1), so an
-//! imported model's per-material textures render correctly; meshes registered
-//! without one get a 1×1 white default (so the tint shows through). The shared
-//! sampler is **nearest-neighbor + REPEAT** — crisp, tiling pixel-art, which is
-//! what low-res game textures want. Per-material shaders, transparency, and the
-//! render-graph integration are later work.
+//! Each registered mesh carries its own base-colour texture (group 1), so an
+//! imported model's per-material textures draw as authored; a mesh registered
+//! without one gets a 1×1 white so the tint shows through. The shared sampler
+//! is nearest-neighbour and repeating: crisp, tiling pixel art.
 
 use std::collections::HashMap;
 
@@ -863,19 +858,12 @@ struct TexBind {
     view: wgpu::TextureView,
     /// The same pixels, read without the sRGB decode.
     ///
-    /// A base-colour image is a picture and belongs in sRGB. A normal map, a
-    /// roughness map, an occlusion map are not pictures — they are numbers that
-    /// happen to be stored in an image, and putting them through a display
-    /// transform silently changes every one of them. 0.5 becomes 0.216, which
-    /// on a normal map is not "slightly off": the flat normal (128,128,255)
-    /// decodes to a surface tilted 39°, so every unmapped material shades as
-    /// though its geometry were bent. (Found by `gi_probe`, which is the first
-    /// thing in the engine that measures a shading normal directly rather than
-    /// looking at a highlight and judging it plausible.)
-    ///
-    /// One upload, two views — `view_formats` on the texture is what makes the
-    /// second reading legal — so nothing costs anything and a texture can still
-    /// be used as either without being registered twice.
+    /// A base-colour image is a picture and belongs in sRGB. A normal, roughness
+    /// or occlusion map is numbers stored in an image, and the display transform
+    /// changes every one of them: 0.5 becomes 0.216, so the flat normal
+    /// (128,128,255) decodes to a surface tilted 39°. One upload, two views —
+    /// `view_formats` on the texture makes the second reading legal — so a
+    /// texture serves as either without being registered twice.
     linear_view: wgpu::TextureView,
     sampling: TexSampling,
     _texture: wgpu::Texture,
@@ -2032,21 +2020,13 @@ impl Raster {
     /// on every material (see [`floptle_core::Retro::under`] for the precedence
     /// rule). All-default, the initial value, is the identity.
     ///
-    /// Call it once per frame before gathering. It is a frame setting rather
-    /// than a per-draw argument because it is a property of the project, not of
-    /// the surface: threading it through every gather would give each call site
-    /// its own chance to forget it, and a surface that quietly missed the
-    /// project's look is precisely the failure this exists to remove.
-    ///
-    /// **It moves the NEUTRAL entry.** Index 0 stops meaning "no artefacts" and
-    /// starts meaning "the project's artefacts, nothing of its own" — which is
-    /// what makes this reach the draws that never name a material at all:
-    /// terrain chunks, tilemaps, map geometry, an untinted primitive. Those all
-    /// carry index 0 and always have, so there is no gather to remember to
-    /// update and none that can be missed.
-    ///
-    /// Changing it resets the store, because every interned key was computed
-    /// under the old project and the gather refills it this same frame anyway.
+    /// Call it once per frame before gathering. A frame setting rather than a
+    /// per-draw argument, so no gather can forget it: it moves the neutral
+    /// entry, so index 0 means "the project's artefacts, nothing of its own",
+    /// and the draws that never name a material — terrain chunks, tilemaps, map
+    /// geometry, an untinted primitive — carry the look through the index they
+    /// always had. Changing it resets the store, since every interned key was
+    /// computed under the old look and the gather refills it this frame.
     pub fn set_retro_defaults(&mut self, retro: floptle_core::Retro) {
         if self.retro_defaults == retro {
             return;
@@ -2118,27 +2098,18 @@ impl Raster {
 
     /// Where to cut the glass in this frame into depth layers, far first.
     ///
-    /// **Why glass needs layers at all.** A pane refracts by sampling the picture
-    /// of everything behind it, and that picture has to be taken before the pane
-    /// is drawn. One capture and one pass therefore give exactly one correct
-    /// layer: the nearest. Anything behind it was never in a picture anybody
-    /// took, so a fish tank's back wall vanished behind its front one.
+    /// A pane refracts by sampling the picture of everything behind it, taken
+    /// before the pane is drawn, so one capture gives one correct layer: the
+    /// nearest. Glass is drawn far to near with the picture re-taken between
+    /// groups, and every pane samples a scene holding the panes behind it and
+    /// none in front — a fish tank's back wall shows through its front.
     ///
-    /// The fix is to draw glass **far to near**, re-taking the picture between
-    /// each group — so every pane samples a scene containing the panes behind it
-    /// and none of the panes in front. That is the same rule the whole pass
-    /// exists for, applied one level down.
-    ///
-    /// **Where the cuts go: the biggest gaps in the sorted depths.** Splitting
-    /// into equal-sized groups would be arbitrary and would happily saw a row of
-    /// bottles standing together in half. Splitting where the depths jump puts
-    /// the front pane and the back pane of a tank on opposite sides of a cut,
-    /// which is the case that matters, and leaves things at the same depth
-    /// together, where their order does not matter anyway.
+    /// The cuts fall at the biggest gaps in the sorted depths: the front and
+    /// back of a tank land on opposite sides of a cut, and a row of bottles at
+    /// one depth stays together, where their order does not matter.
     ///
     /// Returns the cut distances, descending; `cuts.len() + 1` is the layer
-    /// count, and empty means one layer — exactly what a scene with a single
-    /// piece of glass in it did before.
+    /// count, and empty means one layer.
     pub fn transmissive_cuts(
         &self,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
@@ -2528,11 +2499,9 @@ impl Raster {
     //   * at draw time: `SkinDraw`s go through the `vs_skin` pipelines, which read
     //     both stores through the draw's index in the meta table.
     //
-    // What this replaces is not just the arithmetic. The CPU path had to give every
-    // ENTITY a private clone of its mesh's vertex buffer, because two characters
-    // sharing one `.glb` would otherwise share one buffer and the last one baked
-    // would win for both. Here the bind pose is read-only and the pose is per
-    // instance, so N characters of one model are one draw call again.
+    // The bind pose is read-only and the pose is per instance, so N characters
+    // of one model are one draw call; a CPU path would need a private vertex
+    // buffer per entity.
 
     /// Upload one skinned part's per-vertex joint slots + weights and return its
     /// base in the skinning stores (0 = nothing uploaded).
@@ -3310,11 +3279,10 @@ impl Raster {
     /// **The refraction pass**: draw only the surfaces light passes through.
     ///
     /// Run it after the scene behind them has been composited and captured, with
-    /// a `field` bind group whose scene texture is that capture. Everything about
-    /// the split is in service of one fact: a surface cannot sample a picture it
-    /// is already in. Draw glass with the rest of the scene and the only picture
-    /// available is the previous frame's — which has the glass in it, so its tint
-    /// compounds every frame it stays on screen and a green bottle goes black.
+    /// a `field` bind group whose scene texture is that capture. A surface cannot
+    /// sample a picture it is already in: drawn with the rest of the scene, glass
+    /// would read the previous frame, tint itself again every frame, and a green
+    /// bottle would go black.
     ///
     /// Depth is loaded and written: glass tests against the scene in front of it
     /// and occludes glass behind it.
@@ -3547,10 +3515,9 @@ impl Raster {
     /// **2D lighting** (`docs/2d.md`, step 2): fill the flat
     /// G-buffer and composite the lit result over `color`.
     ///
-    /// `flat` is the *same* `(mesh, texture)` pairing the main gather produced —
-    /// the caller builds it in the same loop, so there is no second walk of the
-    /// world to keep in step. This is the whole mitigation for deferred's second
-    /// draw path; see the module docs of [`crate::light2d`].
+    /// `flat` is the same `(mesh, texture)` pairing the main gather produced —
+    /// built in the same loop, so there is no second walk of the world to keep
+    /// in step; see [`crate::light2d`].
     ///
     /// A no-op when nothing is flat or no light reaches it, so a 3D scene pays
     /// one branch.
@@ -4041,14 +4008,10 @@ impl InstanceRaw {
     /// Force this instance onto the UNLIT path, keeping whatever vertex-paint
     /// base it already carries.
     ///
-    /// For the 2D lighting composite, which corrects the frame
-    /// by the *difference* between what the raster pass drew and what the 2D
-    /// lights say it should be. That subtraction is only right if the raster
-    /// pass drew `albedo × alpha` and nothing else — a surface the 3D sun had
-    /// also shaded would be corrected by the wrong amount, and in a dark scene
-    /// the correction would exceed what is there. So a surface on the 2D path
-    /// is unlit in 3D terms, which is what a 2D layer already was in every
-    /// place this engine describes one.
+    /// The 2D lighting composite corrects the frame by the difference between
+    /// what the raster pass drew and what the 2D lights say, which is only
+    /// right if the raster pass drew `albedo × alpha` and nothing else — so a
+    /// surface on the 2D path is unlit in 3D terms.
     ///
     /// `params.z` packs `unlit | (paint_base << 1)`; setting bit 0 leaves the
     /// paint base where it is.

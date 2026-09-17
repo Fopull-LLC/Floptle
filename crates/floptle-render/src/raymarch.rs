@@ -1000,16 +1000,10 @@ impl Raymarch {
     /// Capture the scene's sky into the environment map and build its roughness
     /// chain, so surfaces have something to reflect this frame.
     ///
-    /// Call it after [`upload_globals`](Self::upload_globals) (it reads the same
-    /// globals the sky does) and before the raster pass. It costs one 256×128
-    /// draw plus eight progressively tinier ones — a fraction of a full-screen
-    /// pass — which is why it simply runs every frame rather than trying to
-    /// detect whether the sky changed. Skies animate; a cached one would be
-    /// wrong exactly when it mattered.
-    ///
-    /// The environment map is bound into the shared field group, so the capture
-    /// reaches everything the moment it lands. Nothing needs rebinding: the
-    /// texture is created once at a fixed size and only its contents change.
+    /// Call it after [`upload_globals`](Self::upload_globals) and before the
+    /// raster pass. One 256×128 draw plus eight smaller ones, so it runs every
+    /// frame — skies animate. The map is bound into the shared field group at a
+    /// fixed size, so only its contents change and nothing is rebound.
     pub fn capture_env(&self, gpu: &Gpu) {
         let mut encoder = gpu
             .device

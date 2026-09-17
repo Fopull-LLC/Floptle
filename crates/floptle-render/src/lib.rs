@@ -1,22 +1,19 @@
 //! # floptle-render
 //!
-//! Owns *everything* that defines how Floptle looks. wgpu is only the
-//! portability layer (ADR-0002); the render graph, passes, and the
-//! "reality-bending" look are all ours. See `docs/subsystems/renderer.md`.
+//! Everything that defines how Floptle looks. wgpu is the portability layer;
+//! the passes and the look are the engine's own. See `docs/subsystems/renderer.md`.
 //!
-//! Planned modules:
-//! - `device`     : wgpu instance/adapter/device/surface bootstrap.
-//! - `graph`      : the render graph (passes, resources, dependencies).
-//! - `mesh`       : GPU mesh upload + dynamic/morphing vertex buffers.
-//! - `material`   : material model binding shaders + textures + params.
-//! - `raymarch`   : SDF / fractal raymarching pass — "go inside the fractal".
-//! - `post`       : screen-space passes that bend conventional light rules.
-//! - `light`      : programmable light transport — tiered, off-by-default; bent
-//!   rays where `bend` can BE `g(p)`, so light falls under your
-//!   custom gravity (one rule, two phenomena) (ADR-0016).
-//! - `frame`      : per-frame orchestration, culling, draw submission; uploads
-//!   positions **camera-relative** so the GPU never sees large
-//!   coordinates — large-world-safe by default (ADR-0015).
+//! - `device` — the wgpu instance, adapter, device and surface.
+//! - `frame`, `camera`, `cull` — per-frame orchestration, projections, frustum culling.
+//! - `raster`, `mesh`, `lines`, `tris`, `grid`, `outline` — the forward mesh pass and the editor's overlays.
+//! - `raymarch` — the signed-distance-field world: terrain, blobs, the sky.
+//! - `light2d`, `palette`, `retro` — the flat-scene light pass, palette quantise and low-res upscale.
+//! - `env`, `reflect`, `ssr`, `gi` — the sky capture, reflection probes, the scene history, baked probes.
+//! - `particles`, `post`, `ui` — billboards, the post chain, the screen-space UI.
+//! - `gpu_timer`, `probe` — per-pass timing and headless readback for the probes.
+//!
+//! Positions reach the GPU camera-relative, so a world can be planet-sized
+//! without the precision problems of large coordinates.
 
 // Phase 1–2 modules. `material`, `raymarch`, `post`, `light` arrive in Phases 2/4.
 // `mesh` is the CPU/GPU geometry seam (Phase 2); `raster` is the forward pass.
