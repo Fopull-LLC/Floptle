@@ -2388,122 +2388,7 @@ impl EditorTabViewer<'_> {
         // Does the Animating tab own the keyboard right now? Read before the
         // long borrow below; see the transport gate for why it matters.
         let tab_focused = matches!(self.focused_tab, Some(crate::EditorTab::Animation));
-        // Live per-node data for timeline interactions, gathered before the clip-doc
-        // borrow: current local TRS (double-click / "key pose here"), current numeric
-        // field values (keying a property writes what's on the node right now, like
-        // record does), and which animatable fields each node actually has (the
-        // ✚ Property menus list only real components, Unity-style).
-        let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
-        let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
-        // A sprite frame is four values, so it cannot ride `live_vals`. One per
-        // channel — a node has one sprite.
-        let mut live_frames: HashMap<String, floptle_scene::SpriteFrameDoc> = HashMap::new();
-        // …and a texture path is not a number either. Same key shape as
-        // `live_vals` so the two read alike at the call sites.
-        let mut live_strs: HashMap<(String, String, String), String> = HashMap::new();
-        let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
-        // channel name → the scene entity it drives (for click-track-to-select).
-        let mut chan_entity: HashMap<String, Entity> = HashMap::new();
-        for (e, chan) in scene_channel_names(self.world, target) {
-            if e != target && chan.is_empty() {
-                continue; // unnamed children can't be addressed by a channel
-            }
-            chan_entity.insert(chan.clone(), e);
-            if let Some(tr) = self.world.get::<floptle_core::Transform>(e) {
-                live_trs.insert(
-                    chan.clone(),
-                    TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
-                );
-            }
-            let mir = floptle_script::mirror_components(self.world, e);
-            let strs = floptle_script::mirror_component_strings(self.world, e);
-            let mut fields: Vec<(String, String, &'static str)> = Vec::new();
-            // (kept out of `live_vals`, which is f64 — a frame is four values)
-            for (comp, fs) in ANIMATABLE_PROPS {
-                for (f, kind, group) in fs.iter() {
-                    let present = match kind {
-                        // The mirror is already presence-filtered (cell/tints only
-                        // when the element has an image, textSize with text…).
-                        PropKind::Float => {
-                            if let Some(&v) = mir.get(*comp).and_then(|m| m.get(*f)) {
-                                live_vals.insert(
-                                    (chan.clone(), comp.to_string(), f.to_string()),
-                                    v,
-                                );
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        // Presence used to be a hand-written list of three
-                        // special cases, so a text field not on it could never
-                        // be added as a lane at all. The string mirror answers
-                        // it the same way the number mirror does — is the field
-                        // there — and records the live value for keying while it
-                        // is at it.
-                        PropKind::Text => {
-                            if let Some(v) = strs.get(*comp).and_then(|m| m.get(*f)) {
-                                live_strs.insert(
-                                    (chan.clone(), comp.to_string(), f.to_string()),
-                                    v.clone(),
-                                );
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        // Anything wearing a Material can wear a sprite frame —
-                        // a Sprite node, and the Plane-plus-Material every 2D
-                        // project built before there was one.
-                        PropKind::Frame => {
-                            match floptle_script::read_sprite_frame(self.world, e) {
-                                Some((texture, cols, rows, cell)) => {
-                                    live_frames.insert(
-                                        chan.clone(),
-                                        floptle_scene::SpriteFrameDoc { texture, cols, rows, cell },
-                                    );
-                                    true
-                                }
-                                None => false,
-                            }
-                        }
-                    };
-                    if present {
-                        fields.push((comp.to_string(), f.to_string(), group));
-                    }
-                }
-            }
-            if !fields.is_empty() {
-                let disp =
-                    if chan.is_empty() { "(this node)".to_string() } else { chan.clone() };
-                node_fields.push((chan.clone(), disp, fields));
-            }
-        }
-
-        // Live local pose of every armature bone (from the bound controller), so
-        // "Key all bones" can drop a key holding each bone's current pose, and
-        // clicking a bone track can resolve its skeleton index. Bones aren't ECS
-        // entities, so this is the only source of their current transform.
-        let mut bone_trs: Vec<(String, TransformTRS)> = Vec::new();
-        let mut bone_idx: HashMap<String, usize> = HashMap::new();
-        if let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(target)
-            && let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
-        {
-            let pose = self.anim.instances.get(&target).map(|inst| inst.ctl.pose());
-            for (i, n) in rig.skeleton.nodes.iter().enumerate() {
-                bone_idx.insert(n.name.clone(), i);
-                let trs = pose
-                    .and_then(|p| p.get(i))
-                    .copied()
-                    .unwrap_or(n.rest);
-                bone_trs.push((n.name.clone(), trs));
-                // Bones live in `live_trs` too so every "key pose"/"key here"/double-
-                // click path treats a bone channel like any node channel (bones have
-                // no ECS Transform of their own, so this is their only pose source).
-                live_trs.entry(n.name.clone()).or_insert(trs);
-            }
-        }
-
+        let live = self.timeline_live(target);
         let st = &mut *self.anim_ui;
         // Read `dur` and run the wheel handler before borrowing `clip_doc` mutably (the
         // handler needs &mut st, which would alias the `doc` borrow).
@@ -2518,16 +2403,9 @@ impl EditorTabViewer<'_> {
         // deferred (they swap clip_doc, which `doc` borrows) and applied after draw.
         let undo_snap = st.clip_doc.clone();
         let dirty_before = st.clip_dirty;
-        let mut do_undo = false;
-        let mut do_redo = false;
-        let mut copy_keys = false;
-        let mut cut_keys = false;
-        let mut paste_keys = false;
-        let mut dup_keys = false;
-        let mut delete_sel = false;
+        let mut flags = SheetFlags::default();
         // A scene node/bone to select from a track click (applied after the borrow).
         let mut pending_select: Option<TrackSelect> = None;
-        let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let px = st.zoom;
         let label_w = st.label_w;
         let lane_h = ANIM_ROW_BASE * st.row_scale;
@@ -2547,1503 +2425,13 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        // Header row: duration + event add + selected-event editor.
-        let mut kill_event: Option<usize> = None;
-        ui.horizontal(|ui| {
-            // Undo / redo the clip edits (Ctrl+Z / Ctrl+Y also work over the sheet).
-            if ui.add_enabled(!st.clip_undo.is_empty(), egui::Button::new("↶"))
-                .on_hover_text("Undo clip edit (Ctrl+Z)").clicked() { do_undo = true; }
-            if ui.add_enabled(!st.clip_redo.is_empty(), egui::Button::new("↷"))
-                .on_hover_text("Redo clip edit (Ctrl+Y)").clicked() { do_redo = true; }
-            ui.separator();
-            // The clipboard, as buttons. The shortcuts work, but a shortcut that
-            // silently does nothing is indistinguishable from a broken one, and
-            // that is exactly how this read. A button that is greyed out tells
-            // you *why* nothing is going to happen before you press it.
-            let has_sel = !st.sel_keys.is_empty() || st.sel_prop.is_some();
-            let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
-            // The `if has_sel { … } else { … }` shape these used to have could
-            // never show its second half: egui opens `on_hover_text` only for an
-            // Enabled response, so the "…select some keyframes first" branch —
-            // the only one anybody needs — was unreachable by construction. The
-            // reason a button is greyed out belongs on `on_disabled_hover_text`.
-            if ui.add_enabled(has_sel, egui::Button::new("⎘"))
-                .on_hover_text(format!("Copy {} (Ctrl+C)", plural_keys(n_sel)))
-                .on_disabled_hover_text("Copy keys (Ctrl+C) — select some keyframes first")
-                .clicked() { copy_keys = true; }
-            if ui.add_enabled(has_sel, egui::Button::new("✂"))
-                .on_hover_text(format!("Cut {} (Ctrl+X)", plural_keys(n_sel)))
-                .on_disabled_hover_text("Cut keys (Ctrl+X) — select some keyframes first")
-                .clicked() { copy_keys = true; cut_keys = true; }
-            if ui.add_enabled(!st.key_clipboard.is_empty(), egui::Button::new("📋"))
-                .on_hover_text(format!(
-                    "Paste {} at the playhead (Ctrl+V)",
-                    plural_keys(st.key_clipboard.len())
-                ))
-                .on_disabled_hover_text("Paste keys (Ctrl+V) — nothing copied yet")
-                .clicked() { paste_keys = true; }
-            if let Some((msg, _)) = st.status_note.as_ref() {
-                ui.label(egui::RichText::new(msg).weak());
-            }
-            ui.separator();
-            ui.label("duration");
-            let mut d = doc.duration;
-            if ui.add(egui::DragValue::new(&mut d).speed(0.02).range(0.05..=600.0).suffix("s")).changed() {
-                doc.duration = d;
-                st.clip_dirty = true;
-            }
-            ui.separator();
-            // Key-all commands (both, deliberately — they serve different needs):
-            // "all bones" drops a key on every armature bone at its current pose (a
-            // full-body keyframe, even bones with no track yet); "all tracks" keys
-            // every existing lane (transform + property) at its current value.
-            if !bone_trs.is_empty()
-                && ui.button("⏺ Key all bones")
-                    .on_hover_text("full-body key: every bone gets a key at its current pose, here at the playhead")
-                    .clicked()
-            {
-                for (name, trs) in &bone_trs {
-                    write_key(doc, name, ph, trs);
-                }
-                st.clip_dirty = true;
-            }
-            if !doc.channels.is_empty()
-                && ui.button("◎ Key all tracks")
-                    .on_hover_text("key every existing track (transform + property lanes) at its current value")
-                    .clicked()
-            {
-                for ci in 0..doc.channels.len() {
-                    let name = doc.channels[ci].node.clone();
-                    let trs = bone_trs
-                        .iter()
-                        .find(|(n, _)| *n == name)
-                        .map(|(_, t)| *t)
-                        .or_else(|| live_trs.get(&name).copied());
-                    if let Some(trs) = trs {
-                        write_key(doc, &name, ph, &trs);
-                    }
-                    for ti in 0..doc.channels[ci].properties.len() {
-                        let (comp, field) = {
-                            let pt = &doc.channels[ci].properties[ti];
-                            (pt.component.clone(), pt.field.clone())
-                        };
-                        let kind = prop_kind(&comp, &field);
-                        let key = (name.clone(), comp, field);
-                        let live = live_vals.get(&key).copied();
-                        key_property_current(
-                            &mut doc.channels[ci].properties[ti],
-                            ph,
-                            kind,
-                            live,
-                            live_strs.get(&key),
-                            live_frames.get(&name),
-                        );
-                    }
-                }
-                st.clip_dirty = true;
-            }
-            ui.separator();
-            // ✚ Property: node ▸ component ▸ [group ▸] field, listing only the
-            // components actually on each node (Unity's "Add Property"). Adds an
-            // empty lane to key into.
-            //
-            // Grouped rather than one flat list per node, because a material has
-            // three dozen animatable fields and a UI element two dozen. Flat,
-            // the four anybody reaches for — a texture, an opacity — are lost in
-            // a wall of surface maps, which is the same as not having them.
-            ui.menu_button("✚ Property", |ui| {
-                if node_fields.is_empty() {
-                    ui.weak("no animatable components in this subtree");
-                }
-                for (chan, disp, fields) in &node_fields {
-                    ui.menu_button(disp, |ui| {
-                        // Component order follows ANIMATABLE_PROPS, not the order
-                        // fields happened to be collected in, so the menu is in
-                        // the same place every time.
-                        let mut comps: Vec<&str> = Vec::new();
-                        for (c, _, _) in fields {
-                            if !comps.contains(&c.as_str()) {
-                                comps.push(c.as_str());
-                            }
-                        }
-                        for comp in comps {
-                            let mine: Vec<&(String, String, &'static str)> =
-                                fields.iter().filter(|(c, _, _)| c == comp).collect();
-                            // Does this channel already have a sprite lane? It
-                            // writes the texture, the grid AND the cell, so
-                            // offering those Material fields beside it would let
-                            // two lanes write the same four values — and which
-                            // one won would depend on the order they were added.
-                            let sprite_lane = doc.channels.iter().any(|c| {
-                                &c.node == chan
-                                    && c.properties.iter().any(|p| {
-                                        p.component == floptle_scene::SPRITE_COMPONENT
-                                            && p.field == floptle_scene::SPRITE_FIELD
-                                    })
-                            });
-                            let mut lane = |ui: &mut egui::Ui, field: &str| {
-                                let owned = sprite_lane && owned_by_sprite(comp, field);
-                                let exists = owned
-                                    || doc.channels.iter().any(|c| {
-                                        &c.node == chan
-                                            && c.properties
-                                                .iter()
-                                                .any(|p| p.component == comp && p.field == field)
-                                    });
-                                if ui
-                                    .add_enabled(!exists, egui::Button::new(field))
-                                    .on_hover_text(
-                                        "adds an empty lane — then key it, or ● Record and \
-                                         change the value",
-                                    )
-                                    // A disabled widget never shows `on_hover_text`: egui
-                                    // opens that tooltip only for an enabled response. So
-                                    // the one explanation that matters — why it is greyed
-                                    // out — has to go on the other call.
-                                    .on_disabled_hover_text(if owned {
-                                        "the Sprite ▸ frame lane on this node already writes it"
-                                    } else {
-                                        "this node already has a lane for it"
-                                    })
-                                    .clicked()
-                                {
-                                    add_property_track(doc, chan, comp, field);
-                                    st.clip_dirty = true;
-                                    ui.close();
-                                }
-                            };
-                            ui.menu_button(comp, |ui| {
-                                for (_, field, group) in mine.iter().filter(|(_, _, g)| g.is_empty())
-                                {
-                                    lane(ui, field);
-                                    let _ = group;
-                                }
-                                let mut groups: Vec<&str> = Vec::new();
-                                for (_, _, g) in &mine {
-                                    if !g.is_empty() && !groups.contains(g) {
-                                        groups.push(g);
-                                    }
-                                }
-                                for g in groups {
-                                    ui.menu_button(g, |ui| {
-                                        for (_, field, _) in
-                                            mine.iter().filter(|(_, _, fg)| *fg == g)
-                                        {
-                                            lane(ui, field);
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
-                }
-            })
-            .response
-            .on_hover_text(
-                "add a property lane (opacity, spritesheet cell, image…) under a node — \
-                 then key it, or just ● Record and change the value",
-            );
-            if ui.button("⚑ Add event at playhead").on_hover_text("events call a Lua function (by name) on this node's scripts when the playhead crosses them").clicked() {
-                doc.events.push(AnimEventDoc { t: st.playhead.min(doc.duration), func: "onAnimEvent".into() });
-                doc.events.sort_by(|a, b| a.t.total_cmp(&b.t));
-                st.sel_event = doc
-                    .events
-                    .iter()
-                    .position(|e| (e.t - st.playhead.min(doc.duration)).abs() < 1e-5);
-                st.clip_dirty = true;
-            }
-            if let Some(ei) = st.sel_event {
-                if let Some(ev) = doc.events.get_mut(ei) {
-                    ui.separator();
-                    ui.label("event fn");
-                    if ui.add(egui::TextEdit::singleline(&mut ev.func).desired_width(130.0)).changed() {
-                        st.clip_dirty = true;
-                    }
-                    let mut t = ev.t;
-                    if ui.add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=doc.duration).suffix("s")).changed() {
-                        ev.t = t;
-                        st.clip_dirty = true;
-                    }
-                    if ui.button("🗑").clicked() {
-                        kill_event = Some(ei);
-                    }
-                } else {
-                    st.sel_event = None;
-                }
-            }
-        });
-        if let Some(ei) = kill_event {
-            doc.events.remove(ei);
-            st.sel_event = None;
-            st.clip_dirty = true;
-        }
-
-        // One lane per channel (its transform union) plus one per property track,
-        // counting only the rows the filter lets through.
-        let row_filter = st.row_filter.trim().to_lowercase();
-        let row_shown = |node: &str| {
-            row_filter.is_empty()
-                || node.to_lowercase().contains(&row_filter)
-                || (node.is_empty() && "(this node)".contains(&row_filter))
-        };
-        let n_rows: usize = doc
-            .channels
-            .iter()
-            .filter(|c| row_shown(&c.node))
-            .map(|c| {
-                let opened = if st.expanded_nodes.contains(&c.node) {
-                    Lane::ALL.iter().filter(|&&l| lane_of(c, l).is_some()).count()
-                } else {
-                    0
-                };
-                1 + opened + c.properties.len()
-            })
-            .sum();
-        let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
-        // The curve view stands in for the sheet below; the toolbar, keyboard
-        // and undo around it are shared.
-        if st.curves.on {
-            let hovered_rect = ui.available_rect_before_wrap();
-            let edits = crate::anim_curves::curves_ui(
-                ui,
-                &mut st.curves,
-                doc,
-                dur,
-                px,
-                st.snap_fps,
-                label_w,
-                &mut st.playhead,
-                &st.sel_keys,
-            );
-            if let Some((ci, t)) = edits.select {
-                st.sel_keys = vec![(ci, t)];
-                st.sel_prop = None;
-            }
-            if crate::anim_curves::apply_curve_edits(doc, &edits) {
-                st.clip_dirty = true;
-            }
-            st.sheet_hovered = ui.rect_contains_pointer(hovered_rect);
-            // The transport and undo keys the sheet answers, answered here too.
-            if !playing && (tab_focused || st.sheet_hovered) && !ui.ctx().text_edit_focused() {
-                let (sp, home, end, left, right, fit, ctrl, shift, z, y, tab) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Space),
-                        i.key_pressed(egui::Key::Home),
-                        i.key_pressed(egui::Key::End),
-                        i.key_pressed(egui::Key::ArrowLeft),
-                        i.key_pressed(egui::Key::ArrowRight),
-                        i.key_pressed(egui::Key::F),
-                        i.modifiers.command || i.modifiers.ctrl,
-                        i.modifiers.shift,
-                        i.key_pressed(egui::Key::Z),
-                        i.key_pressed(egui::Key::Y),
-                        i.key_pressed(egui::Key::Tab),
-                    )
-                });
-                let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
-                if ctrl && z && !shift && clip_undo_redo(st, false) {
-                    st.clip_dirty = true;
-                }
-                if ctrl && (y || (z && shift)) && clip_undo_redo(st, true) {
-                    st.clip_dirty = true;
-                }
-                if sp {
-                    st.preview_playing = !st.preview_playing;
-                }
-                if home {
-                    st.playhead = 0.0;
-                    st.preview_playing = false;
-                }
-                if end {
-                    st.playhead = dur;
-                    st.preview_playing = false;
-                }
-                if left {
-                    st.playhead = (st.playhead - step).max(0.0);
-                    st.preview_playing = false;
-                }
-                if right {
-                    st.playhead = (st.playhead + step).min(dur);
-                    st.preview_playing = false;
-                }
-                if fit {
-                    st.fit_pending = true;
-                    st.curves.vrange = None;
-                }
-                if tab {
-                    st.curves.on = false;
-                }
-            }
+        let g = SheetGeom { px, label_w, lane_h, ruler_h, event_h, ph, dur, playing, tab_focused };
+        timeline_header(ui, st, &live, g, &mut flags);
+        if timeline_curves(ui, st, g) {
             anim_sheet_after(st, undo_snap, dirty_before);
             return;
         }
-        let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
-        if let Some(t) = st.scroll_target.take() {
-            area = area.scroll_offset(t);
-        }
-        let out = area.show(ui, |ui| {
-            let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
-            // The body is itself a click target, registered first so every lane/key
-            // widget layered on top wins the pointer — a click that reaches it hit
-            // empty space, which deselects (like clicking off in any editor).
-            let (full, bg_resp) =
-                ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::click_and_drag());
-            if bg_resp.clicked() {
-                st.sel_prop = None;
-                st.sel_event = None;
-                st.sel_keys.clear();
-            }
-            // Click-drag on empty sheet = marquee box select (keys layered on top win
-            // the pointer, so a drag that reaches here started on empty space). While
-            // dragging we rebuild sel_keys from the keys inside the box each frame.
-            if bg_resp.drag_started()
-                && let Some(p) = bg_resp.interact_pointer_pos()
-            {
-                st.marquee = Some((p, p));
-                st.sel_keys.clear();
-                st.sel_prop = None;
-            }
-            if bg_resp.dragged()
-                && let Some(p) = bg_resp.interact_pointer_pos()
-                && let Some(m) = st.marquee.as_mut()
-            {
-                m.1 = p;
-                st.sel_keys.clear();
-            }
-            if bg_resp.drag_stopped() {
-                st.marquee = None;
-            }
-            let marquee = st.marquee.map(|(a, b)| Rect::from_two_pos(a, b));
-            let painter = ui.painter_at(full);
-            let tl_left = full.left() + label_w;
-            // The edge of the name column drags to resize it, so a rig with long
-            // bone names gets the room it needs and a packed sheet gives it back.
-            let handle = Rect::from_min_size(Pos2::new(tl_left - 3.0, full.top()), egui::vec2(6.0, full.height()));
-            let hresp = ui.interact(handle, ui.id().with("anim-label-edge"), Sense::drag());
-            if hresp.hovered() || hresp.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            }
-            if hresp.dragged() {
-                st.label_w = (st.label_w + hresp.drag_delta().x).clamp(ANIM_LABEL_MIN, ANIM_LABEL_MAX);
-            }
-            painter.line_segment(
-                [Pos2::new(tl_left - 0.5, full.top()), Pos2::new(tl_left - 0.5, full.bottom())],
-                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-            );
-            // Row names stay inside their column whatever their length.
-            let label_painter = painter.with_clip_rect(Rect::from_min_max(
-                full.left_top(),
-                Pos2::new(tl_left - 2.0, full.bottom()),
-            ));
-            let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
-            let time_to_x = |t: f32| view.time_to_x(t);
-            let x_to_time = |x: f32| view.x_to_time(x);
-
-            // ---- ruler (scrub) ----
-            let ruler = Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px + 100.0, ruler_h));
-            let rresp = ui.interact(ruler, ui.id().with("anim-ruler"), Sense::click_and_drag());
-            if (rresp.dragged() || rresp.clicked())
-                && let Some(p) = rresp.interact_pointer_pos() {
-                    st.playhead = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
-                    st.preview_playing = false;
-                }
-            painter.rect_filled(ruler, 0.0, ui.visuals().extreme_bg_color);
-
-            // ---- event lane ----
-            let ev_rect = Rect::from_min_size(
-                Pos2::new(full.left(), full.top() + ruler_h),
-                egui::vec2(full.width(), event_h),
-            );
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(tl_left, ev_rect.top()), egui::vec2(dur * px, event_h)),
-                0.0,
-                ui.visuals().faint_bg_color,
-            );
-            painter.text(
-                Pos2::new(full.left() + 4.0, ev_rect.center().y),
-                Align2::LEFT_CENTER,
-                "⚑ events",
-                FontId::proportional(11.0),
-                EVENT_COLOR,
-            );
-            let mut ev_drag: Option<(usize, f32)> = None;
-            for (ei, ev) in doc.events.iter().enumerate() {
-                let x = time_to_x(ev.t);
-                let flag = Rect::from_center_size(Pos2::new(x, ev_rect.center().y), egui::vec2(12.0, event_h));
-                let id = ui.id().with(("anim-event", ei));
-                let resp = ui.interact(flag, id, Sense::click_and_drag());
-                let col = if st.sel_event == Some(ei) { ACCENT } else { EVENT_COLOR };
-                painter.line_segment(
-                    [Pos2::new(x, ev_rect.top() + 2.0), Pos2::new(x, ev_rect.bottom() - 2.0)],
-                    Stroke::new(2.0, col),
-                );
-                painter.text(
-                    Pos2::new(x + 3.0, ev_rect.top() + 4.0),
-                    Align2::LEFT_TOP,
-                    &ev.func,
-                    FontId::proportional(9.0),
-                    col.gamma_multiply(0.9),
-                );
-                if resp.clicked() {
-                    st.sel_event = Some(ei);
-                    st.sel_prop = None;
-                }
-                if resp.dragged()
-                    && let Some(p) = resp.interact_pointer_pos() {
-                        ev_drag = Some((ei, x_to_time(p.x)));
-                    }
-                resp.context_menu(|ui| {
-                    if ui.button("🗑 Delete event").clicked() {
-                        ev_drag = Some((ei, f32::NAN)); // NaN = delete
-                        ui.close();
-                    }
-                });
-            }
-            if let Some((ei, t)) = ev_drag {
-                if t.is_nan() {
-                    doc.events.remove(ei);
-                    st.sel_event = None;
-                } else if let Some(ev) = doc.events.get_mut(ei) {
-                    ev.t = crate::timeline::snap_time(t, st.snap_fps);
-                    st.sel_event = Some(ei);
-                }
-                st.clip_dirty = true;
-            }
-
-            // ---- channel + property rows ----
-            // Each channel draws a node lane (the union of its transform keys) then
-            // one lane per property track indented beneath it — every lane shares the
-            // same time axis and the same draggable diamonds, so a spritesheet `cell`
-            // reads as a keyframe under its node, not a separate numeric panel.
-            //
-            // Lane interactions (registered under the keys, so keys win the pointer):
-            //   · double-click a lane strip = key there (pose / current value)
-            //   · right-click a label = the lane's menu (key, add property, step, delete)
-            //   · single-click empty lane = deselect
-            let rows_top = full.top() + ruler_h + event_h;
-            let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
-            // Edits to ONE transform lane, from an opened node row.
-            let mut lane_retime: Option<(usize, Lane, f32, f32)> = None;
-            let mut lane_delete: Option<(usize, Lane, f32)> = None;
-            let mut lane_mode: Option<(usize, Lane, f32, Option<AnimInterpDoc>)> = None;
-            let mut toggle_expand: Option<String> = None;
-            let mut group_retime: Option<f32> = None; // shift ALL selected keys by this delta
-            let mut delete_key: Option<(usize, f32)> = None;
-            // Is the in-flight key drag moving a whole multi-selection together? (The
-            // dragged key must itself be part of a >1 selection.) If so its delta drags
-            // every selected key; otherwise only the one key moves.
-            let (drag_delta, group_move) = match st.key_drag {
-                Some((aci, aot, apt)) => {
-                    let in_sel =
-                        st.sel_keys.iter().any(|&(c, t)| c == aci && (t - aot).abs() < 1e-6);
-                    (apt - aot, in_sel && st.sel_keys.len() > 1)
-                }
-                None => (0.0, false),
-            };
-            // Live stretch factor while dragging the selection's right grip: selected
-            // keys scale around the selection's left edge (`sel_min`).
-            let (sel_min, sel_max) = {
-                let mut lo = f32::INFINITY;
-                let mut hi = f32::NEG_INFINITY;
-                for &(_, t) in &st.sel_keys {
-                    lo = lo.min(t);
-                    hi = hi.max(t);
-                }
-                (lo, hi)
-            };
-            let stretch_factor = match st.stretch_drag {
-                Some(newmax) if sel_max > sel_min + 1e-4 => {
-                    Some(((newmax - sel_min) / (sel_max - sel_min)).max(0.02))
-                }
-                _ => None,
-            };
-            let mut prop_retime: Option<(usize, usize, f32, f32)> = None; // (ci, ti, old, new)
-            let mut prop_delete: Option<(usize, usize, f32)> = None; // (ci, ti, t)
-            // Per-key interpolation: (channel, time, hold?) for a transform key,
-            // (channel, lane, time, hold?) for a property key. Deferred like
-            // every other edit here — the menu runs inside the painter's borrow.
-            // A mode chosen from a key's menu: for the clicked key, or for the
-            // whole selection when the clicked key is part of it.
-            let mut key_mode: Option<(usize, f32, bool, Option<AnimInterpDoc>)> = None;
-            let mut prop_key_mode: Option<(usize, usize, f32, Option<AnimInterpDoc>)> = None;
-            let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
-            let mut pose_key_at: Option<(usize, f32)> = None; // key the LIVE pose on channel ci at t
-            let mut prop_key_at: Option<(usize, usize, f32)> = None; // key the live/carried value
-            let mut prop_step_toggle: Option<(usize, usize)> = None;
-            let mut prop_remove: Option<(usize, usize)> = None;
-            let mut chan_delete: Option<usize> = None;
-            let mut add_track_for: Option<(String, String, String)> = None; // (chan, comp, field)
-            let mut row_i = 0usize;
-            let stripe = |painter: &egui::Painter, row_i: usize, y: f32, ui: &egui::Ui| {
-                if row_i.is_multiple_of(2) {
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(tl_left, y), egui::vec2(dur * px, lane_h)),
-                        0.0,
-                        ui.visuals().faint_bg_color.gamma_multiply(0.6),
-                    );
-                }
-            };
-            for ci in 0..doc.channels.len() {
-                if !row_shown(&doc.channels[ci].node) {
-                    continue;
-                }
-                // --- node lane: label + transform-union diamonds ---
-                let y = rows_top + row_i as f32 * lane_h;
-                stripe(&painter, row_i, y, ui);
-                row_i += 1;
-                let cy = y + lane_h * 0.5;
-                let chan_name = doc.channels[ci].node.clone();
-                let label =
-                    if chan_name.is_empty() { "(this node)" } else { chan_name.as_str() };
-                // ⏵/⏷ at the left of a node with transform lanes opens it into them.
-                let has_lanes = Lane::ALL.iter().any(|&l| lane_of(&doc.channels[ci], l).is_some());
-                let expanded = has_lanes && st.expanded_nodes.contains(&chan_name);
-                let toggle_w = if has_lanes { 14.0 } else { 0.0 };
-                if has_lanes {
-                    let trect = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(toggle_w, lane_h));
-                    let tresp = ui.interact(trect, ui.id().with(("chan-expand", ci)), Sense::click());
-                    if tresp.clicked() {
-                        toggle_expand = Some(chan_name.clone());
-                    }
-                    if let Some(font) = row_font(lane_h) {
-                        label_painter.text(
-                            Pos2::new(full.left() + 2.0, cy),
-                            Align2::LEFT_CENTER,
-                            if expanded { "⏷" } else { "⏵" },
-                            font,
-                            if tresp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() },
-                        );
-                    }
-                }
-                // Label: right-click menu for the node's lane.
-                let label_rect =
-                    Rect::from_min_size(Pos2::new(full.left() + toggle_w, y), egui::vec2(label_w - toggle_w, lane_h));
-                let lresp =
-                    ui.interact(label_rect, ui.id().with(("chan-label", ci)), Sense::click());
-                {
-                    let existing: Vec<(String, String)> = doc.channels[ci]
-                        .properties
-                        .iter()
-                        .map(|p| (p.component.clone(), p.field.clone()))
-                        .collect();
-                    lresp.context_menu(|ui| {
-                        if live_trs.contains_key(&chan_name)
-                            && ui.button("⏺ Key pose at playhead").clicked()
-                        {
-                            pose_key_at = Some((ci, ph));
-                            ui.close();
-                        }
-                        if let Some((_, _, fields)) =
-                            node_fields.iter().find(|(c, _, _)| *c == chan_name)
-                        {
-                            // Same cascade as the header's ✚ Property, for the
-                            // same reason: flat, a material's three dozen fields
-                            // bury the four anybody wants.
-                            ui.menu_button("✚ Add property", |ui| {
-                                let mut comps: Vec<&str> = Vec::new();
-                                for (c, _, _) in fields {
-                                    if !comps.contains(&c.as_str()) {
-                                        comps.push(c.as_str());
-                                    }
-                                }
-                                for comp in comps {
-                                    let mine: Vec<&(String, String, &'static str)> =
-                                        fields.iter().filter(|(c, _, _)| c == comp).collect();
-                                    let mut lane = |ui: &mut egui::Ui, field: &String| {
-                                        let has =
-                                            existing.iter().any(|(c, f)| c == comp && f == field);
-                                        if ui
-                                            .add_enabled(!has, egui::Button::new(field))
-                                            .clicked()
-                                        {
-                                            add_track_for = Some((
-                                                chan_name.clone(),
-                                                comp.to_string(),
-                                                field.clone(),
-                                            ));
-                                            ui.close();
-                                        }
-                                    };
-                                    ui.menu_button(comp, |ui| {
-                                        for (_, field, _) in
-                                            mine.iter().filter(|(_, _, g)| g.is_empty())
-                                        {
-                                            lane(ui, field);
-                                        }
-                                        let mut groups: Vec<&str> = Vec::new();
-                                        for (_, _, g) in &mine {
-                                            if !g.is_empty() && !groups.contains(g) {
-                                                groups.push(g);
-                                            }
-                                        }
-                                        for g in groups {
-                                            ui.menu_button(g, |ui| {
-                                                for (_, field, _) in
-                                                    mine.iter().filter(|(_, _, fg)| *fg == g)
-                                                {
-                                                    lane(ui, field);
-                                                }
-                                            });
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                        if ui.button("🗑 Delete node track").clicked() {
-                            chan_delete = Some(ci);
-                            ui.close();
-                        }
-                    });
-                }
-                // Clicking a track's label selects the bone/node it drives, back in
-                // the scene (so you can grab its gizmo) — deferred past the borrow.
-                if lresp.clicked() {
-                    if let Some(&bi) = bone_idx.get(&chan_name) {
-                        pending_select = Some(TrackSelect::Bone(bi));
-                    } else if let Some(&e) = chan_entity.get(&chan_name) {
-                        pending_select = Some(TrackSelect::Node(e));
-                    }
-                }
-                if let Some(font) = row_font(lane_h) {
-                    label_painter.text(
-                        Pos2::new(full.left() + 4.0 + toggle_w, cy),
-                        Align2::LEFT_CENTER,
-                        label,
-                        font,
-                        if lresp.hovered() {
-                            ui.visuals().strong_text_color()
-                        } else {
-                            ui.visuals().text_color()
-                        },
-                    );
-                }
-                // A row too short for its name still says it on hover.
-                if row_font(lane_h).is_none() {
-                    lresp.clone().on_hover_text(label);
-                }
-                // Lane strip: double-click keys the node's current pose there;
-                // right-click inserts a key at the click position; a plain click on
-                // empty lane deselects.
-                let lane_strip = Rect::from_min_size(
-                    Pos2::new(tl_left, y),
-                    egui::vec2(dur * px, lane_h),
-                );
-                let sresp =
-                    ui.interact(lane_strip, ui.id().with(("chan-lane", ci)), Sense::click());
-                if sresp.clicked() {
-                    st.sel_prop = None;
-                    st.sel_event = None;
-                }
-                if sresp.double_clicked()
-                    && live_trs.contains_key(&chan_name)
-                    && let Some(p) = sresp.interact_pointer_pos()
-                {
-                    pose_key_at =
-                        Some((ci, crate::timeline::snap_time(x_to_time(p.x), st.snap_fps)));
-                }
-                if live_trs.contains_key(&chan_name) || bone_idx.contains_key(&chan_name) {
-                    sresp.context_menu(|ui| {
-                        if ui
-                            .button("⏺ Insert key here")
-                            .on_hover_text("key this node's current pose at the click position")
-                            .clicked()
-                        {
-                            // The menu opens at the cursor; its left edge ≈ the click x.
-                            let mx = ui.min_rect().left();
-                            pose_key_at =
-                                Some((ci, crate::timeline::snap_time(x_to_time(mx), st.snap_fps)));
-                            ui.close();
-                        }
-                    });
-                }
-                let times = union_times(&doc.channels[ci]);
-                for (ki, &t) in times.iter().enumerate() {
-                    let selected =
-                        st.sel_keys.iter().any(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6);
-                    // A drag previews at the pointer but the doc is only retimed on
-                    // Release — live-resorting mid-drag would hand it to a neighbour.
-                    // A group move shifts every selected key by the anchor's delta; a
-                    // stretch scales selected keys around the selection's left edge.
-                    let dragging_this = st
-                        .key_drag
-                        .is_some_and(|(dci, ot, _)| dci == ci && (ot - t).abs() < 1e-6);
-                    let draw_t = if dragging_this {
-                        st.key_drag.unwrap().2
-                    } else if group_move && selected {
-                        (t + drag_delta).max(0.0)
-                    } else if let (Some(f), true) = (stretch_factor, selected) {
-                        sel_min + (t - sel_min) * f
-                    } else {
-                        t
-                    };
-                    let c = Pos2::new(time_to_x(draw_t), cy);
-                    // Marquee box select: a key whose diamond falls in the box joins
-                    // the selection (rebuilt each drag frame).
-                    if let Some(mq) = marquee
-                        && mq.contains(c)
-                        && !selected
-                    {
-                        st.sel_keys.push((ci, t));
-                    }
-                    let id = ui.id().with(("anim-key", ci, ki));
-                    let resp = ui
-                        .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
-                    let col = if resp.hovered() || dragging_this || selected {
-                        ACCENT
-                    } else {
-                        KEY_COLOR
-                    };
-                    key_diamond(&painter, c, col, channel_key_mode(&doc.channels[ci], t), key_size(lane_h));
-                    if selected {
-                        // A ring around multi-selected keys, so a selection reads at a glance.
-                        painter.circle_stroke(c, key_size(lane_h) + 3.5, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)));
-                    }
-                    if resp.clicked() {
-                        let shift = ui.input(|i| i.modifiers.shift);
-                        if shift {
-                            if let Some(p) =
-                                st.sel_keys.iter().position(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6)
-                            {
-                                st.sel_keys.remove(p);
-                            } else {
-                                st.sel_keys.push((ci, t));
-                            }
-                        } else {
-                            st.sel_keys = vec![(ci, t)];
-                        }
-                        st.sel_prop = None;
-                        st.sel_event = None;
-                    }
-                    if resp.drag_started() {
-                        st.key_drag = Some((ci, t, t));
-                        // Dragging a key that isn't in the selection makes it the selection.
-                        if !selected {
-                            st.sel_keys = vec![(ci, t)];
-                        }
-                    }
-                    if resp.dragged()
-                        && let Some(p) = resp.interact_pointer_pos()
-                    {
-                        let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
-                        if let Some(kd) = st.key_drag.as_mut()
-                            && kd.0 == ci
-                            && (kd.1 - t).abs() < 1e-6
-                        {
-                            kd.2 = nt;
-                        }
-                    }
-                    if resp.drag_stopped()
-                        && let Some((dci, ot, nt)) = st.key_drag.take()
-                        && dci == ci
-                        && (ot - t).abs() < 1e-6
-                        && (nt - ot).abs() > 1e-6
-                    {
-                        // A multi-selection moves as one; a lone key retimes by itself.
-                        if group_move {
-                            group_retime = Some(nt - ot);
-                        } else {
-                            retime = Some((ci, ot, nt));
-                        }
-                    }
-                    resp.context_menu(|ui| {
-                        // Acting on a multi-selection? Offer the batch verbs.
-                        if selected && st.sel_keys.len() > 1 {
-                            if ui.button(format!("🗑 Delete {} keys", st.sel_keys.len())).clicked() {
-                                delete_sel = true;
-                                ui.close();
-                            }
-                            if ui.button("⎘ Copy keys").clicked() {
-                                copy_keys = true;
-                                ui.close();
-                            }
-                        } else if ui.button("🗑 Delete key").clicked() {
-                            delete_key = Some((ci, t));
-                            ui.close();
-                        }
-                        // How this key reaches the next one — per key, because
-                        // a clip holds on its beats and eases through the rest.
-                        ui.separator();
-                        let current = channel_key_mode(&doc.channels[ci], t);
-                        let lane_default = doc.channels[ci]
-                            .translation
-                            .as_ref()
-                            .map(|l| l.step)
-                            .or(doc.channels[ci].rotation.as_ref().map(|l| l.step))
-                            .unwrap_or(false);
-                        interp_menu(ui, current, lane_default, &mut |mode| {
-                            key_mode = Some((ci, t, selected && st.sel_keys.len() > 1, mode));
-                        });
-                    });
-                }
-                // --- an opened node: one row per transform lane, each key editable
-                // on its own — retime, delete, interpolation — without touching the
-                // other two lanes at that time.
-                if expanded {
-                    for lane in Lane::ALL {
-                        let Some(l) = lane_of(&doc.channels[ci], lane) else { continue };
-                        let y = rows_top + row_i as f32 * lane_h;
-                        stripe(&painter, row_i, y, ui);
-                        row_i += 1;
-                        let cy = y + lane_h * 0.5;
-                        if let Some(font) = row_font(lane_h) {
-                            label_painter.text(
-                                Pos2::new(full.left() + 18.0 + toggle_w, cy),
-                                Align2::LEFT_CENTER,
-                                lane.label(),
-                                font,
-                                lane.color().gamma_multiply(0.85),
-                            );
-                        }
-                        let (times, modes, step): (Vec<f32>, Vec<AnimKeyModeDoc>, bool) =
-                            (l.times().to_vec(), l.modes().to_vec(), l.step());
-                        for (ki, &t) in times.iter().enumerate() {
-                            let dragging_this = st
-                                .lane_key_drag
-                                .is_some_and(|(dci, dl, ot, _)| dci == ci && dl == lane && same_key_time(ot, t));
-                            let draw_t = if dragging_this { st.lane_key_drag.unwrap().3 } else { t };
-                            let c = Pos2::new(time_to_x(draw_t), cy);
-                            let id = ui.id().with(("anim-lane-key", ci, lane as u8, ki));
-                            let resp = ui.interact(
-                                Rect::from_center_size(c, key_hit(lane_h)),
-                                id,
-                                Sense::click_and_drag(),
-                            );
-                            let col = if resp.hovered() || dragging_this { ACCENT } else { lane.color() };
-                            key_diamond(&painter, c, col, key_mode_at(&modes, t), key_size(lane_h));
-                            if resp.drag_started() {
-                                st.lane_key_drag = Some((ci, lane, t, t));
-                            }
-                            if resp.dragged()
-                                && let Some(p) = resp.interact_pointer_pos()
-                                && let Some(kd) = st.lane_key_drag.as_mut()
-                                && kd.0 == ci
-                                && kd.1 == lane
-                                && same_key_time(kd.2, t)
-                            {
-                                kd.3 = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
-                            }
-                            if resp.drag_stopped()
-                                && let Some((dci, dl, ot, nt)) = st.lane_key_drag.take()
-                                && dci == ci
-                                && dl == lane
-                                && same_key_time(ot, t)
-                                && !same_key_time(nt, ot)
-                            {
-                                lane_retime = Some((ci, lane, ot, nt));
-                            }
-                            resp.context_menu(|ui| {
-                                if ui.button("🗑 Delete key").clicked() {
-                                    lane_delete = Some((ci, lane, t));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                interp_menu(ui, key_mode_at(&modes, t), step, &mut |mode| {
-                                    lane_mode = Some((ci, lane, t, mode));
-                                });
-                            });
-                        }
-                    }
-                }
-                // --- property lanes, indented under the node ---
-                for ti in 0..doc.channels[ci].properties.len() {
-                    let y = rows_top + row_i as f32 * lane_h;
-                    stripe(&painter, row_i, y, ui);
-                    row_i += 1;
-                    let cy = y + lane_h * 0.5;
-                    let (comp, field, step) = {
-                        let pt = &doc.channels[ci].properties[ti];
-                        (pt.component.clone(), pt.field.clone(), pt.step)
-                    };
-                    // Label: right-click menu for this property lane.
-                    let label_rect = Rect::from_min_size(
-                        Pos2::new(full.left(), y),
-                        egui::vec2(label_w, lane_h),
-                    );
-                    let plresp = ui.interact(
-                        label_rect,
-                        ui.id().with(("prop-label", ci, ti)),
-                        Sense::click(),
-                    );
-                    plresp.context_menu(|ui| {
-                        if ui
-                            .button("✚ Key current value at playhead")
-                            .on_hover_text("writes the value the node has right now")
-                            .clicked()
-                        {
-                            prop_key_at = Some((ci, ti, ph));
-                            ui.close();
-                        }
-                        // Text and frames cannot blend at all, so offering the
-                        // toggle there is a control that does nothing: the
-                        // conversion forces Step back on load, so all it did was
-                        // persist a lie into the file.
-                        if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
-                            && ui
-                                .selectable_label(step, "Step (hold each key)")
-                                .on_hover_text(
-                                    "no blending between keys — right for spritesheet frames",
-                                )
-                                .clicked()
-                        {
-                            prop_step_toggle = Some((ci, ti));
-                            ui.close();
-                        }
-                        if ui.button("🗑 Delete track").clicked() {
-                            prop_remove = Some((ci, ti));
-                            ui.close();
-                        }
-                    });
-                    if let Some(font) = row_font(lane_h) {
-                        label_painter.text(
-                            Pos2::new(full.left() + 10.0, cy),
-                            Align2::LEFT_CENTER,
-                            format!("   {comp}.{field}"),
-                            font,
-                            if plresp.hovered() {
-                                PROP_LABEL_COLOR.gamma_multiply(1.4)
-                            } else {
-                                PROP_LABEL_COLOR
-                            },
-                        );
-                    } else {
-                        plresp.clone().on_hover_text(format!("{comp}.{field}"));
-                    }
-                    // Lane strip: double-click = key the current value at that time.
-                    let lane_strip = Rect::from_min_size(
-                        Pos2::new(tl_left, y),
-                        egui::vec2(dur * px, lane_h),
-                    );
-                    let presp = ui.interact(
-                        lane_strip,
-                        ui.id().with(("prop-lane", ci, ti)),
-                        Sense::click(),
-                    );
-                    if presp.clicked() {
-                        st.sel_prop = None;
-                        st.sel_event = None;
-                    }
-                    if presp.double_clicked()
-                        && let Some(p) = presp.interact_pointer_pos()
-                    {
-                        prop_key_at = Some((
-                            ci,
-                            ti,
-                            crate::timeline::snap_time(x_to_time(p.x), st.snap_fps),
-                        ));
-                    }
-                    let n_keys = doc.channels[ci].properties[ti].times.len();
-                    for ki in 0..n_keys {
-                        let t = doc.channels[ci].properties[ti].times[ki];
-                        let dragging_this = st.prop_key_drag.is_some_and(|(dci, dti, ot, _)| {
-                            dci == ci && dti == ti && (ot - t).abs() < 1e-6
-                        });
-                        let draw_t = if dragging_this { st.prop_key_drag.unwrap().3 } else { t };
-                        let c = Pos2::new(time_to_x(draw_t), cy);
-                        let id = ui.id().with(("anim-prop-key", ci, ti, ki));
-                        let resp = ui
-                            .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
-                        let selected = st.sel_prop == Some((ci, ti, ki));
-                        let col = if resp.hovered() || dragging_this || selected {
-                            ACCENT
-                        } else {
-                            PROP_KEY_COLOR
-                        };
-                        key_diamond(
-                            &painter,
-                            c,
-                            col,
-                            key_mode_at(&doc.channels[ci].properties[ti].modes, t),
-                            key_size(lane_h),
-                        );
-                        if resp.clicked() {
-                            prop_select = Some((ci, ti, ki));
-                        }
-                        if resp.drag_started() {
-                            st.prop_key_drag = Some((ci, ti, t, t));
-                            prop_select = Some((ci, ti, ki));
-                        }
-                        if resp.dragged()
-                            && let Some(p) = resp.interact_pointer_pos()
-                        {
-                            let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
-                            if let Some(kd) = st.prop_key_drag.as_mut()
-                                && kd.0 == ci
-                                && kd.1 == ti
-                                && (kd.2 - t).abs() < 1e-6
-                            {
-                                kd.3 = nt;
-                            }
-                        }
-                        if resp.drag_stopped()
-                            && let Some((dci, dti, ot, nt)) = st.prop_key_drag.take()
-                            && dci == ci
-                            && dti == ti
-                            && (ot - t).abs() < 1e-6
-                            && (nt - ot).abs() > 1e-6
-                        {
-                            prop_retime = Some((ci, ti, ot, nt));
-                        }
-                        resp.context_menu(|ui| {
-                            if ui.button("🗑 Delete key").clicked() {
-                                prop_delete = Some((ci, ti, t));
-                                ui.close();
-                            }
-                            // Not offered on a text or frame lane: those cannot
-                            // blend at all, the conversion forces Step on load,
-                            // and a control that only persists a lie into the
-                            // file is worse than no control.
-                            if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
-                            {
-                                ui.separator();
-                                let pt = &doc.channels[ci].properties[ti];
-                                let current = key_mode_at(&pt.modes, t);
-                                interp_menu(ui, current, pt.step, &mut |mode| {
-                                    prop_key_mode = Some((ci, ti, t, mode));
-                                });
-                            }
-                        });
-                    }
-                }
-            }
-            if doc.channels.is_empty() {
-                painter.text(
-                    Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
-                    Align2::LEFT_CENTER,
-                    "no keys yet — ● Record then pose nodes / change properties, or ✚ Property to add a lane",
-                    FontId::proportional(11.5),
-                    ui.visuals().weak_text_color(),
-                );
-            }
-            if let Some((ci, old, new)) = retime {
-                retime_channel(&mut doc.channels[ci], old, new);
-                st.clip_dirty = true;
-            }
-            if let Some((ci, lane, old, new)) = lane_retime
-                && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
-            {
-                l.retime(old, new.max(0.0));
-                st.clip_dirty = true;
-            }
-            if let Some((ci, lane, t)) = lane_delete {
-                delete_lane_key(&mut doc.channels[ci], lane, t);
-                drop_empty_channel(doc, ci);
-                st.clip_dirty = true;
-            }
-            if let Some((ci, lane, t, mode)) = lane_mode
-                && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
-            {
-                set_key_mode(l.modes_mut(), t, mode);
-                st.clip_dirty = true;
-            }
-            if let Some(name) = toggle_expand
-                && !st.expanded_nodes.remove(&name)
-            {
-                st.expanded_nodes.insert(name);
-            }
-            // Group move: shift every selected key by the same delta. Process in a
-            // collision-safe order (rightmost first when moving right) so a key never
-            // lands on — and merges into — a not-yet-moved neighbour.
-            if let Some(delta) = group_retime.filter(|d| d.abs() > 1e-6) {
-                let mut sel = st.sel_keys.clone();
-                sel.sort_by(|a, b| a.1.total_cmp(&b.1));
-                if delta > 0.0 {
-                    sel.reverse();
-                }
-                let mut new_sel = Vec::new();
-                for (ci, t) in sel {
-                    let nt = (t + delta).max(0.0);
-                    if let Some(ch) = doc.channels.get_mut(ci) {
-                        retime_channel(ch, t, nt);
-                    }
-                    new_sel.push((ci, nt));
-                }
-                st.sel_keys = new_sel;
-                st.clip_dirty = true;
-            }
-            if let Some((ci, t)) = delete_key {
-                delete_channel_key(&mut doc.channels[ci], t);
-                drop_empty_channel(doc, ci);
-                st.clip_dirty = true;
-            }
-            if let Some((ci, t, whole_selection, mode)) = key_mode {
-                let targets: Vec<(usize, f32)> = if whole_selection {
-                    st.sel_keys.clone()
-                } else {
-                    vec![(ci, t)]
-                };
-                for (ci, t) in targets {
-                    if let Some(ch) = doc.channels.get_mut(ci) {
-                        set_channel_key_mode(ch, t, mode);
-                    }
-                }
-                st.clip_dirty = true;
-            }
-            if let Some((ci, ti, t, mode)) = prop_key_mode
-                && let Some(pt) = doc.channels[ci].properties.get_mut(ti)
-            {
-                set_key_mode(&mut pt.modes, t, mode);
-                st.clip_dirty = true;
-            }
-            // Context-menu "Delete N keys" (works regardless of keyboard focus).
-            if delete_sel && !st.sel_keys.is_empty() {
-                let targets: Vec<(String, f32)> = st
-                    .sel_keys
-                    .iter()
-                    .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
-                    .collect();
-                for (node, t) in targets {
-                    if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
-                        delete_channel_key(&mut doc.channels[ci], t);
-                        drop_empty_channel(doc, ci);
-                    }
-                }
-                st.sel_keys.clear();
-                st.clip_dirty = true;
-            }
-            if let Some(sel) = prop_select {
-                st.sel_prop = Some(sel);
-                st.sel_event = None;
-            }
-            if let Some((ci, ti, old, new)) = prop_retime {
-                retime_property_key(&mut doc.channels[ci].properties[ti], old, new);
-                st.sel_prop = None; // key indices shift after a retime
-                st.clip_dirty = true;
-            }
-            if let Some((ci, ti, t)) = prop_delete {
-                delete_property_key(doc, ci, ti, t);
-                st.sel_prop = None;
-                st.clip_dirty = true;
-            }
-            // Deferred lane actions (context menus / double-clicks).
-            if let Some((ci, t)) = pose_key_at {
-                let name = doc.channels[ci].node.clone();
-                if let Some(trs) = live_trs.get(&name) {
-                    write_key(doc, &name, t, trs);
-                    st.clip_dirty = true;
-                }
-            }
-            if let Some((ci, ti, t)) = prop_key_at {
-                let (chan, comp, field) = {
-                    let pt = &doc.channels[ci].properties[ti];
-                    (doc.channels[ci].node.clone(), pt.component.clone(), pt.field.clone())
-                };
-                let kind = prop_kind(&comp, &field);
-                let key = (chan.clone(), comp, field);
-                let live = live_vals.get(&key).copied();
-                let ki = key_property_current(
-                    &mut doc.channels[ci].properties[ti],
-                    t,
-                    kind,
-                    live,
-                    live_strs.get(&key),
-                    live_frames.get(&chan),
-                );
-                // Select the fresh key so its value is instantly editable below.
-                st.sel_prop = Some((ci, ti, ki));
-                st.sel_event = None;
-                if t > doc.duration {
-                    doc.duration = t;
-                }
-                st.clip_dirty = true;
-            }
-            if let Some((chan, comp, field)) = add_track_for {
-                add_property_track(doc, &chan, &comp, &field);
-                st.clip_dirty = true;
-            }
-            if let Some((ci, ti)) = prop_step_toggle {
-                let pt = &mut doc.channels[ci].properties[ti];
-                pt.step = !pt.step;
-                st.clip_dirty = true;
-            }
-            if let Some((ci, ti)) = prop_remove {
-                doc.channels[ci].properties.remove(ti);
-                drop_empty_channel(doc, ci);
-                st.sel_prop = None;
-                st.clip_dirty = true;
-            }
-            if let Some(ci) = chan_delete {
-                doc.channels.remove(ci);
-                st.sel_prop = None;
-                st.clip_dirty = true;
-            }
-
-            // ---- keyboard transport (only when no text field is focused, not playing) ----
-            //
-            // What yields is a text field (a clip name, a numeric entry), which
-            // `text_edit_focused` asks and the window-level `typing` gate uses.
-            // `m.focused().is_none()` would be "nothing anywhere in the editor
-            // has focus", and egui focuses every clickable widget you click, so
-            // clicking a lane header, a state button, the ⏵ transport or any
-            // slider in this panel would switch the whole transport off.
-            //
-            // The other half is ownership. The window handler routes Ctrl+C/V
-            // to the scene whenever the timeline does not own the chord, so
-            // without this a paste aimed at the Hierarchy would also drop
-            // keyframes at the playhead. One chord, one owner: the focused tab
-            // or the panel under the pointer, both halves read by `main.rs`
-            // too, so the two sides cannot disagree about who is about to act.
-            let owns_chord = tab_focused || st.sheet_hovered;
-            if !playing && owns_chord && !ui.ctx().text_edit_focused() {
-                // egui turns Ctrl+C/X/V into Copy/Cut/Paste events (the raw key is
-                // consumed), so those must be read from `events`, not key_pressed —
-                // that was why copy/paste "did nothing". Undo/redo have no such event.
-                let (sp, home, end, left, right, del, fit, ctrl, shift, z, y, a, dup, prevk, nextk, copy_ev, cut_ev, paste_ev) =
-                    ui.input(|i| {
-                        let (mut co, mut cu, mut pa) = (false, false, false);
-                        for e in &i.events {
-                            match e {
-                                egui::Event::Copy => co = true,
-                                egui::Event::Cut => cu = true,
-                                egui::Event::Paste(_) => pa = true,
-                                _ => {}
-                            }
-                        }
-                        (
-                            i.key_pressed(egui::Key::Space),
-                            i.key_pressed(egui::Key::Home),
-                            i.key_pressed(egui::Key::End),
-                            i.key_pressed(egui::Key::ArrowLeft),
-                            i.key_pressed(egui::Key::ArrowRight),
-                            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                            i.key_pressed(egui::Key::F),
-                            i.modifiers.command || i.modifiers.ctrl,
-                            i.modifiers.shift,
-                            i.key_pressed(egui::Key::Z),
-                            i.key_pressed(egui::Key::Y),
-                            i.key_pressed(egui::Key::A),
-                            i.key_pressed(egui::Key::D),
-                            i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::OpenBracket),
-                            i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::CloseBracket),
-                            co,
-                            cu,
-                            pa,
-                        )
-                    });
-                let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
-                // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo the clip edits.
-                if ctrl && z && !shift {
-                    do_undo = true;
-                }
-                if ctrl && (y || (z && shift)) {
-                    do_redo = true;
-                }
-                // Copy / cut / paste selected transform keys (from egui clipboard events).
-                if copy_ev || cut_ev {
-                    copy_keys = true;
-                    if cut_ev {
-                        cut_keys = true;
-                    }
-                }
-                if paste_ev {
-                    paste_keys = true;
-                }
-                // Ctrl+A select every transform key; Ctrl+D duplicate the selection at
-                // the playhead (same path as paste). , / . (or [ / ]) jump the playhead
-                // to the previous / next keyframe across all lanes.
-                if ctrl && a {
-                    // Every key on a shown row: a filtered sheet selects what it shows.
-                    st.sel_keys.clear();
-                    for (ci, ch) in doc.channels.iter().enumerate().filter(|(_, ch)| row_shown(&ch.node)) {
-                        for t in union_times(ch) {
-                            st.sel_keys.push((ci, t));
-                        }
-                    }
-                    st.sel_prop = None;
-                }
-                if ctrl && dup {
-                    dup_keys = true;
-                }
-                if prevk || nextk {
-                    let mut all: Vec<f32> = Vec::new();
-                    for ch in &doc.channels {
-                        all.extend(union_times(ch));
-                    }
-                    all.sort_by(|x, y| x.total_cmp(y));
-                    let cur = st.playhead;
-                    if nextk {
-                        if let Some(&t) = all.iter().find(|&&t| t > cur + 1e-4) {
-                            st.playhead = t;
-                        }
-                    } else if let Some(&t) = all.iter().rev().find(|&&t| t < cur - 1e-4) {
-                        st.playhead = t;
-                    }
-                    st.preview_playing = false;
-                }
-                if sp {
-                    st.preview_playing = !st.preview_playing;
-                }
-                if home {
-                    st.playhead = 0.0;
-                    st.preview_playing = false;
-                }
-                if end {
-                    st.playhead = dur;
-                    st.preview_playing = false;
-                }
-                if left {
-                    st.playhead = (st.playhead - step).max(0.0);
-                    st.preview_playing = false;
-                }
-                if right {
-                    st.playhead = (st.playhead + step).min(dur);
-                    st.preview_playing = false;
-                }
-                if fit {
-                    st.fit_pending = true;
-                }
-                if ui.input(|i| i.key_pressed(egui::Key::Tab)) {
-                    st.curves.on = true;
-                }
-                // Delete removes the multi-selected transform keys first, then a
-                // selected property key, then a selected event.
-                if del && !st.sel_keys.is_empty() {
-                    // Resolve to (node name, time) so channel-index shifts from
-                    // emptied-channel cleanup can't mis-target a later deletion.
-                    let targets: Vec<(String, f32)> = st
-                        .sel_keys
-                        .iter()
-                        .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
-                        .collect();
-                    for (node, t) in targets {
-                        if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
-                            delete_channel_key(&mut doc.channels[ci], t);
-                            drop_empty_channel(doc, ci);
-                        }
-                    }
-                    st.sel_keys.clear();
-                    st.clip_dirty = true;
-                } else if del {
-                    if let Some((ci, ti, ki)) = st.sel_prop.take() {
-                        let removed = doc
-                            .channels
-                            .get_mut(ci)
-                            .and_then(|c| c.properties.get_mut(ti))
-                            .is_some_and(|pt| {
-                                if ki < pt.times.len() {
-                                    pt.times.remove(ki);
-                                    pt.values.remove(ki);
-                                    if pt.times.is_empty() {
-                                        // fall through to track/channel cleanup below
-                                    }
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                        if removed {
-                            if doc.channels[ci].properties[ti].times.is_empty() {
-                                doc.channels[ci].properties.remove(ti);
-                            }
-                            drop_empty_channel(doc, ci);
-                            st.clip_dirty = true;
-                        }
-                    } else if let Some(ei) = st.sel_event.take()
-                        && ei < doc.events.len()
-                    {
-                        doc.events.remove(ei);
-                        st.clip_dirty = true;
-                    }
-                }
-            }
-
-            // ---- stretch grip: scale the time-span of a multi-selection ----
-            // With ≥2 keys spanning a range selected, a span bar sits just under the
-            // event lane with an anchor tick at the left edge and a draggable grip at
-            // the right; dragging the grip scales every selected key's offset from the
-            // left edge (stretch/squash the timing). Applied once on release.
-            if st.sel_keys.len() >= 2 && sel_max > sel_min + 1e-4 {
-                let gy = full.top() + ruler_h + event_h - 3.0;
-                let cur_max = st.stretch_drag.unwrap_or(sel_max);
-                let lx = time_to_x(sel_min);
-                let rx = time_to_x(cur_max);
-                painter.line_segment(
-                    [Pos2::new(lx, gy), Pos2::new(rx, gy)],
-                    Stroke::new(2.0, STRETCH_COL.gamma_multiply(0.8)),
-                );
-                painter.line_segment(
-                    [Pos2::new(lx, gy - 4.0), Pos2::new(lx, gy + 4.0)],
-                    Stroke::new(2.0, STRETCH_COL),
-                );
-                let grip = Rect::from_center_size(Pos2::new(rx, gy), egui::vec2(9.0, 13.0));
-                let gresp = ui.interact(grip, ui.id().with("anim-stretch-grip"), Sense::click_and_drag());
-                painter.rect_filled(
-                    grip,
-                    2.0,
-                    if gresp.hovered() || st.stretch_drag.is_some() { ACCENT } else { STRETCH_COL },
-                );
-                if gresp.drag_started() {
-                    st.stretch_drag = Some(sel_max);
-                }
-                if gresp.dragged()
-                    && let Some(p) = gresp.interact_pointer_pos()
-                {
-                    st.stretch_drag = Some(
-                        crate::timeline::snap_time(x_to_time(p.x), st.snap_fps).max(sel_min + 0.02),
-                    );
-                }
-                if gresp.drag_stopped()
-                    && let Some(newmax) = st.stretch_drag.take()
-                {
-                    let f = ((newmax - sel_min) / (sel_max - sel_min)).max(0.02);
-                    if (f - 1.0).abs() > 1e-4 {
-                        let mut sel = st.sel_keys.clone();
-                        sel.sort_by(|a, b| a.1.total_cmp(&b.1));
-                        if f > 1.0 {
-                            sel.reverse(); // expanding → move the rightmost first
-                        }
-                        let mut new_sel = Vec::new();
-                        for (ci, t) in sel {
-                            let nt = (sel_min + (t - sel_min) * f).max(0.0);
-                            if let Some(ch) = doc.channels.get_mut(ci) {
-                                retime_channel(ch, t, nt);
-                            }
-                            new_sel.push((ci, nt));
-                        }
-                        st.sel_keys = new_sel;
-                        st.clip_dirty = true;
-                    }
-                }
-            }
-
-            // ---- marquee selection box ----
-            if let Some(mq) = marquee {
-                painter.rect_filled(mq, 0.0, ACCENT.gamma_multiply(0.12));
-                painter.rect_stroke(
-                    mq,
-                    0.0,
-                    Stroke::new(1.0, ACCENT.gamma_multiply(0.8)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-
-            // ---- playhead over everything ----
-            let xp = time_to_x(st.playhead.min(dur));
-            let ph_col = if st.record { RECORD_RED } else { PLAYHEAD };
-            painter.line_segment(
-                [Pos2::new(xp, full.top()), Pos2::new(xp, full.bottom())],
-                Stroke::new(1.5, ph_col),
-            );
-            let xe = time_to_x(dur);
-            painter.line_segment(
-                [Pos2::new(xe, full.top()), Pos2::new(xe, full.bottom())],
-                Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
-            );
-            // Recording: a red frame around the sheet — the second half of the
-            // ● REC cue, so it's unmissable that edits are being keyed.
-            if st.record {
-                painter.rect_stroke(
-                    Rect::from_min_size(
-                        Pos2::new(tl_left, full.top()),
-                        egui::vec2(dur * px, full.height()),
-                    ),
-                    0.0,
-                    Stroke::new(1.5, RECORD_RED.gamma_multiply(0.6)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            // ruler ticks over the top strip
-            draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px, st.snap_fps);
-        });
+        let Some(out) = timeline_sheet(ui, st, &live, g, &mut flags, &mut pending_select) else { return };
         // Remember the offset so next frame's cursor-anchored zoom has an anchor.
         st.scroll_off = out.state.offset;
         // Is the pointer over the sheet? This is the other half of "who owns
@@ -4058,11 +2446,11 @@ impl EditorTabViewer<'_> {
 
         // ---- clip undo/redo + clipboard (deferred: they swap/read clip_doc, which
         // `doc` borrowed for the whole draw above) ----
-        if do_undo {
+        if flags.do_undo {
             if clip_undo_redo(st, false) {
                 st.clip_dirty = true;
             }
-        } else if do_redo {
+        } else if flags.do_redo {
             if clip_undo_redo(st, true) {
                 st.clip_dirty = true;
             }
@@ -4075,7 +2463,7 @@ impl EditorTabViewer<'_> {
             // must be a no-op — it must never delete whatever happened to be copied
             // previously (the old code read `key_clipboard` after a failed copy).
             let mut copied_now: Vec<CopiedKey> = Vec::new();
-            if copy_keys {
+            if flags.copy_keys {
                 let sel = st.sel_keys.clone();
                 let sel_prop = st.sel_prop;
                 if let Some((_, d)) = st.clip_doc.as_ref() {
@@ -4097,7 +2485,7 @@ impl EditorTabViewer<'_> {
             }
             // Cut = delete only the keys copied from this selection (by node+time,
             // robust to reindexing).  A stale clipboard is deliberately irrelevant.
-            if cut_keys
+            if flags.cut_keys
                 && !copied_now.is_empty()
                 && let Some((_, d)) = st.clip_doc.as_mut()
             {
@@ -4113,7 +2501,7 @@ impl EditorTabViewer<'_> {
             }
             // Paste at the playhead: the earliest copied key lands on the playhead,
             // the rest keep their relative offsets. Reselect the pasted keys.
-            if paste_keys {
+            if flags.paste_keys {
                 if st.key_clipboard.is_empty() {
                     st.status_note =
                         Some(("nothing on the clipboard — copy some keys first".into(), 3.0));
@@ -4128,7 +2516,7 @@ impl EditorTabViewer<'_> {
                 }
             }
             // Duplicate (Ctrl+D): copy the live selection to the playhead in one step.
-            if dup_keys && !st.sel_keys.is_empty() {
+            if flags.dup_keys && !st.sel_keys.is_empty() {
                 let sel = st.sel_keys.clone();
                 let sel_prop = st.sel_prop;
                 let mut items: Vec<CopiedKey> = Vec::new();
@@ -4177,10 +2565,1793 @@ impl EditorTabViewer<'_> {
             st.playhead %= dur;
         }
     }
+
+    /// Live per-node data the timeline reads while it draws, gathered before
+    /// the clip borrow.
+    fn timeline_live(&self, target: Entity) -> TimelineLive {
+        // Live per-node data for timeline interactions, gathered before the clip-doc
+        // borrow: current local TRS (double-click / "key pose here"), current numeric
+        // field values (keying a property writes what's on the node right now, like
+        // record does), and which animatable fields each node actually has (the
+        // ✚ Property menus list only real components, Unity-style).
+        let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
+        let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
+        // A sprite frame is four values, so it cannot ride `live_vals`. One per
+        // channel — a node has one sprite.
+        let mut live_frames: HashMap<String, floptle_scene::SpriteFrameDoc> = HashMap::new();
+        // …and a texture path is not a number either. Same key shape as
+        // `live_vals` so the two read alike at the call sites.
+        let mut live_strs: HashMap<(String, String, String), String> = HashMap::new();
+        let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
+        // channel name → the scene entity it drives (for click-track-to-select).
+        let mut chan_entity: HashMap<String, Entity> = HashMap::new();
+        for (e, chan) in scene_channel_names(self.world, target) {
+        if e != target && chan.is_empty() {
+            continue; // unnamed children can't be addressed by a channel
+        }
+        chan_entity.insert(chan.clone(), e);
+        if let Some(tr) = self.world.get::<floptle_core::Transform>(e) {
+            live_trs.insert(
+                chan.clone(),
+                TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
+            );
+        }
+        let mir = floptle_script::mirror_components(self.world, e);
+        let strs = floptle_script::mirror_component_strings(self.world, e);
+        let mut fields: Vec<(String, String, &'static str)> = Vec::new();
+        // (kept out of `live_vals`, which is f64 — a frame is four values)
+        for (comp, fs) in ANIMATABLE_PROPS {
+            for (f, kind, group) in fs.iter() {
+                let present = match kind {
+                    // The mirror is already presence-filtered (cell/tints only
+                    // when the element has an image, textSize with text…).
+                    PropKind::Float => {
+                        if let Some(&v) = mir.get(*comp).and_then(|m| m.get(*f)) {
+                            live_vals.insert(
+                                (chan.clone(), comp.to_string(), f.to_string()),
+                                v,
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    // Presence used to be a hand-written list of three
+                    // special cases, so a text field not on it could never
+                    // be added as a lane at all. The string mirror answers
+                    // it the same way the number mirror does — is the field
+                    // there — and records the live value for keying while it
+                    // is at it.
+                    PropKind::Text => {
+                        if let Some(v) = strs.get(*comp).and_then(|m| m.get(*f)) {
+                            live_strs.insert(
+                                (chan.clone(), comp.to_string(), f.to_string()),
+                                v.clone(),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    // Anything wearing a Material can wear a sprite frame —
+                    // a Sprite node, and the Plane-plus-Material every 2D
+                    // project built before there was one.
+                    PropKind::Frame => {
+                        match floptle_script::read_sprite_frame(self.world, e) {
+                            Some((texture, cols, rows, cell)) => {
+                                live_frames.insert(
+                                    chan.clone(),
+                                    floptle_scene::SpriteFrameDoc { texture, cols, rows, cell },
+                                );
+                                true
+                            }
+                            None => false,
+                        }
+                    }
+                };
+                if present {
+                    fields.push((comp.to_string(), f.to_string(), group));
+                }
+            }
+        }
+        if !fields.is_empty() {
+            let disp =
+                if chan.is_empty() { "(this node)".to_string() } else { chan.clone() };
+            node_fields.push((chan.clone(), disp, fields));
+        }
+    }
+
+    // Live local pose of every armature bone (from the bound controller), so
+    // "Key all bones" can drop a key holding each bone's current pose, and
+    // clicking a bone track can resolve its skeleton index. Bones aren't ECS
+    // entities, so this is the only source of their current transform.
+    let mut bone_trs: Vec<(String, TransformTRS)> = Vec::new();
+    let mut bone_idx: HashMap<String, usize> = HashMap::new();
+    if let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(target)
+        && let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
+    {
+        let pose = self.anim.instances.get(&target).map(|inst| inst.ctl.pose());
+        for (i, n) in rig.skeleton.nodes.iter().enumerate() {
+            bone_idx.insert(n.name.clone(), i);
+            let trs = pose
+                .and_then(|p| p.get(i))
+                .copied()
+                .unwrap_or(n.rest);
+            bone_trs.push((n.name.clone(), trs));
+            // Bones live in `live_trs` too so every "key pose"/"key here"/double-
+            // click path treats a bone channel like any node channel (bones have
+            // no ECS Transform of their own, so this is their only pose source).
+            live_trs.entry(n.name.clone()).or_insert(trs);
+        }
+    }
+        TimelineLive { live_trs, live_vals, live_frames, live_strs, node_fields, chan_entity, bone_trs, bone_idx }
+    }
 }
 
 /// The frame's close for the curve view: the undo step the sheet commits at
 /// its own end, and the preview loop.
+/// Live per-node data the timeline reads while it draws: each channel's
+/// current local TRS (double-click / "key pose here"), current numeric and
+/// string field values (keying a property writes what is on the node now,
+/// like record does), sprite frames, which animatable fields each node has,
+/// the entity behind each channel, and every armature bone's live pose.
+struct TimelineLive {
+    live_trs: HashMap<String, TransformTRS>,
+    live_vals: HashMap<(String, String, String), f64>,
+    live_frames: HashMap<String, floptle_scene::SpriteFrameDoc>,
+    live_strs: HashMap<(String, String, String), String>,
+    node_fields: Vec<NodeFieldMenu>,
+    chan_entity: HashMap<String, Entity>,
+    bone_trs: Vec<(String, TransformTRS)>,
+    bone_idx: HashMap<String, usize>,
+}
+
+/// What the header buttons and the keyboard asked for. Answered after the
+/// sheet's borrow of the clip ends: undo and the clipboard swap or read the
+/// clip the sheet was drawing from.
+#[derive(Default)]
+struct SheetFlags {
+    do_undo: bool,
+    do_redo: bool,
+    copy_keys: bool,
+    cut_keys: bool,
+    paste_keys: bool,
+    dup_keys: bool,
+    delete_sel: bool,
+}
+
+/// This frame's sheet geometry and mode.
+#[derive(Clone, Copy)]
+struct SheetGeom {
+    /// Pixels per second.
+    px: f32,
+    /// The name column's width.
+    label_w: f32,
+    /// One row's height.
+    lane_h: f32,
+    ruler_h: f32,
+    event_h: f32,
+    /// Where a "key at playhead" lands, on the snap grid like record.
+    ph: f32,
+    /// The clip's duration.
+    dur: f32,
+    /// The scene is in Play: the transport keys stand down.
+    playing: bool,
+    /// The Animating tab owns the keyboard.
+    tab_focused: bool,
+}
+
+/// The row above the sheet: undo, the clipboard, duration, key-all, the
+/// ✚ Property menus, and the event editor.
+fn timeline_header(ui: &mut egui::Ui, st: &mut AnimUiState, live: &TimelineLive, g: SheetGeom, flags: &mut SheetFlags) {
+    let Some((_, doc)) = st.clip_doc.as_mut() else { return };
+    let TimelineLive { live_trs, live_vals, live_frames, live_strs, node_fields, bone_trs, .. } = live;
+    let SheetGeom { ph, .. } = g;
+    // Header row: duration + event add + selected-event editor.
+    let mut kill_event: Option<usize> = None;
+    ui.horizontal(|ui| {
+        // Undo / redo the clip edits (Ctrl+Z / Ctrl+Y also work over the sheet).
+        if ui.add_enabled(!st.clip_undo.is_empty(), egui::Button::new("↶"))
+            .on_hover_text("Undo clip edit (Ctrl+Z)").clicked() { flags.do_undo = true; }
+        if ui.add_enabled(!st.clip_redo.is_empty(), egui::Button::new("↷"))
+            .on_hover_text("Redo clip edit (Ctrl+Y)").clicked() { flags.do_redo = true; }
+        ui.separator();
+        // The clipboard, as buttons. The shortcuts work, but a shortcut that
+        // silently does nothing is indistinguishable from a broken one, and
+        // that is exactly how this read. A button that is greyed out tells
+        // you *why* nothing is going to happen before you press it.
+        let has_sel = !st.sel_keys.is_empty() || st.sel_prop.is_some();
+        let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
+        // The `if has_sel { … } else { … }` shape these used to have could
+        // never show its second half: egui opens `on_hover_text` only for an
+        // Enabled response, so the "…select some keyframes first" branch —
+        // the only one anybody needs — was unreachable by construction. The
+        // reason a button is greyed out belongs on `on_disabled_hover_text`.
+        if ui.add_enabled(has_sel, egui::Button::new("⎘"))
+            .on_hover_text(format!("Copy {} (Ctrl+C)", plural_keys(n_sel)))
+            .on_disabled_hover_text("Copy keys (Ctrl+C) — select some keyframes first")
+            .clicked() { flags.copy_keys = true; }
+        if ui.add_enabled(has_sel, egui::Button::new("✂"))
+            .on_hover_text(format!("Cut {} (Ctrl+X)", plural_keys(n_sel)))
+            .on_disabled_hover_text("Cut keys (Ctrl+X) — select some keyframes first")
+            .clicked() { flags.copy_keys = true; flags.cut_keys = true; }
+        if ui.add_enabled(!st.key_clipboard.is_empty(), egui::Button::new("📋"))
+            .on_hover_text(format!(
+                "Paste {} at the playhead (Ctrl+V)",
+                plural_keys(st.key_clipboard.len())
+            ))
+            .on_disabled_hover_text("Paste keys (Ctrl+V) — nothing copied yet")
+            .clicked() { flags.paste_keys = true; }
+        if let Some((msg, _)) = st.status_note.as_ref() {
+            ui.label(egui::RichText::new(msg).weak());
+        }
+        ui.separator();
+        ui.label("duration");
+        let mut d = doc.duration;
+        if ui.add(egui::DragValue::new(&mut d).speed(0.02).range(0.05..=600.0).suffix("s")).changed() {
+            doc.duration = d;
+            st.clip_dirty = true;
+        }
+        ui.separator();
+        // Key-all commands (both, deliberately — they serve different needs):
+        // "all bones" drops a key on every armature bone at its current pose (a
+        // full-body keyframe, even bones with no track yet); "all tracks" keys
+        // every existing lane (transform + property) at its current value.
+        if !bone_trs.is_empty()
+            && ui.button("⏺ Key all bones")
+                .on_hover_text("full-body key: every bone gets a key at its current pose, here at the playhead")
+                .clicked()
+        {
+            for (name, trs) in bone_trs {
+                write_key(doc, name, ph, trs);
+            }
+            st.clip_dirty = true;
+        }
+        if !doc.channels.is_empty()
+            && ui.button("◎ Key all tracks")
+                .on_hover_text("key every existing track (transform + property lanes) at its current value")
+                .clicked()
+        {
+            for ci in 0..doc.channels.len() {
+                let name = doc.channels[ci].node.clone();
+                let trs = bone_trs
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, t)| *t)
+                    .or_else(|| live_trs.get(&name).copied());
+                if let Some(trs) = trs {
+                    write_key(doc, &name, ph, &trs);
+                }
+                for ti in 0..doc.channels[ci].properties.len() {
+                    let (comp, field) = {
+                        let pt = &doc.channels[ci].properties[ti];
+                        (pt.component.clone(), pt.field.clone())
+                    };
+                    let kind = prop_kind(&comp, &field);
+                    let key = (name.clone(), comp, field);
+                    let live = live_vals.get(&key).copied();
+                    key_property_current(
+                        &mut doc.channels[ci].properties[ti],
+                        ph,
+                        kind,
+                        live,
+                        live_strs.get(&key),
+                        live_frames.get(&name),
+                    );
+                }
+            }
+            st.clip_dirty = true;
+        }
+        ui.separator();
+        // ✚ Property: node ▸ component ▸ [group ▸] field, listing only the
+        // components actually on each node (Unity's "Add Property"). Adds an
+        // empty lane to key into.
+        //
+        // Grouped rather than one flat list per node, because a material has
+        // three dozen animatable fields and a UI element two dozen. Flat,
+        // the four anybody reaches for — a texture, an opacity — are lost in
+        // a wall of surface maps, which is the same as not having them.
+        ui.menu_button("✚ Property", |ui| {
+            if node_fields.is_empty() {
+                ui.weak("no animatable components in this subtree");
+            }
+            for (chan, disp, fields) in node_fields {
+                ui.menu_button(disp, |ui| {
+                    // Component order follows ANIMATABLE_PROPS, not the order
+                    // fields happened to be collected in, so the menu is in
+                    // the same place every time.
+                    let mut comps: Vec<&str> = Vec::new();
+                    for (c, _, _) in fields {
+                        if !comps.contains(&c.as_str()) {
+                            comps.push(c.as_str());
+                        }
+                    }
+                    for comp in comps {
+                        let mine: Vec<&(String, String, &'static str)> =
+                            fields.iter().filter(|(c, _, _)| c == comp).collect();
+                        // Does this channel already have a sprite lane? It
+                        // writes the texture, the grid AND the cell, so
+                        // offering those Material fields beside it would let
+                        // two lanes write the same four values — and which
+                        // one won would depend on the order they were added.
+                        let sprite_lane = doc.channels.iter().any(|c| {
+                            &c.node == chan
+                                && c.properties.iter().any(|p| {
+                                    p.component == floptle_scene::SPRITE_COMPONENT
+                                        && p.field == floptle_scene::SPRITE_FIELD
+                                })
+                        });
+                        let mut lane = |ui: &mut egui::Ui, field: &str| {
+                            let owned = sprite_lane && owned_by_sprite(comp, field);
+                            let exists = owned
+                                || doc.channels.iter().any(|c| {
+                                    &c.node == chan
+                                        && c.properties
+                                            .iter()
+                                            .any(|p| p.component == comp && p.field == field)
+                                });
+                            if ui
+                                .add_enabled(!exists, egui::Button::new(field))
+                                .on_hover_text(
+                                    "adds an empty lane — then key it, or ● Record and \
+                                     change the value",
+                                )
+                                // A disabled widget never shows `on_hover_text`: egui
+                                // opens that tooltip only for an enabled response. So
+                                // the one explanation that matters — why it is greyed
+                                // out — has to go on the other call.
+                                .on_disabled_hover_text(if owned {
+                                    "the Sprite ▸ frame lane on this node already writes it"
+                                } else {
+                                    "this node already has a lane for it"
+                                })
+                                .clicked()
+                            {
+                                add_property_track(doc, chan, comp, field);
+                                st.clip_dirty = true;
+                                ui.close();
+                            }
+                        };
+                        ui.menu_button(comp, |ui| {
+                            for (_, field, group) in mine.iter().filter(|(_, _, g)| g.is_empty())
+                            {
+                                lane(ui, field);
+                                let _ = group;
+                            }
+                            let mut groups: Vec<&str> = Vec::new();
+                            for (_, _, g) in &mine {
+                                if !g.is_empty() && !groups.contains(g) {
+                                    groups.push(g);
+                                }
+                            }
+                            for g in groups {
+                                ui.menu_button(g, |ui| {
+                                    for (_, field, _) in
+                                        mine.iter().filter(|(_, _, fg)| *fg == g)
+                                    {
+                                        lane(ui, field);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        })
+        .response
+        .on_hover_text(
+            "add a property lane (opacity, spritesheet cell, image…) under a node — \
+             then key it, or just ● Record and change the value",
+        );
+        if ui.button("⚑ Add event at playhead").on_hover_text("events call a Lua function (by name) on this node's scripts when the playhead crosses them").clicked() {
+            doc.events.push(AnimEventDoc { t: st.playhead.min(doc.duration), func: "onAnimEvent".into() });
+            doc.events.sort_by(|a, b| a.t.total_cmp(&b.t));
+            st.sel_event = doc
+                .events
+                .iter()
+                .position(|e| (e.t - st.playhead.min(doc.duration)).abs() < 1e-5);
+            st.clip_dirty = true;
+        }
+        if let Some(ei) = st.sel_event {
+            if let Some(ev) = doc.events.get_mut(ei) {
+                ui.separator();
+                ui.label("event fn");
+                if ui.add(egui::TextEdit::singleline(&mut ev.func).desired_width(130.0)).changed() {
+                    st.clip_dirty = true;
+                }
+                let mut t = ev.t;
+                if ui.add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=doc.duration).suffix("s")).changed() {
+                    ev.t = t;
+                    st.clip_dirty = true;
+                }
+                if ui.button("🗑").clicked() {
+                    kill_event = Some(ei);
+                }
+            } else {
+                st.sel_event = None;
+            }
+        }
+    });
+    if let Some(ei) = kill_event {
+        doc.events.remove(ei);
+        st.sel_event = None;
+        st.clip_dirty = true;
+    }
+}
+
+/// The curve view, when it stands in for the sheet: the toolbar, keyboard
+/// and undo around it are shared. Returns true when it drew.
+fn timeline_curves(ui: &mut egui::Ui, st: &mut AnimUiState, g: SheetGeom) -> bool {
+    let Some((_, doc)) = st.clip_doc.as_mut() else { return false };
+    let SheetGeom { px, label_w, dur, playing, tab_focused, .. } = g;
+    if !st.curves.on {
+        return false;
+    }
+    let hovered_rect = ui.available_rect_before_wrap();
+    let edits = crate::anim_curves::curves_ui(
+        ui,
+        &mut st.curves,
+        doc,
+        dur,
+        px,
+        st.snap_fps,
+        label_w,
+        &mut st.playhead,
+        &st.sel_keys,
+    );
+    if let Some((ci, t)) = edits.select {
+        st.sel_keys = vec![(ci, t)];
+        st.sel_prop = None;
+    }
+    if crate::anim_curves::apply_curve_edits(doc, &edits) {
+        st.clip_dirty = true;
+    }
+    st.sheet_hovered = ui.rect_contains_pointer(hovered_rect);
+    // The transport and undo keys the sheet answers, answered here too.
+    if !playing && (tab_focused || st.sheet_hovered) && !ui.ctx().text_edit_focused() {
+        let (sp, home, end, left, right, fit, ctrl, shift, z, y, tab) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::Home),
+                i.key_pressed(egui::Key::End),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::F),
+                i.modifiers.command || i.modifiers.ctrl,
+                i.modifiers.shift,
+                i.key_pressed(egui::Key::Z),
+                i.key_pressed(egui::Key::Y),
+                i.key_pressed(egui::Key::Tab),
+            )
+        });
+        let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+        if ctrl && z && !shift && clip_undo_redo(st, false) {
+            st.clip_dirty = true;
+        }
+        if ctrl && (y || (z && shift)) && clip_undo_redo(st, true) {
+            st.clip_dirty = true;
+        }
+        if sp {
+            st.preview_playing = !st.preview_playing;
+        }
+        if home {
+            st.playhead = 0.0;
+            st.preview_playing = false;
+        }
+        if end {
+            st.playhead = dur;
+            st.preview_playing = false;
+        }
+        if left {
+            st.playhead = (st.playhead - step).max(0.0);
+            st.preview_playing = false;
+        }
+        if right {
+            st.playhead = (st.playhead + step).min(dur);
+            st.preview_playing = false;
+        }
+        if fit {
+            st.fit_pending = true;
+            st.curves.vrange = None;
+        }
+        if tab {
+            st.curves.on = false;
+        }
+    }
+    true
+}
+
+/// The sheet: ruler, event lane, one row per channel and property track,
+/// the deferred edits those rows asked for, the keyboard, the stretch grip,
+/// the marquee, and the playhead.
+fn timeline_sheet(
+    ui: &mut egui::Ui,
+    st: &mut AnimUiState,
+    live: &TimelineLive,
+    g: SheetGeom,
+    flags: &mut SheetFlags,
+    pending_select: &mut Option<TrackSelect>,
+) -> Option<egui::scroll_area::ScrollAreaOutput<()>> {
+    // The clip leaves `st` for the draw, so the rows can take both: nothing
+    // in the sheet reads `clip_doc` while it is out.
+    let (clip_name, mut clip) = st.clip_doc.take()?;
+    let doc = &mut clip;
+    let SheetGeom { px, label_w, lane_h, ruler_h, event_h, dur, .. } = g;
+    // One lane per channel (its transform union) plus one per property track,
+    // counting only the rows the filter lets through.
+    let row_filter = st.row_filter.trim().to_lowercase();
+    let row_shown = |node: &str| {
+        row_filter.is_empty()
+            || node.to_lowercase().contains(&row_filter)
+            || (node.is_empty() && "(this node)".contains(&row_filter))
+    };
+    let n_rows: usize = doc
+        .channels
+        .iter()
+        .filter(|c| row_shown(&c.node))
+        .map(|c| {
+            let opened = if st.expanded_nodes.contains(&c.node) {
+                Lane::ALL.iter().filter(|&&l| lane_of(c, l).is_some()).count()
+            } else {
+                0
+            };
+            1 + opened + c.properties.len()
+        })
+        .sum();
+    let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
+    let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
+    if let Some(t) = st.scroll_target.take() {
+        area = area.scroll_offset(t);
+    }
+    let out = area.show(ui, |ui| {
+        let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
+        // The body is itself a click target, registered first so every lane/key
+        // widget layered on top wins the pointer — a click that reaches it hit
+        // empty space, which deselects (like clicking off in any editor).
+        let (full, bg_resp) =
+            ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::click_and_drag());
+        if bg_resp.clicked() {
+            st.sel_prop = None;
+            st.sel_event = None;
+            st.sel_keys.clear();
+        }
+        // Click-drag on empty sheet = marquee box select (keys layered on top win
+        // the pointer, so a drag that reaches here started on empty space). While
+        // dragging we rebuild sel_keys from the keys inside the box each frame.
+        if bg_resp.drag_started()
+            && let Some(p) = bg_resp.interact_pointer_pos()
+        {
+            st.marquee = Some((p, p));
+            st.sel_keys.clear();
+            st.sel_prop = None;
+        }
+        if bg_resp.dragged()
+            && let Some(p) = bg_resp.interact_pointer_pos()
+            && let Some(m) = st.marquee.as_mut()
+        {
+            m.1 = p;
+            st.sel_keys.clear();
+        }
+        if bg_resp.drag_stopped() {
+            st.marquee = None;
+        }
+        let marquee = st.marquee.map(|(a, b)| Rect::from_two_pos(a, b));
+        let painter = ui.painter_at(full);
+        let tl_left = full.left() + label_w;
+        // The edge of the name column drags to resize it, so a rig with long
+        // bone names gets the room it needs and a packed sheet gives it back.
+        let handle = Rect::from_min_size(Pos2::new(tl_left - 3.0, full.top()), egui::vec2(6.0, full.height()));
+        let hresp = ui.interact(handle, ui.id().with("anim-label-edge"), Sense::drag());
+        if hresp.hovered() || hresp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if hresp.dragged() {
+            st.label_w = (st.label_w + hresp.drag_delta().x).clamp(ANIM_LABEL_MIN, ANIM_LABEL_MAX);
+        }
+        painter.line_segment(
+            [Pos2::new(tl_left - 0.5, full.top()), Pos2::new(tl_left - 0.5, full.bottom())],
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+        // Row names stay inside their column whatever their length.
+        let label_painter = painter.with_clip_rect(Rect::from_min_max(
+            full.left_top(),
+            Pos2::new(tl_left - 2.0, full.bottom()),
+        ));
+        let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
+        let time_to_x = |t: f32| view.time_to_x(t);
+        let x_to_time = |x: f32| view.x_to_time(x);
+
+        // ---- ruler (scrub) ----
+        let ruler = Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px + 100.0, ruler_h));
+        let rresp = ui.interact(ruler, ui.id().with("anim-ruler"), Sense::click_and_drag());
+        if (rresp.dragged() || rresp.clicked())
+            && let Some(p) = rresp.interact_pointer_pos() {
+                st.playhead = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                st.preview_playing = false;
+            }
+        painter.rect_filled(ruler, 0.0, ui.visuals().extreme_bg_color);
+
+        // ---- event lane ----
+        let ev_rect = Rect::from_min_size(
+            Pos2::new(full.left(), full.top() + ruler_h),
+            egui::vec2(full.width(), event_h),
+        );
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(tl_left, ev_rect.top()), egui::vec2(dur * px, event_h)),
+            0.0,
+            ui.visuals().faint_bg_color,
+        );
+        painter.text(
+            Pos2::new(full.left() + 4.0, ev_rect.center().y),
+            Align2::LEFT_CENTER,
+            "⚑ events",
+            FontId::proportional(11.0),
+            EVENT_COLOR,
+        );
+        let mut ev_drag: Option<(usize, f32)> = None;
+        for (ei, ev) in doc.events.iter().enumerate() {
+            let x = time_to_x(ev.t);
+            let flag = Rect::from_center_size(Pos2::new(x, ev_rect.center().y), egui::vec2(12.0, event_h));
+            let id = ui.id().with(("anim-event", ei));
+            let resp = ui.interact(flag, id, Sense::click_and_drag());
+            let col = if st.sel_event == Some(ei) { ACCENT } else { EVENT_COLOR };
+            painter.line_segment(
+                [Pos2::new(x, ev_rect.top() + 2.0), Pos2::new(x, ev_rect.bottom() - 2.0)],
+                Stroke::new(2.0, col),
+            );
+            painter.text(
+                Pos2::new(x + 3.0, ev_rect.top() + 4.0),
+                Align2::LEFT_TOP,
+                &ev.func,
+                FontId::proportional(9.0),
+                col.gamma_multiply(0.9),
+            );
+            if resp.clicked() {
+                st.sel_event = Some(ei);
+                st.sel_prop = None;
+            }
+            if resp.dragged()
+                && let Some(p) = resp.interact_pointer_pos() {
+                    ev_drag = Some((ei, x_to_time(p.x)));
+                }
+            resp.context_menu(|ui| {
+                if ui.button("🗑 Delete event").clicked() {
+                    ev_drag = Some((ei, f32::NAN)); // NaN = delete
+                    ui.close();
+                }
+            });
+        }
+        if let Some((ei, t)) = ev_drag {
+            if t.is_nan() {
+                doc.events.remove(ei);
+                st.sel_event = None;
+            } else if let Some(ev) = doc.events.get_mut(ei) {
+                ev.t = crate::timeline::snap_time(t, st.snap_fps);
+                st.sel_event = Some(ei);
+            }
+            st.clip_dirty = true;
+        }
+
+        // ---- channel + property rows ----
+        // Each channel draws a node lane (the union of its transform keys) then
+        // one lane per property track indented beneath it — every lane shares the
+        // same time axis and the same draggable diamonds, so a spritesheet `cell`
+        // reads as a keyframe under its node, not a separate numeric panel.
+        //
+        // Lane interactions (registered under the keys, so keys win the pointer):
+        //   · double-click a lane strip = key there (pose / current value)
+        //   · right-click a label = the lane's menu (key, add property, step, delete)
+        //   · single-click empty lane = deselect
+        let rows_top = full.top() + ruler_h + event_h;
+        // Is the in-flight key drag moving a whole multi-selection together? (The
+        // dragged key must itself be part of a >1 selection.) If so its delta drags
+        // every selected key; otherwise only the one key moves.
+        let (drag_delta, group_move) = match st.key_drag {
+            Some((aci, aot, apt)) => {
+                let in_sel =
+                    st.sel_keys.iter().any(|&(c, t)| c == aci && (t - aot).abs() < 1e-6);
+                (apt - aot, in_sel && st.sel_keys.len() > 1)
+            }
+            None => (0.0, false),
+        };
+        // Live stretch factor while dragging the selection's right grip: selected
+        // keys scale around the selection's left edge (`sel_min`).
+        let (sel_min, sel_max) = {
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            for &(_, t) in &st.sel_keys {
+                lo = lo.min(t);
+                hi = hi.max(t);
+            }
+            (lo, hi)
+        };
+        let stretch_factor = match st.stretch_drag {
+            Some(newmax) if sel_max > sel_min + 1e-4 => {
+                Some(((newmax - sel_min) / (sel_max - sel_min)).max(0.02))
+            }
+            _ => None,
+        };
+        let drag = SheetDrag { drag_delta, group_move, sel_min, stretch_factor };
+        let c = SheetCanvas { full, tl_left, rows_top, painter: &painter, label_painter: &label_painter, marquee, view };
+        let acts = sheet_rows(ui, st, doc, live, g, &c, drag, flags, pending_select, &row_shown);
+        apply_row_actions(st, doc, live, flags, acts);
+        sheet_keys(ui, st, doc, g, flags, &row_shown);
+
+        // ---- stretch grip: scale the time-span of a multi-selection ----
+        // With ≥2 keys spanning a range selected, a span bar sits just under the
+        // event lane with an anchor tick at the left edge and a draggable grip at
+        // the right; dragging the grip scales every selected key's offset from the
+        // left edge (stretch/squash the timing). Applied once on release.
+        if st.sel_keys.len() >= 2 && sel_max > sel_min + 1e-4 {
+            let gy = full.top() + ruler_h + event_h - 3.0;
+            let cur_max = st.stretch_drag.unwrap_or(sel_max);
+            let lx = time_to_x(sel_min);
+            let rx = time_to_x(cur_max);
+            painter.line_segment(
+                [Pos2::new(lx, gy), Pos2::new(rx, gy)],
+                Stroke::new(2.0, STRETCH_COL.gamma_multiply(0.8)),
+            );
+            painter.line_segment(
+                [Pos2::new(lx, gy - 4.0), Pos2::new(lx, gy + 4.0)],
+                Stroke::new(2.0, STRETCH_COL),
+            );
+            let grip = Rect::from_center_size(Pos2::new(rx, gy), egui::vec2(9.0, 13.0));
+            let gresp = ui.interact(grip, ui.id().with("anim-stretch-grip"), Sense::click_and_drag());
+            painter.rect_filled(
+                grip,
+                2.0,
+                if gresp.hovered() || st.stretch_drag.is_some() { ACCENT } else { STRETCH_COL },
+            );
+            if gresp.drag_started() {
+                st.stretch_drag = Some(sel_max);
+            }
+            if gresp.dragged()
+                && let Some(p) = gresp.interact_pointer_pos()
+            {
+                st.stretch_drag = Some(
+                    crate::timeline::snap_time(x_to_time(p.x), st.snap_fps).max(sel_min + 0.02),
+                );
+            }
+            if gresp.drag_stopped()
+                && let Some(newmax) = st.stretch_drag.take()
+            {
+                let f = ((newmax - sel_min) / (sel_max - sel_min)).max(0.02);
+                if (f - 1.0).abs() > 1e-4 {
+                    let mut sel = st.sel_keys.clone();
+                    sel.sort_by(|a, b| a.1.total_cmp(&b.1));
+                    if f > 1.0 {
+                        sel.reverse(); // expanding → move the rightmost first
+                    }
+                    let mut new_sel = Vec::new();
+                    for (ci, t) in sel {
+                        let nt = (sel_min + (t - sel_min) * f).max(0.0);
+                        if let Some(ch) = doc.channels.get_mut(ci) {
+                            retime_channel(ch, t, nt);
+                        }
+                        new_sel.push((ci, nt));
+                    }
+                    st.sel_keys = new_sel;
+                    st.clip_dirty = true;
+                }
+            }
+        }
+
+        // ---- marquee selection box ----
+        if let Some(mq) = marquee {
+            painter.rect_filled(mq, 0.0, ACCENT.gamma_multiply(0.12));
+            painter.rect_stroke(
+                mq,
+                0.0,
+                Stroke::new(1.0, ACCENT.gamma_multiply(0.8)),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        // ---- playhead over everything ----
+        let xp = time_to_x(st.playhead.min(dur));
+        let ph_col = if st.record { RECORD_RED } else { PLAYHEAD };
+        painter.line_segment(
+            [Pos2::new(xp, full.top()), Pos2::new(xp, full.bottom())],
+            Stroke::new(1.5, ph_col),
+        );
+        let xe = time_to_x(dur);
+        painter.line_segment(
+            [Pos2::new(xe, full.top()), Pos2::new(xe, full.bottom())],
+            Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
+        );
+        // Recording: a red frame around the sheet — the second half of the
+        // ● REC cue, so it's unmissable that edits are being keyed.
+        if st.record {
+            painter.rect_stroke(
+                Rect::from_min_size(
+                    Pos2::new(tl_left, full.top()),
+                    egui::vec2(dur * px, full.height()),
+                ),
+                0.0,
+                Stroke::new(1.5, RECORD_RED.gamma_multiply(0.6)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // ruler ticks over the top strip
+        draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px, st.snap_fps);
+    });
+    st.clip_doc = Some((clip_name, clip));
+    Some(out)
+}
+
+/// What the rows asked for, applied once the painter's borrow ends: every
+/// edit here is deferred because the menus run inside it.
+#[derive(Default)]
+struct RowActions {
+    /// A transform lane retime: (channel, old t, new t).
+    retime: Option<(usize, f32, f32)>,
+    /// A retime on one transform lane of an opened node row.
+    lane_retime: Option<(usize, Lane, f32, f32)>,
+    /// A delete on one transform lane.
+    lane_delete: Option<(usize, Lane, f32)>,
+    /// An interpolation mode for one transform lane key.
+    lane_mode: Option<(usize, Lane, f32, Option<AnimInterpDoc>)>,
+    /// Open or close a node row.
+    toggle_expand: Option<String>,
+    /// Shift every selected key by this delta.
+    group_retime: Option<f32>,
+    /// Delete a transform key: (channel, t).
+    delete_key: Option<(usize, f32)>,
+    /// A property key retime: (ci, ti, old, new).
+    prop_retime: Option<(usize, usize, f32, f32)>,
+    /// A property key delete: (ci, ti, t).
+    prop_delete: Option<(usize, usize, f32)>,
+    /// A mode for a transform key: (channel, t, whole selection?, mode).
+    key_mode: Option<(usize, f32, bool, Option<AnimInterpDoc>)>,
+    /// A mode for a property key: (ci, ti, t, mode).
+    prop_key_mode: Option<(usize, usize, f32, Option<AnimInterpDoc>)>,
+    /// Select a property key: (ci, ti, ki).
+    prop_select: Option<(usize, usize, usize)>,
+    /// Key the live pose on channel ci at t.
+    pose_key_at: Option<(usize, f32)>,
+    /// Key the live or carried value: (ci, ti, t).
+    prop_key_at: Option<(usize, usize, f32)>,
+    /// Toggle a property track between step and smooth.
+    prop_step_toggle: Option<(usize, usize)>,
+    /// Remove a property track.
+    prop_remove: Option<(usize, usize)>,
+    /// Delete a whole channel.
+    chan_delete: Option<usize>,
+    /// Add a property track: (chan, comp, field).
+    add_track_for: Option<(String, String, String)>,
+}
+
+/// The sheet's canvas for this frame: the full rect, where the time axis
+/// starts, where the rows start, the painters, and the marquee in flight.
+struct SheetCanvas<'a> {
+    full: Rect,
+    tl_left: f32,
+    rows_top: f32,
+    painter: &'a egui::Painter,
+    label_painter: &'a egui::Painter,
+    marquee: Option<Rect>,
+    view: crate::timeline::TimelineView,
+}
+
+/// The in-flight drag facts every row reads: the key drag's delta and
+/// whether it moves the whole selection, the selection's left edge, and the
+/// live stretch factor.
+#[derive(Clone, Copy)]
+struct SheetDrag {
+    drag_delta: f32,
+    group_move: bool,
+    sel_min: f32,
+    stretch_factor: Option<f32>,
+}
+
+/// One row per channel, with its property tracks beneath it: the lanes,
+/// the keys, their drags and menus. Returns what they asked for.
+#[allow(clippy::too_many_arguments)]
+fn sheet_rows(
+    ui: &mut egui::Ui,
+    st: &mut AnimUiState,
+    doc: &mut AnimClipDoc,
+    live: &TimelineLive,
+    g: SheetGeom,
+    c: &SheetCanvas,
+    drag: SheetDrag,
+    flags: &mut SheetFlags,
+    pending_select: &mut Option<TrackSelect>,
+    row_shown: &dyn Fn(&str) -> bool,
+) -> RowActions {
+    let TimelineLive { live_trs, node_fields, chan_entity, bone_idx, .. } = live;
+    let SheetGeom { px, label_w, lane_h, ph, dur, .. } = g;
+    let SheetCanvas { full, tl_left, rows_top, painter, label_painter, marquee, view, .. } = *c;
+    let time_to_x = |t: f32| view.time_to_x(t);
+    let x_to_time = |x: f32| view.x_to_time(x);
+    let SheetDrag { drag_delta, group_move, sel_min, stretch_factor, .. } = drag;
+    let mut acts = RowActions::default();
+    let mut row_i = 0usize;
+    let stripe = |painter: &egui::Painter, row_i: usize, y: f32, ui: &egui::Ui| {
+        if row_i.is_multiple_of(2) {
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(tl_left, y), egui::vec2(dur * px, lane_h)),
+                0.0,
+                ui.visuals().faint_bg_color.gamma_multiply(0.6),
+            );
+        }
+    };
+    for ci in 0..doc.channels.len() {
+        if !row_shown(&doc.channels[ci].node) {
+            continue;
+        }
+        // --- node lane: label + transform-union diamonds ---
+        let y = rows_top + row_i as f32 * lane_h;
+        stripe(painter, row_i, y, ui);
+        row_i += 1;
+        let cy = y + lane_h * 0.5;
+        let chan_name = doc.channels[ci].node.clone();
+        let label =
+            if chan_name.is_empty() { "(this node)" } else { chan_name.as_str() };
+        // ⏵/⏷ at the left of a node with transform lanes opens it into them.
+        let has_lanes = Lane::ALL.iter().any(|&l| lane_of(&doc.channels[ci], l).is_some());
+        let expanded = has_lanes && st.expanded_nodes.contains(&chan_name);
+        let toggle_w = if has_lanes { 14.0 } else { 0.0 };
+        if has_lanes {
+            let trect = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(toggle_w, lane_h));
+            let tresp = ui.interact(trect, ui.id().with(("chan-expand", ci)), Sense::click());
+            if tresp.clicked() {
+                acts.toggle_expand = Some(chan_name.clone());
+            }
+            if let Some(font) = row_font(lane_h) {
+                label_painter.text(
+                    Pos2::new(full.left() + 2.0, cy),
+                    Align2::LEFT_CENTER,
+                    if expanded { "⏷" } else { "⏵" },
+                    font,
+                    if tresp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() },
+                );
+            }
+        }
+        // Label: right-click menu for the node's lane.
+        let label_rect =
+            Rect::from_min_size(Pos2::new(full.left() + toggle_w, y), egui::vec2(label_w - toggle_w, lane_h));
+        let lresp =
+            ui.interact(label_rect, ui.id().with(("chan-label", ci)), Sense::click());
+        {
+            let existing: Vec<(String, String)> = doc.channels[ci]
+                .properties
+                .iter()
+                .map(|p| (p.component.clone(), p.field.clone()))
+                .collect();
+            lresp.context_menu(|ui| {
+                if live_trs.contains_key(&chan_name)
+                    && ui.button("⏺ Key pose at playhead").clicked()
+                {
+                    acts.pose_key_at = Some((ci, ph));
+                    ui.close();
+                }
+                if let Some((_, _, fields)) =
+                    node_fields.iter().find(|(c, _, _)| *c == chan_name)
+                {
+                    // Same cascade as the header's ✚ Property, for the
+                    // same reason: flat, a material's three dozen fields
+                    // bury the four anybody wants.
+                    ui.menu_button("✚ Add property", |ui| {
+                        let mut comps: Vec<&str> = Vec::new();
+                        for (c, _, _) in fields {
+                            if !comps.contains(&c.as_str()) {
+                                comps.push(c.as_str());
+                            }
+                        }
+                        for comp in comps {
+                            let mine: Vec<&(String, String, &'static str)> =
+                                fields.iter().filter(|(c, _, _)| c == comp).collect();
+                            let mut lane = |ui: &mut egui::Ui, field: &String| {
+                                let has =
+                                    existing.iter().any(|(c, f)| c == comp && f == field);
+                                if ui
+                                    .add_enabled(!has, egui::Button::new(field))
+                                    .clicked()
+                                {
+                                    acts.add_track_for = Some((
+                                        chan_name.clone(),
+                                        comp.to_string(),
+                                        field.clone(),
+                                    ));
+                                    ui.close();
+                                }
+                            };
+                            ui.menu_button(comp, |ui| {
+                                for (_, field, _) in
+                                    mine.iter().filter(|(_, _, g)| g.is_empty())
+                                {
+                                    lane(ui, field);
+                                }
+                                let mut groups: Vec<&str> = Vec::new();
+                                for (_, _, g) in &mine {
+                                    if !g.is_empty() && !groups.contains(g) {
+                                        groups.push(g);
+                                    }
+                                }
+                                for g in groups {
+                                    ui.menu_button(g, |ui| {
+                                        for (_, field, _) in
+                                            mine.iter().filter(|(_, _, fg)| *fg == g)
+                                        {
+                                            lane(ui, field);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+                if ui.button("🗑 Delete node track").clicked() {
+                    acts.chan_delete = Some(ci);
+                    ui.close();
+                }
+            });
+        }
+        // Clicking a track's label selects the bone/node it drives, back in
+        // the scene (so you can grab its gizmo) — deferred past the borrow.
+        if lresp.clicked() {
+            if let Some(&bi) = bone_idx.get(&chan_name) {
+                *pending_select = Some(TrackSelect::Bone(bi));
+            } else if let Some(&e) = chan_entity.get(&chan_name) {
+                *pending_select = Some(TrackSelect::Node(e));
+            }
+        }
+        if let Some(font) = row_font(lane_h) {
+            label_painter.text(
+                Pos2::new(full.left() + 4.0 + toggle_w, cy),
+                Align2::LEFT_CENTER,
+                label,
+                font,
+                if lresp.hovered() {
+                    ui.visuals().strong_text_color()
+                } else {
+                    ui.visuals().text_color()
+                },
+            );
+        }
+        // A row too short for its name still says it on hover.
+        if row_font(lane_h).is_none() {
+            lresp.clone().on_hover_text(label);
+        }
+        // Lane strip: double-click keys the node's current pose there;
+        // right-click inserts a key at the click position; a plain click on
+        // empty lane deselects.
+        let lane_strip = Rect::from_min_size(
+            Pos2::new(tl_left, y),
+            egui::vec2(dur * px, lane_h),
+        );
+        let sresp =
+            ui.interact(lane_strip, ui.id().with(("chan-lane", ci)), Sense::click());
+        if sresp.clicked() {
+            st.sel_prop = None;
+            st.sel_event = None;
+        }
+        if sresp.double_clicked()
+            && live_trs.contains_key(&chan_name)
+            && let Some(p) = sresp.interact_pointer_pos()
+        {
+            acts.pose_key_at =
+                Some((ci, crate::timeline::snap_time(x_to_time(p.x), st.snap_fps)));
+        }
+        if live_trs.contains_key(&chan_name) || bone_idx.contains_key(&chan_name) {
+            sresp.context_menu(|ui| {
+                if ui
+                    .button("⏺ Insert key here")
+                    .on_hover_text("key this node's current pose at the click position")
+                    .clicked()
+                {
+                    // The menu opens at the cursor; its left edge ≈ the click x.
+                    let mx = ui.min_rect().left();
+                    acts.pose_key_at =
+                        Some((ci, crate::timeline::snap_time(x_to_time(mx), st.snap_fps)));
+                    ui.close();
+                }
+            });
+        }
+        let times = union_times(&doc.channels[ci]);
+        for (ki, &t) in times.iter().enumerate() {
+            let selected =
+                st.sel_keys.iter().any(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6);
+            // A drag previews at the pointer but the doc is only retimed on
+            // Release — live-resorting mid-drag would hand it to a neighbour.
+            // A group move shifts every selected key by the anchor's delta; a
+            // stretch scales selected keys around the selection's left edge.
+            let dragging_this = st
+                .key_drag
+                .is_some_and(|(dci, ot, _)| dci == ci && (ot - t).abs() < 1e-6);
+            let draw_t = if dragging_this {
+                st.key_drag.unwrap().2
+            } else if group_move && selected {
+                (t + drag_delta).max(0.0)
+            } else if let (Some(f), true) = (stretch_factor, selected) {
+                sel_min + (t - sel_min) * f
+            } else {
+                t
+            };
+            let c = Pos2::new(time_to_x(draw_t), cy);
+            // Marquee box select: a key whose diamond falls in the box joins
+            // the selection (rebuilt each drag frame).
+            if let Some(mq) = marquee
+                && mq.contains(c)
+                && !selected
+            {
+                st.sel_keys.push((ci, t));
+            }
+            let id = ui.id().with(("anim-key", ci, ki));
+            let resp = ui
+                .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
+            let col = if resp.hovered() || dragging_this || selected {
+                ACCENT
+            } else {
+                KEY_COLOR
+            };
+            key_diamond(painter, c, col, channel_key_mode(&doc.channels[ci], t), key_size(lane_h));
+            if selected {
+                // A ring around multi-selected keys, so a selection reads at a glance.
+                painter.circle_stroke(c, key_size(lane_h) + 3.5, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)));
+            }
+            if resp.clicked() {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if shift {
+                    if let Some(p) =
+                        st.sel_keys.iter().position(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6)
+                    {
+                        st.sel_keys.remove(p);
+                    } else {
+                        st.sel_keys.push((ci, t));
+                    }
+                } else {
+                    st.sel_keys = vec![(ci, t)];
+                }
+                st.sel_prop = None;
+                st.sel_event = None;
+            }
+            if resp.drag_started() {
+                st.key_drag = Some((ci, t, t));
+                // Dragging a key that isn't in the selection makes it the selection.
+                if !selected {
+                    st.sel_keys = vec![(ci, t)];
+                }
+            }
+            if resp.dragged()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                if let Some(kd) = st.key_drag.as_mut()
+                    && kd.0 == ci
+                    && (kd.1 - t).abs() < 1e-6
+                {
+                    kd.2 = nt;
+                }
+            }
+            if resp.drag_stopped()
+                && let Some((dci, ot, nt)) = st.key_drag.take()
+                && dci == ci
+                && (ot - t).abs() < 1e-6
+                && (nt - ot).abs() > 1e-6
+            {
+                // A multi-selection moves as one; a lone key retimes by itself.
+                if group_move {
+                    acts.group_retime = Some(nt - ot);
+                } else {
+                    acts.retime = Some((ci, ot, nt));
+                }
+            }
+            resp.context_menu(|ui| {
+                // Acting on a multi-selection? Offer the batch verbs.
+                if selected && st.sel_keys.len() > 1 {
+                    if ui.button(format!("🗑 Delete {} keys", st.sel_keys.len())).clicked() {
+                        flags.delete_sel = true;
+                        ui.close();
+                    }
+                    if ui.button("⎘ Copy keys").clicked() {
+                        flags.copy_keys = true;
+                        ui.close();
+                    }
+                } else if ui.button("🗑 Delete key").clicked() {
+                    acts.delete_key = Some((ci, t));
+                    ui.close();
+                }
+                // How this key reaches the next one — per key, because
+                // a clip holds on its beats and eases through the rest.
+                ui.separator();
+                let current = channel_key_mode(&doc.channels[ci], t);
+                let lane_default = doc.channels[ci]
+                    .translation
+                    .as_ref()
+                    .map(|l| l.step)
+                    .or(doc.channels[ci].rotation.as_ref().map(|l| l.step))
+                    .unwrap_or(false);
+                interp_menu(ui, current, lane_default, &mut |mode| {
+                    acts.key_mode = Some((ci, t, selected && st.sel_keys.len() > 1, mode));
+                });
+            });
+        }
+        // --- an opened node: one row per transform lane, each key editable
+        // on its own — retime, delete, interpolation — without touching the
+        // other two lanes at that time.
+        if expanded {
+            for lane in Lane::ALL {
+                let Some(l) = lane_of(&doc.channels[ci], lane) else { continue };
+                let y = rows_top + row_i as f32 * lane_h;
+                stripe(painter, row_i, y, ui);
+                row_i += 1;
+                let cy = y + lane_h * 0.5;
+                if let Some(font) = row_font(lane_h) {
+                    label_painter.text(
+                        Pos2::new(full.left() + 18.0 + toggle_w, cy),
+                        Align2::LEFT_CENTER,
+                        lane.label(),
+                        font,
+                        lane.color().gamma_multiply(0.85),
+                    );
+                }
+                let (times, modes, step): (Vec<f32>, Vec<AnimKeyModeDoc>, bool) =
+                    (l.times().to_vec(), l.modes().to_vec(), l.step());
+                for (ki, &t) in times.iter().enumerate() {
+                    let dragging_this = st
+                        .lane_key_drag
+                        .is_some_and(|(dci, dl, ot, _)| dci == ci && dl == lane && same_key_time(ot, t));
+                    let draw_t = if dragging_this { st.lane_key_drag.unwrap().3 } else { t };
+                    let c = Pos2::new(time_to_x(draw_t), cy);
+                    let id = ui.id().with(("anim-lane-key", ci, lane as u8, ki));
+                    let resp = ui.interact(
+                        Rect::from_center_size(c, key_hit(lane_h)),
+                        id,
+                        Sense::click_and_drag(),
+                    );
+                    let col = if resp.hovered() || dragging_this { ACCENT } else { lane.color() };
+                    key_diamond(painter, c, col, key_mode_at(&modes, t), key_size(lane_h));
+                    if resp.drag_started() {
+                        st.lane_key_drag = Some((ci, lane, t, t));
+                    }
+                    if resp.dragged()
+                        && let Some(p) = resp.interact_pointer_pos()
+                        && let Some(kd) = st.lane_key_drag.as_mut()
+                        && kd.0 == ci
+                        && kd.1 == lane
+                        && same_key_time(kd.2, t)
+                    {
+                        kd.3 = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                    }
+                    if resp.drag_stopped()
+                        && let Some((dci, dl, ot, nt)) = st.lane_key_drag.take()
+                        && dci == ci
+                        && dl == lane
+                        && same_key_time(ot, t)
+                        && !same_key_time(nt, ot)
+                    {
+                        acts.lane_retime = Some((ci, lane, ot, nt));
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("🗑 Delete key").clicked() {
+                            acts.lane_delete = Some((ci, lane, t));
+                            ui.close();
+                        }
+                        ui.separator();
+                        interp_menu(ui, key_mode_at(&modes, t), step, &mut |mode| {
+                            acts.lane_mode = Some((ci, lane, t, mode));
+                        });
+                    });
+                }
+            }
+        }
+        // --- property lanes, indented under the node ---
+        for ti in 0..doc.channels[ci].properties.len() {
+            let y = rows_top + row_i as f32 * lane_h;
+            stripe(painter, row_i, y, ui);
+            row_i += 1;
+            let cy = y + lane_h * 0.5;
+            let (comp, field, step) = {
+                let pt = &doc.channels[ci].properties[ti];
+                (pt.component.clone(), pt.field.clone(), pt.step)
+            };
+            // Label: right-click menu for this property lane.
+            let label_rect = Rect::from_min_size(
+                Pos2::new(full.left(), y),
+                egui::vec2(label_w, lane_h),
+            );
+            let plresp = ui.interact(
+                label_rect,
+                ui.id().with(("prop-label", ci, ti)),
+                Sense::click(),
+            );
+            plresp.context_menu(|ui| {
+                if ui
+                    .button("✚ Key current value at playhead")
+                    .on_hover_text("writes the value the node has right now")
+                    .clicked()
+                {
+                    acts.prop_key_at = Some((ci, ti, ph));
+                    ui.close();
+                }
+                // Text and frames cannot blend at all, so offering the
+                // toggle there is a control that does nothing: the
+                // conversion forces Step back on load, so all it did was
+                // persist a lie into the file.
+                if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
+                    && ui
+                        .selectable_label(step, "Step (hold each key)")
+                        .on_hover_text(
+                            "no blending between keys — right for spritesheet frames",
+                        )
+                        .clicked()
+                {
+                    acts.prop_step_toggle = Some((ci, ti));
+                    ui.close();
+                }
+                if ui.button("🗑 Delete track").clicked() {
+                    acts.prop_remove = Some((ci, ti));
+                    ui.close();
+                }
+            });
+            if let Some(font) = row_font(lane_h) {
+                label_painter.text(
+                    Pos2::new(full.left() + 10.0, cy),
+                    Align2::LEFT_CENTER,
+                    format!("   {comp}.{field}"),
+                    font,
+                    if plresp.hovered() {
+                        PROP_LABEL_COLOR.gamma_multiply(1.4)
+                    } else {
+                        PROP_LABEL_COLOR
+                    },
+                );
+            } else {
+                plresp.clone().on_hover_text(format!("{comp}.{field}"));
+            }
+            // Lane strip: double-click = key the current value at that time.
+            let lane_strip = Rect::from_min_size(
+                Pos2::new(tl_left, y),
+                egui::vec2(dur * px, lane_h),
+            );
+            let presp = ui.interact(
+                lane_strip,
+                ui.id().with(("prop-lane", ci, ti)),
+                Sense::click(),
+            );
+            if presp.clicked() {
+                st.sel_prop = None;
+                st.sel_event = None;
+            }
+            if presp.double_clicked()
+                && let Some(p) = presp.interact_pointer_pos()
+            {
+                acts.prop_key_at = Some((
+                    ci,
+                    ti,
+                    crate::timeline::snap_time(x_to_time(p.x), st.snap_fps),
+                ));
+            }
+            let n_keys = doc.channels[ci].properties[ti].times.len();
+            for ki in 0..n_keys {
+                let t = doc.channels[ci].properties[ti].times[ki];
+                let dragging_this = st.prop_key_drag.is_some_and(|(dci, dti, ot, _)| {
+                    dci == ci && dti == ti && (ot - t).abs() < 1e-6
+                });
+                let draw_t = if dragging_this { st.prop_key_drag.unwrap().3 } else { t };
+                let c = Pos2::new(time_to_x(draw_t), cy);
+                let id = ui.id().with(("anim-prop-key", ci, ti, ki));
+                let resp = ui
+                    .interact(Rect::from_center_size(c, key_hit(lane_h)), id, Sense::click_and_drag());
+                let selected = st.sel_prop == Some((ci, ti, ki));
+                let col = if resp.hovered() || dragging_this || selected {
+                    ACCENT
+                } else {
+                    PROP_KEY_COLOR
+                };
+                key_diamond(
+                    painter,
+                    c,
+                    col,
+                    key_mode_at(&doc.channels[ci].properties[ti].modes, t),
+                    key_size(lane_h),
+                );
+                if resp.clicked() {
+                    acts.prop_select = Some((ci, ti, ki));
+                }
+                if resp.drag_started() {
+                    st.prop_key_drag = Some((ci, ti, t, t));
+                    acts.prop_select = Some((ci, ti, ki));
+                }
+                if resp.dragged()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                    if let Some(kd) = st.prop_key_drag.as_mut()
+                        && kd.0 == ci
+                        && kd.1 == ti
+                        && (kd.2 - t).abs() < 1e-6
+                    {
+                        kd.3 = nt;
+                    }
+                }
+                if resp.drag_stopped()
+                    && let Some((dci, dti, ot, nt)) = st.prop_key_drag.take()
+                    && dci == ci
+                    && dti == ti
+                    && (ot - t).abs() < 1e-6
+                    && (nt - ot).abs() > 1e-6
+                {
+                    acts.prop_retime = Some((ci, ti, ot, nt));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("🗑 Delete key").clicked() {
+                        acts.prop_delete = Some((ci, ti, t));
+                        ui.close();
+                    }
+                    // Not offered on a text or frame lane: those cannot
+                    // blend at all, the conversion forces Step on load,
+                    // and a control that only persists a lie into the
+                    // file is worse than no control.
+                    if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
+                    {
+                        ui.separator();
+                        let pt = &doc.channels[ci].properties[ti];
+                        let current = key_mode_at(&pt.modes, t);
+                        interp_menu(ui, current, pt.step, &mut |mode| {
+                            acts.prop_key_mode = Some((ci, ti, t, mode));
+                        });
+                    }
+                });
+            }
+        }
+    }
+    if doc.channels.is_empty() {
+        painter.text(
+            Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
+            Align2::LEFT_CENTER,
+            "no keys yet — ● Record then pose nodes / change properties, or ✚ Property to add a lane",
+            FontId::proportional(11.5),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    acts
+}
+
+/// Apply what the rows asked for, once the painter's borrow has ended.
+fn apply_row_actions(st: &mut AnimUiState, doc: &mut AnimClipDoc, live: &TimelineLive, flags: &SheetFlags, acts: RowActions) {
+    let TimelineLive { live_trs, live_vals, live_frames, live_strs, .. } = live;
+    if let Some((ci, old, new)) = acts.retime {
+        retime_channel(&mut doc.channels[ci], old, new);
+        st.clip_dirty = true;
+    }
+    if let Some((ci, lane, old, new)) = acts.lane_retime
+        && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
+    {
+        l.retime(old, new.max(0.0));
+        st.clip_dirty = true;
+    }
+    if let Some((ci, lane, t)) = acts.lane_delete {
+        delete_lane_key(&mut doc.channels[ci], lane, t);
+        drop_empty_channel(doc, ci);
+        st.clip_dirty = true;
+    }
+    if let Some((ci, lane, t, mode)) = acts.lane_mode
+        && let Some(l) = lane_of_mut(&mut doc.channels[ci], lane)
+    {
+        set_key_mode(l.modes_mut(), t, mode);
+        st.clip_dirty = true;
+    }
+    if let Some(name) = acts.toggle_expand
+        && !st.expanded_nodes.remove(&name)
+    {
+        st.expanded_nodes.insert(name);
+    }
+    // Group move: shift every selected key by the same delta. Process in a
+    // collision-safe order (rightmost first when moving right) so a key never
+    // lands on — and merges into — a not-yet-moved neighbour.
+    if let Some(delta) = acts.group_retime.filter(|d| d.abs() > 1e-6) {
+        let mut sel = st.sel_keys.clone();
+        sel.sort_by(|a, b| a.1.total_cmp(&b.1));
+        if delta > 0.0 {
+            sel.reverse();
+        }
+        let mut new_sel = Vec::new();
+        for (ci, t) in sel {
+            let nt = (t + delta).max(0.0);
+            if let Some(ch) = doc.channels.get_mut(ci) {
+                retime_channel(ch, t, nt);
+            }
+            new_sel.push((ci, nt));
+        }
+        st.sel_keys = new_sel;
+        st.clip_dirty = true;
+    }
+    if let Some((ci, t)) = acts.delete_key {
+        delete_channel_key(&mut doc.channels[ci], t);
+        drop_empty_channel(doc, ci);
+        st.clip_dirty = true;
+    }
+    if let Some((ci, t, whole_selection, mode)) = acts.key_mode {
+        let targets: Vec<(usize, f32)> = if whole_selection {
+            st.sel_keys.clone()
+        } else {
+            vec![(ci, t)]
+        };
+        for (ci, t) in targets {
+            if let Some(ch) = doc.channels.get_mut(ci) {
+                set_channel_key_mode(ch, t, mode);
+            }
+        }
+        st.clip_dirty = true;
+    }
+    if let Some((ci, ti, t, mode)) = acts.prop_key_mode
+        && let Some(pt) = doc.channels[ci].properties.get_mut(ti)
+    {
+        set_key_mode(&mut pt.modes, t, mode);
+        st.clip_dirty = true;
+    }
+    // Context-menu "Delete N keys" (works regardless of keyboard focus).
+    if flags.delete_sel && !st.sel_keys.is_empty() {
+        let targets: Vec<(String, f32)> = st
+            .sel_keys
+            .iter()
+            .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
+            .collect();
+        for (node, t) in targets {
+            if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
+                delete_channel_key(&mut doc.channels[ci], t);
+                drop_empty_channel(doc, ci);
+            }
+        }
+        st.sel_keys.clear();
+        st.clip_dirty = true;
+    }
+    if let Some(sel) = acts.prop_select {
+        st.sel_prop = Some(sel);
+        st.sel_event = None;
+    }
+    if let Some((ci, ti, old, new)) = acts.prop_retime {
+        retime_property_key(&mut doc.channels[ci].properties[ti], old, new);
+        st.sel_prop = None; // key indices shift after a acts.retime
+        st.clip_dirty = true;
+    }
+    if let Some((ci, ti, t)) = acts.prop_delete {
+        delete_property_key(doc, ci, ti, t);
+        st.sel_prop = None;
+        st.clip_dirty = true;
+    }
+    // Deferred lane actions (context menus / double-clicks).
+    if let Some((ci, t)) = acts.pose_key_at {
+        let name = doc.channels[ci].node.clone();
+        if let Some(trs) = live_trs.get(&name) {
+            write_key(doc, &name, t, trs);
+            st.clip_dirty = true;
+        }
+    }
+    if let Some((ci, ti, t)) = acts.prop_key_at {
+        let (chan, comp, field) = {
+            let pt = &doc.channels[ci].properties[ti];
+            (doc.channels[ci].node.clone(), pt.component.clone(), pt.field.clone())
+        };
+        let kind = prop_kind(&comp, &field);
+        let key = (chan.clone(), comp, field);
+        let live = live_vals.get(&key).copied();
+        let ki = key_property_current(
+            &mut doc.channels[ci].properties[ti],
+            t,
+            kind,
+            live,
+            live_strs.get(&key),
+            live_frames.get(&chan),
+        );
+        // Select the fresh key so its value is instantly editable below.
+        st.sel_prop = Some((ci, ti, ki));
+        st.sel_event = None;
+        if t > doc.duration {
+            doc.duration = t;
+        }
+        st.clip_dirty = true;
+    }
+    if let Some((chan, comp, field)) = acts.add_track_for {
+        add_property_track(doc, &chan, &comp, &field);
+        st.clip_dirty = true;
+    }
+    if let Some((ci, ti)) = acts.prop_step_toggle {
+        let pt = &mut doc.channels[ci].properties[ti];
+        pt.step = !pt.step;
+        st.clip_dirty = true;
+    }
+    if let Some((ci, ti)) = acts.prop_remove {
+        doc.channels[ci].properties.remove(ti);
+        drop_empty_channel(doc, ci);
+        st.sel_prop = None;
+        st.clip_dirty = true;
+    }
+    if let Some(ci) = acts.chan_delete {
+        doc.channels.remove(ci);
+        st.sel_prop = None;
+        st.clip_dirty = true;
+    }
+}
+
+/// The keyboard over the sheet: transport, undo, the clipboard, selection
+/// and deletion — only when the sheet owns the chord and no text field has
+/// focus.
+fn sheet_keys(ui: &mut egui::Ui, st: &mut AnimUiState, doc: &mut AnimClipDoc, g: SheetGeom, flags: &mut SheetFlags, row_shown: &dyn Fn(&str) -> bool) {
+    let SheetGeom { dur, playing, tab_focused, .. } = g;
+    // ---- keyboard transport (only when no text field is focused, not playing) ----
+    //
+    // What yields is a text field (a clip name, a numeric entry), which
+    // `text_edit_focused` asks and the window-level `typing` gate uses.
+    // `m.focused().is_none()` would be "nothing anywhere in the editor
+    // has focus", and egui focuses every clickable widget you click, so
+    // clicking a lane header, a state button, the ⏵ transport or any
+    // slider in this panel would switch the whole transport off.
+    //
+    // The other half is ownership. The window handler routes Ctrl+C/V
+    // to the scene whenever the timeline does not own the chord, so
+    // without this a paste aimed at the Hierarchy would also drop
+    // keyframes at the playhead. One chord, one owner: the focused tab
+    // or the panel under the pointer, both halves read by `main.rs`
+    // too, so the two sides cannot disagree about who is about to act.
+    let owns_chord = tab_focused || st.sheet_hovered;
+    if !playing && owns_chord && !ui.ctx().text_edit_focused() {
+        // egui turns Ctrl+C/X/V into Copy/Cut/Paste events (the raw key is
+        // consumed), so those must be read from `events`, not key_pressed —
+        // that was why copy/paste "did nothing". Undo/redo have no such event.
+        let (sp, home, end, left, right, del, fit, ctrl, shift, z, y, a, dup, prevk, nextk, copy_ev, cut_ev, paste_ev) =
+            ui.input(|i| {
+                let (mut co, mut cu, mut pa) = (false, false, false);
+                for e in &i.events {
+                    match e {
+                        egui::Event::Copy => co = true,
+                        egui::Event::Cut => cu = true,
+                        egui::Event::Paste(_) => pa = true,
+                        _ => {}
+                    }
+                }
+                (
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                    i.key_pressed(egui::Key::F),
+                    i.modifiers.command || i.modifiers.ctrl,
+                    i.modifiers.shift,
+                    i.key_pressed(egui::Key::Z),
+                    i.key_pressed(egui::Key::Y),
+                    i.key_pressed(egui::Key::A),
+                    i.key_pressed(egui::Key::D),
+                    i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::OpenBracket),
+                    i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::CloseBracket),
+                    co,
+                    cu,
+                    pa,
+                )
+            });
+        let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+        // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo the clip edits.
+        if ctrl && z && !shift {
+            flags.do_undo = true;
+        }
+        if ctrl && (y || (z && shift)) {
+            flags.do_redo = true;
+        }
+        // Copy / cut / paste selected transform keys (from egui clipboard events).
+        if copy_ev || cut_ev {
+            flags.copy_keys = true;
+            if cut_ev {
+                flags.cut_keys = true;
+            }
+        }
+        if paste_ev {
+            flags.paste_keys = true;
+        }
+        // Ctrl+A select every transform key; Ctrl+D duplicate the selection at
+        // the playhead (same path as paste). , / . (or [ / ]) jump the playhead
+        // to the previous / next keyframe across all lanes.
+        if ctrl && a {
+            // Every key on a shown row: a filtered sheet selects what it shows.
+            st.sel_keys.clear();
+            for (ci, ch) in doc.channels.iter().enumerate().filter(|(_, ch)| row_shown(&ch.node)) {
+                for t in union_times(ch) {
+                    st.sel_keys.push((ci, t));
+                }
+            }
+            st.sel_prop = None;
+        }
+        if ctrl && dup {
+            flags.dup_keys = true;
+        }
+        if prevk || nextk {
+            let mut all: Vec<f32> = Vec::new();
+            for ch in &doc.channels {
+                all.extend(union_times(ch));
+            }
+            all.sort_by(|x, y| x.total_cmp(y));
+            let cur = st.playhead;
+            if nextk {
+                if let Some(&t) = all.iter().find(|&&t| t > cur + 1e-4) {
+                    st.playhead = t;
+                }
+            } else if let Some(&t) = all.iter().rev().find(|&&t| t < cur - 1e-4) {
+                st.playhead = t;
+            }
+            st.preview_playing = false;
+        }
+        if sp {
+            st.preview_playing = !st.preview_playing;
+        }
+        if home {
+            st.playhead = 0.0;
+            st.preview_playing = false;
+        }
+        if end {
+            st.playhead = dur;
+            st.preview_playing = false;
+        }
+        if left {
+            st.playhead = (st.playhead - step).max(0.0);
+            st.preview_playing = false;
+        }
+        if right {
+            st.playhead = (st.playhead + step).min(dur);
+            st.preview_playing = false;
+        }
+        if fit {
+            st.fit_pending = true;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Tab)) {
+            st.curves.on = true;
+        }
+        // Delete removes the multi-selected transform keys first, then a
+        // selected property key, then a selected event.
+        if del && !st.sel_keys.is_empty() {
+            // Resolve to (node name, time) so channel-index shifts from
+            // emptied-channel cleanup can't mis-target a later deletion.
+            let targets: Vec<(String, f32)> = st
+                .sel_keys
+                .iter()
+                .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
+                .collect();
+            for (node, t) in targets {
+                if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
+                    delete_channel_key(&mut doc.channels[ci], t);
+                    drop_empty_channel(doc, ci);
+                }
+            }
+            st.sel_keys.clear();
+            st.clip_dirty = true;
+        } else if del {
+            if let Some((ci, ti, ki)) = st.sel_prop.take() {
+                let removed = doc
+                    .channels
+                    .get_mut(ci)
+                    .and_then(|c| c.properties.get_mut(ti))
+                    .is_some_and(|pt| {
+                        if ki < pt.times.len() {
+                            pt.times.remove(ki);
+                            pt.values.remove(ki);
+                            if pt.times.is_empty() {
+                                // fall through to track/channel cleanup below
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                if removed {
+                    if doc.channels[ci].properties[ti].times.is_empty() {
+                        doc.channels[ci].properties.remove(ti);
+                    }
+                    drop_empty_channel(doc, ci);
+                    st.clip_dirty = true;
+                }
+            } else if let Some(ei) = st.sel_event.take()
+                && ei < doc.events.len()
+            {
+                doc.events.remove(ei);
+                st.clip_dirty = true;
+            }
+        }
+    }
+}
+
 fn anim_sheet_after(st: &mut AnimUiState, undo_snap: Option<(String, AnimClipDoc)>, dirty_before: bool) {
     if !dirty_before
         && st.clip_dirty
