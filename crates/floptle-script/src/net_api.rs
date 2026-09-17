@@ -1003,9 +1003,8 @@ pub(crate) fn install_net_api(
             "spawn",
             lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
                 // Keys first, role second: a client calling this is a no-op by
-                // design, and finding out a year later that the options table
-                // was also misspelled the whole time is the failure this task is
-                // about.
+                // design, and an options table misspelled the whole time must
+                // not hide behind that.
                 if let Some(o) = &opts {
                     crate::opts::check_keys(o, SPAWN_KEYS, "net.spawn")?;
                 }

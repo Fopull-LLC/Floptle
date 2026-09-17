@@ -272,8 +272,8 @@ mod readout_tests {
 
 /// Which refresh period to hold, given what the platform just said.
 ///
-/// Pulled out of [`Editor::reread_refresh_period`] because it is the whole of
-/// that task's second half and it cannot be tested through a real window.
+/// Pulled out of [`Editor::reread_refresh_period`] because it cannot be
+/// tested through a real window.
 ///
 /// * `held` — what we already believe (0 = nothing yet).
 /// * `current` — `current_monitor()`'s refresh in mHz, if it answered.

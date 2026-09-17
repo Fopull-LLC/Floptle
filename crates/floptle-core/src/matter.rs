@@ -2053,8 +2053,8 @@ impl Matter {
     /// Every spelling `projection = ...` accepts, and the list an error prints.
     ///
     /// One list, read by both [`parse_projection`](Self::parse_projection) and
-    /// the message — that task's rule, because the two drifting is how
-    /// `pin = "topCenter"` ended up silently meaning top-left.
+    /// the message: the two drifting is how a `pin = "topCenter"` comes to
+    /// silently mean top-left.
     pub const PROJECTION_ACCEPTS: &'static [&'static str] =
         &["perspective", "persp", "3d", "orthographic", "ortho", "2d"];
 

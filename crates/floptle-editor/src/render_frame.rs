@@ -176,9 +176,9 @@ impl Editor {
         // frame + threaded writes — autosaves must never stutter the game.
         self.step_terrain_checkpoint();
         {
-            // Terrain: residency, field generation and meshing.
-            // `0074` came in as "I can see through unloaded terrain" and was a
-            // priority bug; a number here would have shown the meshing queue.
+            // Terrain: residency, field generation and meshing. "I can see
+            // through unloaded terrain" is the meshing queue, and this number
+            // shows it.
             let _t = floptle_core::profile::Span::new();
             self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
             self.profile_record(floptle_core::profile::Bucket::Terrain, _t.ms());

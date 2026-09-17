@@ -332,14 +332,12 @@ end\n";
 
     /// A two-fighter scene, as a document — the thing a replay is played from.
     ///
-    /// ⚠ **`Matter` is not decoration here.** `floptle_scene::to_doc` iterates
-    /// `query::<Matter>()`, so an entity without one is not serialized at all.
-    /// This fixture had no `Matter` for the whole life of the feature, which
-    /// made every document it produced empty — so every shadow bound zero
-    /// nodes, `fingerprint` returned `""`, and every test in this module
-    /// compared one empty string to another and passed. Two real referee faults
-    /// shipped through that hole (that task's build pass and 0041's
-    /// physics). [`ring_is_not_hollow`] is what stops it recurring.
+    /// `Matter` is not decoration here. `floptle_scene::to_doc` iterates
+    /// `query::<Matter>()`, so an entity without one is not serialized at all:
+    /// a fixture with no `Matter` produces an empty document, every shadow
+    /// binds zero nodes, `fingerprint` returns `""`, and every test in this
+    /// module compares one empty string to another and passes.
+    /// [`ring_is_not_hollow`] is what stops that.
     fn ring(gravity: bool) -> floptle_scene::SceneDoc {
         use floptle_core::Matter;
         let mut w = World::default();

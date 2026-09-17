@@ -157,8 +157,8 @@ pub struct Counts {
     pub draws: usize,
     /// Terrain chunks resident (meshed and in memory).
     pub chunks: usize,
-    /// Scatter props submitted this frame. `0071` was a report of 117,000 of
-    /// these and no way to see the number.
+    /// Scatter props submitted this frame. A field can ask for 117,000 of
+    /// these, and this is how you see the number.
     pub props: usize,
     /// Live particles across every effect.
     pub particles: usize,

@@ -212,7 +212,7 @@ mod tests {
     /// The radius conversion is CONSERVATIVE: it contains the box it came from,
     /// including the corners, at any rotation.
     ///
-    /// This is the calculation the task warned about. `size/2` — the obvious
+    /// `size/2` — the obvious
     /// wrong answer — is a sphere inscribed in the box, and a long thin model
     /// turned 45° pops out of it.
     #[test]

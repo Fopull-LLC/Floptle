@@ -1778,8 +1778,7 @@ mod tests {
         );
     }
 
-    /// The end-to-end case that task's adversarial-review follow-up
-    /// exists for: a catalogue entry whose permissions field is present but
+    /// The end-to-end case: a catalogue entry whose permissions field is present but
     /// unreadable must still show a chip, not read as though nothing were
     /// declared — this is the one field whose whole job is warning someone
     /// before they install something.

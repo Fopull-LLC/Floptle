@@ -273,8 +273,8 @@ impl Editor {
     /// scene, so "the mirror is rebuilding" does not mean "this particular
     /// map changed". Comparing against `ext_tilemap_cache` (survives the
     /// mirror being replaced) is what tells the two apart: the comparison
-    /// itself is an O(grid) scan, same as that task's fix for the
-    /// game-script mirror, but it allocates nothing, and an `Rc::clone` is
+    /// itself is an O(grid) scan, the same as the game-script mirror's, but
+    /// it allocates nothing, and an `Rc::clone` is
     /// all a call that finds no change costs.
     fn fill_mirror_tilemaps(&mut self, mirror: &mut SceneMirror) {
         let mut live = std::collections::HashSet::new();

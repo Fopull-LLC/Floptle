@@ -268,10 +268,9 @@ impl Agent {
             // is not running", and on a unit that is already active it does
             // nothing — so the agent would write a corrected unit, log that it
             // had started it, and leave the old process running the old command
-            // line forever. That is not a hypothetical: it is what happened on
-            // `us-east-1` when that task's fix first reached the box, and
-            // the fix read as a failure because the file on disk was right and
-            // the running process was a day old. Reaching this branch at all
+            // line forever — and a fix then reads as a failure, because the
+            // file on disk is right and the running process is a day old.
+            // Reaching this branch at all
             // means the text changed, which means the running process is
             // serving something other than what the control plane asked for.
             host.run("systemctl", &["restart", &name])?;
@@ -680,13 +679,10 @@ mod tests {
     /// `systemctl enable --now` on a unit that is already active does nothing:
     /// `--now` means "start it if it is not running", and it was running. So
     /// the agent could write a corrected unit file, log that it had started it,
-    /// and leave the old process running the old command line forever.
-    ///
-    /// That is not hypothetical — it is what happened on `us-east-1` the first
-    /// time that task's fix reached the box. The unit file on disk had the
-    /// new `RuntimeDirectory=` and the new `--status-file`; the process was a
-    /// day-old one still writing to the path that never worked, so the status
-    /// file was still missing and the fix looked like it had failed.
+    /// and leave the old process running the old command line forever: a unit
+    /// file on disk with the new `RuntimeDirectory=` and the new
+    /// `--status-file`, a day-old process still writing to the path that never
+    /// worked, and a fix that looks like it failed.
     #[test]
     fn a_unit_whose_text_changed_is_restarted_rather_than_merely_started() {
         let dir = tmp("rewrite");
@@ -716,16 +712,15 @@ mod tests {
         );
     }
 
-    /// ⚠ **The game key is on disk for root alone, and a rotated key restarts
-    /// the server**.
+    /// The game key is on disk for root alone, and a rotated key restarts
+    /// the server.
     ///
-    /// Found on `us-east-1`: the unit file carried `Environment=FLOPTLE_GAME_KEY=`
-    /// at `0644`, so `sudo -u nobody cat` read another developer's credential
-    /// — the very thing 0229 tightened the runtime directory against. The key
-    /// now lives in a `0600` file the unit names with `EnvironmentFile=`. And
-    /// because that file is read at start, a rotation that changes only the
-    /// key must still restart the unit, or the old key runs until something
-    /// else bounces it.
+    /// The key lives in a `0600` file the unit names with `EnvironmentFile=`,
+    /// never in the unit file itself: a unit file is `0644`, and
+    /// `Environment=FLOPTLE_GAME_KEY=` in it lets `sudo -u nobody cat` read
+    /// another developer's credential. Because that file is read at start, a
+    /// rotation that changes only the key must still restart the unit, or the
+    /// old key runs until something else bounces it.
     #[test]
     fn the_game_key_is_a_root_only_file_and_a_rotated_key_restarts_the_server() {
         use std::os::unix::fs::PermissionsExt;

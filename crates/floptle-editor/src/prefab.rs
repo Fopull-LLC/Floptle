@@ -112,8 +112,8 @@ impl Editor {
 
     /// Write the whole world back over the prefab file being edited.
     ///
-    /// Overwrites: this is the "in place" half of the task, and it
-    /// is the difference between editing a prefab and making another one.
+    /// Overwrites: that is the difference between editing a prefab and making
+    /// another one.
     pub(crate) fn save_prefab_in_place(&mut self) -> bool {
         let Some(path) = self.editing_prefab.clone() else { return false };
         // Every node in the world, top level first — `subtree_docs` walks the

@@ -87,8 +87,8 @@ mod tests {
         for (k, why) in RESERVED {
             assert!(!why.is_empty(), "{k} is reserved with no reason given");
         }
-        // Tab is the key this task is about. It must not be on the list: the fix
-        // is that the game gets it, not that the editor documents keeping it.
+        // Tab must not be on the list: the game gets it, rather than the
+        // editor documenting keeping it.
         assert!(reserved_reason("tab").is_none(), "the game is supposed to get Tab now");
         assert!(reserved_reason("i").is_none());
         assert_eq!(reserved_reason("f1"), Some("Play / Stop"));

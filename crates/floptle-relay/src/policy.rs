@@ -1560,10 +1560,9 @@ mod tests {
         assert_eq!(row.ccu, 1, "the occupancy is still there");
     }
 
-    /// ⚠ **A sample says which addresses a key's lobbies are hosted from, and
-    /// the breakdown sums to the lobby count**. This is the
-    /// field 0228's first step — count and show, refuse nothing — cannot
-    /// start without. A host that comes back from a different address after
+    /// A sample says which addresses a key's lobbies are hosted from, and the
+    /// breakdown sums to the lobby count. Counting and showing, refusing
+    /// nothing, starts here. A host that comes back from a different address after
     /// a blip is counted where it is now.
     #[test]
     fn a_usage_sample_partitions_a_keys_lobbies_by_host_address() {

@@ -368,8 +368,8 @@ impl Light2d {
             bind_group_layouts: &[Some(&lights_layout), Some(&read_layout)],
             immediate_size: 0,
         });
-        // The two halves of that task's signed delta. Identical but for the
-        // entry point and the blend OPERATION — both take the source as-is
+        // The two halves of the signed delta. Identical but for the
+        // entry point and the blend operation — both take the source as-is
         // (`One`/`One`), one subtracting it from the frame and one adding it.
         //
         // Not one pipeline with a signed source: a fixed-point colour target

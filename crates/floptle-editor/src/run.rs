@@ -1154,10 +1154,9 @@ mod tests {
     /// The acceptance test `floptle run` exists to make possible, and the one
     /// that says the number above measures what it claims to.
     ///
-    /// `net.setRelevant(node, peer, false)` is that task's whole promise —
-    /// the cheat-resistance of a hidden-role game is *defined* by what a client
-    /// is not sent — and until there was a way to be a client, every project
-    /// relying on it took it on trust.
+    /// `net.setRelevant(node, peer, false)` is the whole promise — the
+    /// cheat-resistance of a hidden-role game is *defined* by what a client is
+    /// not sent — and only a client can check it.
     ///
     /// It is also what proves the report is honest. Counting the ids a client
     /// bound locally would answer the same for both peers here, because both

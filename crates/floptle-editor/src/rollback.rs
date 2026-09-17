@@ -690,7 +690,7 @@ impl RollbackDriver {
     }
 
     /// Step the simulation backwards one tick, from the state ring
-    /// (`docs/multiplayer.md` §7 P5 — closes 0024's deferred item).
+    /// (`docs/multiplayer.md` §7 P5).
     ///
     /// Frame-stepping forwards is easy; stepping back is not, because a
     /// simulation is not invertible. It only works here because rollback

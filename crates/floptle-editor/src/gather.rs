@@ -2127,9 +2127,9 @@ impl Editor {
                     SCATTER_BUDGET,
                     &mut instances,
                 );
-                // Scatter. `0071` was filed as "currently unplayable" and was a
-                // field asking for 117,000 props; `props` in the counts below is
-                // that number, and this is what it cost.
+                // Scatter. A field can ask for 117,000 props and make a scene
+                // unplayable; `props` in the counts below is that number, and
+                // this is what it cost.
                 scatter_props = instances.len().saturating_sub(before_scatter);
                 profile
                     .borrow_mut()

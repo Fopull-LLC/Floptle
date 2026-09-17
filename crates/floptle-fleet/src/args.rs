@@ -176,12 +176,11 @@ an endpoint that will refuse it every ten seconds forever.
     /// **In a directory of its own, not a file beside the others** — the
     /// directory is what a unit can be given. The server runs `DynamicUser=yes`
     /// under `ProtectSystem=strict`, so it can write nowhere it is not handed
-    /// explicitly, and the agent's own runtime directory (root, `0755`) was
-    /// exactly such a place: that task's first defect was every deployment
-    /// reporting zero players and no lobby code forever, because the file was
-    /// never written and nothing said so. Each server now declares
-    /// [`Args::runtime_directory`] and systemd creates it owned by that
-    /// server's user.
+    /// explicitly, and the agent's own runtime directory (root, `0755`) is
+    /// exactly such a place: a status file there is never written, nothing
+    /// says so, and every deployment reports zero players and no lobby code
+    /// forever. Each server declares [`Args::runtime_directory`] and systemd
+    /// creates it owned by that server's user.
     pub fn status_file(&self, deployment_id: &str) -> PathBuf {
         self.run.join(crate::unit::sanitize(deployment_id)).join("status.json")
     }
@@ -358,9 +357,9 @@ mod tests {
     /// **The status file is in a directory systemd can hand to the server.**
     ///
     /// The unit's `RuntimeDirectory=` is relative to `/run`, so a `--run`
-    /// anywhere else is a unit whose status file silently never appears —
-    /// the exact shape of that task's first defect — and the agent says
-    /// so instead of writing one. The id is sanitised on the way in, the same
+    /// anywhere else is a unit whose status file silently never appears,
+    /// and the agent says so instead of writing one. The id is sanitised on
+    /// the way in, the same
     /// way the unit name is, because it becomes a path.
     #[test]
     fn the_status_directory_is_the_units_own_and_under_run() {
