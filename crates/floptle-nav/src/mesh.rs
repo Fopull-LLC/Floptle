@@ -165,9 +165,9 @@ pub struct NavMesh {
     /// derived from the polygons and rebuilding it costs a fraction of what
     /// carrying it costs.
     ///
-    /// **Both must be cleared by anything that mutates the polygons or the
-    /// links** — a `OnceLock` will otherwise keep serving the answer it
-    /// computed for the mesh that used to be here. [`NavMesh::carve`] does;
+    /// Both must be cleared by anything that mutates the polygons or the
+    /// links — a `OnceLock` will otherwise keep serving the answer it
+    /// computed for the mesh that was here. [`NavMesh::carve`] does;
     /// see [`crate::carve`].
     #[serde(skip)]
     pub(crate) index: OnceLock<PolyIndex>,

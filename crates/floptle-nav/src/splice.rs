@@ -220,7 +220,7 @@ impl NavMesh {
             }
             for l in ls {
                 if !hit[l.to] {
-                    seam.push(map[l.to]); // a survivor that used to border the box
+                    seam.push(map[l.to]); // a survivor that bordered the box
                 }
             }
         }

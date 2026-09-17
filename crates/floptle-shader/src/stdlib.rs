@@ -202,9 +202,9 @@ pub static OPS: &[OpSpec] = &[
 /// Every op category, in palette order.
 ///
 /// One list, because there are two palettes (the graph tab's node menu and the
-/// IDE's autocomplete) and they used to hardcode a copy each — so an op in a new
-/// category compiled, documented and worked, and was simply never offered to
-/// anybody. A test keeps this exhaustive.
+/// IDE's autocomplete): with a copy each, an op in a new category compiles,
+/// documents and works, and is simply never offered to anybody. A test keeps
+/// this exhaustive.
 pub const CATEGORIES: &[&str] = &["math", "noise", "color", "texture", "sdf", "engine", "screen"];
 
 /// Look up an op by its `.flsl` name.

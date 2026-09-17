@@ -1390,9 +1390,8 @@ mod tests {
     ///
     /// A lane-wide `Interp` cannot express this at all, and it is what "stepped
     /// animation" actually means: a clip that holds each pose and snaps on the
-    /// beats the animator chose, not a clip that never interpolates anywhere.
-    /// The only way to author a hold in a smooth lane used to be keying the same
-    /// value twice and hoping nobody retimed it.
+    /// beats the animator chose, not a clip that never interpolates anywhere —
+    /// and not keying the same value twice and hoping nobody retimes it.
     ///
     /// The mode belongs to the key the playhead is LEAVING — the segment after
     /// it — which is the convention every keyframe editor uses and the only one

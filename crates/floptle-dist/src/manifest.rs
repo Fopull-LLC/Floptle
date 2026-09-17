@@ -133,10 +133,10 @@ impl Manifest {
 
     /// The same list without copying anything.
     ///
-    /// Worth having since [`ReleaseInfo::notes`] arrived: an entry used to be a version
-    /// string and three URLs, and is now that plus a few KB of Markdown. Anything asking
-    /// a *question* of the list — "is there a newer one?", asked several times per frame
-    /// by the update checks — must not clone the whole history to answer it.
+    /// An entry is a version string, three URLs and, in [`ReleaseInfo::notes`], a few KB
+    /// of Markdown. Anything asking a *question* of the list — "is there a newer one?",
+    /// asked several times per frame by the update checks — must not clone the whole
+    /// history to answer it.
     pub fn on_channel_refs(&self, channel: &str) -> Vec<&ReleaseInfo> {
         let mut v: Vec<&ReleaseInfo> =
             self.versions.iter().filter(|r| r.channel == channel).collect();

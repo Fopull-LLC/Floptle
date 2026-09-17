@@ -47,9 +47,8 @@ pub(crate) fn newell(mesh: &MapMesh, face: &Face) -> Vec3 {
 
 /// Split one face into triangles, as local corner indices (0..k) into `face.verts`.
 ///
-/// **Not a fan from corner 0**, which is what this used to be and what made editing
-/// feel broken. A fan is only correct for a face that is both convex and planar, and
-/// dragging a single vertex destroys either property:
+/// Not a fan from corner 0. A fan is only correct for a face that is both convex and
+/// planar, and dragging a single vertex destroys either property:
 ///
 /// - **Concave** — a fan emits triangles that leave the polygon entirely, so the face
 ///   visibly spills outside its own outline.

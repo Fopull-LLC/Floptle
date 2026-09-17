@@ -297,13 +297,12 @@ pub struct UsageSample {
     /// none. A page that reads the two the same way tells a developer nobody
     /// was turned away when the truth is that nobody knows.
     pub refused_joins: u32,
-    /// **Payload that arrived for a lobby that did not exist**.
+    /// Payload that arrived for a lobby that did not exist.
     ///
-    /// ⚠ These bytes used to be visible only as `bytes_in` exceeding
-    /// `bytes_out` — and that is literally how a host being torn down three
-    /// times inside one real match was found, by differencing two counters that
-    /// had matched to the byte in every other bucket ever recorded. Anything
-    /// above zero means somebody is sending into a lobby that is gone.
+    /// Its own counter: as a difference between `bytes_in` and `bytes_out` it
+    /// is invisible until somebody thinks to subtract. Anything above zero
+    /// means somebody is sending into a lobby that is gone — a host torn down
+    /// mid-match, for one.
     pub orphan_bytes: u64,
     /// **Where this key's live lobbies are hosted from**:
     /// one entry per address, `lobbies` summing to the sample's `lobbies`.

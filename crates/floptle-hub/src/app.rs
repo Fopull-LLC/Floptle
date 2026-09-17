@@ -1610,12 +1610,10 @@ impl HubApp {
     /// Versions, and what each one was. A list on the left, the selected release's
     /// notes on the right.
     ///
-    /// The notes are the point of the redesign. The Hub used to show a version as a
-    /// number, a date and an Install button, which told somebody deciding whether to
-    /// upgrade precisely nothing — the answer lived on a GitHub page they had to go and
-    /// find. They ship in the manifest now (`docs/releases/vX.Y.Z.md`, embedded at
-    /// publish time), so every release explains itself here, including the ones already
-    /// installed and the ones from before this existed.
+    /// The notes are the point. A version as a number, a date and an Install button
+    /// tells somebody deciding whether to upgrade precisely nothing. They ship in the
+    /// manifest (`docs/releases/vX.Y.Z.md`, embedded at publish time), so every release
+    /// explains itself here, including the ones already installed.
     fn installs_tab(&mut self, ui: &mut egui::Ui) {
         let rows = self.version_rows();
 
@@ -1708,12 +1706,10 @@ impl HubApp {
                                 .as_ref()
                                 .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
 
-                        // one ROW, one HIT target. This used to be a `selectable_label`
-                        // for the version and an unclickable line of state under it — so
-                        // the actual target was the width of the text "0.21.0" and one
-                        // line tall, with dead space around it that looked clickable and
-                        // wasn't. The whole card takes the click now: full column width,
-                        // both lines, and the padding.
+                        // One row, one hit target: the whole card takes the click —
+                        // full column width, both lines, and the padding — rather than
+                        // a `selectable_label` the width of the text "0.21.0" with dead
+                        // space around it that looks clickable and isn't.
                         let row_h = if r.title.is_empty() { 42.0 } else { 46.0 };
                         let (rect, resp) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width(), row_h),

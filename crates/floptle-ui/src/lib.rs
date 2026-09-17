@@ -357,16 +357,15 @@ pub struct TextSpec {
 
 /// One stretch of a text run with its own colour.
 ///
-/// `TextSpec` used to carry exactly one colour for the entire string, which is
-/// a fine default and the wrong floor: the moment a game writes prose at the
-/// player it wants a proper noun in the speaker's colour, a keyword tinted to
-/// match the key it names, an item name in its rarity. The only way to do that
-/// was to split the line into sibling elements and lay them out by hand, which
+/// One colour for a whole `TextSpec` is a fine default and the wrong floor:
+/// the moment a game writes prose at the player it wants a proper noun in the
+/// speaker's colour, a keyword tinted to match the key it names, an item name
+/// in its rarity. Splitting the line into sibling elements laid out by hand
 /// re-wraps wrong at every resolution, breaks the moment the string is
 /// translated, and is impossible for text revealed a glyph at a time.
 ///
-/// **Spans style; they never lay out.** Wrapping, alignment, `max_lines` and
-/// ellipsis are all computed across the whole string exactly as before, so a
+/// Spans style; they never lay out. Wrapping, alignment, `max_lines` and
+/// ellipsis are all computed across the whole string, so a
 /// span boundary is not a line-break opportunity a plain string would not have
 /// had — a two-colour run wraps identically to the same string in one colour,
 /// and a test says so. That is also why a span cannot change `size` or `font`:

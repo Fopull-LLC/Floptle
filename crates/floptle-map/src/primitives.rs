@@ -369,8 +369,8 @@ pub fn arch(half: Vec3, opening: Vec2, segments: u32) -> MapMesh {
     // Order matters: the arc is a semicircle of the opening's half-width, so a
     // WIDE, low arch has to give up width or the cap wouldn't fit under the
     // ceiling. Capping `w` first also keeps the `h` clamp's bounds ordered —
-    // `f32::clamp` panics outright when min > max, which is how a broad, short
-    // arch used to take the whole editor down with it.
+    // `f32::clamp` panics outright when min > max, and a broad, short arch
+    // would take the whole editor down with it.
     let max_h = hy * 1.98;
     let w = opening.x.clamp(0.02, (hx * 0.98).min(max_h));
     let h = opening.y.clamp(w, max_h);
@@ -408,7 +408,7 @@ pub fn arch(half: Vec3, opening: Vec2, segments: u32) -> MapMesh {
         .collect();
     // Lintel: per-segment front/back spandrel + arc soffit + top (per segment
     // too — one big top quad would leave every arc vertex stranded on its
-    // edge, which is what used to tear the mesh apart on a face drag).
+    // edge, and a face drag would tear the mesh apart there).
     // (the arc runs left to right, so a1 is the +X end of each span)
     for pair in arc.windows(2) {
         let (a0, a1) = (pair[0], pair[1]);

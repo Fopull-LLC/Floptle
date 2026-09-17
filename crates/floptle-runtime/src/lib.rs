@@ -5,15 +5,11 @@
 //! of this release so is the *engine* under it: `floptle_editor::dedicated` is
 //! the editor's own play/host tick with no window and no local player.
 //!
-//! **This crate used to carry a second, smaller server**, re-derived from that
-//! tick once and never caught up with it. It drained no `NetCmd` at all — so
-//! `net.spawn`, `net.despawn`, `net.setOwner`, `net.kick`, `net.setRelevant`
-//! and a server-originated `net.send` were silent no-ops on a dedicated server
-//! — had no lag-compensation history, passed no terrain volumes, hard-coded
-//! uniform gravity, never loaded a project's packages, and never stepped
-//! animation or nav. None of that was a bug anyone wrote; it was the cost of
-//! there being two of something. So there is one, and this is the alias that
-//! keeps the flag working.
+//! One server, not a second smaller one re-derived from that tick: a copy
+//! drifts — no `NetCmd` drained, so `net.spawn`, `net.kick` and the rest go
+//! silent on a dedicated server; no lag-compensation history; no terrain
+//! volumes; uniform gravity; no packages; no animation or nav. This is the
+//! alias that keeps the flag working.
 
 // **The dedicated server needs to LISTEN**, on QUIC or through a relay, and a
 // browser tab cannot: it can open connections, never accept them. There is also

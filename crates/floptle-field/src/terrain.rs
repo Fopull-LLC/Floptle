@@ -50,10 +50,10 @@ pub enum Brush {
 /// The shape of a brush's weight from its center to its rim — the thing that decides
 /// whether a stroke reads as a soft airbrush or a hard stamp.
 ///
-/// Every brush in the editor (terrain sculpt/paint and vertex paint) runs through this,
-/// because both used to hardcode `w = strength * (1 - d/radius)` — a fixed linear ramp.
-/// That is *why* everything looked blurry: there was no profile to configure, only one
-/// soft gradient. Two knobs, deliberately, in the shape artists already know:
+/// Every brush in the editor (terrain sculpt/paint and vertex paint) runs through this:
+/// a fixed linear ramp — `w = strength * (1 - d/radius)` — is one soft gradient, and
+/// everything painted with it looks blurry. Two knobs, in the shape artists already
+/// know:
 ///
 /// * `hardness` — the fraction of the radius that gets full weight before any falloff
 ///   starts. `1.0` = a hard-edged stamp with no gradient at all (the N64/PS1 look);
@@ -741,11 +741,10 @@ mod tests {
     /// grows faster than distance itself can. Break that and the march STEPS PAST the
     /// surface; the symptom is blotchy AO and speckle, not an obvious crash.
     ///
-    /// `grow` used to fill new cells with `box_distance(..) + edge_air`. Summing two
-    /// distance-like terms sums their gradients — two aligned unit gradients give 2.0.
-    /// Measured on a real 289×271×307 field: 14.4% of near-surface voxels violated
-    /// the bound, p95 |∇d| = 2.25. That ~2.0 is the sum. `max` unions the same two
-    /// bounds while staying 1-Lipschitz.
+    /// `grow` fills new cells with `max`, not `box_distance(..) + edge_air`: summing two
+    /// distance-like terms sums their gradients — two aligned unit gradients give 2.0,
+    /// and on a real 289×271×307 field 14.4% of near-surface voxels break the bound
+    /// (p95 |∇d| = 2.25). `max` unions the same two bounds while staying 1-Lipschitz.
     #[test]
     fn a_hard_brush_has_no_gradient_and_a_soft_one_is_all_gradient() {
         let hard = BrushProfile::hard();

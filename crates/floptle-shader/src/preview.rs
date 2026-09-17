@@ -303,8 +303,8 @@ fn target_vis(
             let e = match (stage, i) {
                 // `time` first, and for every stage: it is the one input that
                 // means the same thing everywhere, and each stage's catch-all
-                // below is an error arm — a Ui or Post shader that read the
-                // clock used to be told the clock did not exist.
+                // below is an error arm that would tell a Ui or Post shader
+                // the clock does not exist.
                 (_, Input::Time) => "fract(G.params.x * 0.25)",
                 (Stage::Fragment | Stage::Ui | Stage::Post, Input::Uv) => "in.uv",
                 (Stage::Post, _) => {

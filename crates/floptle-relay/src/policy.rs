@@ -95,11 +95,11 @@ pub struct CloudPolicy {
     cursor: Option<String>,
     last_pull_ok: Option<Instant>,
     pull_in_flight: bool,
-    /// **When a failed pull may be tried again**. `None` when
-    /// the last pull succeeded, and the healthy cadence applies. A failure
-    /// used to leave `last_pull_ok` old and the loop re-pulling the instant
-    /// the previous attempt returned — fifteen a second for nine hours, each
-    /// one logged, until the relay's own lines evicted its journal.
+    /// When a failed pull may be tried again. `None` when the last pull
+    /// succeeded, and the healthy cadence applies. Without it a failure leaves
+    /// `last_pull_ok` old and the loop re-pulling the instant the previous
+    /// attempt returns — fifteen a second, each one logged, until the relay's
+    /// own lines evict its journal.
     retry_at: Option<Instant>,
     /// The current retry interval: doubles per failure from
     /// [`RETRY_MIN`] up to [`PULL_INTERVAL`], resets on success.

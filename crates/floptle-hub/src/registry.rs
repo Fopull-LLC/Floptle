@@ -64,11 +64,11 @@ pub fn editor_bin_name() -> &'static str {
     if cfg!(windows) { "floptle.exe" } else { "floptle" }
 }
 
-/// Scan `versions/` for installed bundles. The VERSION comes from the bundle's
+/// Scan `versions/` for installed bundles. The version comes from the bundle's
 /// own `version.json` when present — so a hand-unpacked archive counts as a
-/// real install whatever its folder is called (unpacking
-/// `floptle-0.1.3-linux-x86_64/` by hand used to register as an install named
-/// after the folder, which matched no release and read as "not installed").
+/// real install whatever its folder is called (an install named after a
+/// `floptle-0.1.3-linux-x86_64/` folder matches no release and reads as
+/// "not installed").
 /// Version-named dirs without a `version.json` still count (legacy bundles).
 /// Skips hidden/staging dirs (`.staging-*`); duplicates of one version keep
 /// the first found. A broken install (missing binary) is still listed so the

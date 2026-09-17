@@ -1107,11 +1107,11 @@ impl Crowd {
         ride.progress = (ride.progress + dt / seconds).min(1.0);
         let t = ride.progress;
         let was = agent.pos;
-        // Along the crossing's own curve, not a straight line between its ends.
-        // A drop used to slide down an invisible ramp — the one place the agent
-        // layer visibly disagreed with the overlay drawn over it — and now both
-        // ask `arc_point`. A placed link is still a straight line, because a
-        // ladder that arcs is a ladder nobody built.
+        // Along the crossing's own curve, not a straight line between its ends:
+        // the agent layer and the overlay drawn over it both ask `arc_point`,
+        // so a drop does not slide down an invisible ramp. A placed link is
+        // still a straight line, because a ladder that arcs is a ladder nobody
+        // built.
         agent.pos = crate::link::arc_point(ride.kind, ride.from, ride.to, t);
         // Read off the movement rather than off the ends, so a script watching
         // `velocity` during a fall sees a fall. `dt` can be zero on a paused

@@ -74,11 +74,11 @@ pub fn extrude_faces(mesh: &mut MapMesh, faces: &[u32], distance: f32) -> Vec<u3
     for &fi in &sel {
         nsum += newell(mesh, &mesh.faces[fi]);
     }
-    // A closed selection has no direction to go. Every face of a box sums to zero, so
-    // "select all, press E" used to normalize a zero vector, fall back to +Y, and
-    // translate the entire shell upward — while making no walls (nothing is a boundary
-    // edge) and leaving every original vertex behind as an orphan that still draws as a
-    // dot and still box-selects. That reads exactly like "the tool invented vertices".
+    // A closed selection has no direction to go. Every face of a box sums to zero;
+    // normalizing that, falling back to +Y and translating the entire shell upward
+    // would make no walls (nothing is a boundary edge) and leave every original
+    // vertex behind as an orphan that still draws as a dot and still box-selects —
+    // which reads exactly like "the tool invented vertices".
     // Refusing is the honest answer: there is no such thing as extruding a closed solid
     // along its own normals.
     let Some(dir) = nsum.try_normalize() else {

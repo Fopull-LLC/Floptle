@@ -1434,16 +1434,14 @@ mod tests {
     /// is what lets a caller fall back to [`floptle_services::NullPlatform`]
     /// rather than crash.
     ///
-    /// **This deliberately does not assert which way.** It used to assert
-    /// `is_err()`, on the reasoning that no Steam client runs in CI — true
-    /// there, and false on the machine of anybody actually developing this
-    /// crate, who has Steam open. App 480 (Spacewar) is free to every Steam
-    /// account, so with a client running `SteamAPI_Init` genuinely SUCCEEDS
-    /// and the old assertion failed. Worse, it failed by panicking mid-test:
-    /// unwinding dropped a live client, whose `SteamAPI_Shutdown` then
-    /// deadlocked against the callback thread and hung the whole suite in
-    /// `futex_wait` — a test-suite hang whose cause looks nothing like "an
-    /// assertion about an unrelated thing was environment-dependent".
+    /// This does not assert which way. `is_err()` is true in CI, where no
+    /// Steam client runs, and false on the machine of anybody actually
+    /// developing this crate, who has Steam open: App 480 (Spacewar) is free
+    /// to every Steam account, so with a client running `SteamAPI_Init`
+    /// genuinely succeeds. An assertion that panics mid-test here is worse
+    /// than wrong: unwinding drops a live client, whose `SteamAPI_Shutdown`
+    /// then deadlocks against the callback thread and hangs the whole suite
+    /// in `futex_wait`.
     ///
     /// The environment-independent claim is the one the caller actually
     /// relies on, so that is what this asserts.

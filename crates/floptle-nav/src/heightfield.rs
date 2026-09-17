@@ -13,9 +13,9 @@
 //! **Ground** — anything within `max_slope` of flat — records one height. Where
 //! the column's centre is on the triangle that height is read off it exactly,
 //! which is what keeps a ramp a ramp rather than a staircase; on a column the
-//! triangle only clips, it comes off the same plane, extended. Ground narrower
-//! than a column used to fall between centres and vanish — a catwalk, a kerb,
-//! the lip of a step — and does not now.
+//! triangle only clips, it comes off the same plane, extended, so ground
+//! narrower than a column — a catwalk, a kerb, the lip of a step — does not
+//! fall between centres and vanish.
 //!
 //! **A wall is not a height at all.** A vertical face projects to a line in plan:
 //! it has no area, contains no column centre, and sampling could never see it. A

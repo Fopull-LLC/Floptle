@@ -132,10 +132,9 @@ pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
 /// binary matters is the caller's business, not this crate's.
 /// The counterpart of [`unpack`]: everything in `dir` into one `.tar.gz`.
 ///
-/// **This exists so a developer never has to type a `tar` line.** Shipping a
-/// dedicated server used to be "export, then run this command off our website,
-/// then upload" — and the middle step is the one that assumes a shell, gets
-/// `-C` wrong, and produced both of the hand-rolled bundles that exist.
+/// This exists so a developer never has to type a `tar` line: "export, then
+/// run this command off our website, then upload" has a middle step that
+/// assumes a shell and gets `-C` wrong.
 /// The archive is written with the directory's CONTENTS at
 /// the top level, which is the shape the fleet agent unpacks and the control
 /// plane's index walk reads.
