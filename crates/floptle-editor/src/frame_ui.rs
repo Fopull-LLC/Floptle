@@ -929,7 +929,7 @@ impl Editor {
         playing: bool,
         net: &NetSnapshot,
     ) {
-        let NetSnapshot { net_hosting, net_peer_count, net_as_player, net_rtt, net_pred_stats, net_late_inputs, net_is_real, replays } = net.clone();
+        let net_hosting = net.net_hosting;
         let net_has_client = self.net_client.is_some();
         // Per-player pings, host side — what a relay could never report.
         let net_peer_rtts = self.net_server.as_ref().map(|s| s.peer_rtts()).unwrap_or_default();
@@ -988,566 +988,211 @@ impl Editor {
                         );
                         return;
                     }
-                    if net_hosting && !net_peer_rtts.is_empty() {
-                        ui.small(
-                            net_peer_rtts
-                                .iter()
-                                .map(|(p, r)| format!("peer {p}: {r:.0} ms"))
-                                .collect::<Vec<_>>()
-                                .join(" · "),
-                        )
-                        .on_hover_text(
-                            "measured host↔player round trip. Probed end to end rather \
-                             than read off the transport, because through a relay the \
-                             transport only sees its own leg — it would report host↔relay \
-                             and call it the player's ping.",
-                        );
-                    }
-                    // ---- interest management, when the host turned it on ----
-                    if let Some((cfg, stats)) = &net_interest {
-                        ui.separator();
-                        ui.label(format!(
-                            "👁 interest · {:.0} m radius · {} KB/s per client{}",
-                            cfg.radius,
-                            cfg.budget_bytes_per_sec / 1024,
-                            if cfg.occlusion { " · line of sight" } else { "" }
-                        ))
-                        .on_hover_text(
-                            "each client is told about its own neighbourhood instead of the \
-                             whole world. Nothing is dropped for good — what doesn't fit \
-                             the budget accrues priority and goes in a later snapshot.\n\n\
-                             A radius is a BANDWIDTH boundary, not a security one: a client \
-                             told where everyone within it is standing knows where they \
-                             are, whatever it draws. Line of sight is the part that answers \
-                             that — net.host{ interestOcclusion = \"Level\" }.",
-                        );
-                        if stats.is_empty() {
-                            ui.small("no clients yet — nothing to build a relevant set from");
-                        }
-                        for (peer, st) in stats {
-                            let line = format!(
-                                "peer {peer}: {} of {} sent · {} B{}{}",
-                                st.sent,
-                                st.relevant,
-                                st.bytes,
-                                if st.deferred > 0 {
-                                    format!(" · {} waiting", st.deferred)
-                                } else {
-                                    String::new()
-                                },
-                                // What this client is not being told, and
-                                // by which rule. "Is my filter working"
-                                // has to be a number, or a project turns
-                                // one on and cannot tell it from a typo.
-                                if st.withheld() > 0 {
-                                    format!(
-                                        " · withheld {} ({} far{}{})",
-                                        st.withheld(),
-                                        st.withheld_radius,
-                                        if st.withheld_occluded > 0 {
-                                            format!(", {} unseen", st.withheld_occluded)
-                                        } else {
-                                            String::new()
-                                        },
-                                        if st.withheld_filter > 0 {
-                                            format!(", {} by the game", st.withheld_filter)
-                                        } else {
-                                            String::new()
-                                        },
-                                    )
-                                } else {
-                                    String::new()
-                                }
-                            );
-                            // A backlog that never clears is the one shape
-                            // worth colouring: it means the budget cannot
-                            // keep up with the scene, and distant things
-                            // will visibly lag rather than merely update
-                            // less often.
-                            if st.deferred > st.sent && st.sent > 0 {
-                                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
-                                    .on_hover_text(
-                                        "more entities are waiting for a turn than got one. \
-                                         They are not lost — they accrue priority — but if \
-                                         this stays high, raise interestBudget or lower the \
-                                         radius.",
-                                    );
-                            } else {
-                                ui.small(line).on_hover_text(
-                                    "relevant = what this client may hear about at all; \
-                                     sent = what fit in the last snapshot's budget; \
-                                     withheld = replicable nodes it was told nothing \
-                                     about, split by which rule decided — out of range, \
-                                     out of sight, or net.setRelevant.",
-                                );
-                            }
-                        }
-                    }
-                    // ---- voice chat, when anything is speaking or listening ----
-                    if let Some((rows, mic)) = &net_voice {
-                        ui.separator();
-                        ui.label(format!("🎤 voice · {mic}")).on_hover_text(
-                            "the local microphone. The level meter is live whether or not \
-                             transmit is on, so a settings screen can prove the mic works \
-                             without joining a lobby.",
-                        );
-                        if rows.is_empty() {
-                            ui.small("nobody else is speaking");
-                        }
-                        // The harness microphone. Voice normally needs two
-                        // machines and two people to try at all; this makes
-                        // a WAV stand in for the far end, through the real
-                        // forwarding rules.
-                        ui.horizontal(|ui| {
-                            match voice_test_peer {
-                                Some(p) => {
-                                    if ui.small_button("⏹ stop test voice").clicked() {
-                                        out.voice_test_stop = true;
-                                    }
-                                    ui.small(format!("speaking as peer {p}"));
-                                }
-                                None => {
-                                    if ui
-                                        .small_button("🎤 test voice from a WAV…")
-                                        .on_hover_text(
-                                            "play an audio file in as though a remote \
-                                             player were speaking it — through the real \
-                                             forwarding rules, jitter buffer and spatial \
-                                             voice. Proves the routing without a second \
-                                             machine or a microphone.",
-                                        )
-                                        .clicked()
-                                    {
-                                        out.voice_test_pick = true;
-                                    }
-                                }
-                            }
-                        });
-                        for (peer, buffered, cushion, concealed, late) in rows {
-                            let line = format!(
-                                "peer {peer}: {buffered:.0} ms buffered (target {cushion:.0})\
-                                 {}{}",
-                                if *concealed > 0 {
-                                    format!(" · {concealed} concealed")
-                                } else {
-                                    String::new()
-                                },
-                                if *late > 0 { format!(" · {late} late") } else { String::new() }
-                            );
-                            // A cushion pinned at its ceiling means the link
-                            // is the problem, and it is the one shape worth
-                            // colouring: the voice still works, it is just
-                            // permanently 60 ms behind and will stay there.
-                            if *cushion >= 60.0 {
-                                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
-                                    .on_hover_text(
-                                        "the jitter buffer is as wide as it goes. Packets \
-                                         keep arriving late, so this speaker is held at the \
-                                         maximum delay to stop them dropping out.",
-                                    );
-                            } else {
-                                ui.small(line).on_hover_text(
-                                    "buffered = audio waiting to play; target = the cushion \
-                                     the jitter buffer is holding, which widens on lateness \
-                                     and shrinks again when the link settles. concealed = \
-                                     gaps Opus filled in for packets that never came.",
-                                );
-                            }
-                        }
-                    }
-                    if let Some(rb) = net_rollback.as_ref() {
-                        ui.separator();
-                        if rb.stalled {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 170, 60),
-                                "⚔ ROLLBACK · waiting for input",
-                            )
-                            .on_hover_text(
-                                "past the depth cap the sim waits instead of guessing \
-                                 further: the game runs slightly slow rather than \
-                                 teleporting the opponent. It catches up on its own.",
-                            );
-                        } else {
-                            // Delay and mispredict rate on one line, because
-                            // neither means anything alone: a rollback
-                            // implementation working perfectly and one badly
-                            // misconfigured look identical from outside, and
-                            // "delay 2 — 99% guessed" is the whole diagnosis.
-                            let line = format!(
-                                "⚔ ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
-                                rb.fighters,
-                                rb.input_delay,
-                                rb.mispredict_rate * 100.0,
-                            );
-                            // Only once there is enough of a match to judge:
-                            // the opening ticks always guess.
-                            let bad = rb.mispredict_rate > 0.5 && rb.current > 120;
-                            if bad {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(255, 170, 60),
-                                    line,
-                                )
-                                .on_hover_text(format!(
-                                    "almost every tick is being guessed and re-simulated. \
-                                     Nothing is broken — the fight is identical on both \
-                                     machines — but this peer is doing several times the \
-                                     work and it feels like it. The delay is too low for \
-                                     this link: raise it between matches with \
-                                     net.setInputDelay(n) (max {}), or set \
-                                     net.host{{ inputDelay = n }}.",
-                                    floptle_net::MAX_DELAY
-                                ));
-                            } else {
-                                ui.label(line);
-                            }
-                        }
-                        ui.small(format!(
-                            "corrections {} · depth last {} / max {} / avg {:.1} · \
-                             ring {} ticks / {} KB",
-                            rb.corrections,
-                            rb.last_depth,
-                            rb.max_depth_seen,
-                            rb.average_depth,
-                            rb.ring_ticks,
-                            rb.ring_bytes / 1024,
-                        ))
-                        .on_hover_text(
-                            "the delay is FIXED for the session — it never changes \
-                             mid-match, because how the game feels must not. These \
-                             numbers are the measurement you choose it from: a healthy \
-                             match sits at low average depth.",
-                        );
-                        // who is starved, and on what. A frozen match used
-                        // to look identical from both screens; this names
-                        // the side that stopped keeping up.
-                        ui.small(format!(
-                            "frontier · confirmed {} of {} simulated ({} ahead)",
-                            rb.confirmed,
-                            rb.current,
-                            rb.current.saturating_sub(rb.confirmed),
-                        ))
-                        .on_hover_text(
-                            "\"confirmed\" is the newest tick every peer's REAL input is \
-                             known for. Everything past it was simulated from a guess and \
-                             can still be corrected. When the gap reaches the depth cap \
-                             the sim stalls — so a gap pinned at the cap means someone's \
-                             input has stopped arriving.",
-                        );
-                        for (peer, frontier, backlog) in &rb.peers {
-                            let who = if *peer == floptle_net::SERVER {
-                                "host".to_string()
-                            } else {
-                                format!("peer {peer}")
-                            };
-                            // A backlog past the fan-out window is a peer
-                            // that has stopped confirming — the shape of a
-                            // starved or departed player, not of a slow one.
-                            let stuck = *backlog > 24;
-                            let line =
-                                format!("   {who} · frontier {frontier} · {backlog} tick(s) held");
-                            if stuck {
-                                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
-                                    .on_hover_text(
-                                        "this peer has stopped confirming ticks: the host \
-                                         is holding its inputs and re-sending them, and \
-                                         will keep doing so until they land. If it stays \
-                                         here, that peer is the one that fell out of the \
-                                         match.",
-                                    );
-                            } else {
-                                ui.small(line);
-                            }
-                        }
-                        // Checksum status. "Never checked" and "checked and
-                        // agreeing" are very different states to be in.
-                        if rb.desynced {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 90, 90),
-                                "⚠ DESYNCED — the peers no longer agree",
-                            )
-                            .on_hover_text(
-                                "from the reported tick on, the two machines are playing \
-                                 different matches. The Console names the tick. Usual \
-                                 causes: a gameplay value outside snapshot()/restore(), \
-                                 an unseeded rng() (use net.random()), or reading node.x \
-                                 inside fixedUpdate instead of node.tickPos.",
-                            );
-                        } else if rb.checksum_tick > 0 {
-                            ui.small(format!(
-                                "✔ checksums agree through tick {}",
-                                rb.checksum_tick
-                            ));
-                        } else {
-                            ui.small("checksums: none due yet (every 30 confirmed ticks)");
-                        }
-                        if let Some(rf) = referee {
-                            ui.small(format!(
-                                "⚖ referee at tick {} ({} behind)",
-                                rf.0,
-                                rf.1.saturating_sub(rf.0)
-                            ))
-                            .on_hover_text(
-                                "a second simulation of this match on the host, advanced \
-                                 only to ticks every peer's input has actually arrived \
-                                 for. It never guesses and never rolls back, so it is \
-                                 never wrong — only behind. Every peer's checksum is \
-                                 judged against it, which is the difference between \
-                                 \"someone is out of sync\" and \"THAT machine is\".",
-                            );
-                        }
-                        ui.separator();
-                    }
-                    // Replays. A match's inputs and its seed are the match,
-                    // so a replay is kilobytes and playing it back is
-                    // re-simulation rather than re-enactment.
-                    if !replays.is_empty() {
-                        ui.small("🎞 replays");
-                        for (name, path) in replays {
-                            if ui
-                                .button(name.as_str())
-                                .on_hover_text(
-                                    "re-simulate this match in a headless second world. \
-                                     Enter Play on its scene first — a replay is the match \
-                                     run again, so it needs the world it was played in.",
-                                )
-                                .clicked()
-                            {
-                                out.cmd.net_play_replay = Some(path.clone());
-                            }
-                        }
-                        ui.separator();
-                    }
-                    // Dev-only rehearsal knob. The section only exists at
-                    // all when FLOPTLE_NET_IMPAIR was set on the command
-                    // line, so it cannot appear in front of someone who did
-                    // not ask for it — the whole point is that a real
-                    // session can never be silently degraded from the UI.
-                    if let Some(knob) = Editor::net_impair() {
-                        let mut imp = knob.get();
-                        let before = imp;
-                        let hot = imp.is_active();
-                        ui.colored_label(
-                            if hot {
-                                egui::Color32::from_rgb(255, 170, 60)
-                            } else {
-                                egui::Color32::GRAY
-                            },
-                            "⚠ LINK IMPAIRMENT (dev build)",
-                        )
-                        .on_hover_text(
-                            "adds latency and loss to THIS build's real transports (QUIC \
-                             and the relay) so a rollback match can be rehearsed at match \
-                             conditions between two instances on one desk. It is not a \
-                             network emulator — no jitter, no reordering — and it is not \
-                             a substitute for the two-machine acceptance run.",
-                        );
-                        let rtt = imp.rtt_ms();
-                        ui.add(
-                            egui::Slider::new(&mut imp.latency_ms, 0..=250)
-                                .text(format!("one-way ms  (≈{rtt} ms RTT)")),
-                        );
-                        let mut loss_pct = imp.loss * 100.0;
-                        if ui
-                            .add(egui::Slider::new(&mut loss_pct, 0.0..=25.0).text("% loss"))
-                            .changed()
-                        {
-                            imp.loss = loss_pct / 100.0;
-                        }
-                        if hot && ui.button("off").clicked() {
-                            imp = floptle_net::Impairment::default();
-                        }
-                        if imp != before {
-                            knob.set(imp);
-                        }
-                        ui.small(
-                            "reliable traffic is never dropped — a real reliable channel \
-                             retransmits, so dropping handshakes would only invent \
-                             failures the field can't produce.",
-                        );
-                        ui.separator();
-                    }
-                    if net_as_player {
-                        ui.label(format!(
-                            "🎮 you are a REMOTE PLAYER · rtt {net_rtt:.0} ms"
-                        ));
-                        match &net_predicted_name {
-                            Some(n) => ui.small(format!(
-                                "predicting \"{n}\" locally — orange ghosts = the hidden server's truth. Raise latency/loss and feel it stay responsive."
-                            )),
-                            None => ui.small(
-                                "spectating (no Predicted node) — give your character a Networked component with mode 'Predicted (owner)'",
-                            ),
-                        };
-                        if let Some((corr, conf, last)) = net_pred_stats {
-                            let total = corr + conf;
-                            let pct = if total > 0 {
-                                100.0 * corr as f64 / total as f64
-                            } else {
-                                0.0
-                            };
-                            ui.small(format!(
-                                "reconciles: {conf} confirmed · {corr} corrected ({pct:.0}%) · last error {:.0} mm · late inputs {net_late_inputs}",
-                                last * 1000.0
-                            ))
-                            .on_hover_text("healthy prediction: corrections near 0%, late inputs near 0 (a brief burst right after dragging the latency slider is normal — the server pauses to refill the input pipeline). Constant growth = the sims disagree — report it");
-                        }
-                    } else {
-                        match (net_hosting, net_has_client) {
-                            (false, _) => {
-                                // The simulated-link harness is an editor
-                                // dev tool — a build's menu is just the
-                                // real hosting/joining flows.
-                                if !player_mode {
-                                    ui.label("Test alone (simulated link)");
-                                    if ui.button("⏵ Host + join a local client").clicked() {
-                                        out.cmd.net_host_local = true;
-                                        out.cmd.net_join_local = true;
-                                    }
-                                    if ui
-                                        .button("🎮 Test as remote player (predicted)")
-                                        .on_hover_text("the play world becomes a CLIENT predicting against a hidden authoritative server — your character stays responsive at any latency, the server keeps the truth")
-                                        .clicked()
-                                    {
-                                        out.cmd.net_play_as_client = true;
-                                    }
-                                    ui.separator();
-                                }
-                                ui.label(if player_mode {
-                                    "Host — friends join with a lobby code"
-                                } else {
-                                    "Real network — via relay (lobby codes)"
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("relay");
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.net_relay_addr)
-                                            .desired_width(150.0)
-                                            .hint_text("relay host:port"),
-                                    );
-                                });
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .button("⏵ Host — get a lobby code")
-                                        .on_hover_text("registers a lobby on the relay above and shows a five-letter CODE for friends. Nobody port-forwards; run `floptle-relay` anywhere both machines can reach.")
-                                        .clicked()
-                                    {
-                                        out.cmd.net_host_relay = Some(self.net_relay_addr.clone());
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("code");
-                                    let r = ui.add(
-                                        egui::TextEdit::singleline(&mut self.net_join_code)
-                                            .desired_width(70.0)
-                                            .hint_text("ABCDE"),
-                                    );
-                                    if r.changed() {
-                                        self.net_join_code = self.net_join_code.to_uppercase();
-                                    }
-                                    let ok = !self.net_join_code.trim().is_empty();
-                                    if ui
-                                        .add_enabled(ok, egui::Button::new("⏵ Join by code"))
-                                        .on_hover_text("joins the lobby with this code, through the relay above")
-                                        .clicked()
-                                    {
-                                        out.cmd.net_join_quic = Some(format!(
-                                            "relay://{}/{}",
-                                            self.net_relay_addr.trim(),
-                                            self.net_join_code.trim()
-                                        ));
-                                    }
-                                });
-                                ui.separator();
-                                ui.label("Real network — direct (LAN / self-host)");
-                                ui.horizontal(|ui| {
-                                    ui.label("port");
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.net_host_port)
-                                            .desired_width(60.0),
-                                    );
-                                    if ui.button("⏵ Host on LAN").clicked() {
-                                        out.cmd.net_host_quic =
-                                            Some(self.net_host_port.trim().parse().unwrap_or(7777));
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.net_join_addr)
-                                            .desired_width(170.0)
-                                            .hint_text("quic://ip:port"),
-                                    );
-                                    if ui.button("⏵ Join").clicked() {
-                                        out.cmd.net_join_quic = Some(self.net_join_addr.clone());
-                                    }
-                                });
-                                ui.small(
-                                    "both machines run THIS project. Player slots = the \
-                                     scene's Predicted nodes in order (#1 the host, #2+ \
-                                     joiners) — or spawn one per joiner (player_spawner.lua). \
-                                     Scripts: net.host{relay=\"…\"} / net.join(\"relay://…/CODE\")",
-                                );
-                            }
-                            (true, false) if !net_is_real => {
-                                ui.label("hosting · 0 ghost clients");
-                                if ui.button("➕ Join a local ghost client").clicked() {
-                                    out.cmd.net_join_local = true;
-                                }
-                            }
-                            _ => {
-                                ui.label(format!(
-                                    "hosting · {net_peer_count} client(s) connected"
-                                ));
-                                if let Some(code) = &net_lobby_code {
-                                    ui.horizontal(|ui| {
-                                        ui.label("lobby code:");
-                                        ui.add(egui::Label::new(
-                                            egui::RichText::new(code).strong().monospace(),
-                                        ).selectable(true));
-                                        if ui.small_button("copy").clicked() {
-                                            ui.ctx().copy_text(code.clone());
-                                        }
-                                    });
-                                }
-                                if net_is_real && net_peer_count > 0 {
-                                    ui.small(format!("late inputs {net_late_inputs} — near zero is healthy"));
-                                }
-                            }
-                        }
-                    }
-                    if net_hosting || net_as_player {
-                        ui.separator();
-                        if net_is_real {
-                            ui.label("real link (QUIC)");
-                            ui.small("latency and loss are whatever the network gives you — the sliders only shape the simulated harness");
-                        } else {
-                            ui.label("simulated link");
-                            let mut lat = self.net_latency_ticks as i32;
-                            if ui
-                                .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
-                                .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
-                                .changed()
-                            {
-                                self.net_latency_ticks = lat as u64;
-                            }
-                            ui.add(
-                                egui::Slider::new(&mut self.net_loss, 0.0..=0.9)
-                                    .text("packet loss")
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
-                            ui.checkbox(&mut self.net_ghosts, "show client ghosts (cyan)")
-                                .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
-                        }
-                        ui.separator();
-                        if ui.button("⏹ End session").clicked() {
-                            out.cmd.net_stop_session = true;
-                        }
-                    }
+                    net_pings_ui(ui, net_hosting, &net_peer_rtts);
+                    net_interest_ui(ui, net_interest.as_ref());
+                    net_voice_ui(ui, out, net_voice.as_ref(), voice_test_peer);
+                    net_rollback_ui(ui, net_rollback.as_ref(), referee);
+                    net_replays_ui(ui, &net.replays, out);
+                    net_impair_ui(ui);
+                    self.net_session_ui(ui, out, net, player_mode, net_has_client, net_predicted_name, net_lobby_code);
                 });
             if !open {
                 self.show_net_panel = false;
             }
         }
 
+    }
+
+    /// Host or join — locally, by relay code, or over UDP — and, once in a
+    /// session, the readouts and the way out.
+    #[allow(clippy::too_many_arguments)]
+    fn net_session_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        out: &mut UiOut,
+        net: &NetSnapshot,
+        player_mode: bool,
+        net_has_client: bool,
+        net_predicted_name: Option<String>,
+        net_lobby_code: Option<String>,
+    ) {
+        let NetSnapshot { net_hosting, net_peer_count, net_as_player, net_rtt, net_pred_stats, net_late_inputs, net_is_real, .. } = *net;
+        if net_as_player {
+            ui.label(format!(
+                "🎮 you are a REMOTE PLAYER · rtt {net_rtt:.0} ms"
+            ));
+            match &net_predicted_name {
+                Some(n) => ui.small(format!(
+                    "predicting \"{n}\" locally — orange ghosts = the hidden server's truth. Raise latency/loss and feel it stay responsive."
+                )),
+                None => ui.small(
+                    "spectating (no Predicted node) — give your character a Networked component with mode 'Predicted (owner)'",
+                ),
+            };
+            if let Some((corr, conf, last)) = net_pred_stats {
+                let total = corr + conf;
+                let pct = if total > 0 {
+                    100.0 * corr as f64 / total as f64
+                } else {
+                    0.0
+                };
+                ui.small(format!(
+                    "reconciles: {conf} confirmed · {corr} corrected ({pct:.0}%) · last error {:.0} mm · late inputs {net_late_inputs}",
+                    last * 1000.0
+                ))
+                .on_hover_text("healthy prediction: corrections near 0%, late inputs near 0 (a brief burst right after dragging the latency slider is normal — the server pauses to refill the input pipeline). Constant growth = the sims disagree — report it");
+            }
+        } else {
+            match (net_hosting, net_has_client) {
+                (false, _) => {
+                    // The simulated-link harness is an editor
+                    // dev tool — a build's menu is just the
+                    // real hosting/joining flows.
+                    if !player_mode {
+                        ui.label("Test alone (simulated link)");
+                        if ui.button("⏵ Host + join a local client").clicked() {
+                            out.cmd.net_host_local = true;
+                            out.cmd.net_join_local = true;
+                        }
+                        if ui
+                            .button("🎮 Test as remote player (predicted)")
+                            .on_hover_text("the play world becomes a CLIENT predicting against a hidden authoritative server — your character stays responsive at any latency, the server keeps the truth")
+                            .clicked()
+                        {
+                            out.cmd.net_play_as_client = true;
+                        }
+                        ui.separator();
+                    }
+                    ui.label(if player_mode {
+                        "Host — friends join with a lobby code"
+                    } else {
+                        "Real network — via relay (lobby codes)"
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("relay");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.net_relay_addr)
+                                .desired_width(150.0)
+                                .hint_text("relay host:port"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("⏵ Host — get a lobby code")
+                            .on_hover_text("registers a lobby on the relay above and shows a five-letter CODE for friends. Nobody port-forwards; run `floptle-relay` anywhere both machines can reach.")
+                            .clicked()
+                        {
+                            out.cmd.net_host_relay = Some(self.net_relay_addr.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("code");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.net_join_code)
+                                .desired_width(70.0)
+                                .hint_text("ABCDE"),
+                        );
+                        if r.changed() {
+                            self.net_join_code = self.net_join_code.to_uppercase();
+                        }
+                        let ok = !self.net_join_code.trim().is_empty();
+                        if ui
+                            .add_enabled(ok, egui::Button::new("⏵ Join by code"))
+                            .on_hover_text("joins the lobby with this code, through the relay above")
+                            .clicked()
+                        {
+                            out.cmd.net_join_quic = Some(format!(
+                                "relay://{}/{}",
+                                self.net_relay_addr.trim(),
+                                self.net_join_code.trim()
+                            ));
+                        }
+                    });
+                    ui.separator();
+                    ui.label("Real network — direct (LAN / self-host)");
+                    ui.horizontal(|ui| {
+                        ui.label("port");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.net_host_port)
+                                .desired_width(60.0),
+                        );
+                        if ui.button("⏵ Host on LAN").clicked() {
+                            out.cmd.net_host_quic =
+                                Some(self.net_host_port.trim().parse().unwrap_or(7777));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.net_join_addr)
+                                .desired_width(170.0)
+                                .hint_text("quic://ip:port"),
+                        );
+                        if ui.button("⏵ Join").clicked() {
+                            out.cmd.net_join_quic = Some(self.net_join_addr.clone());
+                        }
+                    });
+                    ui.small(
+                        "both machines run THIS project. Player slots = the \
+                         scene's Predicted nodes in order (#1 the host, #2+ \
+                         joiners) — or spawn one per joiner (player_spawner.lua). \
+                         Scripts: net.host{relay=\"…\"} / net.join(\"relay://…/CODE\")",
+                    );
+                }
+                (true, false) if !net_is_real => {
+                    ui.label("hosting · 0 ghost clients");
+                    if ui.button("➕ Join a local ghost client").clicked() {
+                        out.cmd.net_join_local = true;
+                    }
+                }
+                _ => {
+                    ui.label(format!(
+                        "hosting · {net_peer_count} client(s) connected"
+                    ));
+                    if let Some(code) = &net_lobby_code {
+                        ui.horizontal(|ui| {
+                            ui.label("lobby code:");
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(code).strong().monospace(),
+                            ).selectable(true));
+                            if ui.small_button("copy").clicked() {
+                                ui.ctx().copy_text(code.clone());
+                            }
+                        });
+                    }
+                    if net_is_real && net_peer_count > 0 {
+                        ui.small(format!("late inputs {net_late_inputs} — near zero is healthy"));
+                    }
+                }
+            }
+        }
+        if net_hosting || net_as_player {
+            ui.separator();
+            if net_is_real {
+                ui.label("real link (QUIC)");
+                ui.small("latency and loss are whatever the network gives you — the sliders only shape the simulated harness");
+            } else {
+                ui.label("simulated link");
+                let mut lat = self.net_latency_ticks as i32;
+                if ui
+                    .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
+                    .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
+                    .changed()
+                {
+                    self.net_latency_ticks = lat as u64;
+                }
+                ui.add(
+                    egui::Slider::new(&mut self.net_loss, 0.0..=0.9)
+                        .text("packet loss")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                );
+                ui.checkbox(&mut self.net_ghosts, "show client ghosts (cyan)")
+                    .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
+            }
+            ui.separator();
+            if ui.button("⏹ End session").clicked() {
+                out.cmd.net_stop_session = true;
+            }
+        }
     }
 
     /// net-stats overlay: one compact line while a session runs, so
@@ -3362,5 +3007,430 @@ impl Editor {
 
         // (Terrain tools live in the dockable Terrain tab now; the gizmo paints
         // inside the Scene tab, clipped to its rect.)
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+/// Per-player pings, host side.
+fn net_pings_ui(ui: &mut egui::Ui, net_hosting: bool, net_peer_rtts: &[(floptle_net::PeerId, f32)]) {
+    if net_hosting && !net_peer_rtts.is_empty() {
+        ui.small(
+            net_peer_rtts
+                .iter()
+                .map(|(p, r)| format!("peer {p}: {r:.0} ms"))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        )
+        .on_hover_text(
+            "measured host↔player round trip. Probed end to end rather \
+             than read off the transport, because through a relay the \
+             transport only sees its own leg — it would report host↔relay \
+             and call it the player's ping.",
+        );
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+/// Interest management, when the host turned it on: the radius, and what each client is not being sent.
+fn net_interest_ui(
+    ui: &mut egui::Ui,
+    net_interest: Option<&(floptle_net::InterestConfig, Vec<(floptle_net::PeerId, floptle_net::InterestStat)>)>,
+) {
+    // ---- interest management, when the host turned it on ----
+    if let Some((cfg, stats)) = net_interest {
+        ui.separator();
+        ui.label(format!(
+            "👁 interest · {:.0} m radius · {} KB/s per client{}",
+            cfg.radius,
+            cfg.budget_bytes_per_sec / 1024,
+            if cfg.occlusion { " · line of sight" } else { "" }
+        ))
+        .on_hover_text(
+            "each client is told about its own neighbourhood instead of the \
+             whole world. Nothing is dropped for good — what doesn't fit \
+             the budget accrues priority and goes in a later snapshot.\n\n\
+             A radius is a BANDWIDTH boundary, not a security one: a client \
+             told where everyone within it is standing knows where they \
+             are, whatever it draws. Line of sight is the part that answers \
+             that — net.host{ interestOcclusion = \"Level\" }.",
+        );
+        if stats.is_empty() {
+            ui.small("no clients yet — nothing to build a relevant set from");
+        }
+        for (peer, st) in stats {
+            let line = format!(
+                "peer {peer}: {} of {} sent · {} B{}{}",
+                st.sent,
+                st.relevant,
+                st.bytes,
+                if st.deferred > 0 {
+                    format!(" · {} waiting", st.deferred)
+                } else {
+                    String::new()
+                },
+                // What this client is not being told, and
+                // by which rule. "Is my filter working"
+                // has to be a number, or a project turns
+                // one on and cannot tell it from a typo.
+                if st.withheld() > 0 {
+                    format!(
+                        " · withheld {} ({} far{}{})",
+                        st.withheld(),
+                        st.withheld_radius,
+                        if st.withheld_occluded > 0 {
+                            format!(", {} unseen", st.withheld_occluded)
+                        } else {
+                            String::new()
+                        },
+                        if st.withheld_filter > 0 {
+                            format!(", {} by the game", st.withheld_filter)
+                        } else {
+                            String::new()
+                        },
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            // A backlog that never clears is the one shape
+            // worth colouring: it means the budget cannot
+            // keep up with the scene, and distant things
+            // will visibly lag rather than merely update
+            // less often.
+            if st.deferred > st.sent && st.sent > 0 {
+                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                    .on_hover_text(
+                        "more entities are waiting for a turn than got one. \
+                         They are not lost — they accrue priority — but if \
+                         this stays high, raise interestBudget or lower the \
+                         radius.",
+                    );
+            } else {
+                ui.small(line).on_hover_text(
+                    "relevant = what this client may hear about at all; \
+                     sent = what fit in the last snapshot's budget; \
+                     withheld = replicable nodes it was told nothing \
+                     about, split by which rule decided — out of range, \
+                     out of sight, or net.setRelevant.",
+                );
+            }
+        }
+    }
+}
+
+/// One speaker's row in the voice readout: peer, buffered ms, cushion ms,
+/// concealed frames, late packets.
+#[cfg(feature = "editor-ui")]
+type VoiceRow = (u64, f32, f32, u64, u64);
+
+#[cfg(feature = "editor-ui")]
+/// Voice chat, when anything is speaking or listening: the mic, and each voice's jitter buffer.
+fn net_voice_ui(
+    ui: &mut egui::Ui,
+    out: &mut UiOut,
+    net_voice: Option<&(Vec<VoiceRow>, String)>,
+    voice_test_peer: Option<u64>,
+) {
+    // ---- voice chat, when anything is speaking or listening ----
+    if let Some((rows, mic)) = net_voice {
+        ui.separator();
+        ui.label(format!("🎤 voice · {mic}")).on_hover_text(
+            "the local microphone. The level meter is live whether or not \
+             transmit is on, so a settings screen can prove the mic works \
+             without joining a lobby.",
+        );
+        if rows.is_empty() {
+            ui.small("nobody else is speaking");
+        }
+        // The harness microphone. Voice normally needs two
+        // machines and two people to try at all; this makes
+        // a WAV stand in for the far end, through the real
+        // forwarding rules.
+        ui.horizontal(|ui| {
+            match voice_test_peer {
+                Some(p) => {
+                    if ui.small_button("⏹ stop test voice").clicked() {
+                        out.voice_test_stop = true;
+                    }
+                    ui.small(format!("speaking as peer {p}"));
+                }
+                None => {
+                    if ui
+                        .small_button("🎤 test voice from a WAV…")
+                        .on_hover_text(
+                            "play an audio file in as though a remote \
+                             player were speaking it — through the real \
+                             forwarding rules, jitter buffer and spatial \
+                             voice. Proves the routing without a second \
+                             machine or a microphone.",
+                        )
+                        .clicked()
+                    {
+                        out.voice_test_pick = true;
+                    }
+                }
+            }
+        });
+        for (peer, buffered, cushion, concealed, late) in rows {
+            let line = format!(
+                "peer {peer}: {buffered:.0} ms buffered (target {cushion:.0})\
+                 {}{}",
+                if *concealed > 0 {
+                    format!(" · {concealed} concealed")
+                } else {
+                    String::new()
+                },
+                if *late > 0 { format!(" · {late} late") } else { String::new() }
+            );
+            // A cushion pinned at its ceiling means the link
+            // is the problem, and it is the one shape worth
+            // colouring: the voice still works, it is just
+            // permanently 60 ms behind and will stay there.
+            if *cushion >= 60.0 {
+                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                    .on_hover_text(
+                        "the jitter buffer is as wide as it goes. Packets \
+                         keep arriving late, so this speaker is held at the \
+                         maximum delay to stop them dropping out.",
+                    );
+            } else {
+                ui.small(line).on_hover_text(
+                    "buffered = audio waiting to play; target = the cushion \
+                     the jitter buffer is holding, which widens on lateness \
+                     and shrinks again when the link settles. concealed = \
+                     gaps Opus filled in for packets that never came.",
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+/// Rollback health: depth, mispredicts, the stall indicator, and how far behind the referee sim is.
+fn net_rollback_ui(
+    ui: &mut egui::Ui,
+    net_rollback: Option<&crate::rollback_session::RollbackStats>,
+    referee: Option<(u64, u64)>,
+) {
+    if let Some(rb) = net_rollback {
+        ui.separator();
+        if rb.stalled {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 170, 60),
+                "⚔ ROLLBACK · waiting for input",
+            )
+            .on_hover_text(
+                "past the depth cap the sim waits instead of guessing \
+                 further: the game runs slightly slow rather than \
+                 teleporting the opponent. It catches up on its own.",
+            );
+        } else {
+            // Delay and mispredict rate on one line, because
+            // neither means anything alone: a rollback
+            // implementation working perfectly and one badly
+            // misconfigured look identical from outside, and
+            // "delay 2 — 99% guessed" is the whole diagnosis.
+            let line = format!(
+                "⚔ ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
+                rb.fighters,
+                rb.input_delay,
+                rb.mispredict_rate * 100.0,
+            );
+            // Only once there is enough of a match to judge:
+            // the opening ticks always guess.
+            let bad = rb.mispredict_rate > 0.5 && rb.current > 120;
+            if bad {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 170, 60),
+                    line,
+                )
+                .on_hover_text(format!(
+                    "almost every tick is being guessed and re-simulated. \
+                     Nothing is broken — the fight is identical on both \
+                     machines — but this peer is doing several times the \
+                     work and it feels like it. The delay is too low for \
+                     this link: raise it between matches with \
+                     net.setInputDelay(n) (max {}), or set \
+                     net.host{{ inputDelay = n }}.",
+                    floptle_net::MAX_DELAY
+                ));
+            } else {
+                ui.label(line);
+            }
+        }
+        ui.small(format!(
+            "corrections {} · depth last {} / max {} / avg {:.1} · \
+             ring {} ticks / {} KB",
+            rb.corrections,
+            rb.last_depth,
+            rb.max_depth_seen,
+            rb.average_depth,
+            rb.ring_ticks,
+            rb.ring_bytes / 1024,
+        ))
+        .on_hover_text(
+            "the delay is FIXED for the session — it never changes \
+             mid-match, because how the game feels must not. These \
+             numbers are the measurement you choose it from: a healthy \
+             match sits at low average depth.",
+        );
+        // who is starved, and on what. A frozen match used
+        // to look identical from both screens; this names
+        // the side that stopped keeping up.
+        ui.small(format!(
+            "frontier · confirmed {} of {} simulated ({} ahead)",
+            rb.confirmed,
+            rb.current,
+            rb.current.saturating_sub(rb.confirmed),
+        ))
+        .on_hover_text(
+            "\"confirmed\" is the newest tick every peer's REAL input is \
+             known for. Everything past it was simulated from a guess and \
+             can still be corrected. When the gap reaches the depth cap \
+             the sim stalls — so a gap pinned at the cap means someone's \
+             input has stopped arriving.",
+        );
+        for (peer, frontier, backlog) in &rb.peers {
+            let who = if *peer == floptle_net::SERVER {
+                "host".to_string()
+            } else {
+                format!("peer {peer}")
+            };
+            // A backlog past the fan-out window is a peer
+            // that has stopped confirming — the shape of a
+            // starved or departed player, not of a slow one.
+            let stuck = *backlog > 24;
+            let line =
+                format!("   {who} · frontier {frontier} · {backlog} tick(s) held");
+            if stuck {
+                ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                    .on_hover_text(
+                        "this peer has stopped confirming ticks: the host \
+                         is holding its inputs and re-sending them, and \
+                         will keep doing so until they land. If it stays \
+                         here, that peer is the one that fell out of the \
+                         match.",
+                    );
+            } else {
+                ui.small(line);
+            }
+        }
+        // Checksum status. "Never checked" and "checked and
+        // agreeing" are very different states to be in.
+        if rb.desynced {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 90, 90),
+                "⚠ DESYNCED — the peers no longer agree",
+            )
+            .on_hover_text(
+                "from the reported tick on, the two machines are playing \
+                 different matches. The Console names the tick. Usual \
+                 causes: a gameplay value outside snapshot()/restore(), \
+                 an unseeded rng() (use net.random()), or reading node.x \
+                 inside fixedUpdate instead of node.tickPos.",
+            );
+        } else if rb.checksum_tick > 0 {
+            ui.small(format!(
+                "✔ checksums agree through tick {}",
+                rb.checksum_tick
+            ));
+        } else {
+            ui.small("checksums: none due yet (every 30 confirmed ticks)");
+        }
+        if let Some(rf) = referee {
+            ui.small(format!(
+                "⚖ referee at tick {} ({} behind)",
+                rf.0,
+                rf.1.saturating_sub(rf.0)
+            ))
+            .on_hover_text(
+                "a second simulation of this match on the host, advanced \
+                 only to ticks every peer's input has actually arrived \
+                 for. It never guesses and never rolls back, so it is \
+                 never wrong — only behind. Every peer's checksum is \
+                 judged against it, which is the difference between \
+                 \"someone is out of sync\" and \"THAT machine is\".",
+            );
+        }
+        ui.separator();
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+/// Recorded matches: a click plays one back.
+fn net_replays_ui(ui: &mut egui::Ui, replays: &[(String, std::path::PathBuf)], out: &mut UiOut) {
+    // Replays. A match's inputs and its seed are the match,
+    // so a replay is kilobytes and playing it back is
+    // re-simulation rather than re-enactment.
+    if !replays.is_empty() {
+        ui.small("🎞 replays");
+        for (name, path) in replays {
+            if ui
+                .button(name.as_str())
+                .on_hover_text(
+                    "re-simulate this match in a headless second world. \
+                     Enter Play on its scene first — a replay is the match \
+                     run again, so it needs the world it was played in.",
+                )
+                .clicked()
+            {
+                out.cmd.net_play_replay = Some(path.clone());
+            }
+        }
+        ui.separator();
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+/// The dev-only link impairment knob.
+fn net_impair_ui(ui: &mut egui::Ui) {
+    // Dev-only rehearsal knob. The section only exists at
+    // all when FLOPTLE_NET_IMPAIR was set on the command
+    // line, so it cannot appear in front of someone who did
+    // not ask for it — the whole point is that a real
+    // session can never be silently degraded from the UI.
+    if let Some(knob) = Editor::net_impair() {
+        let mut imp = knob.get();
+        let before = imp;
+        let hot = imp.is_active();
+        ui.colored_label(
+            if hot {
+                egui::Color32::from_rgb(255, 170, 60)
+            } else {
+                egui::Color32::GRAY
+            },
+            "⚠ LINK IMPAIRMENT (dev build)",
+        )
+        .on_hover_text(
+            "adds latency and loss to THIS build's real transports (QUIC \
+             and the relay) so a rollback match can be rehearsed at match \
+             conditions between two instances on one desk. It is not a \
+             network emulator — no jitter, no reordering — and it is not \
+             a substitute for the two-machine acceptance run.",
+        );
+        let rtt = imp.rtt_ms();
+        ui.add(
+            egui::Slider::new(&mut imp.latency_ms, 0..=250)
+                .text(format!("one-way ms  (≈{rtt} ms RTT)")),
+        );
+        let mut loss_pct = imp.loss * 100.0;
+        if ui
+            .add(egui::Slider::new(&mut loss_pct, 0.0..=25.0).text("% loss"))
+            .changed()
+        {
+            imp.loss = loss_pct / 100.0;
+        }
+        if hot && ui.button("off").clicked() {
+            imp = floptle_net::Impairment::default();
+        }
+        if imp != before {
+            knob.set(imp);
+        }
+        ui.small(
+            "reliable traffic is never dropped — a real reliable channel \
+             retransmits, so dropping handshakes would only invent \
+             failures the field can't produce.",
+        );
+        ui.separator();
     }
 }
