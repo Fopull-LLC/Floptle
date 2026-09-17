@@ -7,10 +7,7 @@
 //! - **Fixed** (`FixedTimestep`): a determinism-preserving accumulator that
 //!   yields a whole number of constant-`dt` ticks per frame; physics, the SDF
 //!   sim, and `on_fixed_update` run on it so simulation is reproducible
-//!   regardless of frame rate. (See `docs/subsystems/time.md`, ADR-0012.)
-//!
-//! Promoting the global scalar `t` to a per-entity rate field `r(p)` (`LocalTime`,
-//! ADR-0017) lands in Phase 5 next to these; the clock is intentionally that seam.
+//!   regardless of frame rate.
 
 /// Wall-clock-driven master clock. `tick(real_dt)` is called once per frame with
 /// the measured elapsed seconds; everything else reads the cooked values.
@@ -23,7 +20,7 @@ pub struct Time {
     /// Frames advanced since start.
     pub frame: u64,
     /// Global time scale (1.0 = real-time). Pauses/bullet-time multiply here;
-    /// per-region rates (ADR-0017) layer on top later.
+    /// per-region rates layer on top.
     pub scale: f32,
     /// Upper bound on a single frame's `real_dt` before scaling, so a stall (the
     /// debugger, a hitch) can't inject a huge step that explodes the sim.
@@ -65,7 +62,7 @@ pub struct FixedTimestep {
 }
 
 impl Default for FixedTimestep {
-    /// The engine's default GAMEPLAY tick rate: 60 Hz (`docs/multiplayer.md` §3 —
+    /// The engine's default gameplay tick rate: 60 Hz (`docs/multiplayer.md` §3 —
     /// parry-tight input granularity; per-project configurable later).
     fn default() -> Self {
         Self::new(60.0)

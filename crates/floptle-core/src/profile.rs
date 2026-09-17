@@ -199,7 +199,7 @@ pub struct FrameProfile {
     /// bucket may be timed in several pieces (physics runs per tick, scripts run
     /// three passes) and they all belong to one frame's figure.
     frame: HashMap<Bucket, f32>,
-    /// Per script KIND — the file name, which is what a game author has words
+    /// Per script kind — the file name, which is what a game author has words
     /// for. Same two-phase accumulation as the buckets.
     script_frame: HashMap<String, f32>,
     scripts: HashMap<String, Series>,
@@ -212,7 +212,7 @@ pub struct FrameProfile {
 impl FrameProfile {
     /// Turn collection on or off. Off is the default and costs nothing.
     ///
-    /// Turning it off CLEARS the history rather than freezing it: a stale mean
+    /// Turning it off clears the history rather than freezing it: a stale mean
     /// from before a fix looks exactly like a fix that did not work.
     pub fn enable(&mut self, on: bool) {
         if self.on == on {
@@ -249,14 +249,12 @@ impl FrameProfile {
 
     /// Add `ms` to one script kind's total.
     ///
-    /// **Not to `Bucket::Scripts`.** It used to add to both, so that the
-    /// per-script figures summed exactly to the bucket — which was tidy and
-    /// wrong: the bucket was then hook time only, and everything the engine
-    /// did to reach a hook was invisible. A 0.84 profile of a real game
-    /// accounted 5.3 of 12.9 ms and hid a whole optimisation pass for a
-    /// release. `Bucket::Scripts` is now the wall clock of the whole pass,
-    /// recorded once per pass by the caller that runs it, and these figures are
-    /// a breakdown of the part of it that was inside a hook.
+    /// Not to `Bucket::Scripts`. Adding to both would make the per-script
+    /// figures sum exactly to the bucket, and make the bucket hook time only,
+    /// with everything the engine does to reach a hook invisible: a real game
+    /// would account 5.3 of 12.9 ms. `Bucket::Scripts` is the wall clock of
+    /// the whole pass, recorded once per pass by the caller that runs it, and
+    /// these figures are a breakdown of the part of it inside a hook.
     pub fn record_script(&mut self, kind: &str, ms: f32) {
         if !self.on {
             return;
@@ -363,7 +361,7 @@ impl FrameProfile {
     /// all outside every bucket. Presented as "accounted for" rather than
     /// "total" for exactly that reason — a readout claiming to add up to the
     /// frame time and not doing so is worse than one that never claimed it.
-    /// A bucket's total for the frame in PROGRESS — before `end_frame` folds it
+    /// A bucket's total for the frame in progress — before `end_frame` folds it
     /// into the history. Read it either side of a call to record that call net
     /// of a bucket nested inside it (`Scripts` around `Mirror`), so the buckets
     /// still sum to the frame rather than counting the inner one twice.
@@ -407,7 +405,7 @@ impl Default for Span {
 mod tests {
     use super::*;
 
-    /// While off, times read as ABSENT rather than zero — so a smoke test
+    /// While off, times read as absent rather than zero — so a smoke test
     /// asserting a budget cannot pass because nothing was measured.
     ///
     /// The failure mode designed out here is a number that means "no data"
@@ -461,13 +459,11 @@ mod tests {
     /// Per-script times are attributed by name, and they do **not** write the
     /// `Scripts` bucket.
     ///
-    /// They used to do both from one call, so that the rows always summed to the
-    /// bucket — which was tidy and wrong: it made the bucket hook time only, and
-    /// everything the engine did to reach a hook had nowhere to be. `Scripts` is
-    /// the whole pass now, recorded once by whoever ran it, and these rows are a
-    /// breakdown of the part of it that was inside a hook. This test is the old
-    /// one turned around: if `record_script` ever writes the bucket again, the
-    /// pass is counted twice.
+    /// Rows that summed to the bucket would make the bucket hook time only,
+    /// with everything the engine does to reach a hook having nowhere to be.
+    /// `Scripts` is the whole pass, recorded once by whoever ran it, and these
+    /// rows are a breakdown of the part of it inside a hook. If
+    /// `record_script` ever writes the bucket, the pass is counted twice.
     ///
     /// Watched failing by putting the bucket write back: 8.5 against the 0 here.
     #[test]

@@ -104,7 +104,7 @@ pub struct Accessibility {
     /// How strongly (0 = off, 1 = full). A partial correction is a real setting:
     /// full daltonization shifts hues a lot, and some players want less.
     pub color_filter_strength: f32,
-    /// Show the deficiency instead of correcting it — for the DEVELOPER, to see
+    /// Show the deficiency instead of correcting it — for the developer, to see
     /// what a colourblind player sees. Not something to ship switched on.
     pub simulate_deficiency: bool,
     /// The player asked for less movement. The engine snaps its own UI

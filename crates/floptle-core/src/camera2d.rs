@@ -130,7 +130,7 @@ impl Camera2D {
         }
         // Strength takes the louder of the two and time takes the longer, always
         // and independently. Letting a strong short one replace the time as well
-        // meant a bang during a three-second rumble ENDED the rumble after a
+        // meant a bang during a three-second rumble ended the rumble after a
         // tenth of a second, which reads as the bang having cancelled it.
         self.shake_amp = self.shake_amp.max(amount);
         self.shake_left = self.shake_left.max(seconds);
@@ -248,7 +248,7 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
     // Collected first: resolving a target's world transform reads the world,
     // and the write below needs it mutably.
     //
-    // **Only an orthographic camera.** This function OWNS the transform of
+    // **Only an orthographic camera.** This function owns the transform of
     // everything it steps — it writes a position every frame — so stepping a
     // node that is not a 2D camera pins that node in place for the rest of the
     // session, and a script setting its position is silently stomped after the
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(c.pos, at(7.0, -3.0));
     }
 
-    /// The limits clamp the FOLLOW state, so a target that wanders far outside
+    /// The limits clamp the follow state, so a target that wanders far outside
     /// and comes back does not drag the camera through a stored position it
     /// never actually had.
     #[test]

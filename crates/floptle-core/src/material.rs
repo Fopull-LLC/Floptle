@@ -6,7 +6,7 @@
 //! Blinn-Phong specular (color + shininess + strength), a rim/fresnel edge term,
 //! an **unlit** (fullbright/flat) toggle, and an ambient-light multiplier.
 
-/// How a texture binding tiles across a surface — per BINDING (this material's
+/// How a texture binding tiles across a surface — per binding (this material's
 /// use of the image), while wrap/filter stay per-texture settings. The
 /// "drag on and tile, no shader required" block (proposal §8).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -381,8 +381,8 @@ pub struct Material {
     /// Deliberate PS1/N64-era artefacts. All off by default.
     pub retro: Retro,
 
-    /// A custom `.flsl` shader (project-relative path) — the shader-IR path
-    /// (ADR-0007). `None` = the built-in look above. When set, the shader's
+    /// A custom `.flsl` shader (project-relative path). `None` = the built-in
+    /// look above. When set, the shader's
     /// exposed uniforms/texture slots (below) drive the surface; the fields
     /// above still feed it (`instanceColor`, `litSurface`'s specular/rim) and
     /// the base `texture` remains its `baseTexture()`.
@@ -534,7 +534,7 @@ impl Material {
         [u0 + iu, v0 + iv, u1 - iu, v1 - iv]
     }
 
-    /// The tiling the RENDERER should pack for this material: a sheet becomes a
+    /// The tiling the renderer should pack for this material: a sheet becomes a
     /// UV window onto its own cell, so sprite indexing costs no new instance
     /// lanes, no shader variant, and reaches a custom `.flsl`'s `baseTexture()`
     /// for free.
@@ -553,7 +553,7 @@ impl Material {
             return self.tiling;
         }
         let [u0, v0, u1, v1] = self.cell_uv_inset(texel);
-        // `base_texel` in raster.wgsl scales UVs about the 0.5 CENTER before
+        // `base_texel` in raster.wgsl scales UVs about the 0.5 center before
         // adding the offset, so the window's offset is its own centre minus that
         // one — not its corner.
         Some(Tiling::Uv {
@@ -578,7 +578,7 @@ mod tests {
     fn identity_covers_the_additive_lanes() {
         assert!(Tint::default().is_identity());
 
-        // Each lane ALONE is enough to make it not the identity. Values chosen
+        // Each lane alone is enough to make it not the identity. Values chosen
         // to differ from the default in the direction a caller would set them.
         let rim = Tint { rim: [0.2, 0.6, 1.0], rim_strength: 1.3, ..Tint::default() };
         assert!(!rim.is_identity(), "a rim is not nothing");
@@ -586,14 +586,14 @@ mod tests {
         let amb = Tint { ambient: 1.6, ..Tint::default() };
         assert!(!amb.is_identity(), "an ambient lift is not nothing");
 
-        // …and a rim COLOUR at zero strength still is: that is the state a node
+        // …and a rim colour at zero strength still is: that is the state a node
         // is in when somebody dialled the strength back to 0, and it must not
         // keep a Tint alive that does nothing.
         let off = Tint { rim: [0.2, 0.6, 1.0], rim_strength: 0.0, ..Tint::default() };
         assert!(off.is_identity(), "a rim colour at strength 0 is no rim");
     }
 
-    /// **A tint with no rim must not STRIP the surface's own.**
+    /// **A tint with no rim must not strip the surface's own.**
     ///
     /// "I did not ask for a rim" and "I asked for no rim" are different, and
     /// the first one is what every existing tinted node in every existing scene
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(rimmed.rim_over(own.0, own.1), ([0.1, 0.4, 1.0], 1.3));
     }
 
-    /// Ambient COMPOSES rather than replaces, so a node whose own material
+    /// Ambient composes rather than replaces, so a node whose own material
     /// already lifts its ambient and a tint that also does end up brighter than
     /// either — not at whichever one happened to be applied last.
     #[test]

@@ -569,7 +569,7 @@ pub struct Parent(pub crate::ecs::Entity);
 
 /// Rides a **bone / sub-object** of a rigged (node-preserving) `Matter::Mesh`, so a
 /// weapon, emitter, or pickup follows a character's hand/arm — including under
-/// animation. Lives ALONGSIDE [`Parent`]`(target)` (which keeps the node in the
+/// animation. Lives alongside [`Parent`]`(target)` (which keeps the node in the
 /// hierarchy and serializable): `Parent` says *under which mesh*, `BoneAttach` says
 /// *which bone under it*. Each frame `resolve_attachments` sets this node's local
 /// transform to `bone_local · offset` (both in the mesh's model space), and the
@@ -583,7 +583,7 @@ pub struct BoneAttach {
     /// The skeleton node name (portable across re-import; resolved to an index each
     /// frame via `Skeleton::index_of`, like animation clips).
     pub bone: String,
-    /// The child's transform in the BONE'S local SPACE — seeded on attach so the node
+    /// The child's transform in the bone'S local space — seeded on attach so the node
     /// doesn't jump, then editable to position it on the bone.
     pub offset: crate::transform::Transform,
 }
@@ -604,9 +604,9 @@ impl Shape {
     /// message that names what it takes.
     pub const ACCEPTS: &'static [&'static str] = &["Cube", "Sphere", "Capsule", "Plane"];
 
-    /// Parse a shape name, case-insensitively. `None` for anything else —
-    /// `node:setPrimitive("Sphre")` used to make a CUBE and say nothing, which
-    /// is a whole different object silently standing where you put it.
+    /// Parse a shape name, case-insensitively. `None` for anything else, so
+    /// `node:setPrimitive("Sphre")` raises rather than making a cube, a whole
+    /// different object silently standing where you put it.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "cube" | "box" => Some(Self::Cube),
@@ -640,19 +640,19 @@ pub enum BodyMode {
     /// Fully simulated: gravity, velocity, collisions push it around.
     #[default]
     Dynamic,
-    /// TRANSFORM-DRIVEN: never falls or gets pushed — scripts/animation move
+    /// Transform-driven: never falls or gets pushed — scripts/animation move
     /// the node and the body follows. Dynamic bodies collide with it (moving
     /// platforms, elevators, doors that shove the player), raycasts hit it,
     /// and touch events fire. Costs almost nothing per tick (no integration).
     Kinematic,
-    /// Baked STATIC geometry: no body at all — just an immovable collider in
+    /// Baked static geometry: no body at all — just an immovable collider in
     /// the shape below (walls, floors, props). Zero per-tick cost; the
     /// cheapest way to make something solid. (Same as Collidable, but sized
     /// by the body shape instead of the node's visual geometry.)
     Static,
 }
 
-/// Puts a node on RAILS as a celestial body (solar demo S2, `frames` module):
+/// Puts a node on rails as a celestial body (solar demo S2, `frames` module):
 /// during Play the engine assembles all `CelestialBody` nodes into a
 /// [`crate::frames::System`], advances space time each tick, and writes this
 /// node's translation from its Kepler elements — exact analytic orbits, stable
@@ -689,13 +689,13 @@ pub struct CelestialBody {
     pub atmo_density: f32,
     /// Cloud coverage inside the atmosphere, 0..1 (0 = clear skies).
     pub clouds: f32,
-    /// STAR: this body emits light (Lighting `stars` mode). Irradiance at
+    /// Star: this body emits light (Lighting `stars` mode). Irradiance at
     /// distance d = `luminosity × 1e6 / d²` — ~36 lights a body 6000 units
     /// out at full strength. 0 = not a star.
     pub luminosity: f32,
     /// The star's light color (only meaningful with `luminosity > 0`).
     pub star_color: [f32; 3],
-    /// OCCLUSION CULLING: radius of a solid sphere at this body's center that
+    /// Occlusion culling: radius of a solid sphere at this body's center that
     /// geometry is guaranteed never to pierce (a planet's core below its
     /// deepest cave). When > 0, the renderer skips terrain chunks fully hidden
     /// behind it — the far side of a planet stops costing draw calls. 0 = off.
@@ -780,11 +780,11 @@ pub struct RigidBody {
     /// capsule already follows −gravity regardless). Overrides `lock_rot` when set.
     pub align_up: bool,
     /// Mass in kilogram-ish sim units. Plain bodies ignore it today (the
-    /// translational solver is mass-free); it is the mass SHARE of a shape
+    /// translational solver is mass-free); it is the mass share of a shape
     /// inside an [`Self::assembly`] compound, where composed mass/CoM/inertia
     /// are what make off-center thrust and contacts behave.
     pub mass: f32,
-    /// This node is the root of a COMPOUND ASSEMBLY: one 6-DOF rigid body
+    /// This node is the root of a compound assembly: one 6-DOF rigid body
     /// built from every descendant node that carries a `RigidBody` (each
     /// becomes an oriented shape at its offset, weighted by its `mass` —
     /// the root's own shape fields are ignored). Multi-part vehicles,
@@ -859,7 +859,7 @@ impl RigidBody {
     }
 }
 
-/// Marks a node (and everything under it) as SWITCHED off: it doesn't draw, doesn't
+/// Marks a node (and everything under it) as switched off: it doesn't draw, doesn't
 /// collide, and its scripts don't run.
 ///
 /// A marker rather than an `enabled: bool` field, so the common case — every node in
@@ -884,7 +884,7 @@ pub struct Disabled;
 /// change and leaving its audio source behind would be a trap, and the useful
 /// unit — a HUD, a party, a save-game manager — is a folder, not a leaf.
 ///
-/// This is a RUNTIME flag: it is set from a script (`node.persistent = true`),
+/// This is a runtime flag: it is set from a script (`node.persistent = true`),
 /// not authored in a scene file. A node is only ever persistent relative to a
 /// swap that happens while the game runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -896,13 +896,13 @@ pub struct Persistent;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneTag(pub String);
 
-/// Marks a `Matter::Mesh` node as a STATIC collider you can walk on — the editor bakes
+/// Marks a `Matter::Mesh` node as a static collider you can walk on — the editor bakes
 /// its triangles (in world space) into the physics sim at Play. The model isn't a
 /// dynamic body; it's environment geometry (a level/map). Presence = collidable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MeshCollider;
 
-/// Marks any node as a STATIC collider auto-shaped from its geometry — the "collidable"
+/// Marks any node as a static collider auto-shaped from its geometry — the "collidable"
 /// switch. At Play the editor builds the matching static collision shape sized to the
 /// node's `Matter` + world transform (Cube → box, Sphere → sphere, Capsule → capsule,
 /// Mesh → triangle mesh), so a primitive is collidable without a dynamic rigidbody (just
@@ -938,7 +938,7 @@ pub struct TerrainGen(pub String);
 /// Makes a [`Collidable`] node's static collider a **trigger**: bodies pass
 /// straight through it (no blocking, no push-out), but overlap still fires the
 /// `onTriggerEnter` / `onTriggerStay` / `onTriggerExit` script hooks — the
-/// portal / pickup-zone / checkpoint primitive. Lives ALONGSIDE `Collidable`
+/// portal / pickup-zone / checkpoint primitive. Lives alongside `Collidable`
 /// (the Inspector's "trigger" switch on the Collider component); on its own it
 /// does nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -948,12 +948,12 @@ pub struct Trigger;
 /// stored outside the scene (`<project>/paint/<scene>.vpaint`) because per-vertex
 /// arrays have no business in a `.ron`.
 ///
-/// `id` is a STABLE per-node key, not an `Entity`: undo respawns the whole `World`, so
+/// `id` is a stable per-node key, not an `Entity`: undo respawns the whole `World`, so
 /// entity handles don't survive it — the same reason `Matter::Terrain { id }` exists.
 /// The paint file keys off this id, and the renderer resolves it to a base offset in
 /// the `vpaint` store.
 ///
-/// This is an ADDITIVE component rather than a `Matter` field on purpose. Paint is
+/// This is an additive component rather than a `Matter` field on purpose. Paint is
 /// orthogonal to what a node *is* (a Mesh and a Primitive are both paintable), and
 /// every primitive of a shape shares one `MeshId` — so paint cannot live on the
 /// geometry. See `docs/subsystems/materials-and-textures.md` §3.1/§9.1.
@@ -1014,7 +1014,7 @@ impl Default for Visible {
 /// them into the frame's light. `direction` need not be unit — the renderer
 /// normalizes it.
 ///
-/// `stars` switches the key light to STARS mode: the directional light turns
+/// `stars` switches the key light to stars mode: the directional light turns
 /// off and every [`CelestialBody`] with `luminosity > 0` becomes a real point
 /// light source — light radiates from each star's world position with
 /// inverse-square falloff, so terminators wrap planets, shadow directions
@@ -1033,7 +1033,7 @@ pub struct Light {
     /// Separate from `ambient` above, which is the 3D one, because the two want
     /// opposite defaults. 3D ambient is a dim fill under a key light. This is
     /// the whole light a flat scene has until you place one — so it defaults to
-    /// WHITE, and adding a light to a 2D scene can only ever make it brighter.
+    /// White, and adding a light to a 2D scene can only ever make it brighter.
     ///
     /// Turning it down is how you get a dark room for a torch to carve a circle
     /// out of. That has to be the deliberate act: a first light that blacked out
@@ -1063,8 +1063,8 @@ pub struct Light {
     /// Max distance (world units) a shadow ray marches before giving up — a perf
     /// fence; far geometry simply stops casting past it.
     pub shadow_distance: f32,
-    /// CONTACT shadows: a short screen-space trace that catches what the marched
-    /// field cannot. A dynamic mesh casts through a collider PROXY — a box or a
+    /// Contact shadows: a short screen-space trace that catches what the marched
+    /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
     /// worst is the contact between a foot and the floor. This shadows from the
     /// real silhouette of whatever is on screen instead.
@@ -1078,7 +1078,7 @@ pub struct Light {
     /// strength are applied on top.
     pub contact_strength: f32,
 
-    /// SCREEN-SPACE REFLECTIONS: reflective surfaces show the scene itself, and
+    /// Screen-space reflections: reflective surfaces show the scene itself, and
     /// not only the captured sky.
     ///
     /// Every physical material with some reflectivity picks this up at once —
@@ -1157,7 +1157,7 @@ pub struct Light {
     pub fog_dither: bool,
     /// Dither amplitude (0..1); scaled to a sub-percent nudge of the fog factor.
     pub fog_dither_strength: f32,
-    /// VOLUMETRIC mode: instead of a flat distance ramp, march real fog media —
+    /// Volumetric mode: instead of a flat distance ramp, march real fog media —
     /// a height-bounded layer with drifting noise, so hills poke out of ground
     /// mist and beams of distance thicken naturally. Uses `fog_color` and the
     /// dither settings; `fog_start`/`fog_end` don't apply.
@@ -1172,7 +1172,7 @@ pub struct Light {
     pub fog_noise: f32,
     /// Noise feature size, world units per pattern repeat (bigger = broader wisps).
     pub fog_noise_scale: f32,
-    /// VOLUMETRIC only — how much of the scene's own light scatters in the media.
+    /// Volumetric only — how much of the scene's own light scatters in the media.
     /// 0 is the flat fog colour (the pre-injection look, reached exactly); 1 lights
     /// the fog by the sun, the point lights and the baked bounce; past 1
     /// exaggerates rather than blending further.
@@ -1186,13 +1186,13 @@ pub struct Light {
     /// March the sun shadow at every fog step. This is what turns lit fog into
     /// actual beams, and it is essentially the entire cost of lit fog.
     pub fog_shafts: bool,
-    /// flat RAMP only — how much of the fog the **sky** takes at the horizon
+    /// flat ramp only — how much of the fog the **sky** takes at the horizon
     /// (0..1), weighted so the zenith keeps whatever is painted there.
     ///
     /// Fog that tints surfaces and stops reads as fog only while its colour is
-    /// near the sky's, which is why every colour darker than the background
-    /// used to look like no fog at all: the hills went to silhouette and the
-    /// air behind them never moved. 0 restores that surfaces-only look for a
+    /// near the sky's; every colour darker than the background reads as no
+    /// fog at all, hills gone to silhouette against air that never moved. 0
+    /// keeps that surfaces-only look for a
     /// scene that wants it. Volumetric fog ignores this — it is a real medium
     /// and reaches the sky by marching it.
     pub fog_sky: f32,
@@ -1506,7 +1506,7 @@ pub enum Matter {
         drag: f32,
         /// Angular drag — what stops a dropped craft spinning forever.
         angular_drag: f32,
-        /// FROZEN: no buoyancy, no drag, no underwater state. Pair with a
+        /// Frozen: no buoyancy, no drag, no underwater state. Pair with a
         /// collider for the surface and the sea becomes walkable ground.
         frozen: bool,
         /// The colour everything fades toward when the camera is under. This is
@@ -1518,7 +1518,7 @@ pub enum Matter {
         /// crisp.
         visibility: f32,
     },
-    /// An authored SDF shape (ADR-0007 Sdf stage): its Material's `.flsl`
+    /// An authored SDF shape: its Material's `.flsl`
     /// shader is the geometry, raymarched as part of the scene field (up to 4
     /// per scene). `radius` bounds the shape in local units — the march,
     /// shadows and spans all key off it, so keep it snug. Visual only for now
@@ -1672,7 +1672,7 @@ pub enum Matter {
         /// How the scene's linear light lands on a display that stops at white.
         ///
         /// `0` clip (the default, and what the engine did before there was a
-        /// choice), `1` Reinhard, `2` ACES, `3` AgX. A plain number rather than
+        /// choice), `1` Reinhard, `2` aces, `3` AgX. A plain number rather than
         /// an enum here because `Matter` carries no renderer types; the renderer
         /// reads it through `floptle_render::Tonemap`.
         tonemap: u32,
@@ -1742,7 +1742,7 @@ pub enum Matter {
         /// Taps in the blur kernel. 0 = the default 16. More is smoother bokeh
         /// and linearly more expensive; fewer is the chunky look on purpose.
         dof_quality: u32,
-        /// MOTION BLUR: the shutter, as a fraction of the step between frames.
+        /// Motion blur: the shutter, as a fraction of the step between frames.
         /// 0 = off. 0.5 is the 180° shutter a film camera has, and is the value
         /// that reads as footage rather than as a smear; 1 leaves the shutter
         /// open for the whole frame.
@@ -2315,7 +2315,7 @@ pub enum WaterKind {
     #[default]
     Sea,
     /// A lake, a tank, a flooded room: an oriented box with a flat top. Its
-    /// sides are WALLS — standing beside a pool at the same height as its water
+    /// sides are walls — standing beside a pool at the same height as its water
     /// is not standing in it.
     Pool,
 }

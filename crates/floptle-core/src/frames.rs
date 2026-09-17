@@ -238,13 +238,13 @@ impl System {
         }
     }
 
-    /// The dominant attractor at a system-frame position — the DEEPEST body
+    /// The dominant attractor at a system-frame position — the deepest body
     /// whose SOI contains it (a moon's SOI shadows its planet's, which shadows
     /// the sun's). Falls back to the root. Returns the body index.
     pub fn dominant(&self, pos: DVec3, t: f64) -> usize {
         let mut best = self.root();
         let mut advanced = true;
-        // Walk down: from the current dominant body, find a CHILD whose SOI
+        // Walk down: from the current dominant body, find a child whose SOI
         // contains the point; repeat until none does.
         while advanced {
             advanced = false;
@@ -314,7 +314,7 @@ mod tests {
         for &t in &[0.0, 13.7, 500.0, 4321.0] {
             let (r, v) = k.pos_vel(MU, t);
             let k2 = Kepler::from_state(r, v, MU, t);
-            // Compare by TRAJECTORY, not raw angles (angle aliasing): the
+            // Compare by trajectory, not raw angles (angle aliasing): the
             // recovered elements must reproduce the same future states.
             for &dt in &[0.0, 100.0, 777.0] {
                 let (ra, va) = k.pos_vel(MU, t + dt);

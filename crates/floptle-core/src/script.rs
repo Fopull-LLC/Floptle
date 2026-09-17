@@ -1,4 +1,4 @@
-//! Node scripting — the *data* a node carries (ADR-0003).
+//! Node scripting: the data a node carries.
 //!
 //! A node can hold a [`Scripts`] component: a list of [`ScriptInst`]s, each naming
 //! a `.lua` script (the file stem under the project's `scripts/` folder) plus the

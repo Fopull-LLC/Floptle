@@ -1,4 +1,4 @@
-//! The data-oriented runtime under everything (ADR-0005).
+//! The data-oriented runtime under everything.
 //!
 //! The eventual representation is an **archetype ECS** (entities grouped by exact
 //! component set, components stored in packed parallel arrays systems iterate
@@ -7,8 +7,7 @@
 //! so the rest of Phase 1 has a real, testable world to build on. The archetype
 //! packing is an internal swap behind this API; callers won't change.
 //!
-//! The friendly **Node tree** (ADR-0005, `docs/subsystems/scene-and-nodes.md`) is
-//! a facade over this and arrives with the scene module in a later phase.
+//! The Node tree the editor shows is a facade over this.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -391,7 +390,7 @@ mod tests {
                 e
             })
             .collect();
-        // Take one out of the MIDDLE, so the last row really does move.
+        // Take one out of the middle, so the last row really does move.
         assert_eq!(w.remove::<Hp>(es[1]), Some(Hp(1)));
         assert_eq!(w.get::<Hp>(es[1]), None);
         for (i, e) in es.iter().enumerate() {

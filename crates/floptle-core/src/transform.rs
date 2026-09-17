@@ -1,4 +1,4 @@
-//! World transform — large-world-safe by default (ADR-0015).
+//! World transform, large-world-safe by default.
 //!
 //! The translation is `f64` (`DVec3`) so a node twelve light-years out is still
 //! placed to sub-millimeter precision; rotation and scale stay `f32` (they don't
@@ -46,7 +46,7 @@ impl Transform {
     /// **Camera-relative** model matrix for GPU upload: the translation is taken
     /// relative to `camera_world` in `f64`, and only the small residual is cast
     /// to `f32`. So vertices near the camera keep full precision no matter how far
-    /// the absolute coordinates are — no jitter, no developer effort (ADR-0015).
+    /// the absolute coordinates are: no jitter, no developer effort.
     pub fn render_matrix(&self, camera_world: DVec3) -> Mat4 {
         let rel = (self.translation - camera_world).as_vec3();
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, rel)

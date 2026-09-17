@@ -1,5 +1,4 @@
-//! Networking identity + replication description (Phase 2a of ADR-0022 —
-//! see `docs/multiplayer.md`).
+//! Networking identity and replication description.
 //!
 //! These are the *authored/data* halves of the netcode: which nodes replicate
 //! and how, plus the stable network identity. The behavior (sessions, wire
@@ -80,7 +79,7 @@ pub struct Replicated {
     /// of a physics body).
     pub physics: bool,
     /// Sync the Animation Controller's playback (state + time per layer, a few
-    /// bytes per TRANSITION — poses are sampled locally on every peer). Off =
+    /// bytes per transition — poses are sampled locally on every peer). Off =
     /// client-sided: each machine drives this node's animator itself (pure
     /// cosmetics, or Lua driving it from already-replicated state).
     pub animator: bool,

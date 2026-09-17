@@ -541,7 +541,7 @@ pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey>
             // …and only as far as the face actually goes. A cube face runs
             // `u, v` in [-1, 1], which is `radius / chunk` cells; a key beyond
             // that clamps to the edge and re-derives points already covered.
-            // On a body SMALLER than the view distance that is nearly all of
+            // On a body smaller than the view distance that is nearly all of
             // the sweep: 700 m of `lod` on a 107 m planet swept 4,489 keys for
             // 174 distinct chunks, and piled three quarters of its props on the
             // seam in a wall. Residency saturates at the body.
@@ -611,7 +611,7 @@ mod tests {
         }
     }
 
-    /// The load-bearing property: a chunk is RECOMPUTED, never remembered.
+    /// The load-bearing property: a chunk is recomputed, never remembered.
     /// Walk away and back and the same trees must stand in the same places —
     /// and on every machine, which is what lets a multiplayer session skip
     /// replicating scenery entirely.
@@ -624,7 +624,7 @@ mod tests {
         assert!(!a.is_empty());
     }
 
-    /// Density: where the map says nothing grows, nothing is GENERATED — not
+    /// Density: where the map says nothing grows, nothing is generated — not
     /// hidden at draw time, or the reason to scatter at all is gone.
     #[test]
     fn density_zero_grows_nothing_and_density_one_is_untouched() {
@@ -698,7 +698,7 @@ mod tests {
         }
     }
 
-    /// Position, scale and rotation come from INDEPENDENT streams. Deriving
+    /// Position, scale and rotation come from independent streams. Deriving
     /// them by shifting one value correlates them, and a forest whose big trees
     /// are all in one corner reads as a bug nobody can name.
     #[test]
@@ -723,7 +723,7 @@ mod tests {
         );
     }
 
-    /// Removal is by ID and it STICKS — that is the whole reason ids are stable
+    /// Removal is by ID and it sticks — that is the whole reason ids are stable
     /// across a stream-out and back in. A game that had to remember positions
     /// would be storing floats that came from a chain of arithmetic.
     #[test]
@@ -756,7 +756,7 @@ mod tests {
         assert!(band_at(&s, 200.0).is_none(), "past the last band it is gone");
     }
 
-    /// Chunk selection is GENEROUS on purpose. A prop near a chunk's far corner
+    /// Chunk selection is generous on purpose. A prop near a chunk's far corner
     /// must not be culled by the chunk it happens to live in — missing props at
     /// a seam is the classic scatter bug, and it only shows up as you walk.
     #[test]
@@ -801,7 +801,7 @@ mod tests {
         assert!(shipped.props > fixed.props * 30, "{shipped:?} vs {fixed:?}");
         assert_eq!(fixed.props, fixed.chunks * 14, "props is chunks x perChunk");
 
-        // …and it really is the SQUARE of the distance. Doubling `lod` is
+        // …and it really is the square of the distance. Doubling `lod` is
         // getting on for four times the work, which is the fact the knob's name
         // hides. (Just under four: the sweep carries a fixed couple of chunks
         // of slack, which weighs more on the smaller of the two.)
@@ -810,10 +810,10 @@ mod tests {
         assert!((3.0..4.2).contains(&ratio), "doubling the distance cost {ratio:.2}x, not ~4x");
     }
 
-    /// On a body SMALLER than the view distance, residency saturates at the
-    /// body. It used to keep growing: 700 m of `lod` on a 107 m planet swept
-    /// 4,489 keys that resolved to 174 distinct chunks, and piled three
-    /// quarters of its props on a cube-face seam.
+    /// On a body smaller than the view distance, residency saturates at the
+    /// body. Left growing, 700 m of `lod` on a 107 m planet sweeps 4,489 keys
+    /// that resolve to 174 distinct chunks, and piles three quarters of its
+    /// props on a cube-face seam.
     #[test]
     fn a_planet_smaller_than_the_view_distance_does_not_keep_costing_more() {
         let planet = |far: f32| ScatterSource {
@@ -990,7 +990,7 @@ mod tests {
         assert!(flat.dot(Vec3::Y) > 0.999);
     }
 
-    /// A prop rolled outside the declared rectangle is REJECTED, not clamped.
+    /// A prop rolled outside the declared rectangle is rejected, not clamped.
     /// Clamping builds a wall of props along the boundary — visibly a bug, and
     /// the kind you fix by shrinking the region until you notice why.
     #[test]

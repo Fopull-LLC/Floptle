@@ -2,7 +2,7 @@
 //!
 //! A hash grid rebuilt every frame, not a BVH: the items are physics bodies
 //! that move, so a tree would be refit every frame anyway, and the
-//! floating-origin rebase (ADR-0015) moves every item at once — a grid built
+//! floating-origin rebase moves every item at once — a grid built
 //! from this frame's positions in the frame that queries it cannot go stale.
 //! [`Grid::rebuild`] reuses its buffers, so a build is O(n) with no allocation
 //! once warm.
@@ -48,7 +48,7 @@ impl Grid {
 
     /// Rebuild the index from `items`, reusing the buffers from last time.
     ///
-    /// The cell size comes from the DATA — a few times the mean radius — because
+    /// The cell size comes from the data — a few times the mean radius — because
     /// a fixed size is wrong for both a room of crates and a solar system, and
     /// the mean is the one number that costs nothing to know while inserting.
     pub fn rebuild(&mut self, items: impl Iterator<Item = (Vec3, f32)> + Clone) {
@@ -276,7 +276,7 @@ mod tests {
     }
 
     /// A rebase moves everything at once; the index is rebuilt from the same
-    /// coordinates the query uses, so it cannot go stale (ADR-0015).
+    /// coordinates the query uses, so it cannot go stale.
     #[test]
     fn the_index_survives_the_floating_origin_rebase() {
         let near = items(300, 2.0, 0.5);

@@ -1,4 +1,4 @@
-//! Floating origin (ADR-0015): keep the active simulation near `(0,0,0)`.
+//! Floating origin: keep the active simulation near `(0,0,0)`.
 //!
 //! Even with `f64` world transforms, physics finite-differences (`∇f`, penetration
 //! depth) are *differences of large nearly-equal numbers* where precision dies. So

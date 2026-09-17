@@ -233,7 +233,7 @@ pub fn tile_corner(s: u8, t: u8, xf: TileXform) -> (u8, u8) {
     let mut s = if xf.flip_x { 1 - s } else { s };
     let mut t = t;
     // Then un-rotate, a quarter-turn at a time. Drawing the art a quarter-turn
-    // CLOCKWISE sends art (a, b) to screen (b, 1 - a); finding which art corner
+    // Clockwise sends art (a, b) to screen (b, 1 - a); finding which art corner
     // landed here therefore runs the other way: (s, t) <- (1 - t, s).
     for _ in 0..(xf.rot & 3) {
         let (ns, nt) = (1 - t, s);

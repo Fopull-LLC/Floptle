@@ -10,8 +10,8 @@
 //! - `material` — materials and tints.
 //! - `transform`, `origin`, `frames` — `f64` world transforms, the floating
 //!   origin, and hierarchical reference frames (galaxy → system → body → local),
-//!   large-world-safe by default (ADR-0015).
-//! - `time`     — the frame clock, fixed timestep and timers (ADR-0017).
+//!   large-world-safe by default.
+//! - `time`     — the frame clock, fixed timestep and timers.
 //! - `layers`, `tile`, `camera2d`, `scatter`, `spatial`, `noise`, `net`,
 //!   `profile`, `access`, `event`, `script` — the smaller building blocks named
 //!   after what they hold.

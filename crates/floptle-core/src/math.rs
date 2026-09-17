@@ -1,6 +1,6 @@
 //! Thin re-exports over `glam` so the rest of the engine speaks one math
 //! vocabulary, plus a few helpers. The split that matters for large-world space
-//! (ADR-0015): **world translations are `f64` (`DVec3`)**, while rotation, scale,
+//! is that world translations are `f64` (`DVec3`), while rotation, scale,
 //! and everything uploaded to the GPU are `f32` (GPUs are `f32`-native).
 
 pub use glam::{
