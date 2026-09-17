@@ -483,6 +483,16 @@ pub fn anim_component_ui(
     ui.add_space(4.0);
 }
 
+/// The bound node's animation controller and what it plays: the controller
+/// key, its states as `(name, clip)` pairs, and how many states play each
+/// clip file.
+struct AnimStates {
+    ctl_key: Option<String>,
+    states: Vec<(String, String)>,
+    clip_users: HashMap<String, usize>,
+}
+
+
 impl EditorTabViewer<'_> {
 
     // =========================================================================
@@ -1255,6 +1265,60 @@ impl EditorTabViewer<'_> {
     // =========================================================================
     pub fn animating_ui(&mut self, ui: &mut egui::Ui) {
         self.anim_ui.tab_visible = true;
+        let candidates = self.anim_candidates();
+        let Some(target) = self.anim_ui.target else {
+            self.anim_no_target_ui(ui, &candidates);
+            return;
+        };
+        let st = self.anim_states(target);
+        self.anim_top_bar(ui, target, &candidates, &st);
+        self.anim_new_prompt(ui, target, &st);
+
+        let Some(sel_anim) = self.anim_ui.sel_anim.clone() else {
+            ui.add_space(10.0);
+            ui.weak("No animations yet — click ✚ New… above to author one, or ⬇ Extract a model's embedded clips.");
+            return;
+        };
+        let resolved = self.anim_clip_key(&sel_anim, &st.states);
+        // A sprite clip is a frame list, not lanes of keys, and the timeline can
+        // only write the second shape — onto a different filename, leaving two
+        // files claiming one key. So it plays here and is edited as its file.
+        if let Some(res) = resolved.as_ref().filter(|k| self.anim.is_sprite_clip(k)) {
+            self.anim_sprite_clip_ui(ui, res);
+            return;
+        }
+        self.anim_load_clip_doc(&resolved);
+        self.anim_shared_clip_guard(ui, &sel_anim, &resolved, &st);
+
+        ui.separator();
+        if self.anim_ui.clip_doc.is_some() {
+            self.timeline_ui(ui, target);
+            self.property_tracks_ui(ui, target);
+        } else {
+            ui.weak(
+                "This animation is embedded in the model. ⬇ Extract animations (select the model \
+                 asset in the browser) to edit keys and events.",
+            );
+            // Still allow preview scrubbing of embedded clips via a bare ruler.
+            self.bare_ruler_ui(ui, target, &sel_anim);
+        }
+
+        // (Record diffing runs in the render loop before the preview re-applies
+        // the clip — see anim_ui::record_scan.)
+
+        // Save coalescing for clip edits.
+        if self.anim_ui.clip_dirty && !self.pointer_down {
+            if let Some((k, d)) = self.anim_ui.clip_doc.clone() {
+                self.anim.save_clip(self.project_root, &k, &d);
+            }
+            self.anim_ui.clip_dirty = false;
+        }
+    }
+
+
+    /// The nodes the Animating tab can bind to, after re-checking the bound one
+    /// and defaulting to the selection.
+    fn anim_candidates(&mut self) -> Vec<(Entity, String)> {
         // ---- resolve the bound node ----
         let valid = |e: Entity, viewer: &Self| {
             viewer.world.get::<AnimController>(e).is_some()
@@ -1276,26 +1340,32 @@ impl EditorTabViewer<'_> {
             .filter(|(e, _)| valid(*e, self))
             .map(|(e, n)| (*e, n.clone()))
             .collect();
-        let Some(target) = self.anim_ui.target else {
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                ui.weak("Select a node with an Animation Controller (or a rigged model) to animate.");
-                if candidates.is_empty() {
-                    ui.small("add one via Inspector ➕ Add Component ⏵ Animation Controller");
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label("or pick:");
-                        for (e, n) in &candidates {
-                            if ui.button(n).clicked() {
-                                self.anim_ui.target = Some(*e);
-                            }
-                        }
-                    });
-                }
-            });
-            return;
-        };
+        candidates
+    }
 
+    /// What the tab shows with nothing bound: the hint, and the candidates as buttons.
+    fn anim_no_target_ui(&mut self, ui: &mut egui::Ui, candidates: &[(Entity, String)]) {
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| {
+            ui.weak("Select a node with an Animation Controller (or a rigged model) to animate.");
+            if candidates.is_empty() {
+                ui.small("add one via Inspector ➕ Add Component ⏵ Animation Controller");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("or pick:");
+                    for (e, n) in candidates {
+                        if ui.button(n).clicked() {
+                            self.anim_ui.target = Some(*e);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// The bound node's controller key and its states, with a count of how many
+    /// states play each clip file; keeps the selected state valid.
+    fn anim_states(&mut self, target: Entity) -> AnimStates {
         // The controller doc + available states.
         let ctl_key = self.world.get::<AnimController>(target).map(|c| c.asset.clone());
         let states: Vec<(String, String)> = match &ctl_key {
@@ -1346,7 +1416,12 @@ impl EditorTabViewer<'_> {
             self.anim_ui.clip_doc = None;
             self.anim_ui.playhead = 0.0;
         }
+        AnimStates { ctl_key, states, clip_users }
+    }
 
+    /// The bar above the timeline: node and animation pickers, transport, view
+    /// settings, shortcuts.
+    fn anim_top_bar(&mut self, ui: &mut egui::Ui, target: Entity, candidates: &[(Entity, String)], st: &AnimStates) {
         // ---- top bar ----
         let tname = self
             .entity_names
@@ -1355,290 +1430,311 @@ impl EditorTabViewer<'_> {
             .map(|(_, n)| n.clone())
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.label("node");
-            egui::ComboBox::from_id_salt("animating-target")
-                .selected_text(tname)
-                .show_ui(ui, |ui| {
-                    for (e, n) in &candidates {
-                        if ui.selectable_label(*e == target, n).clicked() && *e != target {
-                            // A live recording is bound to the old target's subtree —
-                            // stop it (restoring the pre-record scene) before switching.
-                            if self.anim_ui.record {
-                                stop_record_ui(self.world, self.anim_ui);
-                                self.anim.forget_preview();
-                            }
-                            self.anim.restore_preview(self.world);
-                            self.anim_ui.target = Some(*e);
-                            self.anim_ui.sel_anim = None;
-                            self.anim_ui.clip_doc = None;
-                            self.anim_ui.sel_prop = None;
-                            self.anim_ui.last_scene_local.clear();
+            self.anim_bar_pickers(ui, target, tname, candidates, st);
+            self.anim_bar_transport(ui, target);
+            self.anim_bar_view(ui);
+            self.anim_bar_shortcuts(ui);
+        });
+    }
+
+    fn anim_bar_pickers(&mut self, ui: &mut egui::Ui, target: Entity, tname: String, candidates: &[(Entity, String)], st: &AnimStates) {
+        let AnimStates { ctl_key, states, clip_users } = st;
+        ui.label("node");
+        egui::ComboBox::from_id_salt("animating-target")
+            .selected_text(tname)
+            .show_ui(ui, |ui| {
+                for (e, n) in candidates {
+                    if ui.selectable_label(*e == target, n).clicked() && *e != target {
+                        // A live recording is bound to the old target's subtree —
+                        // stop it (restoring the pre-record scene) before switching.
+                        if self.anim_ui.record {
+                            stop_record_ui(self.world, self.anim_ui);
+                            self.anim.forget_preview();
                         }
+                        self.anim.restore_preview(self.world);
+                        self.anim_ui.target = Some(*e);
+                        self.anim_ui.sel_anim = None;
+                        self.anim_ui.clip_doc = None;
+                        self.anim_ui.sel_prop = None;
+                        self.anim_ui.last_scene_local.clear();
                     }
-                });
-            ui.label("animation");
-            let cur = self.anim_ui.sel_anim.clone().unwrap_or_else(|| "—".into());
-            egui::ComboBox::from_id_salt("animating-state")
-                .selected_text(cur.clone())
-                .show_ui(ui, |ui| {
-                    for (n, c) in &states {
-                        // ⚠ = this state plays a clip another state also plays:
-                        // one file, so editing here edits there too.
-                        let shared = self
-                            .anim
-                            .resolve_clip_key(c)
-                            .and_then(|k| clip_users.get(&k).copied())
-                            .unwrap_or(1)
-                            > 1;
-                        let lbl = if shared { format!("{n}  ⚠ shared") } else { n.clone() };
-                        if ui
-                            .selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), lbl)
-                            .clicked()
-                        {
-                            // Recording writes into the current clip — stop it before
-                            // switching so keys can't land in the wrong animation.
-                            if self.anim_ui.record {
-                                stop_record_ui(self.world, self.anim_ui);
-                                self.anim.forget_preview();
-                            }
-                            self.anim_ui.sel_anim = Some(n.clone());
-                            self.anim_ui.clip_doc = None;
-                            self.anim_ui.playhead = 0.0;
-                            self.anim_ui.sel_event = None;
-                            self.anim_ui.sel_prop = None;
+                }
+            });
+        ui.label("animation");
+        let cur = self.anim_ui.sel_anim.clone().unwrap_or_else(|| "—".into());
+        egui::ComboBox::from_id_salt("animating-state")
+            .selected_text(cur.clone())
+            .show_ui(ui, |ui| {
+                for (n, c) in states {
+                    // ⚠ = this state plays a clip another state also plays:
+                    // one file, so editing here edits there too.
+                    let shared = self
+                        .anim
+                        .resolve_clip_key(c)
+                        .and_then(|k| clip_users.get(&k).copied())
+                        .unwrap_or(1)
+                        > 1;
+                    let lbl = if shared { format!("{n}  ⚠ shared") } else { n.clone() };
+                    if ui
+                        .selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), lbl)
+                        .clicked()
+                    {
+                        // Recording writes into the current clip — stop it before
+                        // switching so keys can't land in the wrong animation.
+                        if self.anim_ui.record {
+                            stop_record_ui(self.world, self.anim_ui);
+                            self.anim.forget_preview();
                         }
+                        self.anim_ui.sel_anim = Some(n.clone());
+                        self.anim_ui.clip_doc = None;
+                        self.anim_ui.playhead = 0.0;
+                        self.anim_ui.sel_event = None;
+                        self.anim_ui.sel_prop = None;
                     }
-                });
-            // New clip: on a controller it adds a state; on a controller-less rigged
-            // Mesh it authors a standalone clip bound to the model (source_model).
-            let is_mesh = matches!(self.world.get::<Matter>(target), Some(Matter::Mesh { .. }));
-            let new_hover = if ctl_key.is_some() {
-                "create a new empty animation clip and add it to this controller"
+                }
+            });
+        // New clip: on a controller it adds a state; on a controller-less rigged
+        // Mesh it authors a standalone clip bound to the model (source_model).
+        let is_mesh = matches!(self.world.get::<Matter>(target), Some(Matter::Mesh { .. }));
+        let new_hover = if ctl_key.is_some() {
+            "create a new empty animation clip and add it to this controller"
+        } else {
+            "create a new empty animation clip for this model — key its objects/bones below"
+        };
+        if (ctl_key.is_some() || is_mesh)
+            && ui.button("✚ New…").on_hover_text(new_hover).clicked()
+        {
+            self.anim_ui.new_anim_buf = Some(String::new());
+            self.anim_ui.focus_prompt = true;
+        }
+    }
+
+    fn anim_bar_transport(&mut self, ui: &mut egui::Ui, target: Entity) {
+        ui.separator();
+        if self.playing {
+            ui.colored_label(
+                Color32::from_rgb(230, 180, 90),
+                "⏵ Play mode — preview & record paused",
+            );
+        }
+        ui.add_enabled_ui(!self.playing, |ui| {
+            // Transport.
+            if ui.button("⏮").on_hover_text("to start").clicked() {
+                self.anim_ui.playhead = 0.0;
+            }
+            let play_lbl = if self.anim_ui.preview_playing { "⏸" } else { "⏵" };
+            if ui.button(play_lbl).on_hover_text("preview play/pause (Space)").clicked() {
+                self.anim_ui.preview_playing = !self.anim_ui.preview_playing;
+                if self.anim_ui.preview_playing && self.anim_ui.record {
+                    stop_record_ui(self.world, self.anim_ui);
+                    self.anim.forget_preview();
+                }
+            }
+            if ui.button("⏹").on_hover_text("stop preview (restore the scene pose)").clicked() {
+                self.anim_ui.preview_playing = false;
+                self.anim_ui.playhead = 0.0;
+                if self.anim_ui.record {
+                    stop_record_ui(self.world, self.anim_ui);
+                    self.anim.forget_preview();
+                }
+                self.anim.restore_preview(self.world);
+                self.anim.poses.remove(&target);
+            }
+            // ● Record: red while armed — the standard "you are recording" cue.
+            let rec_text = if self.anim_ui.record {
+                egui::RichText::new("● REC").color(RECORD_RED).strong()
             } else {
-                "create a new empty animation clip for this model — key its objects/bones below"
+                egui::RichText::new("● Record")
             };
-            if (ctl_key.is_some() || is_mesh)
-                && ui.button("✚ New…").on_hover_text(new_hover).clicked()
-            {
-                self.anim_ui.new_anim_buf = Some(String::new());
-                self.anim_ui.focus_prompt = true;
-            }
-            ui.separator();
-            if self.playing {
-                ui.colored_label(
-                    Color32::from_rgb(230, 180, 90),
-                    "⏵ Play mode — preview & record paused",
+            let rec = ui
+                .selectable_label(self.anim_ui.record, rec_text)
+                .on_hover_text(
+                    "key on change: while recording, the scene shows the clip at the playhead — \
+                     move a node or edit a property (a spritesheet cell, opacity…) and it's keyed \
+                     there. Turning record off restores the scene (recording edits the CLIP, \
+                     never the scene).",
                 );
-            }
-            ui.add_enabled_ui(!self.playing, |ui| {
-                // Transport.
-                if ui.button("⏮").on_hover_text("to start").clicked() {
-                    self.anim_ui.playhead = 0.0;
-                }
-                let play_lbl = if self.anim_ui.preview_playing { "⏸" } else { "⏵" };
-                if ui.button(play_lbl).on_hover_text("preview play/pause (Space)").clicked() {
-                    self.anim_ui.preview_playing = !self.anim_ui.preview_playing;
-                    if self.anim_ui.preview_playing && self.anim_ui.record {
-                        stop_record_ui(self.world, self.anim_ui);
-                        self.anim.forget_preview();
-                    }
-                }
-                if ui.button("⏹").on_hover_text("stop preview (restore the scene pose)").clicked() {
-                    self.anim_ui.preview_playing = false;
-                    self.anim_ui.playhead = 0.0;
-                    if self.anim_ui.record {
-                        stop_record_ui(self.world, self.anim_ui);
-                        self.anim.forget_preview();
-                    }
-                    self.anim.restore_preview(self.world);
-                    self.anim.poses.remove(&target);
-                }
-                // ● Record: red while armed — the standard "you are recording" cue.
-                let rec_text = if self.anim_ui.record {
-                    egui::RichText::new("● REC").color(RECORD_RED).strong()
+            if rec.clicked() {
+                if self.anim_ui.record {
+                    stop_record_ui(self.world, self.anim_ui);
+                    self.anim.forget_preview();
                 } else {
-                    egui::RichText::new("● Record")
-                };
-                let rec = ui
-                    .selectable_label(self.anim_ui.record, rec_text)
-                    .on_hover_text(
-                        "key on change: while recording, the scene shows the clip at the playhead — \
-                         move a node or edit a property (a spritesheet cell, opacity…) and it's keyed \
-                         there. Turning record off restores the scene (recording edits the CLIP, \
-                         never the scene).",
-                    );
-                if rec.clicked() {
-                    if self.anim_ui.record {
-                        stop_record_ui(self.world, self.anim_ui);
-                        self.anim.forget_preview();
-                    } else {
-                        self.anim_ui.record = true;
-                        self.anim_ui.preview_playing = false;
-                        // Snapshot the subtree so turning record off restores it.
-                        self.anim_ui.record_restore = scene_channel_names(self.world, target)
-                            .iter()
-                            .filter_map(|(e, _)| {
-                                self.world
-                                    .get::<floptle_core::Transform>(*e)
-                                    .map(|t| (*e, *t))
-                            })
-                            .collect();
-                        // Snapshot pre-record property values too (for restore
-                        // on stop) — numbers and paths. Without the second half,
-                        // recording a texture swap leaves the swap in the scene.
-                        self.anim_ui.record_restore_props = scene_channel_names(self.world, target)
+                    self.anim_ui.record = true;
+                    self.anim_ui.preview_playing = false;
+                    // Snapshot the subtree so turning record off restores it.
+                    self.anim_ui.record_restore = scene_channel_names(self.world, target)
+                        .iter()
+                        .filter_map(|(e, _)| {
+                            self.world
+                                .get::<floptle_core::Transform>(*e)
+                                .map(|t| (*e, *t))
+                        })
+                        .collect();
+                    // Snapshot pre-record property values too (for restore
+                    // on stop) — numbers and paths. Without the second half,
+                    // recording a texture swap leaves the swap in the scene.
+                    self.anim_ui.record_restore_props = scene_channel_names(self.world, target)
+                        .into_iter()
+                        .flat_map(|(e, _)| {
+                            numeric_props_of(self.world, e)
+                                .into_iter()
+                                .map(move |(c, f, v)| (e, c.to_string(), f.to_string(), v))
+                        })
+                        .collect();
+                    self.anim_ui.record_restore_frames = scene_channel_names(self.world, target)
+                        .into_iter()
+                        .filter_map(|(e, _)| {
+                            let (texture, cols, rows, cell) =
+                                floptle_script::read_sprite_frame(self.world, e)?;
+                            Some((e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell }))
+                        })
+                        .collect();
+                    self.anim_ui.record_restore_prop_strs =
+                        scene_channel_names(self.world, target)
                             .into_iter()
                             .flat_map(|(e, _)| {
-                                numeric_props_of(self.world, e)
+                                string_props_of(self.world, e)
                                     .into_iter()
-                                    .map(move |(c, f, v)| (e, c.to_string(), f.to_string(), v))
+                                    .map(move |(c, f, v)| {
+                                        (e, c.to_string(), f.to_string(), v)
+                                    })
                             })
                             .collect();
-                        self.anim_ui.record_restore_frames = scene_channel_names(self.world, target)
-                            .into_iter()
-                            .filter_map(|(e, _)| {
-                                let (texture, cols, rows, cell) =
-                                    floptle_script::read_sprite_frame(self.world, e)?;
-                                Some((e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell }))
-                            })
-                            .collect();
-                        self.anim_ui.record_restore_prop_strs =
-                            scene_channel_names(self.world, target)
-                                .into_iter()
-                                .flat_map(|(e, _)| {
-                                    string_props_of(self.world, e)
-                                        .into_iter()
-                                        .map(move |(c, f, v)| {
-                                            (e, c.to_string(), f.to_string(), v)
-                                        })
-                                })
-                                .collect();
-                        refresh_record_baseline(self.world, self.anim_ui, target);
-                    }
+                    refresh_record_baseline(self.world, self.anim_ui, target);
                 }
-            });
-            ui.separator();
-            // Time readout — with the frame number when snapping (24fps: "0.50s · f12").
-            if self.anim_ui.snap_fps > 0.0 {
-                ui.label(format!(
-                    "{:.2}s · f{}",
-                    self.anim_ui.playhead,
-                    (self.anim_ui.playhead * self.anim_ui.snap_fps).round() as i64
-                ));
-            } else {
-                ui.label(format!("{:.2}s", self.anim_ui.playhead));
             }
-            ui.label("snap");
-            egui::ComboBox::from_id_salt("anim-snap")
-                .selected_text(if self.anim_ui.snap_fps <= 0.0 {
-                    "off".to_string()
-                } else {
-                    format!("{:.0} fps", self.anim_ui.snap_fps)
-                })
-                .width(70.0)
-                .show_ui(ui, |ui| {
-                    for f in [0.0, 8.0, 12.0, 24.0, 30.0, 60.0] {
-                        let lbl = if f <= 0.0 { "off".to_string() } else { format!("{f:.0} fps") };
-                        if ui.selectable_label(self.anim_ui.snap_fps == f, lbl).clicked() {
-                            self.anim_ui.snap_fps = f;
-                        }
-                    }
-                });
-            // (Zoom lives on the wheel — the old slider duplicated it and ate bar space.)
-            if ui
-                .button("Fit")
-                .on_hover_text("zoom to fit the whole clip (F)")
-                .clicked()
-            {
-                self.anim_ui.fit_pending = true;
-            }
-            // Dopesheet or curves.
-            ui.separator();
-            if ui
-                .selectable_label(!self.anim_ui.curves.on, "▤ Sheet")
-                .on_hover_text("keys on rows: when things happen")
-                .clicked()
-            {
-                self.anim_ui.curves.on = false;
-            }
-            if ui
-                .selectable_label(self.anim_ui.curves.on, "📈 Curves")
-                .on_hover_text("values over time: how much, and how fast (Tab)")
-                .clicked()
-            {
-                self.anim_ui.curves.on = true;
-            }
-            ui.separator();
-            // Row height, in points: the wheel's Alt+scroll as a number, so a big
-            // rig can be packed to exactly the height that fits the panel.
-            let mut row_px = ANIM_ROW_BASE * self.anim_ui.row_scale;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut row_px)
-                        .speed(0.25)
-                        .range((ANIM_ROW_BASE * ANIM_ROW_MIN)..=(ANIM_ROW_BASE * ANIM_ROW_MAX))
-                        .suffix(" px")
-                        .max_decimals(0),
-                )
-                .on_hover_text("row height (Alt+wheel over the sheet does the same)")
-                .changed()
-            {
-                self.anim_ui.row_scale = (row_px / ANIM_ROW_BASE).clamp(ANIM_ROW_MIN, ANIM_ROW_MAX);
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.anim_ui.row_filter)
-                    .hint_text("🔍 rows")
-                    .desired_width(90.0),
-            )
-            .on_hover_text("show only the rows whose name contains this");
-            // Live selection count (multi-select feedback).
-            if !self.anim_ui.sel_keys.is_empty() {
-                ui.separator();
-                ui.colored_label(
-                    ACCENT,
-                    format!("{} key(s) selected", self.anim_ui.sel_keys.len()),
-                );
-            }
-            // A discoverable cheat-sheet of every dopesheet gesture/shortcut.
-            ui.menu_button("⌨ Shortcuts", |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                for line in [
-                    "— Selection —",
-                    "click key = select · Shift+click = add/remove",
-                    "drag empty sheet = marquee box-select",
-                    "Ctrl+A = select all keys · Esc / click empty = deselect",
-                    "click a track label = select that bone/node",
-                    "— Editing —",
-                    "drag a key = move it (moves the whole selection)",
-                    "stretch grip (amber, on ≥2 selected) = scale timing",
-                    "Ctrl+C / X / V = copy / cut / paste at playhead",
-                    "Ctrl+D = duplicate selection at playhead",
-                    "Del / Backspace = delete selection",
-                    "Ctrl+Z / Ctrl+Y = undo / redo",
-                    "double-click a lane = key pose there",
-                    "right-click a lane = insert key here",
-                    "right-click a key = its interpolation (smooth, ease, hold)",
-                    "⏵ on a node row = its position / rotation / scale lanes",
-                    "Tab = curves ⇄ sheet · in curves: drag a key in time and value,",
-                    "Shift+drag = value only · Alt+wheel = zoom values · right-click = key here",
-                    "⏺ Key all bones · ◎ Key all tracks (toolbar)",
-                    "— Navigation —",
-                    "Space = play/pause · Home/End = clip ends",
-                    "←/→ = step · , / . (or [ / ]) = prev/next key",
-                    "F = fit · wheel = zoom · Alt+wheel = row height (or type it)",
-                    "🔍 rows = show only the rows whose name matches",
-                    "Shift+wheel = pan",
-                ] {
-                    if line.starts_with('—') {
-                        ui.add_space(3.0);
-                        ui.strong(line);
-                    } else {
-                        ui.label(line);
-                    }
-                }
-            });
         });
+    }
 
+    fn anim_bar_view(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        // Time readout — with the frame number when snapping (24fps: "0.50s · f12").
+        if self.anim_ui.snap_fps > 0.0 {
+            ui.label(format!(
+                "{:.2}s · f{}",
+                self.anim_ui.playhead,
+                (self.anim_ui.playhead * self.anim_ui.snap_fps).round() as i64
+            ));
+        } else {
+            ui.label(format!("{:.2}s", self.anim_ui.playhead));
+        }
+        ui.label("snap");
+        egui::ComboBox::from_id_salt("anim-snap")
+            .selected_text(if self.anim_ui.snap_fps <= 0.0 {
+                "off".to_string()
+            } else {
+                format!("{:.0} fps", self.anim_ui.snap_fps)
+            })
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for f in [0.0, 8.0, 12.0, 24.0, 30.0, 60.0] {
+                    let lbl = if f <= 0.0 { "off".to_string() } else { format!("{f:.0} fps") };
+                    if ui.selectable_label(self.anim_ui.snap_fps == f, lbl).clicked() {
+                        self.anim_ui.snap_fps = f;
+                    }
+                }
+            });
+        // (Zoom lives on the wheel — the old slider duplicated it and ate bar space.)
+        if ui
+            .button("Fit")
+            .on_hover_text("zoom to fit the whole clip (F)")
+            .clicked()
+        {
+            self.anim_ui.fit_pending = true;
+        }
+        // Dopesheet or curves.
+        ui.separator();
+        if ui
+            .selectable_label(!self.anim_ui.curves.on, "▤ Sheet")
+            .on_hover_text("keys on rows: when things happen")
+            .clicked()
+        {
+            self.anim_ui.curves.on = false;
+        }
+        if ui
+            .selectable_label(self.anim_ui.curves.on, "📈 Curves")
+            .on_hover_text("values over time: how much, and how fast (Tab)")
+            .clicked()
+        {
+            self.anim_ui.curves.on = true;
+        }
+        ui.separator();
+        // Row height, in points: the wheel's Alt+scroll as a number, so a big
+        // rig can be packed to exactly the height that fits the panel.
+        let mut row_px = ANIM_ROW_BASE * self.anim_ui.row_scale;
+        if ui
+            .add(
+                egui::DragValue::new(&mut row_px)
+                    .speed(0.25)
+                    .range((ANIM_ROW_BASE * ANIM_ROW_MIN)..=(ANIM_ROW_BASE * ANIM_ROW_MAX))
+                    .suffix(" px")
+                    .max_decimals(0),
+            )
+            .on_hover_text("row height (Alt+wheel over the sheet does the same)")
+            .changed()
+        {
+            self.anim_ui.row_scale = (row_px / ANIM_ROW_BASE).clamp(ANIM_ROW_MIN, ANIM_ROW_MAX);
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut self.anim_ui.row_filter)
+                .hint_text("🔍 rows")
+                .desired_width(90.0),
+        )
+        .on_hover_text("show only the rows whose name contains this");
+        // Live selection count (multi-select feedback).
+        if !self.anim_ui.sel_keys.is_empty() {
+            ui.separator();
+            ui.colored_label(
+                ACCENT,
+                format!("{} key(s) selected", self.anim_ui.sel_keys.len()),
+            );
+        }
+    }
+
+    fn anim_bar_shortcuts(&mut self, ui: &mut egui::Ui) {
+        // A discoverable cheat-sheet of every dopesheet gesture/shortcut.
+        ui.menu_button("⌨ Shortcuts", |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            for line in [
+                "— Selection —",
+                "click key = select · Shift+click = add/remove",
+                "drag empty sheet = marquee box-select",
+                "Ctrl+A = select all keys · Esc / click empty = deselect",
+                "click a track label = select that bone/node",
+                "— Editing —",
+                "drag a key = move it (moves the whole selection)",
+                "stretch grip (amber, on ≥2 selected) = scale timing",
+                "Ctrl+C / X / V = copy / cut / paste at playhead",
+                "Ctrl+D = duplicate selection at playhead",
+                "Del / Backspace = delete selection",
+                "Ctrl+Z / Ctrl+Y = undo / redo",
+                "double-click a lane = key pose there",
+                "right-click a lane = insert key here",
+                "right-click a key = its interpolation (smooth, ease, hold)",
+                "⏵ on a node row = its position / rotation / scale lanes",
+                "Tab = curves ⇄ sheet · in curves: drag a key in time and value,",
+                "Shift+drag = value only · Alt+wheel = zoom values · right-click = key here",
+                "⏺ Key all bones · ◎ Key all tracks (toolbar)",
+                "— Navigation —",
+                "Space = play/pause · Home/End = clip ends",
+                "←/→ = step · , / . (or [ / ]) = prev/next key",
+                "F = fit · wheel = zoom · Alt+wheel = row height (or type it)",
+                "🔍 rows = show only the rows whose name matches",
+                "Shift+wheel = pan",
+            ] {
+                if line.starts_with('—') {
+                    ui.add_space(3.0);
+                    ui.strong(line);
+                } else {
+                    ui.label(line);
+                }
+            }
+        });
+    }
+
+    /// The ✚ New… prompt, while it is open.
+    fn anim_new_prompt(&mut self, ui: &mut egui::Ui, target: Entity, st: &AnimStates) {
+        let AnimStates { ctl_key, .. } = st;
         // New-animation prompt.
         if let Some(buf) = self.anim_ui.new_anim_buf.as_mut() {
             let mut done = false;
@@ -1725,13 +1821,10 @@ impl EditorTabViewer<'_> {
                 self.anim_ui.new_anim_buf = None;
             }
         }
+    }
 
-        let Some(sel_anim) = self.anim_ui.sel_anim.clone() else {
-            ui.add_space(10.0);
-            ui.weak("No animations yet — click ✚ New… above to author one, or ⬇ Extract a model's embedded clips.");
-            return;
-        };
-
+    /// The registry key of the clip the selected state plays, if it has one.
+    fn anim_clip_key(&self, sel_anim: &str, states: &[(String, String)]) -> Option<String> {
         // Resolve the editable clip doc for the selected state.
         let clip_key: Option<String> = states
             .iter()
@@ -1740,42 +1833,44 @@ impl EditorTabViewer<'_> {
             .filter(|c| !c.is_empty());
         // Resolve to the registry key (handles stem-fallback for moved files) so
         // edits save onto the right file, and reload the working copy on change.
-        let resolved = clip_key.as_ref().and_then(|k| self.anim.resolve_clip_key(k));
-        // A sprite clip is a frame list, not lanes of keys, and the timeline can
-        // only write the second shape — onto a different filename, leaving two
-        // files claiming one key. So it plays here and is edited as its file.
-        if let Some(res) = resolved.as_ref().filter(|k| self.anim.is_sprite_clip(k)) {
-            let frames = self.anim.clip(res).map_or(0, |c| {
-                c.channels.first().and_then(|ch| ch.properties.first()).map_or(0, |p| p.times.len())
-            });
-            self.anim_ui.clip_doc = None;
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(
-                        ACCENT,
-                        format!("▦ {res} — a sprite animation, {frames} frame(s)"),
-                    );
-                });
-                crate::responsive::para(
-                    ui,
-                    "It plays here like any other clip, and blends and crossfades like one. Its \
-                     frames, its frame rate and its holds live in the .spriteanim.ron file — the \
-                     timeline below writes keyed lanes, which is a different shape and a \
-                     different file, so it does not edit this one.",
+        clip_key.as_ref().and_then(|k| self.anim.resolve_clip_key(k))
+    }
+
+    /// A sprite clip plays here and is edited as its file; this says so.
+    fn anim_sprite_clip_ui(&mut self, ui: &mut egui::Ui, res: &str) {
+        let frames = self.anim.clip(res).map_or(0, |c| {
+            c.channels.first().and_then(|ch| ch.properties.first()).map_or(0, |p| p.times.len())
+        });
+        self.anim_ui.clip_doc = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    ACCENT,
+                    format!("▦ {res} — a sprite animation, {frames} frame(s)"),
                 );
-                if ui
-                    .button("🗀 Show the file")
-                    .on_hover_text("open the folder it is in")
-                    .clicked()
-                {
-                    let p = self
-                        .project_root
-                        .join(format!("{res}{}", floptle_scene::SPRITE_ANIM_EXT));
-                    crate::assets::reveal_in_explorer(&p);
-                }
             });
-            return;
-        }
+            crate::responsive::para(
+                ui,
+                "It plays here like any other clip, and blends and crossfades like one. Its \
+                 frames, its frame rate and its holds live in the .spriteanim.ron file — the \
+                 timeline below writes keyed lanes, which is a different shape and a \
+                 different file, so it does not edit this one.",
+            );
+            if ui
+                .button("🗀 Show the file")
+                .on_hover_text("open the folder it is in")
+                .clicked()
+            {
+                let p = self
+                    .project_root
+                    .join(format!("{res}{}", floptle_scene::SPRITE_ANIM_EXT));
+                crate::assets::reveal_in_explorer(&p);
+            }
+        });
+    }
+
+    /// Reloads the working copy of the clip when the bound clip changes.
+    fn anim_load_clip_doc(&mut self, resolved: &Option<String>) {
         if self.anim_ui.clip_doc.as_ref().map(|(k, _)| k.as_str()) != resolved.as_deref() {
             self.anim_ui.clip_doc = resolved
                 .as_ref()
@@ -1783,7 +1878,10 @@ impl EditorTabViewer<'_> {
             self.anim_ui.sel_event = None;
             self.anim_ui.sel_prop = None;
         }
+    }
 
+    fn anim_shared_clip_guard(&mut self, ui: &mut egui::Ui, sel_anim: &str, resolved: &Option<String>, st: &AnimStates) {
+        let AnimStates { ctl_key, states, clip_users } = st;
         // ---- shared-clip guard --------------------------------------------
         // Several states pointing at one clip file is legal (a "hit" reused by
         // three attacks) but it is a single animation: keying it changes every
@@ -1821,7 +1919,7 @@ impl EditorTabViewer<'_> {
                                 )
                                 .clicked()
                             {
-                                self.unshare_clips(&k, Some(&sel_anim));
+                                self.unshare_clips(&k, Some(sel_anim));
                             }
                             if ui
                                 .button(format!("Split every shared state ({all_shared})"))
@@ -1838,32 +1936,7 @@ impl EditorTabViewer<'_> {
                     });
             }
         }
-
-        ui.separator();
-        if self.anim_ui.clip_doc.is_some() {
-            self.timeline_ui(ui, target);
-            self.property_tracks_ui(ui, target);
-        } else {
-            ui.weak(
-                "This animation is embedded in the model. ⬇ Extract animations (select the model \
-                 asset in the browser) to edit keys and events.",
-            );
-            // Still allow preview scrubbing of embedded clips via a bare ruler.
-            self.bare_ruler_ui(ui, target, &sel_anim);
-        }
-
-        // (Record diffing runs in the render loop before the preview re-applies
-        // the clip — see anim_ui::record_scan.)
-
-        // Save coalescing for clip edits.
-        if self.anim_ui.clip_dirty && !self.pointer_down {
-            if let Some((k, d)) = self.anim_ui.clip_doc.clone() {
-                self.anim.save_clip(self.project_root, &k, &d);
-            }
-            self.anim_ui.clip_dirty = false;
-        }
     }
-
     /// Scrub-only ruler for embedded (un-extracted) clips.
     fn bare_ruler_ui(&mut self, ui: &mut egui::Ui, _target: Entity, sel: &str) {
         let dur = match self.world.get::<Matter>(_target) {
