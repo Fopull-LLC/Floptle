@@ -22,7 +22,7 @@ pub struct PaletteQuantize {
     /// not build one otherwise.
     pub bands: u32,
     /// Ordered-dither the step, so a smooth ramp in the *art* becomes a stipple
-    /// rather than a hard edge. It no longer has anything to do with lighting.
+    /// rather than a hard edge. It has nothing to do with lighting.
     pub dither: bool,
     /// Step brightness and carry the chroma, rather than each channel on its own.
     pub chroma: bool,

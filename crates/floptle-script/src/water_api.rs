@@ -7,12 +7,10 @@
 //! "how deep is this point" — so that is the one thing this module exports, and
 //! everything else is derived from it in Lua where it belongs.
 //!
-//! Before this existed the game re-derived the geometry: `climate.lua` carried
-//! its own `seaDepth(x,y,z)` against a sea radius it had to keep in step with
-//! the sphere the generator drew, and `planet_walker.lua` implemented swimming
-//! as a controller because a character is one capsule. The first of those is
-//! now one call; the second still belongs to the game, but it no longer has to
-//! agree with the renderer by hand.
+//! Without it a game re-derives the geometry: a `seaDepth(x,y,z)` of its own
+//! against a sea radius it has to keep in step with the sphere the generator
+//! drew. Swimming still belongs to the game — a character is one capsule —
+//! but it does not have to agree with the renderer by hand.
 
 use std::cell::RefCell;
 use std::rc::Rc;

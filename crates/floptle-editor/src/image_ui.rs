@@ -114,11 +114,9 @@ impl ImageCtx<'_> {
 
     /// One chip per open document, active one first.
     ///
-    /// This is the whole answer to "closing an image does not close it and I am
-    /// stuck editing that image": there is no longer one slot to be stuck in.
-    /// Opening another image parks this one, the ✖ closes exactly the document
-    /// it is on, and a document with no name yet is no longer a document you
-    /// cannot leave.
+    /// There is no single slot to be stuck in: opening another image parks
+    /// this one, the ✖ closes exactly the document it is on, and a document
+    /// with no name yet is not a document you cannot leave.
     fn image_tab_strip(&mut self, ui: &mut egui::Ui) {
         if self.parked.is_empty() && self.st.doc.is_none() {
             return;

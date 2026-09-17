@@ -538,7 +538,7 @@ fn auto_fit_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
 }
 
 /// Auto-fit one channel `ch` of a curve — each Vec3 sub-lane gets its own y-axis, so
-/// e.g. a radians rotation channel and a 0..1 channel no longer share a cramped scale.
+/// e.g. a radians rotation channel and a 0..1 channel do not share a cramped scale.
 fn auto_fit_channel(rt: &floptle_vfx::Curve, ch: usize) -> (f32, f32) {
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     for i in 0..=24 {

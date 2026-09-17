@@ -189,8 +189,8 @@ impl Terrain {
 
     /// Lay a flat slab of solid ground across the bounds, unioned with what's already
     /// there: every voxel inside the box `[walls ± inset] × [floor_y, top_y]` is filled
-    /// solid (taller existing features survive; pits fill up to `top_y`). This is the
-    /// deliberate counterpart to edge-sculpt no longer auto-expanding the ground — pour
+    /// solid (taller existing features survive; pits fill up to `top_y`). The
+    /// counterpart to edge-sculpt not auto-expanding the ground — pour
     /// in flat land where you want it, sized by `inset` (margin from the X/Z walls) and
     /// bounded vertically by `floor_y`..`top_y`. Filled cells take `color`.
     pub fn fill_bounds(&mut self, top_y: f32, floor_y: f32, inset: f32, color: [f32; 3]) {

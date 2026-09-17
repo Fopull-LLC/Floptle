@@ -1546,8 +1546,8 @@ impl Editor {
         let (star_meta, star_pos, star_color) =
             crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
         // Proxies are what lets a raster mesh cast at all, and a lamp marches the
-        // same list now — so the sun's switch alone can no longer decide whether
-        // they are collected. A scene with the sun's shadows off and a torch
+        // same list — so the sun's switch alone cannot decide whether they are
+        // collected. A scene with the sun's shadows off and a torch
         // casting would otherwise hand the shader an empty proxy list, and the
         // torch would shine through every crate in the room.
         let (prox_count, prox_a, prox_b, prox_rot) = collect_shadow_proxies(
@@ -2040,11 +2040,11 @@ impl Editor {
             }
         }
 
-        // Terrain 2.0 (P2): the terrains' extracted chunk meshes join the raster draw list,
-        // so they flow through the depth prepass, field shadows/AO, SSAO and post exactly
-        // like every other mesh. The raymarch no longer draws them (their volume is `w = 3`
-        // — shadow + AO, not drawn). This is the render swap that retires the up-close
-        // faceting / grazing-shadow stripes the raymarched terrain had.
+        // The terrains' extracted chunk meshes join the raster draw list, so they flow
+        // through the depth prepass, field shadows/AO, SSAO and post exactly like every
+        // other mesh. The raymarch does not draw them (their volume is `w = 3` — shadow +
+        // AO, not drawn): a raymarched terrain facets up close and stripes under grazing
+        // shadows.
         crate::terrain_edit::push_terrain_instances(
             &self.terrain_render,
             &self.terrains,

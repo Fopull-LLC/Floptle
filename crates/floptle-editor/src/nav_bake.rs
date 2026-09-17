@@ -1156,8 +1156,8 @@ impl crate::Editor {
         // dragged for two seconds is still one bake, however many revisions it
         // passed through, because this only samples the world once per
         // interval. Two consecutive samples agreeing is 0.4s of the level
-        // holding still, which is what "settled" always meant — it no longer
-        // needs its own accumulator to say so.
+        // holding still, which is what "settled" means — no accumulator of
+        // its own is needed to say so.
         self.nav_watch_elapsed += dt;
         if self.nav_watch_elapsed < NAV_WATCH_INTERVAL {
             return;

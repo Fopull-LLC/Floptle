@@ -1153,8 +1153,8 @@ impl Raymarch {
     }
 
     /// Upload a set of baked volumes into one shared 3D atlas, each at its native
-    /// voxel resolution — far-apart terrains no longer share a coarse combined grid
-    /// (the old resolution-spread limit). Volumes stack along the atlas Z axis; the
+    /// voxel resolution — far-apart terrains do not share a coarse combined grid.
+    /// Volumes stack along the atlas Z axis; the
     /// per-slot offsets/dims are patched into the globals at draw time. Returns how
     /// many volumes were accepted (the rest exceeded the device's 3D-texture limit —
     /// callers should surface that instead of silently dropping content).

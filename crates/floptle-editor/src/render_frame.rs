@@ -272,7 +272,7 @@ impl Editor {
         self.ensure_flsl_materials();
         self.ensure_ui_shaders();
         self.ensure_post_shaders();
-        // Anything the GPU rejected since the last frame. It no longer takes
+        // Anything the GPU rejected since the last frame. It does not take
         // the process down (see `Gpu::new`), so this is the only place it
         // becomes visible — and it has to, or a pass that silently stops
         // drawing looks like the feature never worked.

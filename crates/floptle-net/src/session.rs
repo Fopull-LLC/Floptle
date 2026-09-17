@@ -3030,9 +3030,9 @@ impl NetSession {
             Msg::Kicked { reason } => {
                 // Both events, in this order: `Kicked` is what a game shows the
                 // player ("you were removed: <why>"), `Disconnected` is what
-                // every existing teardown path already listens for. A kick that
-                // only fired the new one would leave games written before this
-                // sitting in a session that no longer exists.
+                // every teardown path listens for. A kick that fired only the
+                // first would leave a game that listens for the second sitting
+                // in a session that no longer exists.
                 self.connected = false;
                 self.events.push(NetEvent::Kicked(reason.clone()));
                 self.events.push(NetEvent::Disconnected(reason));

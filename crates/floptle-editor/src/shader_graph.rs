@@ -38,8 +38,8 @@ use crate::ide::IdeState;
 use crate::project::resolve_asset_path;
 use crate::{Editor, EditorTabViewer};
 
-/// Every canvas gesture in one hover — the graph has enough of them now that
-/// "right-click to add nodes" is no longer the whole story.
+/// Every canvas gesture in one hover — the graph has enough of them that
+/// "right-click to add nodes" is not the whole story.
 const SHORTCUTS: &str = "\
 wheel — zoom · middle-drag — pan · left-drag — box select
 right-click — add a node · drag a wire into empty space — add + connect

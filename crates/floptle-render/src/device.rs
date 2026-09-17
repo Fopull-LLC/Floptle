@@ -253,7 +253,7 @@ impl Gpu {
         let frame_format = if format.is_srgb() { format } else { format.add_srgb_suffix() };
         let view_formats = if frame_format == format { vec![] } else { vec![frame_format] };
         // Fifo (classic vsync) is the default — see [`Vsync`] for
-        // why, and for why it is no longer the only choice.
+        // why, and for the other choices.
         let present_modes = caps.present_modes.clone();
         let vsync = Vsync::default();
         let present_mode = pick_present_mode(vsync, &present_modes);

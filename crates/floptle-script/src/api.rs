@@ -3989,8 +3989,8 @@ let node_mt = lua.create_table()?;
                         }
                     }
                     // A number splats (the classic form); a vec3 sets each
-                    // axis, so `node.scale = vec3(2, 1, 1)` no longer needs
-                    // three statements. `node.size` is the same setter.
+                    // axis, so `node.scale = vec3(2, 1, 1)` is one statement.
+                    // `node.size` is the same setter.
                     "scale" | "size" => {
                         if let Some(n) = as_num(&val) {
                             tr.scale = Vec3::splat(n as f32);

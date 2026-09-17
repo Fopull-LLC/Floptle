@@ -268,7 +268,7 @@ impl Default for PostSettings {
 impl PostSettings {
     /// True if any effect is enabled (else the stack is a no-op passthrough).
     ///
-    /// Posterize counts even though the chain no longer applies it, and that is
+    /// Posterize counts even though the chain does not apply it, and that is
     /// load-bearing: it is what makes the caller render the scene into a post
     /// target instead of straight at the swapchain, and the palette pass has to
     /// be able to read the frame it quantizes. A swapchain texture cannot be

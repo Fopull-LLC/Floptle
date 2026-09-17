@@ -561,7 +561,7 @@ impl ChunkField {
         // Union/subtract an analytic BALL instead. min/max — and smin/smax — of two
         // 1-Lipschitz fields is 1-Lipschitz, so the invariant holds by construction
         // rather than by repair. This is also how SDF sculpting is normally done, and it
-        // makes a dab idempotent: holding the brush still no longer digs to infinity.
+        // makes a dab idempotent: holding the brush still does not dig to infinity.
         //
         //   strength  -> how much of the ball this dab deposits (its radius)
         //   hardness  -> the smin blend k: hard = a crisp ball, soft = a gentle swell

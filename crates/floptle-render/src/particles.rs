@@ -131,7 +131,7 @@ pub struct ParticleBatch {
 
 /// Frame globals for the particle shader: the camera transform. `cam_right`/`cam_up`
 /// carry the camera basis the CPU packer reads for face-camera tracks (the shader
-/// itself now spans the per-instance basis, so it no longer reads them — they stay
+/// itself spans the per-instance basis and does not read them — they stay
 /// for the packer's convenience and the future on-device backend).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

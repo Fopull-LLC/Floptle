@@ -2190,11 +2190,11 @@ impl Raster {
     ///
     /// The difference between two things a draw needs to be able to say. `None`
     /// means "no override — the mesh's own texture draws", which is right for a
-    /// model wearing its imported look. There was no way to say the other one:
-    /// *deliberately untextured*. A node-level Material that supersedes a
-    /// model's own materials needs exactly that — without it, a material with no
-    /// texture fell back to the very texture it was replacing, so a model kept
-    /// the picture of the material that was no longer in effect.
+    /// model wearing its imported look. This is the other one: untextured, on
+    /// purpose. A node-level Material that supersedes a model's own materials
+    /// needs exactly that — otherwise a material with no texture falls back to
+    /// the very texture it is replacing, and the model keeps the picture of a
+    /// material that is not in effect.
     pub fn white_texture(&mut self, gpu: &Gpu) -> TexId {
         if let Some(id) = self.white_tex {
             return id;

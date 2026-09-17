@@ -22,8 +22,8 @@ pub(crate) struct TerrainBrush {
     /// Paint target: -1 = flat color, else a terrain texture palette slot.
     pub(crate) tex_slot: i32,
     /// "Fill bounds" tool: lay flat ground up to `fill_top`, from `fill_floor` below,
-    /// kept `fill_inset` in from the X/Z walls. (Edge-sculpt no longer auto-extends the
-    /// ground, so this is the deliberate way to make flat areas.)
+    /// kept `fill_inset` in from the X/Z walls. (Edge-sculpt does not auto-extend the
+    /// ground, so this is the way to make flat areas.)
     pub(crate) fill_top: f32,
     pub(crate) fill_floor: f32,
     pub(crate) fill_inset: f32,
@@ -363,8 +363,8 @@ impl EditorTabViewer<'_> {
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette.");
         }
         ui.separator();
-        // Fill-bounds tool. Sculpting near an edge now grows only the bounds (the
-        // surface no longer auto-extends into flat land), so this is the deliberate way
+        // Fill-bounds tool. Sculpting near an edge grows only the bounds (the
+        // surface does not auto-extend into flat land), so this is the way
         // to lay flat ground: pour solid up to `height`, from `floor` below, kept
         // `inset` in from the walls.
         egui::CollapsingHeader::new("▦ Fill bounds (flat ground)").default_open(false).show(ui, |ui| {
