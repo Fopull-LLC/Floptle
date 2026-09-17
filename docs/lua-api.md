@@ -2747,7 +2747,7 @@ The game camera's projection: viewport size and rect, world↔screen conversion,
 
 ### `camera.exists`
 
-camera.exists() — true once a live game camera is being fed. Guard the other camera.* calls with it during the first frames, or while a scene without a camera is up.
+camera.exists() — true once a live game camera is being fed. Guard the other camera.* calls with it during the first frames, or while a scene without a camera is up. True throughout a `floptle shot`, which feeds its picture's size; never under `floptle run`, which draws nothing.
 
 ### `camera.pixelsPerUnit`
 
@@ -2759,11 +2759,11 @@ A 2D camera can do the snapping for you: node:setCamera2D{ pixelSnap = 32 }.
 
 ### `camera.screenRect`
 
-camera.screenRect() -> x, y, w, h — the game viewport in the SAME space as input.mouse() and camera.worldToScreen, offset included. That shared space is the only reason hit-testing the mouse against a projected point works; screenSize alone would be wrong wherever the viewport isn't at the window origin.
+camera.screenRect() -> x, y, w, h — the game viewport in the SAME space as input.mouse() and camera.worldToScreen, offset included. That shared space is the only reason hit-testing the mouse against a projected point works; screenSize alone would be wrong wherever the viewport isn't at the window origin. Under `floptle shot --size WxH` it is 0, 0, W, H from the first update — the picture is the viewport — so a layout can be checked at 1440p, an ultrawide or a portrait window without a window; `floptle run` renders nothing and reports 0, 0, 0, 0.
 
 ### `camera.screenSize`
 
-camera.screenSize() → w, h — the game viewport size in pixels. camera.exists() is true once a live game camera is being fed.
+camera.screenSize() → w, h — the game viewport size in pixels. camera.exists() is true once a live game camera is being fed. Under `floptle shot` this is the picture's --size from the first update, so a HUD can be checked at any screen size headless; `floptle run` renders nothing and reports no camera.
 
 ### `camera.screenToRay`
 

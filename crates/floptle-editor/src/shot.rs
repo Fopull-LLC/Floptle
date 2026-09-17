@@ -79,7 +79,38 @@ fn find_camera(
 /// It does **not** stop afterwards. `toggle_play` restores the
 /// scene to how it was authored, which would undo the entire point: the picture
 /// is of the live session.
-fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> {
+/// Tell the scripts what they are drawing into: the active game camera as it
+/// stands this step, projected at the picture's own aspect, in a viewport of
+/// the picture's size at the origin. What the Game view feeds every frame —
+/// `camera.exists()`, `camera.screenSize()`, `camera.screenRect()` and
+/// `camera.worldToScreen` all read it — and what a headless play left unfed,
+/// so every HUD that sizes itself from the screen fell back to a guess and a
+/// shot could not say whether a layout survives 1440p. `input.mouse()` shares
+/// the space by construction: the rect's origin is 0, 0.
+fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
+    let Some((e, fov_y, _, ortho, ortho_height)) = find_camera(ed, named) else { return };
+    let wt = floptle_core::world_transform(&ed.world, e);
+    let cam = RenderCamera::new(
+        wt.translation,
+        wt.rotation,
+        Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
+    );
+    let aspect = ed.project.render_aspect(w.max(1) as f32 / h.max(1) as f32);
+    ed.game_view_origin = [0.0, 0.0];
+    ed.script_host.set_view(floptle_script::ViewInfo {
+        view_proj: cam.view_proj(aspect).to_cols_array(),
+        cam_world: [cam.world_position.x, cam.world_position.y, cam.world_position.z],
+        vp_x: 0.0,
+        vp_y: 0.0,
+        vp_w: w as f32,
+        vp_h: h as f32,
+        fov_y: cam.projection.fov_y(),
+        ortho_height: cam.projection.ortho_height().unwrap_or(0.0),
+        valid: true,
+    });
+}
+
+fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3, view: (Option<&str>, u32, u32)) -> Option<f32> {
     // How long this is allowed to spend waiting on the background terrain
     // threads, in total — the same budget `shot` already gives its pre-render
     // settle, for the same reason: a world that never finishes streaming must
@@ -119,6 +150,10 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3) -> Option<f32> 
             std::thread::sleep(std::time::Duration::from_millis(4));
             ed.pump_world_streaming();
         }
+        // Before the step, so the first `update` already sees the viewport —
+        // and every step, so a camera a script moves is what the next one
+        // projects through.
+        feed_view(ed, view.0, view.1, view.2);
         ed.play_step(crate::run::DT, true);
         ed.drain_script_logs();
         // A script that asked to quit has said the session is over, and stepping
@@ -276,7 +311,7 @@ pub(crate) fn run(args: Args) -> i32 {
         let anchor = find_camera(&ed, camera)
             .map(|(e, ..)| floptle_core::world_transform(&ed.world, e).translation)
             .unwrap_or(DVec3::ZERO);
-        let Some(played) = play_for(&mut ed, seconds, anchor) else {
+        let Some(played) = play_for(&mut ed, seconds, anchor, (camera, w, h)) else {
             floptle_say::say_err!("the project did not enter play mode, so there is nothing to photograph");
             return 1;
         };
@@ -385,6 +420,7 @@ pub(crate) fn run(args: Args) -> i32 {
         for i in 1..frames {
             if after.is_some() && ed.playing {
                 ed.pump_world_streaming();
+                feed_view(&mut ed, camera, w, h);
                 ed.play_step(crate::run::DT, true);
                 ed.drain_script_logs();
             }
@@ -866,7 +902,7 @@ mod tests {
         let (authored, ..) = find_camera(&ed, None).expect("the file's own camera");
 
         let played =
-            play_for(&mut ed, 0.25, DVec3::ZERO).expect("the project must enter play mode");
+            play_for(&mut ed, 0.25, DVec3::ZERO, (None, 160, 90)).expect("the project must enter play mode");
         assert!(played > 0.0, "the span has to actually simulate — a held session steps at dt=0");
 
         // …and after playing it is, which is the whole card.
@@ -894,6 +930,70 @@ mod tests {
         // world that was just built.
         assert!(ed.playing, "the session must be live when the picture is taken");
 
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A shot tells its scripts the picture is the viewport.** From the
+    /// first `update`, `camera.exists()` is true and `camera.screenRect()` is
+    /// `0, 0, W, H` for the `--size` asked — what a HUD sizes itself from, and
+    /// what a headless play used to leave at zeros, so no layout could be
+    /// checked at 1440p without a window. And `run` still reports none: it
+    /// renders nothing, so a camera would be a lie there.
+    #[test]
+    fn a_shots_play_reports_its_size_as_the_viewport_from_the_first_update() {
+        let d = std::env::temp_dir().join(format!(
+            "flshot-view-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scripts/hud.lua"),
+            "local n = 0\n\
+             function update()\n\
+             \x20 n = n + 1\n\
+             \x20 if n > 2 then return end\n\
+             \x20 local x, y, w, h = camera.screenRect()\n\
+             \x20 local sw, sh = camera.screenSize()\n\
+             \x20 print(\"rect \" .. tostring(camera.exists()) .. \" \" .. x .. \",\" .. y .. \",\" .. w .. \",\" .. h .. \" size \" .. sw .. \",\" .. sh)\n\
+             end\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            "(name: \"s\", nodes: [\
+               (name: \"Cam\", matter: Camera(active: true)), \
+               (name: \"Hud\", scripts: [(kind: \"hud\")])\
+             ])",
+        )
+        .unwrap();
+
+        let mut ed = crate::Editor::default();
+        ed.open_project(d.clone());
+        ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
+        play_for(&mut ed, 0.1, DVec3::ZERO, (None, 1920, 1080)).expect("the project must enter play mode");
+        let said: Vec<String> = ed
+            .console
+            .entries
+            .iter()
+            .filter(|e| e.msg.starts_with("rect "))
+            .map(|e| e.msg.clone())
+            .collect();
+        assert!(!said.is_empty(), "the script never ran: {:?}", ed.console.entries.iter().map(|e| &e.msg).collect::<Vec<_>>());
+        assert_eq!(
+            said[0], "rect true 0,0,1920,1080 size 1920,1080",
+            "the FIRST update must already see the picture as its viewport"
+        );
+        if ed.playing {
+            ed.toggle_play();
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
