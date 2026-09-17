@@ -3002,153 +3002,18 @@ fn reflection_probe_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter
 
 /// Post process: tonemap, bloom, vignette, AO, grading, and the .flsl passes.
 fn post_process_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
-    let Matter::PostProcess {
-        tonemap,
-        enabled,
-        bloom,
-        bloom_threshold,
-        bloom_intensity,
-        vignette,
-        vignette_strength,
-        vignette_radius,
-        ao,
-        ao_strength,
-        ao_radius,
-        posterize_bands,
-        posterize_dither,
-        posterize_chroma,
-        exposure,
-        contrast,
-        saturation,
-        temperature,
-        tint,
-        lift,
-        grade_gamma,
-        gain,
-        aberration,
-        distortion,
-        sharpen,
-        denoise,
-        grain,
-        grain_size,
-        dof_focus,
-        dof_range,
-        dof_near_range,
-        dof_max_blur,
-        dof_blades,
-        dof_blade_rotation,
-        dof_highlight,
-        dof_quality,
-        motion_blur,
-        motion_samples,
-        dof_show_focus,
-        dof_focus_node,
-        screen_shaders,
-    } = m else { return };
+    let Matter::PostProcess { enabled, .. } = m else { return };
     let cmd = &mut *ctx.cmd;
-    use floptle_core::AoMode;
     ui.label("post processing");
     ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
     cmd.inspector_changed |= crate::responsive::check(ui, enabled, "enabled")
         .on_hover_text("master switch for the whole chain")
         .changed();
-    ui.add_enabled_ui(*enabled, |ui| {
-        ui.separator();
-        ui.label("Ambient occlusion");
-        ui.horizontal_wrapped(|ui| {
-            let mut m = *ao;
-            if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
-                m = AoMode::Off;
-            }
-            if ui
-                .selectable_label(m == AoMode::ScreenSpace, "Screen space")
-                .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
-                .clicked()
-            {
-                m = AoMode::ScreenSpace;
-            }
-            if ui
-                .selectable_label(m == AoMode::Sdf, "SDF (true)")
-                .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
-                .clicked()
-            {
-                m = AoMode::Sdf;
-            }
-            if m != *ao {
-                *ao = m;
-                cmd.inspector_changed = true;
-            }
-        });
-        if *ao != AoMode::Off {
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
-                .changed();
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
-                .changed();
-        }
-        ui.separator();
-        cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
-        if *bloom {
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
-                .changed();
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
-                .changed();
-        }
-        cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
-        if *vignette {
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
-                .changed();
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
-                .changed();
-        }
-        // Posterize — crush the ART to a limited palette. It runs
-        // before the 2D light rather than at the end of the frame,
-        // which is why the tooltip says palette.
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Posterize")
-                .on_hover_text(
-                    "reduce your ART to a fixed number of levels per channel — a \
-                     limited-palette / banded retro look. It quantises the palette \
-                     only: 2D lights, the vignette, bloom and ambient occlusion are \
-                     applied on top and stay smooth.",
-                );
-            let plabel = match *posterize_bands {
-                0 | 1 => "off".to_string(),
-                n => format!("{n} levels"),
-            };
-            egui::ComboBox::from_id_salt("posterize_bands")
-                .width(crate::responsive::fit_here(ui, 220.0))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                .selected_text(plabel)
-                .show_ui(ui, |ui| {
-                    cmd.inspector_changed |=
-                        ui.selectable_value(posterize_bands, 0, "off").clicked();
-                    for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
-                        cmd.inspector_changed |= ui
-                            .selectable_value(posterize_bands, nb, format!("{nb} levels"))
-                            .clicked();
-                    }
-                });
-        });
-        ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
-            cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
-                .on_hover_text(
-                    "ordered dither, so a gradient in your ART stipples between two \
-                     levels instead of hard-stepping — a painted sky, a soft-edged \
-                     sprite. It has no effect on lighting.",
-                )
-                .changed();
-            cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
-                .on_hover_text(
-                    "off — the default — steps each colour channel on its own, which is a real \
-                     look and what every project built before now is made of. It is often not \
-                     what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
-                     boundary at a different value, so it steps through colours nobody chose. \
-                     On, the step happens once to brightness and the colour rides along — a grey \
-                     pixel comes out identical either way.",
-                )
-                .changed();
-        });
+    let on = *enabled;
+    ui.add_enabled_ui(on, |ui| {
+        post_ao_ui(ui, ctx, m);
+        post_bloom_vignette_ui(ui, ctx, m);
+        post_posterize_ui(ui, ctx, m);
     });
 
     // ---- the look chain -------------------------
@@ -3158,538 +3023,738 @@ fn post_process_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     // back to neutral is a grade you stop touching.
     // Every heading says what off is, so "is this
     // doing anything" is answerable at a glance.
-    let acc = egui::Color32::from_rgb(255, 200, 80);
+    post_tonemap_ui(ui, ctx, m);
+    post_screen_shaders_ui(ui, ctx, m);
+    post_grade_ui(ui, ctx, m);
+    post_lens_ui(ui, ctx, m);
+    post_dof_ui(ui, ctx, m);
+    post_motion_blur_ui(ui, ctx, m);
+}
 
-    // Tonemap first, and on its own, because it is
-    // not one effect among the others: it is how the
-    // scene's light reaches the display at all. The
-    // grade below it is working in the range this
-    // choice defines.
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.label("tonemap").on_hover_text(
-            "The scene is lit in real, unbounded light — a lamp can \
-             be ten times brighter than white. A screen stops at \
-             white. This chooses how to get from one to the other.\n\n\
-             Doing nothing is a choice too: each colour channel \
-             clips on its own, so a very bright colour slides toward \
-             white through whatever hue clips last. That is why \
-             blown highlights can go strange colours.",
-        );
-        let names = [
-            ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
-            ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
-            ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
-            ("AgX", "AgX — bright colours whiten the way film does, instead of \
-                     hitting a flat ceiling of their own hue"),
-        ];
-        let cur = (*tonemap as usize).min(3);
-        egui::ComboBox::from_id_salt("pp_tonemap")
-            .width(crate::responsive::fit_here(ui, 220.0))
-            .wrap_mode(egui::TextWrapMode::Truncate)
-            .selected_text(names[cur].0)
-            .width(160.0)
-            .show_ui(ui, |ui| {
-                for (i, (short, long)) in names.iter().enumerate() {
-                    if ui
-                        .selectable_label(cur == i, *short)
-                        .on_hover_text(*long)
-                        .clicked()
-                    {
-                        *tonemap = i as u32;
-                        cmd.inspector_changed = true;
-                    }
-                }
-            });
-    });
-    if *tonemap == 0 {
-        ui.small(
-            egui::RichText::new(
-                "anything brighter than white is clipped — try AgX \
-                 if bright lights look like flat blocks of colour",
-            )
-            .small()
-            .color(ui.visuals().weak_text_color()),
-        );
+fn post_ao_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        ao,
+        ao_strength,
+        ao_radius,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    use floptle_core::AoMode;
+ui.separator();
+ui.label("Ambient occlusion");
+ui.horizontal_wrapped(|ui| {
+    let mut m = *ao;
+    if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
+        m = AoMode::Off;
     }
+    if ui
+        .selectable_label(m == AoMode::ScreenSpace, "Screen space")
+        .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
+        .clicked()
+    {
+        m = AoMode::ScreenSpace;
+    }
+    if ui
+        .selectable_label(m == AoMode::Sdf, "SDF (true)")
+        .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
+        .clicked()
+    {
+        m = AoMode::Sdf;
+    }
+    if m != *ao {
+        *ao = m;
+        cmd.inspector_changed = true;
+    }
+});
+if *ao != AoMode::Off {
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
+        .changed();
+}
+}
 
-    // ---- the scene's own screen shaders ---------
-    //
-    // Placed after the tonemap and before the grade
-    // because that is where they run, and a panel
-    // that lists effects in an order the frame does
-    // not follow is a panel that teaches the wrong
-    // thing.
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.label("screen shaders");
-        ui.small(
-            egui::RichText::new(format!(
-                "{} pass{}",
-                screen_shaders.len(),
-                if screen_shaders.len() == 1 { "" } else { "es" }
-            ))
-            .color(ui.visuals().weak_text_color()),
+fn post_bloom_vignette_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        bloom,
+        bloom_threshold,
+        bloom_intensity,
+        vignette,
+        vignette_strength,
+        vignette_radius,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+ui.separator();
+cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
+if *bloom {
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
+        .changed();
+}
+cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
+if *vignette {
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
+        .changed();
+}
+}
+
+fn post_posterize_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        posterize_bands,
+        posterize_dither,
+        posterize_chroma,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+// Posterize — crush the ART to a limited palette. It runs
+// before the 2D light rather than at the end of the frame,
+// which is why the tooltip says palette.
+ui.separator();
+ui.horizontal_wrapped(|ui| {
+    ui.label("Posterize")
+        .on_hover_text(
+            "reduce your ART to a fixed number of levels per channel — a \
+             limited-palette / banded retro look. It quantises the palette \
+             only: 2D lights, the vignette, bloom and ambient occlusion are \
+             applied on top and stay smooth.",
         );
-    });
-    ui.small(
-        "full-screen passes you wrote — a `stage post` .flsl gets the \
-         finished frame plus its depth and normals, and returns a new \
-         colour. They run in this order, over the picture, before the \
-         grade and the lens below.",
+    let plabel = match *posterize_bands {
+        0 | 1 => "off".to_string(),
+        n => format!("{n} levels"),
+    };
+    egui::ComboBox::from_id_salt("posterize_bands")
+        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+        .selected_text(plabel)
+        .show_ui(ui, |ui| {
+            cmd.inspector_changed |=
+                ui.selectable_value(posterize_bands, 0, "off").clicked();
+            for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
+                cmd.inspector_changed |= ui
+                    .selectable_value(posterize_bands, nb, format!("{nb} levels"))
+                    .clicked();
+            }
+        });
+});
+ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
+    cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
+        .on_hover_text(
+            "ordered dither, so a gradient in your ART stipples between two \
+             levels instead of hard-stepping — a painted sky, a soft-edged \
+             sprite. It has no effect on lighting.",
+        )
+        .changed();
+    cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
+        .on_hover_text(
+            "off — the default — steps each colour channel on its own, which is a real \
+             look and what every project built before now is made of. It is often not \
+             what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
+             boundary at a different value, so it steps through colours nobody chose. \
+             On, the step happens once to brightness and the colour rides along — a grey \
+             pixel comes out identical either way.",
+        )
+        .changed();
+});
+}
+
+fn post_tonemap_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        tonemap,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+// Tonemap first, and on its own, because it is
+// not one effect among the others: it is how the
+// scene's light reaches the display at all. The
+// grade below it is working in the range this
+// choice defines.
+ui.separator();
+ui.horizontal_wrapped(|ui| {
+    ui.label("tonemap").on_hover_text(
+        "The scene is lit in real, unbounded light — a lamp can \
+         be ten times brighter than white. A screen stops at \
+         white. This chooses how to get from one to the other.\n\n\
+         Doing nothing is a choice too: each colour channel \
+         clips on its own, so a very bright colour slides toward \
+         white through whatever hue clips last. That is why \
+         blown highlights can go strange colours.",
     );
-    {
-        let mut remove: Option<usize> = None;
-        let mut swap: Option<(usize, usize)> = None;
-        let n = screen_shaders.len();
-        for (i, pass) in screen_shaders.iter_mut().enumerate() {
-            let name = Path::new(&pass.shader)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| pass.shader.clone());
-            let entry = ctx.post_flsl_cache.get(&pass.shader);
-            let err = entry.and_then(|e| e.error.as_deref());
-            crate::responsive::group(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
-                        .on_hover_text(
-                            "off keeps the pass and its settings \
-                             without running it",
-                        )
-                        .changed();
-                    ui.label(egui::RichText::new(&name).strong());
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .button("✖")
-                                .on_hover_text("remove this pass")
-                                .clicked()
-                            {
-                                remove = Some(i);
-                            }
-                            // Straight to the graph, the
-                            // same door a Material's
-                            // shader row opens — a pass
-                            // you can add and tune but
-                            // not open is a pass you
-                            // hunt for in the Assets
-                            // panel every time.
-                            if ui
-                                .button("◈")
-                                .on_hover_text("edit this shader in the ◈ Shaders graph")
-                                .clicked()
-                            {
-                                cmd.open_shader_graph =
-                                    Some(pass.shader.clone());
-                            }
-                            if ui
-                                .add_enabled(
-                                    i + 1 < n,
-                                    egui::Button::new("▼"),
-                                )
-                                .on_hover_text("run later")
-                                .clicked()
-                            {
-                                swap = Some((i, i + 1));
-                            }
-                            if ui
-                                .add_enabled(i > 0, egui::Button::new("▲"))
-                                .on_hover_text("run earlier")
-                                .clicked()
-                            {
-                                swap = Some((i, i - 1));
-                            }
-                        },
-                    );
-                });
-                match (err, entry.and_then(|e| e.compiled.as_ref())) {
-                    (Some(msg), _) => {
-                        ui.small(
-                            egui::RichText::new(format!("◈ {msg}"))
-                                .color(egui::Color32::from_rgb(
-                                    255, 120, 110,
-                                )),
-                        );
-                    }
-                    (None, None) => {
-                        ui.small("(compiling — its knobs appear here)");
-                    }
-                    (None, Some(_)) => {}
-                }
-                // Knobs from the compiled shader's own schema. Shown
-                // even when the newest edit failed, because they are
-                // still driving the last good pipeline.
-                if let Some((compiled, _)) =
-                    entry.and_then(|e| e.compiled.as_ref())
-                    && !compiled.uniforms.is_empty()
-                {
-                    crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
-                            if shader_uniform_rows(
-                                ui,
-                                &compiled.uniforms,
-                                &mut pass.params,
-                            ) {
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                    if !pass.params.is_empty()
-                        && ui
-                            .button("Reset knobs")
-                            .on_hover_text(
-                                "back to the shader's own defaults",
-                            )
-                            .clicked()
-                    {
-                        pass.params.clear();
-                        cmd.inspector_changed = true;
-                    }
-                }
-            });
-        }
-        if let Some((a, b)) = swap {
-            screen_shaders.swap(a, b);
-            cmd.inspector_changed = true;
-        }
-        if let Some(i) = remove {
-            screen_shaders.remove(i);
-            cmd.inspector_changed = true;
-        }
-        ui.horizontal_wrapped(|ui| {
-            if let Some(pick) = crate::ui_widgets::asset_picker(
-                ui,
-                egui::Id::new("pp-add-screen-shader"),
-                ctx.project_root,
-                "+ Add screen shader",
-                None,
-                ctx.asset_tree,
-                crate::assets::is_shader,
-                200.0,
-            ) && let Some(path) = pick
-            {
-                screen_shaders
-                    .push(floptle_core::ScreenShader::new(path));
-                cmd.inspector_changed = true;
-            }
-            ui.small(
-                egui::RichText::new(
-                    "try shaders/examples/inkOutline.flsl",
-                )
-                .color(ui.visuals().weak_text_color()),
-            );
-        });
-    }
-
-    ui.separator();
-    ui.label("colour grade");
-    {
-        let neutral = *exposure == 0.0
-            && *contrast == 1.0
-            && *saturation == 1.0
-            && *temperature == 0.0
-            && *tint == 0.0
-            && *lift == 0.0
-            && *grade_gamma == 1.0
-            && *gain == 1.0;
-        ui.horizontal_wrapped(|ui| {
-            ui.small(if neutral {
-                "neutral — no pass runs"
-            } else {
-                "grading"
-            });
-            if !neutral && ui.small_button("reset").clicked() {
-                *exposure = 0.0;
-                *contrast = 1.0;
-                *saturation = 1.0;
-                *temperature = 0.0;
-                *tint = 0.0;
-                *lift = 0.0;
-                *grade_gamma = 1.0;
-                *gain = 1.0;
-                cmd.inspector_changed = true;
-            }
-        });
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
-            .on_hover_text(
-                "in STOPS: +1 is twice the light. The unit a camera and a \
-                 renderer already share — it keeps meaning the same thing \
-                 when the scene's brightness changes.",
-            )
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
-            .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
-            .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
-            .on_hover_text("cool (−) ↔ warm (+)")
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
-            .on_hover_text(
-                "green (−) ↔ magenta (+) — the axis temperature can't reach, \
-                 and the one that fixes a scene that has gone subtly sickly",
-            )
-            .changed();
-        ui.small("shadows / midtones / highlights");
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
-            .on_hover_text("raise or crush the black floor — a lifted black is the film look")
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
-            .on_hover_text("bend the midtones without moving black or white")
-            .changed();
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
-            .on_hover_text("scale the highlights")
-            .changed();
-    }
-
-    ui.separator();
-    ui.label("lens");
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
-        .on_hover_text(
-            "red and blue drift apart toward the edges, the way real glass \
-             disperses. 0 = off.",
-        )
-        .changed();
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
-        .on_hover_text(
-            "positive barrels (fisheye), negative pincushions. The corners go \
-             BLACK rather than smearing the edge pixel outward — a bent frame \
-             genuinely has no picture out there.",
-        )
-        .changed();
-    if *aberration == 0.0 && *distortion == 0.0 {
-        ui.small("both at 0 — no lens pass runs");
-    }
-
-    ui.separator();
-    ui.label("detail");
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
-        .on_hover_text(
-            "unsharp mask, clamped to the local neighbourhood so edges get \
-             crisper without growing a bright halo. 0 = off.",
-        )
-        .changed();
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
-        .on_hover_text(
-            "bilateral: averages within a flat region and refuses to average \
-             across an edge, which is the difference between removing noise \
-             and removing detail. Runs FIRST in the chain, on the raw frame. \
-             0 = off.",
-        )
-        .changed();
-    if *sharpen > 0.0 && *denoise > 0.0 {
-        ui.small("denoise runs first, then sharpen — the useful order");
-    }
-
-    ui.separator();
-    ui.label("film grain");
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
-        .on_hover_text(
-            "multiplicative and strongest in the MIDTONES, the way emulsion \
-             responds — additive grain lifts every shadow into grey mud, \
-             which is the tell of a cheap filter. Applied last, so nothing \
-             downstream turns it into crawling static. 0 = off.",
-        )
-        .changed();
-    ui.add_enabled_ui(*grain > 0.0, |ui| {
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
-            .on_hover_text(
-                "grain cell in pixels. 1 is per-pixel — which under a retro \
-                 upscale is invisible, then suddenly a flat shimmer. 2–4 is \
-                 what reads as film.",
-            )
-            .changed();
-    });
-
-    ui.separator();
-    ui.label("depth of field");
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
-                .logarithmic(true),
-                "focus distance")
-        .on_hover_text("world units from the camera that are sharp. 0 = off.")
-        .changed();
-    // Focus on a node instead of a number: the focus
-    // distance becomes the camera's distance to it,
-    // every frame. This is what a rack focus is made
-    // of, and by hand it means a script measuring a
-    // distance the engine already knows.
-    ui.horizontal_wrapped(|ui| {
-        ui.label("follow");
-        let cur = dof_focus_node.clone();
-        let label = if cur.is_empty() {
-            "(a fixed distance)".to_string()
-        } else {
-            cur.clone()
-        };
-        egui::ComboBox::from_id_salt("pp_dof_follow")
-            .width(crate::responsive::fit_here(ui, 220.0))
-            .wrap_mode(egui::TextWrapMode::Truncate)
-            .selected_text(label)
-            .width(170.0)
-            .show_ui(ui, |ui| {
+    let names = [
+        ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
+        ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
+        ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
+        ("AgX", "AgX — bright colours whiten the way film does, instead of \
+                 hitting a flat ceiling of their own hue"),
+    ];
+    let cur = (*tonemap as usize).min(3);
+    egui::ComboBox::from_id_salt("pp_tonemap")
+        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+        .selected_text(names[cur].0)
+        .width(160.0)
+        .show_ui(ui, |ui| {
+            for (i, (short, long)) in names.iter().enumerate() {
                 if ui
-                    .selectable_label(cur.is_empty(), "(a fixed distance)")
+                    .selectable_label(cur == i, *short)
+                    .on_hover_text(*long)
                     .clicked()
-                    && !cur.is_empty()
                 {
-                    dof_focus_node.clear();
+                    *tonemap = i as u32;
                     cmd.inspector_changed = true;
                 }
-                for (_, name) in ctx.entity_names {
-                    if ui.selectable_label(cur == *name, name).clicked()
-                        && cur != *name
-                    {
-                        *dof_focus_node = name.clone();
-                        cmd.inspector_changed = true;
-                    }
-                }
-            });
-    })
-    .response
-    .on_hover_text(
-        "keep this node in focus — the focus distance becomes the \
-         camera's distance to it, measured every frame and per \
-         viewport, so the Scene view shows its own focus while you \
-         fly around. A name that matches nothing falls back to the \
-         slider above rather than to zero.",
+            }
+        });
+});
+if *tonemap == 0 {
+    ui.small(
+        egui::RichText::new(
+            "anything brighter than white is clipped — try AgX \
+             if bright lights look like flat blocks of colour",
+        )
+        .small()
+        .color(ui.visuals().weak_text_color()),
     );
-    if !dof_focus_node.is_empty()
-        && !ctx.entity_names.iter().any(|(_, n)| n == dof_focus_node)
-    {
-        ui.colored_label(
-            acc,
-            format!(
-                "⚠ no node named \"{dof_focus_node}\" in this scene — \
-                 using the focus distance above"
-            ),
-        );
+}
+}
+
+fn post_screen_shaders_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        screen_shaders,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+// ---- the scene's own screen shaders ---------
+//
+// Placed after the tonemap and before the grade
+// because that is where they run, and a panel
+// that lists effects in an order the frame does
+// not follow is a panel that teaches the wrong
+// thing.
+ui.separator();
+ui.horizontal_wrapped(|ui| {
+    ui.label("screen shaders");
+    ui.small(
+        egui::RichText::new(format!(
+            "{} pass{}",
+            screen_shaders.len(),
+            if screen_shaders.len() == 1 { "" } else { "es" }
+        ))
+        .color(ui.visuals().weak_text_color()),
+    );
+});
+ui.small(
+    "full-screen passes you wrote — a `stage post` .flsl gets the \
+     finished frame plus its depth and normals, and returns a new \
+     colour. They run in this order, over the picture, before the \
+     grade and the lens below.",
+);
+{
+    let mut remove: Option<usize> = None;
+    let mut swap: Option<(usize, usize)> = None;
+    let n = screen_shaders.len();
+    for (i, pass) in screen_shaders.iter_mut().enumerate() {
+        let name = Path::new(&pass.shader)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| pass.shader.clone());
+        let entry = ctx.post_flsl_cache.get(&pass.shader);
+        let err = entry.and_then(|e| e.error.as_deref());
+        crate::responsive::group(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
+                    .on_hover_text(
+                        "off keeps the pass and its settings \
+                         without running it",
+                    )
+                    .changed();
+                ui.label(egui::RichText::new(&name).strong());
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui
+                            .button("✖")
+                            .on_hover_text("remove this pass")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        // Straight to the graph, the
+                        // same door a Material's
+                        // shader row opens — a pass
+                        // you can add and tune but
+                        // not open is a pass you
+                        // hunt for in the Assets
+                        // panel every time.
+                        if ui
+                            .button("◈")
+                            .on_hover_text("edit this shader in the ◈ Shaders graph")
+                            .clicked()
+                        {
+                            cmd.open_shader_graph =
+                                Some(pass.shader.clone());
+                        }
+                        if ui
+                            .add_enabled(
+                                i + 1 < n,
+                                egui::Button::new("▼"),
+                            )
+                            .on_hover_text("run later")
+                            .clicked()
+                        {
+                            swap = Some((i, i + 1));
+                        }
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("▲"))
+                            .on_hover_text("run earlier")
+                            .clicked()
+                        {
+                            swap = Some((i, i - 1));
+                        }
+                    },
+                );
+            });
+            match (err, entry.and_then(|e| e.compiled.as_ref())) {
+                (Some(msg), _) => {
+                    ui.small(
+                        egui::RichText::new(format!("◈ {msg}"))
+                            .color(egui::Color32::from_rgb(
+                                255, 120, 110,
+                            )),
+                    );
+                }
+                (None, None) => {
+                    ui.small("(compiling — its knobs appear here)");
+                }
+                (None, Some(_)) => {}
+            }
+            // Knobs from the compiled shader's own schema. Shown
+            // even when the newest edit failed, because they are
+            // still driving the last good pipeline.
+            if let Some((compiled, _)) =
+                entry.and_then(|e| e.compiled.as_ref())
+                && !compiled.uniforms.is_empty()
+            {
+                crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
+                        if shader_uniform_rows(
+                            ui,
+                            &compiled.uniforms,
+                            &mut pass.params,
+                        ) {
+                            cmd.inspector_changed = true;
+                        }
+                    });
+                if !pass.params.is_empty()
+                    && ui
+                        .button("Reset knobs")
+                        .on_hover_text(
+                            "back to the shader's own defaults",
+                        )
+                        .clicked()
+                {
+                    pass.params.clear();
+                    cmd.inspector_changed = true;
+                }
+            }
+        });
     }
-    ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
-            .on_hover_text("how far BEYOND the focus distance stays sharp")
-            .changed();
-        let mut near = *dof_near_range;
-        let auto = near <= 0.0;
-        if auto {
-            near = *dof_range * 0.5;
-        }
-        let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
-            .on_hover_text(
-                "how far IN FRONT of it stays sharp. A lens goes soft \
-                 on the near side much sooner than on the far side, \
-                 which is why these are two numbers: a portrait wants \
-                 the foreground gone and the background readable.",
-            );
-        if r.changed() {
-            *dof_near_range = near;
-            cmd.inspector_changed = true;
-        }
-        if auto {
-            ui.small(
-                egui::RichText::new("near range is following the far one (half of it)")
-                    .color(ui.visuals().weak_text_color()),
-            );
-        } else if ui
-            .small_button("link to far range")
-            .on_hover_text("back to half the far range")
-            .clicked()
+    if let Some((a, b)) = swap {
+        screen_shaders.swap(a, b);
+        cmd.inspector_changed = true;
+    }
+    if let Some(i) = remove {
+        screen_shaders.remove(i);
+        cmd.inspector_changed = true;
+    }
+    ui.horizontal_wrapped(|ui| {
+        if let Some(pick) = crate::ui_widgets::asset_picker(
+            ui,
+            egui::Id::new("pp-add-screen-shader"),
+            ctx.project_root,
+            "+ Add screen shader",
+            None,
+            ctx.asset_tree,
+            crate::assets::is_shader,
+            200.0,
+        ) && let Some(path) = pick
         {
-            *dof_near_range = 0.0;
+            screen_shaders
+                .push(floptle_core::ScreenShader::new(path));
             cmd.inspector_changed = true;
         }
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
-            .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
-            .changed();
-
-        ui.add_space(3.0);
-        ui.small("the iris");
-        let mut blades = *dof_blades as f32;
-        let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
-                    .step_by(1.0),
-                    "blades")
-            .on_hover_text(
-                "0 is a round iris. 3 and up gives the polygonal bokeh \
-                 of a real lens — six is the classic hexagon.",
-            );
-        if r.changed() {
-            *dof_blades = blades.max(0.0) as u32;
-            cmd.inspector_changed = true;
-        }
-        if *dof_blades >= 3 {
-            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
-                        "blade angle°")
-                .on_hover_text("turn the polygon")
-                .changed();
-        }
-        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
-            .on_hover_text(
-                "how much brighter-than-white pixels dominate the \
-                 blur. 0 averages them away into grey; turn it up and \
-                 a specular glint spreads into a visible disc. It \
-                 reads the scene's real light, so it needs something \
-                 genuinely brighter than white to work on.",
+        ui.small(
+            egui::RichText::new(
+                "try shaders/examples/inkOutline.flsl",
             )
-            .changed();
-        let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
-        let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
-            .on_hover_text(
-                "taps in the blur. More is smoother bokeh and costs \
-                 linearly more; fewer is the chunky look, on purpose.",
-            );
-        if r.changed() {
-            *dof_quality = q.round().clamp(4.0, 64.0) as u32;
-            cmd.inspector_changed = true;
-        }
-        cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
-            .on_hover_text(
-                "a tuning view: cool where the near side is going \
-                 soft, warm where the far side is, the picture itself \
-                 where it is sharp. Which half of the band a pixel is \
-                 on is the one thing you cannot read off a blurred \
-                 frame.",
-            )
-            .changed();
+            .color(ui.visuals().weak_text_color()),
+        );
     });
-    if *dof_show_focus {
-        ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
-    }
-    if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
-        && *dof_max_blur <= 0.0
-    {
-        ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
-    }
+}
+}
 
-    // ---- motion blur --------------------------------
-    ui.separator();
-    ui.strong("≈ Motion blur");
-    ui.small("shows in the Game view");
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
+fn post_grade_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        exposure,
+        contrast,
+        saturation,
+        temperature,
+        tint,
+        lift,
+        grade_gamma,
+        gain,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+ui.separator();
+ui.label("colour grade");
+{
+    let neutral = *exposure == 0.0
+        && *contrast == 1.0
+        && *saturation == 1.0
+        && *temperature == 0.0
+        && *tint == 0.0
+        && *lift == 0.0
+        && *grade_gamma == 1.0
+        && *gain == 1.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.small(if neutral {
+            "neutral — no pass runs"
+        } else {
+            "grading"
+        });
+        if !neutral && ui.small_button("reset").clicked() {
+            *exposure = 0.0;
+            *contrast = 1.0;
+            *saturation = 1.0;
+            *temperature = 0.0;
+            *tint = 0.0;
+            *lift = 0.0;
+            *grade_gamma = 1.0;
+            *gain = 1.0;
+            cmd.inspector_changed = true;
+        }
+    });
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
         .on_hover_text(
-            "How much of the frame's camera motion is smeared. 0 is off. \
-             0.5 is the 180° shutter a film camera has and is the one \
-             that reads as footage; 1 leaves the shutter open for the \
-             whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
-             motion — a pan, a whip, a dolly, a roll. Something crossing \
-             a locked-off shot stays sharp.\n\nThe Scene view is left \
-             alone deliberately: you have to be able to place things \
-             while the camera is moving.",
+            "in STOPS: +1 is twice the light. The unit a camera and a \
+             renderer already share — it keeps meaning the same thing \
+             when the scene's brightness changes.",
         )
         .changed();
-    if *motion_blur > 0.0 {
-        let mut taps =
-            if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
-        if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
-            .on_hover_text(
-                "Taps along the streak. Too few and a fast pan bands \
-                 into separate copies of the picture.",
-            )
-            .changed()
-        {
-            *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
-            cmd.inspector_changed = true;
-        }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
+        .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
+        .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
+        .on_hover_text("cool (−) ↔ warm (+)")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
+        .on_hover_text(
+            "green (−) ↔ magenta (+) — the axis temperature can't reach, \
+             and the one that fixes a scene that has gone subtly sickly",
+        )
+        .changed();
+    ui.small("shadows / midtones / highlights");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
+        .on_hover_text("raise or crush the black floor — a lifted black is the film look")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
+        .on_hover_text("bend the midtones without moving black or white")
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
+        .on_hover_text("scale the highlights")
+        .changed();
+}
+}
+
+fn post_lens_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        aberration,
+        distortion,
+        sharpen,
+        denoise,
+        grain,
+        grain_size,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+ui.separator();
+ui.label("lens");
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
+    .on_hover_text(
+        "red and blue drift apart toward the edges, the way real glass \
+         disperses. 0 = off.",
+    )
+    .changed();
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
+    .on_hover_text(
+        "positive barrels (fisheye), negative pincushions. The corners go \
+         BLACK rather than smearing the edge pixel outward — a bent frame \
+         genuinely has no picture out there.",
+    )
+    .changed();
+if *aberration == 0.0 && *distortion == 0.0 {
+    ui.small("both at 0 — no lens pass runs");
+}
+
+ui.separator();
+ui.label("detail");
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
+    .on_hover_text(
+        "unsharp mask, clamped to the local neighbourhood so edges get \
+         crisper without growing a bright halo. 0 = off.",
+    )
+    .changed();
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
+    .on_hover_text(
+        "bilateral: averages within a flat region and refuses to average \
+         across an edge, which is the difference between removing noise \
+         and removing detail. Runs FIRST in the chain, on the raw frame. \
+         0 = off.",
+    )
+    .changed();
+if *sharpen > 0.0 && *denoise > 0.0 {
+    ui.small("denoise runs first, then sharpen — the useful order");
+}
+
+ui.separator();
+ui.label("film grain");
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
+    .on_hover_text(
+        "multiplicative and strongest in the MIDTONES, the way emulsion \
+         responds — additive grain lifts every shadow into grey mud, \
+         which is the tell of a cheap filter. Applied last, so nothing \
+         downstream turns it into crawling static. 0 = off.",
+    )
+    .changed();
+ui.add_enabled_ui(*grain > 0.0, |ui| {
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
+        .on_hover_text(
+            "grain cell in pixels. 1 is per-pixel — which under a retro \
+             upscale is invisible, then suddenly a flat shimmer. 2–4 is \
+             what reads as film.",
+        )
+        .changed();
+});
+}
+
+fn post_dof_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        dof_focus,
+        dof_range,
+        dof_near_range,
+        dof_max_blur,
+        dof_blades,
+        dof_blade_rotation,
+        dof_highlight,
+        dof_quality,
+        dof_show_focus,
+        dof_focus_node,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    let acc = egui::Color32::from_rgb(255, 200, 80);
+ui.separator();
+ui.label("depth of field");
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
+            .logarithmic(true),
+            "focus distance")
+    .on_hover_text("world units from the camera that are sharp. 0 = off.")
+    .changed();
+// Focus on a node instead of a number: the focus
+// distance becomes the camera's distance to it,
+// every frame. This is what a rack focus is made
+// of, and by hand it means a script measuring a
+// distance the engine already knows.
+ui.horizontal_wrapped(|ui| {
+    ui.label("follow");
+    let cur = dof_focus_node.clone();
+    let label = if cur.is_empty() {
+        "(a fixed distance)".to_string()
+    } else {
+        cur.clone()
+    };
+    egui::ComboBox::from_id_salt("pp_dof_follow")
+        .width(crate::responsive::fit_here(ui, 220.0))
+        .wrap_mode(egui::TextWrapMode::Truncate)
+        .selected_text(label)
+        .width(170.0)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(cur.is_empty(), "(a fixed distance)")
+                .clicked()
+                && !cur.is_empty()
+            {
+                dof_focus_node.clear();
+                cmd.inspector_changed = true;
+            }
+            for (_, name) in ctx.entity_names {
+                if ui.selectable_label(cur == *name, name).clicked()
+                    && cur != *name
+                {
+                    *dof_focus_node = name.clone();
+                    cmd.inspector_changed = true;
+                }
+            }
+        });
+})
+.response
+.on_hover_text(
+    "keep this node in focus — the focus distance becomes the \
+     camera's distance to it, measured every frame and per \
+     viewport, so the Scene view shows its own focus while you \
+     fly around. A name that matches nothing falls back to the \
+     slider above rather than to zero.",
+);
+if !dof_focus_node.is_empty()
+    && !ctx.entity_names.iter().any(|(_, n)| n == dof_focus_node)
+{
+    ui.colored_label(
+        acc,
+        format!(
+            "⚠ no node named \"{dof_focus_node}\" in this scene — \
+             using the focus distance above"
+        ),
+    );
+}
+ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
+        .on_hover_text("how far BEYOND the focus distance stays sharp")
+        .changed();
+    let mut near = *dof_near_range;
+    let auto = near <= 0.0;
+    if auto {
+        near = *dof_range * 0.5;
     }
+    let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
+        .on_hover_text(
+            "how far IN FRONT of it stays sharp. A lens goes soft \
+             on the near side much sooner than on the far side, \
+             which is why these are two numbers: a portrait wants \
+             the foreground gone and the background readable.",
+        );
+    if r.changed() {
+        *dof_near_range = near;
+        cmd.inspector_changed = true;
+    }
+    if auto {
+        ui.small(
+            egui::RichText::new("near range is following the far one (half of it)")
+                .color(ui.visuals().weak_text_color()),
+        );
+    } else if ui
+        .small_button("link to far range")
+        .on_hover_text("back to half the far range")
+        .clicked()
+    {
+        *dof_near_range = 0.0;
+        cmd.inspector_changed = true;
+    }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
+        .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
+        .changed();
+
+    ui.add_space(3.0);
+    ui.small("the iris");
+    let mut blades = *dof_blades as f32;
+    let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
+                .step_by(1.0),
+                "blades")
+        .on_hover_text(
+            "0 is a round iris. 3 and up gives the polygonal bokeh \
+             of a real lens — six is the classic hexagon.",
+        );
+    if r.changed() {
+        *dof_blades = blades.max(0.0) as u32;
+        cmd.inspector_changed = true;
+    }
+    if *dof_blades >= 3 {
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
+                    "blade angle°")
+            .on_hover_text("turn the polygon")
+            .changed();
+    }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
+        .on_hover_text(
+            "how much brighter-than-white pixels dominate the \
+             blur. 0 averages them away into grey; turn it up and \
+             a specular glint spreads into a visible disc. It \
+             reads the scene's real light, so it needs something \
+             genuinely brighter than white to work on.",
+        )
+        .changed();
+    let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
+    let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
+        .on_hover_text(
+            "taps in the blur. More is smoother bokeh and costs \
+             linearly more; fewer is the chunky look, on purpose.",
+        );
+    if r.changed() {
+        *dof_quality = q.round().clamp(4.0, 64.0) as u32;
+        cmd.inspector_changed = true;
+    }
+    cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
+        .on_hover_text(
+            "a tuning view: cool where the near side is going \
+             soft, warm where the far side is, the picture itself \
+             where it is sharp. Which half of the band a pixel is \
+             on is the one thing you cannot read off a blurred \
+             frame.",
+        )
+        .changed();
+});
+if *dof_show_focus {
+    ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
+}
+if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
+    && *dof_max_blur <= 0.0
+{
+    ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
+}
+}
+
+fn post_motion_blur_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        motion_blur,
+        motion_samples,
+        ..
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+// ---- motion blur --------------------------------
+ui.separator();
+ui.strong("≈ Motion blur");
+ui.small("shows in the Game view");
+cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
+    .on_hover_text(
+        "How much of the frame's camera motion is smeared. 0 is off. \
+         0.5 is the 180° shutter a film camera has and is the one \
+         that reads as footage; 1 leaves the shutter open for the \
+         whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
+         motion — a pan, a whip, a dolly, a roll. Something crossing \
+         a locked-off shot stays sharp.\n\nThe Scene view is left \
+         alone deliberately: you have to be able to place things \
+         while the camera is moving.",
+    )
+    .changed();
+if *motion_blur > 0.0 {
+    let mut taps =
+        if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
+    if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
+        .on_hover_text(
+            "Taps along the streak. Too few and a fast pan bands \
+             into separate copies of the picture.",
+        )
+        .changed()
+    {
+        *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
+        cmd.inspector_changed = true;
+    }
+}
 }
 
 impl EditorTabViewer<'_> {
