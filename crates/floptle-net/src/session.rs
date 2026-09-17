@@ -101,7 +101,7 @@ pub enum RpcTarget {
 /// A received remote call, ready for `onRpc` dispatch. `sender` is stamped by
 /// the receiving side's transport identity — a client can't spoof it. `tick`
 /// (client → server, `{withInput = true}`) is the server tick the sender
-/// PERCEIVED when firing — what `net.rewind` rewinds combat queries to (§7).
+/// Perceived when firing — what `net.rewind` rewinds combat queries to (§7).
 #[derive(Clone, Debug)]
 pub struct ReceivedRpc {
     pub name: String,
@@ -119,7 +119,7 @@ pub type BodyStates = Vec<(Entity, [f32; 3], bool)>;
 
 /// One controller layer's live playback as fed by the driver (pre-quantization).
 /// Mirrors `floptle_anim::NetLayerState` without coupling this crate to it.
-/// `dur`/`looped`/`rate` never hit the wire — they power the SEND-side change
+/// `dur`/`looped`/`rate` never hit the wire — they power the send-side change
 /// predictor: a playing clip's time is foreseeable (t + elapsed·rate, wrapped
 /// on loops), so an undisturbed animation costs zero bytes after its
 /// transition. Only surprises (transitions, seeks, speed/weight edits, drift)
@@ -163,7 +163,7 @@ const MAX_RPC_NAME: usize = 256;
 /// How many recent input ticks ride in every input packet (redundancy: a lost
 /// packet doesn't lose a tick's input — later packets re-carry it). Inputs are
 /// tiny, so the window is deep: an input only goes missing if this many
-/// CONSECUTIVE packets all drop (0.5^10 ≈ 0.1% per tick at 50% loss) — and a
+/// Consecutive packets all drop (0.5^10 ≈ 0.1% per tick at 50% loss) — and a
 /// missing input is a guaranteed visible correction, so depth is cheap
 /// insurance.
 const INPUT_WINDOW: usize = 10;
@@ -171,7 +171,7 @@ const INPUT_WINDOW: usize = 10;
 const INPUT_BUFFER_CAP: usize = 64;
 /// How many of a peer's unconfirmed applied ticks ride in one rollback fan-out.
 ///
-/// Per PEER, so nobody can crowd anybody out, and generous next to what a
+/// Per peer, so nobody can crowd anybody out, and generous next to what a
 /// healthy session needs: a peer stalls once it is `max_depth` (8) past the
 /// confirmed frontier, so in an ordinary match every ring holds well under this
 /// and the cap never binds. It binds only when a peer has stopped confirming
@@ -235,7 +235,7 @@ pub struct NetSession {
     // --- server ---
     peers: Vec<PeerId>,
     /// Last transform sent per (audience, NetId) — the delta baseline.
-    /// `None` is the BROADCAST audience: one baseline shared by every client,
+    /// `None` is the broadcast audience: one baseline shared by every client,
     /// which is exactly right when every client gets the same snapshot.
     /// `Some(peer)` is that client's own, which interest management needs
     /// because no two clients are told the same thing any more.
@@ -281,7 +281,7 @@ pub struct NetSession {
     /// the guardrails a stock client applies at queue time. Counted rather
     /// than only ignored, so a modified client shows up as a number.
     refused_from_clients: u64,
-    /// SERVER: who may hear each speaker. `None` (absent) = everyone.
+    /// Server: who may hear each speaker. `None` (absent) = everyone.
     ///
     /// **This is where proximity voice is enforced, and it has to be here.**
     /// Attenuating a stream every client already received is a volume slider a
@@ -320,7 +320,7 @@ pub struct NetSession {
     /// so nothing else records that they belong to the root.
     spawned_ents: HashMap<u64, Vec<Entity>>,
     snap_count: u32,
-    /// The scene GENERATION: bumped by every [`Self::switch_scene`], carried on
+    /// The scene generation: bumped by every [`Self::switch_scene`], carried on
     /// scene-scoped messages (snapshots/spawns/despawns) so old-scene state
     /// still in flight can't apply to the new scene's same-numbered NetIds.
     /// Clients adopt it from `Welcome` / `Scene`.
@@ -352,7 +352,7 @@ pub struct NetSession {
     /// (mispredictions on the owner) — the harness surfaces it.
     late_inputs: u64,
     /// Per-peer received input commands, keyed by tick (prediction §6: the
-    /// server replays the OWNER's real input through the same script).
+    /// server replays the owner's real input through the same script).
     peer_inputs: HashMap<PeerId, VecDeque<InputCmd>>,
     /// Per-peer last input actually used — the repeat-last fallback when a
     /// tick's command hasn't arrived (late/lost).
@@ -361,7 +361,7 @@ pub struct NetSession {
     /// "no map" — a project that hasn't defined actions yet, which is fine as
     /// long as both sides agree.
     input_map_hash: u64,
-    /// Per-peer input-buffer margin, EWMA over [`Self::input_for`] calls:
+    /// Per-peer input-buffer margin, ewma over [`Self::input_for`] calls:
     /// newest buffered stamp − the tick being consumed. Shipped back in
     /// [`Msg::InputAck`] so the owner can auto-tune its lead.
     peer_margin: HashMap<PeerId, f32>,
@@ -459,7 +459,7 @@ pub struct NetSession {
     /// is the session input log, which is what makes replays, the referee and
     /// (later) spectators nearly free (§5).
     ///
-    /// Per peer, not one shared FIFO, and the distinction is load-bearing.
+    /// Per peer, not one shared fifo, and the distinction is load-bearing.
     /// Shared, a peer that resends its window every tick (which every peer
     /// does, that being the whole loss strategy) evicts other peers' oldest
     /// entries — and the oldest entry is exactly the tick a starved peer is
@@ -474,7 +474,7 @@ pub struct NetSession {
     /// tick for which they hold every peer's real input (`Msg::Input`'s
     /// `confirmed`; our own entry is set locally by the driver).
     ///
-    /// The retention floor comes from the MINIMUM of these, never from our own
+    /// The retention floor comes from the minimum of these, never from our own
     /// frontier alone. "I have everyone's input for T" does not imply "everyone
     /// has everyone's input for T", and dropping on the former is the bug this
     /// field exists to make impossible.
@@ -507,7 +507,7 @@ pub struct NetSession {
     /// match (the referee). Handed out as they arrive rather than by cloning
     /// the log, which would cost the whole match every tick.
     record_out: Vec<crate::replay::LogEntry>,
-    /// Host: the REFEREE's checksum per confirmed tick — from a simulation that
+    /// Host: the referee's checksum per confirmed tick — from a simulation that
     /// never guessed. When one exists, peers are judged against it rather than
     /// against each other, which is the difference between "someone is wrong"
     /// and "peer 3 is wrong".
@@ -545,7 +545,7 @@ pub type PeerDetail = (PeerId, Vec<(String, u64)>);
 /// several frames, which is not a shape a unit test can drive.
 ///
 /// Only the values that actually differ come back: the report's whole job is to
-/// point at one thing, and a list that also contains everything that AGREED is
+/// point at one thing, and a list that also contains everything that agreed is
 /// the report that named nothing.
 #[allow(clippy::type_complexity)]
 pub fn diff_details(reports: &[PeerDetail]) -> Vec<(String, Vec<(PeerId, u64)>)> {
@@ -765,7 +765,7 @@ impl NetSession {
     /// Who a connected peer is. `None` for a peer that is not on the roster.
     ///
     /// Read [`crate::identity::Identity::verified`] before acting on `id`: an
-    /// unverified claim is what the client SAID, and until an audience-scoped
+    /// unverified claim is what the client said, and until an audience-scoped
     /// credential exists there is no other kind. See [`crate::identity`].
     pub fn identity(&self, peer: PeerId) -> Option<&crate::identity::Identity> {
         self.identities.get(&peer)
@@ -843,7 +843,7 @@ impl NetSession {
 
     // -- voice chat ------------------------------------------
 
-    /// CLIENT: send one encoded 20 ms frame from this machine's microphone.
+    /// Client: send one encoded 20 ms frame from this machine's microphone.
     ///
     /// Fire and forget on the unreliable channel. A frame that does not arrive
     /// is a gap the listener's decoder conceals; a frame that arrives late is
@@ -858,7 +858,7 @@ impl NetSession {
         self.transport.send(SERVER, Channel::UnreliableSequenced, &msg);
     }
 
-    /// SERVER: speak as the host — the host is a player too, and its voice
+    /// Server: speak as the host — the host is a player too, and its voice
     /// reaches the same peers under the same forwarding rules.
     pub fn host_voice(&mut self, frame: &[u8]) {
         if self.role != NetRole::Server {
@@ -869,7 +869,7 @@ impl NetSession {
         self.forward_voice(SERVER, seq, frame);
     }
 
-    /// SERVER: restrict who hears `speaker`. An empty list means nobody; call
+    /// Server: restrict who hears `speaker`. An empty list means nobody; call
     /// [`Self::clear_voice_forward`] to go back to everyone.
     ///
     /// A game using proximity voice sets this from distance every tick or so.
@@ -877,7 +877,7 @@ impl NetSession {
         self.voice_forward.insert(speaker, to);
     }
 
-    /// SERVER: `speaker` is heard by everyone again (the default).
+    /// Server: `speaker` is heard by everyone again (the default).
     pub fn clear_voice_forward(&mut self, speaker: PeerId) {
         self.voice_forward.remove(&speaker);
     }
@@ -898,7 +898,7 @@ impl NetSession {
     /// nobody collected a second ago is worthless.
     const MAX_VOICE_IN: usize = 8 * 50;
 
-    /// server, HARNESS only: play a frame in as though `speaker` had sent it.
+    /// server, harness only: play a frame in as though `speaker` had sent it.
     ///
     /// Goes through the real forwarding rules — the same
     /// [`Self::forward_voice`] a genuine datagram reaches — so what it proves
@@ -912,7 +912,7 @@ impl NetSession {
         self.forward_voice(speaker, seq, frame);
     }
 
-    /// SERVER: relay one speaker's frame to whoever is allowed to hear it.
+    /// Server: relay one speaker's frame to whoever is allowed to hear it.
     fn forward_voice(&mut self, speaker: PeerId, seq: u16, frame: &[u8]) {
         let msg = Msg::Voice { speaker, seq, frame: frame.to_vec() }.encode();
         // Collected first: the borrow checker aside, the allow list is what
@@ -1200,7 +1200,7 @@ impl NetSession {
     /// One auto-lead step, if due: keep the server-side margin inside [1, 6].
     /// Too little runway → raise the lead fast (late inputs are misprediction
     /// storms); too much → shave one tick at a time (extra lead is only added
-    /// latency). Cooldown one second so the server's EWMA can settle between
+    /// latency). Cooldown one second so the server's ewma can settle between
     /// nudges. A +N nudge skips N stamps (the server repeats-last once); a −1
     /// nudge duplicates one stamp (the server's monotonic ingest drops it) —
     /// both self-heal through the redundant input window.
@@ -1248,7 +1248,7 @@ impl NetSession {
         let buf = self.peer_inputs.entry(peer).or_default();
         // Timing margin before consuming: how many ticks of runway the newest
         // buffered stamp still has past this tick. Negative = this peer's
-        // inputs run late. Smoothed (EWMA) and shipped back via `InputAck` so
+        // inputs run late. Smoothed (ewma) and shipped back via `InputAck` so
         // the owner can retune its lead.
         let now = buf.back().map(|c| c.tick as i64 - tick as i64).unwrap_or(-1) as f32;
         let m = self.peer_margin.entry(peer).or_insert(now);
@@ -1277,18 +1277,9 @@ impl NetSession {
     // Rollback (docs/multiplayer.md §5)
     // -----------------------------------------------------------------------
 
-    /// Host: put this session into (or out of) rollback mode with a fixed input
-    /// delay, and announce the peer→slot roster to every client.
-    ///
-    /// Announcing is also the **tick origin**: every peer starts its rollback
-    /// clock at 0 on receiving it, so a bare applied-tick number means the same
-    /// instant everywhere and no stamp translation is needed. Calling it again
-    /// (a peer joined or left) restarts the match clock, which is why v1 does
-    /// not support joining a rollback match in progress.
-    /// Server: turn interest management on or off, and configure it
-    /// (`docs/multiplayer.md` §5.2). Off is the default — below a few dozen
-    /// players broadcasting is cheaper, and a feature that changes what reaches
-    /// the wire should be one a project asks for.
+    /// Server: turn interest management on or off, and configure it. Off is
+    /// the default: below a few dozen players broadcasting is cheaper, and a
+    /// feature that changes what reaches the wire is one a project asks for.
     ///
     /// Switching modes drops every delta baseline: the two paths keep different
     /// ones (shared vs per-client), and carrying one across would leave clients
@@ -1374,22 +1365,20 @@ impl NetSession {
             .collect()
     }
 
-    /// The entity indices a local rollback DRIVER is currently simulating.
+    /// The entity indices a local rollback driver is currently simulating.
     ///
-    /// Published every frame by whoever owns the driver, and the reason it
-    /// exists is that the session's own `rollback` flag is a second source of
-    /// truth for the same question — and the two can get out of step. A
-    /// `Msg::Scene` clears the flag; a `RollbackStart` sets it; the driver is
-    /// installed a frame later from a queued signal. Any ordering that leaves
-    /// the flag off while the driver is on turns every guard here off, and the
-    /// symptom is a stale snapshot pose written over a locally-simulated node
-    /// forever after.
+    /// Published every frame by whoever owns the driver. The session's own
+    /// `rollback` flag answers the same question and can get out of step: a
+    /// `Msg::Scene` clears it, a `RollbackStart` sets it, and the driver is
+    /// installed a frame later from a queued signal. A set refreshed from the
+    /// driver itself cannot disagree with the driver, and a guard that read
+    /// only the flag would write a stale snapshot pose over a
+    /// locally-simulated node forever after.
     ///
-    /// A set refreshed from the driver itself cannot disagree with the driver.
     /// Samples already buffered for a newly-driven node are dropped here for
-    /// the same reason `RollbackStart` drops them: `apply_interpolation` keeps
-    /// applying the newest sample it holds whether or not new ones arrive, so
-    /// refusing to buffer more is not enough on its own.
+    /// the same reason `RollbackStart` drops them: `apply_interpolation`
+    /// keeps applying the newest sample it holds whether or not new ones
+    /// arrive.
     pub fn set_locally_driven(&mut self, ids: std::collections::HashSet<u32>) {
         for (id, &e) in &self.net_to_ent {
             if ids.contains(&e.index())
@@ -1411,6 +1400,14 @@ impl NetSession {
         std::mem::take(&mut self.driven_drops).into_iter().collect()
     }
 
+    /// Host: put this session into (or out of) rollback mode with a fixed
+    /// input delay, and announce the peer→slot roster to every client.
+    ///
+    /// Announcing is also the tick origin: every peer starts its rollback
+    /// clock at 0 on receiving it, so a bare applied-tick number means the
+    /// same instant everywhere. Calling it again (a peer joined or left)
+    /// restarts the match clock, which is why joining a rollback match in
+    /// progress is not supported.
     pub fn set_rollback(&mut self, on: bool, input_delay: u8, seed: u64) {
         self.rollback = on;
         self.rollback_seed = seed;
@@ -1464,7 +1461,7 @@ impl NetSession {
         self.rollback_seed
     }
 
-    /// Client: this tick's local input for its APPLIED tick.
+    /// Client: this tick's local input for its applied tick.
     ///
     /// Deliberately not [`Self::send_input`]: that stamps through
     /// `stamp_offset`, the adaptive lead the `Predicted` path uses to keep
@@ -1575,7 +1572,7 @@ impl NetSession {
         std::mem::take(&mut self.referee_faults)
     }
 
-    /// Ticks where the REFEREE disagreed with every peer while the peers agreed
+    /// Ticks where the referee disagreed with every peer while the peers agreed
     /// with each other — i.e. the referee is the one that is wrong.
     pub fn take_referee_outliers(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.referee_outliers)
@@ -1710,7 +1707,7 @@ impl NetSession {
     /// The fan-out payload: every peer's unconfirmed applied ticks, oldest
     /// first, capped per peer.
     ///
-    /// Oldest first is the whole point. A starved peer is waiting on the OLDEST
+    /// Oldest first is the whole point. A starved peer is waiting on the oldest
     /// tick it is missing, so that tick has to be in the packet — and it has to
     /// stay in the packet on every resend until it is confirmed, which is what
     /// the floor guarantees. Capping per peer (rather than in total) is what
@@ -1914,7 +1911,7 @@ impl NetSession {
             return Vec::new();
         }
         let ents = floptle_scene::spawn_nodes(nodes, world);
-        // NetIds are handed out per subtree POSITION rather than one at a time,
+        // NetIds are handed out per subtree position rather than one at a time,
         // so a client can derive a replicated descendant's id from the vector
         // it was sent instead of needing one message per node. Ids stay
         // reserved for the whole subtree even where a node does not use one.
@@ -1975,10 +1972,9 @@ impl NetSession {
 
     /// Server: hand a node to a different owner, or release it (`None`).
     ///
-    /// Ownership used to be decidable only at spawn, which meant a scene's
-    /// authored player slots were assigned by scene order and a player who
-    /// dropped could never be given their slot back. Returns whether the node
-    /// was a replicated one (a caller can say so rather than failing silently).
+    /// A scene's authored player slots are assigned this way, and a player
+    /// who dropped gets their slot back. Returns whether the node was a
+    /// replicated one, so a caller can say so rather than failing silently.
     pub fn set_owner(&mut self, world: &mut World, e: Entity, owner: Option<PeerId>) -> bool {
         debug_assert_eq!(self.role, NetRole::Server, "only the server assigns owners");
         let Some(&id) = self.ent_to_net.get(&e) else { return false };
@@ -2074,7 +2070,7 @@ impl NetSession {
     /// A separate entry point rather than a parameter on the existing one: most
     /// drivers have no ray to offer — and none of this crate's own tests does —
     /// so the common call stays two arguments and the occluding one says what
-    /// it is doing at the call site. Only the OUTGOING half needs it; pumping
+    /// it is doing at the call site. Only the outgoing half needs it; pumping
     /// incoming traffic decides nothing about who hears what.
     pub fn tick_server_seen(
         &mut self,
@@ -2143,14 +2139,13 @@ impl NetSession {
             self.send_interest_snapshots(world, tick, keyframe, occl, self.interest);
             return;
         }
-        // **A relevance pin holds whether or not interest management is on.**
-        //
-        // Pins used to be read only inside the interest path, so a game that
-        // called `net.setRelevant` without also turning interest on got a call
-        // that returned success and did nothing: the broadcast below sent the
-        // hidden player's position to everyone, every snapshot. For the one
-        // feature whose entire purpose is that a client is never told a thing,
-        // silently not withholding it is the worst failure available.
+        // A relevance pin holds whether or not interest management is on. A
+        // pin read only inside the interest path would make `net.setRelevant`
+        // without interest on a call that returns success and does nothing,
+        // with the broadcast below sending the hidden player's position to
+        // everyone every snapshot. For the one feature whose purpose is that a
+        // client is never told a thing, silently not withholding it is the
+        // worst failure available.
         //
         // So a pinned-off node takes the per-peer path — with every other test
         // disabled, because the game asked to hide one node, not to opt into
@@ -2530,7 +2525,7 @@ impl NetSession {
             }
             Msg::Input { entries, confirmed } => {
                 if self.rollback {
-                    // Rollback: the host doesn't CONSUME a peer's input, it
+                    // Rollback: the host doesn't consume a peer's input, it
                     // relays it. Everyone simulates everyone, so an input is
                     // only useful once every peer has it.
                     //
@@ -2634,26 +2629,19 @@ impl NetSession {
             if !rep.transform {
                 continue;
             }
-            // ⚠ **In a rollback session, a rollback node's transform is bytes
-            // nobody will read**.
-            //
-            // Every peer simulates these locally from inputs, and the receiving
-            // side already refuses them — `driven_locally` returns true for
-            // exactly this case and `drop_locally_driven_buffers` throws away
-            // anything that slipped in before the match began. The server was
-            // packing them into every snapshot regardless, so the most
-            // expensive thing on the wire was state that was discarded on
-            // arrival.
-            //
-            // A real match measured **234 kbps per player — 487 bytes a frame**
-            // for a game whose whole netcode is a handful of input bits. This
-            // is where it went.
+            // In a rollback session, a rollback node's transform is bytes
+            // nobody will read: every peer simulates these locally from
+            // inputs, `driven_locally` refuses them on arrival, and
+            // `drop_locally_driven_buffers` throws away anything that slipped
+            // in before the match began. Packed into every snapshot anyway they
+            // are 234 kbps per player, 487 bytes a frame, for a game whose
+            // whole netcode is a handful of input bits.
             //
             // Gated on `self.rollback` and nothing else, so the two sides stay
             // symmetric by construction: the server sends precisely what the
             // client will accept. Before the match starts the flag is false and
-            // these nodes replicate normally, which is what puts a late joiner
-            // in the right place before its driver takes over.
+            // these nodes replicate normally, which puts a late joiner in the
+            // right place before its driver takes over.
             if self.rollback && rep.mode.is_rollback() {
                 continue;
             }
@@ -2698,7 +2686,7 @@ impl NetSession {
     }
 
     /// Encode the animator states that need sending: everything on a keyframe,
-    /// else only the SURPRISED ones — a changed state/weight/speed, or a clock
+    /// else only the surprised ones — a changed state/weight/speed, or a clock
     /// the time predictor couldn't foresee (a seek, a hitch). An undisturbed
     /// looping animation costs zero bytes here.
     fn collect_anim_entries(
@@ -2874,8 +2862,7 @@ impl NetSession {
                     self.connected = false;
                     // Whatever the transport knew. "server closed" is the
                     // honest fallback for a link that simply ended, and a poor
-                    // description of a lobby code that was never valid — which
-                    // is what every refused join used to report.
+                    // description of a lobby code that was never valid.
                     self.join_state = match &why {
                         Some(r) => JoinState::Refused(r.clone()),
                         None => JoinState::Refused("the connection ended".into()),
@@ -2964,7 +2951,7 @@ impl NetSession {
     /// it land and the node is tugged between the driver's tick pose and an
     /// interpolated pose from the past, every single frame.
     ///
-    /// Deliberately gated on the SESSION's rollback flag rather than on the
+    /// Deliberately gated on the session's rollback flag rather than on the
     /// mode alone. Before `RollbackStart` there is no driver yet: the fighters
     /// are parked and snapshot-driven exactly like anything else, which is what
     /// puts a joining client's scene in the right place before the match
@@ -3062,7 +3049,7 @@ impl NetSession {
                 self.anim_started.clear();
                 self.anims_due.clear();
                 self.predicted_in.clear();
-                // A scene switch ENDS the match. The tick origin, the roster's
+                // A scene switch ends the match. The tick origin, the roster's
                 // slot order and the state ring are all indexed against the
                 // scene that just went away, and the new scene's fighters are
                 // different nodes. If it has any, the host announces a fresh
@@ -3274,7 +3261,7 @@ impl NetSession {
             // fighter, so it refuses on its own terms rather than trusting that
             // nothing upstream ever buffers one.
             //
-            // Two questions, deliberately: the DRIVER's set (which cannot get
+            // Two questions, deliberately: the driver's set (which cannot get
             // out of step with the driver) and the session flag (which can, and
             // once did). Either one is enough to refuse.
             let driven = self.locally_driven.contains(&e.index())
@@ -3466,7 +3453,7 @@ mod tests {
         };
         assert_eq!(entries, 0, "a rollback session is still shipping locally-simulated state");
 
-        // ⚠ And an ordinary networked node is UNTOUCHED. Skipping those would
+        // ⚠ And an ordinary networked node is untouched. Skipping those would
         // not be a saving, it would be a desync.
         let (mut s, w) = session_with(ReplicationMode::Authority, true);
         assert!(
@@ -3594,7 +3581,7 @@ mod tests {
         assert_eq!(tr.rotation, floptle_core::math::Quat::IDENTITY, "…rotation included");
     }
 
-    /// The samples buffered before the driver arrived are DROPPED, not merely
+    /// The samples buffered before the driver arrived are dropped, not merely
     /// skipped. `apply_interpolation` keeps applying the newest sample it
     /// holds whether or not new ones arrive, so a guard that only refuses to
     /// buffer more would still be re-applying the last stale one forever.
@@ -3606,7 +3593,7 @@ mod tests {
         assert!(s.interp[&1].samples.is_empty());
     }
 
-    /// A sample that gets past the ingest guard is REPORTED, not silently
+    /// A sample that gets past the ingest guard is reported, not silently
     /// dropped. It fires on the machine
     /// that has the problem, while it has it, naming the node.
     #[test]

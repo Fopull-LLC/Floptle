@@ -80,22 +80,17 @@ impl NetValue {
         }
     }
 
-    /// An order-independent fingerprint — the rollback desync checksum
-    /// (`docs/multiplayer.md` §6), FNV-1a like
-    /// [`floptle_input::InputMap::hash`].
+    /// An order-independent fingerprint: the rollback desync checksum, FNV-1a
+    /// like `floptle_input::InputMap::hash`.
     ///
-    /// **The canonicalization trap, which is why this exists at all.** A
-    /// `NetValue` built from Lua is built by iterating a table, and Lua's
-    /// `pairs()` order is not deterministic — not across machines, and not even
-    /// across two rebuilds of the same table on one machine. Restore doesn't
-    /// care about that; a checksum does. Hashing the encoding as-is would have
-    /// two peers in *perfect agreement* report a desync, which is worse than no
-    /// checksum at all: it would train everyone to ignore the alarm.
-    ///
-    /// So a table's pairs are sorted by their key's canonical form before
-    /// hashing, at every level. `f64` is hashed by bits, with the two zeros
-    /// folded together (`-0.0 == 0.0` in the simulation, so they must not
-    /// disagree here) and every NaN folded to one pattern.
+    /// A `NetValue` built from Lua is built by iterating a table, and Lua's
+    /// `pairs()` order is not deterministic, not across machines and not
+    /// across two rebuilds of the same table on one machine. Hashing the
+    /// encoding as-is would have two peers in perfect agreement report a
+    /// desync, which trains everyone to ignore the alarm. So a table's pairs
+    /// are sorted by their key's canonical form before hashing, at every
+    /// level. `f64` is hashed by bits, with the two zeros folded together
+    /// (`-0.0 == 0.0` in the simulation) and every NaN folded to one pattern.
     pub fn canonical_hash(&self) -> u64 {
         let mut h = Fnv::new();
         self.hash_into(&mut h);
@@ -166,7 +161,7 @@ fn cmp_value(a: &NetValue, b: &NetValue) -> std::cmp::Ordering {
     })
 }
 
-/// FNV-1a, spelled out so no dependency (and no hasher-version drift) can
+/// Fnv-1a, spelled out so no dependency (and no hasher-version drift) can
 /// change a checksum between builds — the same reasoning as
 /// `floptle_input::InputMap::hash`. Public because the rollback driver hashes
 /// physics snapshots into the same digest as the script state (§6), and those

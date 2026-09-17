@@ -1,29 +1,20 @@
-//! Who a peer is, and whether this server will have them.
+//! Who a peer is, and whether this server will have them. A dedicated server
+//! bans, allow-lists, keeps per-account statistics, recognises a returning
+//! player after a disconnect, and kicks.
 //!
-//! Two gaps that are really one: a server did not know **who** a peer was, and
-//! could not do anything about it if it did. A peer was a transport id plus
-//! whatever display name the game's own handshake carried, so a dedicated
-//! server could not ban, allow-list, keep per-account statistics, or recognise
-//! a returning player after a disconnect except by trusting a string the client
-//! typed. And the Lua net surface had no `kick`.
+//! Asserted is not verified, and the difference is said out loud. A signed-in
+//! client presents its account's public claim: subject id, display name,
+//! tier. Anyone can send those bytes. Turning a claim into an identity needs a
+//! credential the server can check with the provider, scoped so that
+//! presenting it to a game server does not hand that server the account; a
+//! full-scope access token would let any server you join spend your Fobucks.
 //!
-//! ## Asserted is not verified, and the difference is said out loud
-//!
-//! A signed-in client presents its account's public claim — subject id, display
-//! name, tier. Anyone can send those bytes. Turning a claim into an identity
-//! needs a credential the server can check with the provider, scoped so that
-//! presenting it to a game server does not hand that server the account: a
-//! full-scope access token would let any server you join spend your Fobucks and
-//! read your mail.
-//!
-//! `contracts/identity-auth.md` has no such credential today — every route in
-//! it is the account holder talking to fopull.com about itself. So this crate
-//! ships the whole shape (the claim travels, the server records it, the policy
-//! consults it, `net.identity` reports it) with `verified: false` on every
-//! claim, and a [`Verifier`] seam for the moment the provider can answer. What
-//! it does **not** do is quietly report `verified: true` for a string somebody
-//! typed — a moderation tool that lies about its own confidence is worse than
-//! no moderation tool, because a server operator acts on it.
+//! The account service has no such credential yet, so the claim travels, the
+//! server records it, the policy consults it and `net.identity` reports it,
+//! with `verified: false` on every claim and a [`Verifier`] seam for the
+//! moment the provider can answer. It never reports `verified: true` for a
+//! string somebody typed: a moderation tool that lies about its own
+//! confidence is worse than none, because a server operator acts on it.
 
 use std::collections::HashSet;
 
@@ -149,7 +140,7 @@ mod tests {
         }
     }
 
-    /// The property the module exists to keep honest. A server operator BANS
+    /// The property the module exists to keep honest. A server operator bans
     /// people on the strength of this flag; reporting `true` for a string the
     /// client typed would make every ban a guess.
     #[test]

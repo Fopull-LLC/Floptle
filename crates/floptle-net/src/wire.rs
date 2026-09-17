@@ -23,10 +23,10 @@ pub const CHECKSUM_EVERY: u64 = 30;
 
 /// What a joining client says about who it is.
 ///
-/// A peer used to be a transport id plus whatever display name the game's own
-/// handshake carried, so a server could not ban, allow-list, keep per-account
-/// statistics, or recognise a returning player except by trusting a string the
-/// client typed.
+/// Without it a peer is a transport id plus whatever display name the game's
+/// own handshake carries, and a server cannot ban, allow-list, keep
+/// per-account statistics, or recognise a returning player except by trusting
+/// a string the client typed.
 ///
 /// `proof` is the part that makes this an identity rather than an assertion:
 /// a short-lived credential the server can check with the provider, scoped so
@@ -88,7 +88,7 @@ impl AnimLayerWire {
 /// 1/256ths — covers reverse playback) + its layers. `sub` addresses which
 /// animator under the networked node: 0 = the node itself, N = the Nth
 /// animator-carrying descendant in the deterministic subtree walk — the
-/// standard avatar is a Networked capsule whose CHILD Model carries the
+/// standard avatar is a Networked capsule whose child Model carries the
 /// controller. Sent only on change (a transition, a weight/speed edit, or
 /// unpredictable time — a looping clip's time is predicted, not re-sent),
 /// plus keyframes.
@@ -235,9 +235,9 @@ pub enum Msg {
     /// Server → clients: this node's owner changed (`net.setOwner`, `None` to
     /// release).
     ///
-    /// Ownership used to be settable only at spawn, which is why authored
-    /// slots had to rely on scene order to decide who drove what — and why a
-    /// player who dropped could not be given their slot back on reconnect.
+    /// Ownership settable only at spawn would leave authored slots relying on
+    /// scene order to decide who drives what, and a player who dropped could
+    /// not be given their slot back on reconnect.
     SetOwner { epoch: u8, id: u64, owner: Option<PeerId> },
     /// Server → clients, at the snapshot cadence: changed transforms + synced
     /// vars + changed animator states. `keyframe` marks a periodic full-state
@@ -255,7 +255,7 @@ pub enum Msg {
     /// Client → server, every tick: the last few ticks' inputs (redundant
     /// window, so one lost packet doesn't lose a tick's input).
     ///
-    /// `confirmed` is the sender's ROLLBACK frontier — the newest applied tick
+    /// `confirmed` is the sender's rollback frontier — the newest applied tick
     /// for which it holds every peer's real input. Zero, and meaningless, in a
     /// non-rollback session.
     ///
@@ -267,7 +267,7 @@ pub enum Msg {
     Input { entries: Vec<InputCmd>, confirmed: u64 },
     /// Either direction: a named remote call. `sender` is stamped by the
     /// server when relaying/receiving (clients can't spoof it). `tick` is the
-    /// sender's PERCEIVED server tick (`{withInput = true}`, client → server
+    /// sender's perceived server tick (`{withInput = true}`, client → server
     /// only): the newest snapshot tick the client had applied when it fired —
     /// what lag compensation rewinds to (`docs/multiplayer.md` §7).
     Rpc { name: String, args: NetValue, sender: PeerId, tick: Option<u64> },
@@ -276,28 +276,26 @@ pub enum Msg {
     PeerLeft { peer: PeerId },
     /// Either direction: clean goodbye.
     Bye,
-    /// Server → clients: this session simulates by ROLLBACK from now, with this
-    /// peer→slot assignment (`peers[n]` plays slot `n`; the host is always slot
-    /// 0) and this fixed input delay.
+    /// Server → clients: this session simulates by rollback from now, with
+    /// this peer→slot assignment (`peers[n]` plays slot `n`; the host is
+    /// always slot 0) and this fixed input delay.
     ///
-    /// It is also the **tick origin**: receiving it starts every peer's rollback
-    /// clock at 0, so tick N means the same instant on every machine. That is
-    /// what lets the wire carry bare applied-tick numbers with no stamp
-    /// translation — and it is why v1 does not support joining a rollback match
-    /// already in progress. Spectators and late joiners need the input log plus
-    /// a keyframe, which §5 files as future work.
+    /// Also the tick origin: receiving it starts every peer's rollback clock
+    /// at 0, so tick N means the same instant on every machine and the wire
+    /// carries bare applied-tick numbers. That is why joining a rollback match
+    /// already in progress is not supported; spectators and late joiners need
+    /// the input log plus a keyframe.
     ///
     /// `seed` is the match's RNG seed, chosen once by the host: `net.random()`
     /// draws from (seed, tick, draw index), so every peer rolls the same
-    /// numbers and a re-simulated tick rolls them again (§3). An unseeded
-    /// `rng()` in a rollback sim is poison — two peers draw differently and the
-    /// match quietly forks — so the engine hands out the correct thing rather
-    /// than only documenting it.
+    /// numbers and a re-simulated tick rolls them again. An unseeded `rng()`
+    /// in a rollback sim forks the match, so the engine hands out the seeded
+    /// one.
     ///
     /// Re-sent whenever the roster changes, which restarts the match clock.
     RollbackStart { peers: Vec<PeerId>, input_delay: u8, seed: u64 },
     /// Host → clients, every tick: a redundant window of every peer's recent
-    /// APPLIED-tick inputs, so one lost packet costs nothing.
+    /// Applied-tick inputs, so one lost packet costs nothing.
     ///
     /// The host is the arbiter and the fan-out point: peers send it their own
     /// inputs and it echoes everyone's to everyone. That also means the host

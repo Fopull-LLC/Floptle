@@ -1,19 +1,19 @@
-//! # floptle-net — open, transport-agnostic netcode (ADR-0022)
+//! # floptle-net: open, transport-agnostic netcode
 //!
-//! Phase 2b of `docs/multiplayer.md`: server-authoritative replication over
-//! a swappable [`Transport`]. The pieces:
+//! Server-authoritative replication over a swappable [`Transport`]:
 //!
-//! - [`transport`] — the `Transport` trait + [`MemoryHub`] (in-process loopback
-//!   with simulated tick-based latency/loss — tests + the editor's
-//!   "Host & Join locally" harness).
-//! - [`wire`] — the postcard-encoded message vocabulary.
-//! - [`value`] — [`NetValue`], the guarded Lua value tree (depth ≤ 4, ≤ 1 KB).
-//! - [`session`] — [`NetSession`]: hello/welcome, deterministic scene ids,
-//!   spawn/despawn, changed-only snapshots + keyframes, `synced` vars, RPC,
+//! - [`transport`]: the `Transport` trait and [`MemoryHub`], an in-process
+//!   loopback with simulated tick-based latency and loss for tests and the
+//!   editor's "Host & Join locally" harness.
+//! - [`wire`]: the postcard-encoded message vocabulary.
+//! - [`value`]: [`NetValue`], the guarded Lua value tree (depth ≤ 4, ≤ 1 KB).
+//! - [`session`]: [`NetSession`]: hello/welcome, deterministic scene ids,
+//!   spawn/despawn, changed-only snapshots and keyframes, `synced` vars, RPC,
 //!   client-side interpolation.
 //!
-//! Prediction (2c), lag compensation (2d), and the QUIC transport + relay (2e)
-//! build on these seams without changing the game-facing API.
+//! Prediction, rollback, lag compensation, interest management, the quic
+//! transport and the relay build on these seams without changing the
+//! game-facing API.
 
 pub mod identity;
 pub mod impair;
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_mismatched_input_map_is_refused_at_hello() {
-        // Input commands index actions by their POSITION in input.ron. Two
+        // Input commands index actions by their position in input.ron. Two
         // builds with differently-ordered maps would decode each other's
         // commands as the wrong actions and just play wrong, with no error
         // anywhere — so the handshake has to catch it.
@@ -237,7 +237,7 @@ mod tests {
     }
 
     /// **The host re-validates what a client sends.** The §13.2 guardrails
-    /// were checked at queue time on the SENDER, and a modified client sends
+    /// were checked at queue time on the sender, and a modified client sends
     /// whatever fits in a frame. An oversized RPC value hand-built onto the
     /// wire reaches the server and is not handed on; a server-only message —
     /// a scene switch — from a client changes nothing. Both are counted, so a
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn input_commands_flow_and_predicted_states_route_to_reconcile() {
         use floptle_core::ReplicationMode;
-        // The 2c plumbing end-to-end over a LOSSY link: client inputs reach the
+        // The 2c plumbing end-to-end over a lossy link: client inputs reach the
         // server (redundant window healing 30% loss), physics-synced snapshot
         // entries carry vel/grounded, and the client's own predicted node's
         // authoritative states go to the reconcile queue — never interpolation.
@@ -653,7 +653,7 @@ mod tests {
 
     /// The scene-switch handshake end to end: the Welcome names the session's
     /// scene, a mid-session switch is announced, old-epoch state in flight is
-    /// DROPPED (never applied to the new scene's same-numbered ids), and after
+    /// Dropped (never applied to the new scene's same-numbered ids), and after
     /// the client rebinds, replication resumes against the new scene.
     #[test]
     fn scene_switch_rebinds_and_drops_stale_epochs() {
@@ -679,7 +679,7 @@ mod tests {
         let moved = cw.get::<Transform>(ce[0]).unwrap().translation.x;
         assert!(moved > 0.5, "pre-switch replication works, got {moved}");
 
-        // SWITCH: the server flips to a different scene (different shape too).
+        // Switch: the server flips to a different scene (different shape too).
         let (mut sw2, se2) = world_with(1);
         server.switch_scene("scenes/arena.ron");
         server.rebind_scene(&sw2);
@@ -768,7 +768,7 @@ mod tests {
     /// second opinion a round trip late. Applying it drags the node between the
     /// driver's tick pose and an interpolated one from the past, every frame,
     /// while the checksums (which hash body state, not transforms) stay green:
-    /// a match that looks broken and REPORTS healthy.
+    /// a match that looks broken and reports healthy.
     #[test]
     fn once_the_match_starts_the_host_stops_moving_the_fighter() {
         let hub = MemoryHub::new();
@@ -1073,7 +1073,7 @@ mod tests {
         assert!(bz(2).abs() < 1e-9, "B does not hear about A's neighbourhood either");
     }
 
-    /// A budget too small for the crowd must DEFER, never drop: run long
+    /// A budget too small for the crowd must defer, never drop: run long
     /// enough and every relevant node has had its turn. A design that starves
     /// the unlucky ones is one you cannot safely turn on.
     #[test]
@@ -1272,22 +1272,17 @@ mod tests {
         }
     }
 
-    /// A field regression: a live relay match froze on
-    /// round one, the joiner stalled at warmup+depth having never received a
-    /// host input, and every layer test passed.
+    /// An unconfirmed tick keeps riding every packet until every peer has it.
+    /// That is what makes the redundancy redundant.
     ///
-    /// The window was doing two jobs out of one FIFO: **dedup memory** and
-    /// **fan-out payload**, capped at `INPUT_WINDOW × slots` across all peers.
-    /// So it carried "the last N admissions", not "everything still
-    /// unconfirmed" — and the host advancing evicted its own oldest ticks,
-    /// which are exactly the ticks a starved peer is waiting for. One dropped
-    /// packet early in a match and that tick was gone for good: the client
-    /// could never confirm, so it stopped sending, so the host's frontier froze
-    /// too. A permanent deadlock, from one lost datagram, on a design whose
-    /// entire loss strategy is "say it again next tick".
-    ///
-    /// The invariant is: **an unconfirmed tick keeps riding every packet until
-    /// every peer has it.** That is what makes the redundancy redundant.
+    /// A window doing two jobs out of one fifo, dedup memory and fan-out
+    /// payload capped at `INPUT_WINDOW × slots` across all peers, carries "the
+    /// last N admissions" rather than "everything still unconfirmed": the
+    /// host advancing evicts its own oldest ticks, exactly the ticks a starved
+    /// peer is waiting for. One dropped packet early in a match and that tick
+    /// is gone for good; the client never confirms, stops sending, and the
+    /// host's frontier freezes too, a permanent deadlock from one lost
+    /// datagram.
     #[test]
     fn the_window_keeps_carrying_the_tick_a_starved_peer_is_waiting_for() {
         let hub = MemoryHub::new();
@@ -1338,7 +1333,7 @@ mod tests {
         );
     }
 
-    /// field regression: a referee that disagrees with EVERYONE
+    /// field regression: a referee that disagrees with everyone
     /// is the one that is wrong, and must not take the match down with it.
     ///
     /// The referee is the sole judge when one is running — deliberately, because

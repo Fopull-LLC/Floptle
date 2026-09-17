@@ -1,11 +1,9 @@
-//! Rollback bookkeeping (`docs/multiplayer.md`): per-peer input
-//! rings, input delay, remote-input prediction, the confirmed frontier, and
-//! mispredict detection.
+//! Rollback bookkeeping: per-peer input rings, input delay, remote-input
+//! prediction, the confirmed frontier, and mispredict detection.
 //!
-//! Like [`crate::predict`], this is **pure bookkeeping** — it decides *whether*
-//! and *how far* to roll back; the driver owns the actual state ring and
-//! re-simulation, because that means running `fixedUpdate` and physics bodies,
-//! which live outside this crate.
+//! Like [`crate::predict`], this decides whether and how far to roll back;
+//! the driver owns the state ring and the re-simulation, since that means
+//! running `fixedUpdate` and physics bodies, which live outside this crate.
 //!
 //! The loop a driver runs:
 //!
@@ -23,13 +21,10 @@
 //! 5. [`Rollback::confirmed`] is the newest tick where every peer's real input is
 //!    known — the driver may drop saved states at or below it.
 //!
-//! ## Why the arithmetic is fussy about `delay`
-//!
-//! Local input sampled on tick `T` is *applied* on `T + delay`. That is the
-//! whole point: it buys the network `delay` ticks to deliver before anyone has
-//! to guess. Everything in this module speaks in **applied** ticks — the tick a
-//! `NetInput` actually drives simulation on — so a driver never has to do the
-//! shift itself and get it wrong in one of the two places.
+//! Local input sampled on tick `T` is applied on `T + delay`, which buys the
+//! network `delay` ticks to deliver before anyone has to guess. Everything in
+//! this module speaks in applied ticks, the tick a `NetInput` drives
+//! simulation on, so a driver never does the shift itself.
 
 use std::collections::HashMap;
 
@@ -54,7 +49,7 @@ pub const INPUT_RING: usize = 256;
 /// beats finding it out from a match.
 pub const MAX_DELAY: u8 = 6;
 
-/// The FLOOR on input delay, ticks (~33 ms at 60 Hz), and what a LAN session
+/// The floor on input delay, ticks (~33 ms at 60 Hz), and what a LAN session
 /// runs at.
 ///
 /// It was the only delay for two releases, which is right for peers in the same
@@ -212,7 +207,7 @@ impl Rollback {
         out
     }
 
-    /// A remote peer's input for an already-shifted APPLIED tick.
+    /// A remote peer's input for an already-shifted applied tick.
     ///
     /// Returns `Some(Correction)` only when this arrival contradicts a tick that
     /// has already been simulated. Duplicates, inputs for the future, and
@@ -267,7 +262,7 @@ impl Rollback {
         self.prune();
     }
 
-    /// Move the simulated frontier back to `tick` — the editor's BACKWARDS
+    /// Move the simulated frontier back to `tick` — the editor's backwards
     /// frame-step, which reads the driver's state ring instead of re-deriving
     /// anything (§7 P5).
     ///
@@ -369,7 +364,7 @@ impl Rollback {
         self.confirmed = t;
     }
 
-    /// Drop input older than the ring. Keyed by the CONFIRMED frontier rather
+    /// Drop input older than the ring. Keyed by the confirmed frontier rather
     /// than by the current tick: anything at or below `confirmed` can never be
     /// re-simulated, and anything above it might.
     fn prune(&mut self) {
@@ -401,7 +396,7 @@ impl Rollback {
     }
 }
 
-/// A repeated input with its EDGES cleared.
+/// A repeated input with its edges cleared.
 ///
 /// Repeat-last means "assume they kept holding what they held". It emphatically
 /// does not mean "assume they pressed it again": replaying a `just_pressed` bit
@@ -426,7 +421,7 @@ mod tests {
     ///
     /// The cross-platform failure that motivated this was a single Lua number —
     /// `st.visYaw`, smoothed with `math.exp`, which is library code and is not
-    /// required to agree between glibc and Windows' UCRT. One ULP a tick voided
+    /// required to agree between glibc and Windows' ucrt. One ULP a tick voided
     /// a match both players could see was identical, and the game was told
     /// nothing at all: `net.on("desync")` fired with no payload.
     #[test]

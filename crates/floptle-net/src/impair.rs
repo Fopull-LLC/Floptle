@@ -1,33 +1,29 @@
-//! **Development only.** A [`Transport`] wrapper that adds latency and packet
+//! Development only: a [`Transport`] wrapper that adds latency and packet
 //! loss to a real link, so a rollback match can be rehearsed at 60–120 ms RTT
 //! between two editor instances on one desk.
 //!
-//! [`MemoryHub`](crate::MemoryHub) already simulates a bad link, but it is a
-//! loopback for tests: it never touches QUIC or the relay, and its clock is the
-//! gameplay tick. This is the same idea applied to the transports a real match
-//! actually runs over, driven by the wall clock, and it wraps the trait rather
-//! than any one implementation — so QUIC and the relay both get it for free.
+//! [`MemoryHub`](crate::MemoryHub) simulates a bad link as a loopback for
+//! tests, on the gameplay tick. This wraps the transports a real match runs
+//! over, on the wall clock, and wraps the trait rather than one
+//! implementation, so quic and the relay both get it.
 //!
-//! It is **off unless `FLOPTLE_NET_IMPAIR` is set** in the environment. Nothing
-//! in the editor's UI can turn it on by itself; the variable makes the panel
-//! section appear, and only then can it be dialled up. That asymmetry is
-//! deliberate: a knob that can silently degrade a real session is worse than no
-//! knob, because the resulting bug report blames the netcode.
+//! Off unless `FLOPTLE_NET_IMPAIR` is set in the environment. The variable
+//! makes the panel section appear, and only then can it be dialled up: a knob
+//! that can silently degrade a real session produces bug reports that blame
+//! the netcode.
 //!
-//! ## What it models, and what it does not
+//! Delay is applied on send, one way, so a round trip costs twice the
+//! configured latency; the knob is labelled one-way and the panel prints the
+//! implied RTT beside it. Loss never touches [`Channel::Reliable`]: a real
+//! reliable channel retransmits, and dropping handshakes would manufacture
+//! failures that cannot happen in the field.
 //!
-//! Delay is applied on **send**, one way. A round trip therefore costs twice
-//! the configured latency, which is why the knob is labelled one-way and the
-//! panel prints the implied RTT beside it. Loss never touches
-//! [`Channel::Reliable`] — a real reliable channel retransmits, and dropping
-//! handshakes would only manufacture failures that cannot happen in the field.
-//!
-//! It does not model reordering, duplication, or bandwidth limits, and the only
-//! jitter it has is an artefact: held packets are released from `poll`, so
+//! It does not model reordering, duplication, or bandwidth limits, and its
+//! only jitter is an artefact: held packets are released from `poll`, so
 //! delivery is quantised to the session's tick (≈16 ms at 60 Hz) and the
-//! effective delay is the configured one plus up to a tick. It is a rehearsal
-//! aid for "does this hold up at 100 ms", not a network emulator, and it is not
-//! a substitute for the two-machine acceptance run.
+//! effective delay is the configured one plus up to a tick. A rehearsal aid
+//! for "does this hold up at 100 ms", not a network emulator, and not a
+//! substitute for the two-machine acceptance run.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,6 +1,6 @@
 //! The transport seam (`docs/multiplayer.md` §5.3): sessions speak
 //! [`Transport`], never sockets, so the same replication code runs over the
-//! in-memory hub (tests + the editor's "Host & Join locally" harness), QUIC
+//! in-memory hub (tests + the editor's "Host & Join locally" harness), quic
 //! (phase 2e), or anything else.
 //!
 //! [`MemoryHub`] is the loopback implementation: a server endpoint plus any
@@ -38,9 +38,9 @@ pub enum Incoming {
     /// The reason is what tells a mistyped lobby code apart from an opponent
     /// closing their laptop. Every layer above this already carries one
     /// ([`crate::NetEvent::Disconnected`] → `net.on("disconnected", fn)` →
-    /// the game's own text), so the string a relay actually sends —
-    /// "no such lobby" — used to be thrown away one line below the pipe built
-    /// to deliver it.
+    /// the game's own text), so the string a relay sends, "no such lobby",
+    /// reaches the game rather than being thrown away one line below the pipe
+    /// built to deliver it.
     ///
     /// `None` means the link simply ended: a timeout, a closed process, a
     /// pulled cable. Nobody is in a position to say more, and inventing a
@@ -85,7 +85,7 @@ pub trait Transport: Send {
     /// kicked client stops paying for a connection it is no longer part of.
     fn disconnect(&mut self, _peer: PeerId) {}
 
-    /// Anything the far end said that a DEVELOPER should read, drained.
+    /// Anything the far end said that a developer should read, drained.
     ///
     /// Defaulted to nothing because only a managed relay has any: it runs on
     /// somebody else's machine, so a message about the developer's own game —
@@ -228,7 +228,7 @@ impl HubState {
         }
         let now = self.now;
         let Some(q) = self.inbox.get_mut(&me) else { return out };
-        // Uniform latency keeps FIFO order, so a single front-scan suffices.
+        // Uniform latency keeps fifo order, so a single front-scan suffices.
         let mut ready = Vec::new();
         while q.front().is_some_and(|m| m.deliver_at <= now) {
             ready.push(q.pop_front().unwrap());
@@ -343,7 +343,7 @@ impl Transport for MemoryTransport {
     }
 
     fn disconnect(&mut self, peer: PeerId) {
-        // The leave is queued; the peer's INBOX is left alone. A kick sends the
+        // The leave is queued; the peer's inbox is left alone. A kick sends the
         // reason and then hangs up, and wiping the mail on the way out would
         // deliver the hangup and drop the explanation — which is the exact
         // failure a kick with a reason exists to remove. (The harness's own
@@ -396,7 +396,7 @@ mod tests {
         let mut client = hub.connect();
         let _ = server.poll();
         // Two sends, but the destination only polls after both are queued —
-        // both deliver (in order); sequenced only drops if an OLDER seq arrives
+        // both deliver (in order); sequenced only drops if an older seq arrives
         // after a newer one was delivered. Simulate that by delivering #2 first.
         client.send(SERVER, Channel::UnreliableSequenced, b"a");
         let _ = server.poll(); // delivers "a" (seq 1)

@@ -1,28 +1,28 @@
-//! The QUIC transport (phase 2e, `docs/multiplayer.md` §5.3/§10): the same
-//! [`Transport`] seam the sessions already speak, over a real network.
+//! The quic transport: the same [`Transport`] seam the sessions speak, over a
+//! real network.
 //!
-//! quinn runs on a small background tokio runtime; the sync game loop talks to
-//! it through channels, so the editor/runtime never awaits anything:
+//! quinn runs on a small background tokio runtime; the sync game loop talks
+//! to it through channels, so the editor and runtime never await anything:
 //!
-//! - [`Channel::Reliable`] rides one ordered unidirectional QUIC stream per
-//!   direction, length-prefix framed (control: hello/spawn/rpc).
-//! - [`Channel::Unreliable`] / [`Channel::UnreliableSequenced`] ride QUIC
+//! - [`Channel::Reliable`] rides one ordered unidirectional quic stream per
+//!   direction, length-prefix framed (control: hello, spawn, rpc).
+//! - [`Channel::Unreliable`] and [`Channel::UnreliableSequenced`] ride quic
 //!   datagrams tagged `[tag u8][seq u64 LE][payload]`; the receiver drops
 //!   stale sequenced datagrams. A datagram too large for the path MTU falls
-//!   back to the reliable stream (correct, just not droppable — the 2e
-//!   interest/byte-budget work keeps snapshots under the MTU).
+//!   back to the reliable stream, correct but not droppable; interest
+//!   management and the byte budget keep snapshots under the MTU.
 //!
-//! **Dev-trust security model (v1):** the server presents a fresh self-signed
-//! certificate and clients accept any certificate. That makes LAN/self-hosted
-//! play zero-config, and it is exactly as trustworthy as a Minecraft server —
-//! the connection is encrypted, but the server's identity is not verified.
+//! Dev trust: by default the server presents a fresh self-signed certificate
+//! and clients accept any certificate, so LAN and self-hosted play is
+//! zero-config and exactly as trustworthy as a Minecraft server. The
+//! connection is encrypted; the server's identity is not verified.
 //!
-//! **Verified identity, for a relay reached by name**: a
-//! server can instead be handed a certificate ([`ServerCertificate`], PEM as
-//! certbot writes it) and can be handed a NEWER one while it runs
-//! ([`QuicServer::set_certificate`]) — new handshakes present the new chain
-//! and every live connection keeps the one it agreed, so a renewal on the box
-//! drops nobody. Whether a client checks the chain is [`ClientTrust`]'s call.
+//! Verified identity, for a relay reached by name: a server can instead be
+//! handed a certificate ([`ServerCertificate`], PEM as certbot writes it) and
+//! a newer one while it runs ([`QuicServer::set_certificate`]). New
+//! handshakes present the new chain and every live connection keeps the one
+//! it agreed, so a renewal on the box drops nobody. Whether a client checks
+//! the chain is [`ClientTrust`]'s call.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -167,7 +167,7 @@ async fn read_datagrams(conn: quinn::Connection, peer: PeerId, events: mpsc::Sen
 // Server
 // ---------------------------------------------------------------------------
 
-/// The authoritative host's endpoint: accepts QUIC clients, assigns peer ids
+/// The authoritative host's endpoint: accepts quic clients, assigns peer ids
 /// from 1 up. Create with [`QuicServer::bind`]; drop to shut down.
 pub struct QuicServer {
     runtime: Option<tokio::runtime::Runtime>,
@@ -181,30 +181,27 @@ pub struct QuicServer {
     buffers: Option<SocketBuffers>,
 }
 
-/// **The UDP socket's kernel buffers, as granted**.
+/// The UDP socket's kernel buffers, as granted.
 ///
-/// A relay's inbox is its receive buffer. Left at the kernel default (212,992
-/// bytes on a stock Linux box — on the order of 100–200 datagrams once the
-/// kernel charges each one's `skb` overhead), the live `us-east` relay began
-/// dropping between 56 and 104 CCU while carrying **under 1% of its link**,
-/// with the loop at 1.2 ms and load at 0.17. Three counters agreed to the unit:
-/// the relay's `rx_drops`, the kernel's `UdpRcvbufErrors`, and the socket's own
-/// `skmem d…`. A bigger machine with the same socket drops at the same point.
+/// A relay's inbox is its receive buffer. At the kernel default (212,992
+/// bytes on a stock Linux box, 100–200 datagrams once the kernel charges each
+/// one's `skb` overhead) a relay starts dropping between 56 and 104 CCU while
+/// carrying under 1% of its link, and a bigger machine with the same socket
+/// drops at the same point. The relay's `rx_drops`, the kernel's
+/// `UdpRcvbufErrors` and the socket's own `skmem d…` all count it.
 ///
-/// ⚠ **Asked and granted differ, and only the second is a fact.** The kernel
+/// Asked and granted differ, and only the second is a fact. The kernel
 /// silently clamps `SO_RCVBUF` to `net.core.rmem_max` (and `SO_SNDBUF` to
-/// `wmem_max`), so a relay that asked for 8 MiB on a stock box got 425,984
-/// bytes and nothing said so. The sysctl is the operator's half; this struct
-/// exists so the relay — the only thing that knows it was clamped — can say
-/// it at startup. Read back with `getsockopt`, which is also what `ss -m`
-/// prints as `rb`/`tb`.
+/// `wmem_max`), so a relay that asks for 8 MiB on a stock box gets 425,984
+/// bytes. The sysctl is the operator's half; this struct lets the relay, the
+/// only thing that knows it was clamped, say so at startup. Read back with
+/// `getsockopt`, which is what `ss -m` prints as `rb`/`tb`.
 ///
-/// ⚠ **Linux reports DOUBLE what it applied** — it books the `skb` overhead
-/// in the same number — so an unclamped 8 MiB reads as 16,777,216 here and
-/// in `ss`, and **a clamp to exactly half the ask reads as the ask itself.**
-/// That is not hypothetical: a box with `rmem_max = 4 MiB` answered an 8 MiB
-/// ask with `8388608`, and a comparison against the ask called it granted.
-/// [`Self::usable`] undoes the booking; [`Self::clamped`] compares that.
+/// Linux reports double what it applied, booking the `skb` overhead in the
+/// same number, so an unclamped 8 MiB reads as 16,777,216 here and in `ss`,
+/// and a clamp to exactly half the ask reads as the ask itself: a box with
+/// `rmem_max = 4 MiB` answers an 8 MiB ask with `8388608`. [`Self::usable`]
+/// undoes the booking; [`Self::clamped`] compares that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketBuffers {
     /// Bytes asked for, on each of receive and send.
@@ -284,7 +281,7 @@ impl SocketBuffers {
 /// The dev self-signed certificate is minted at startup and nobody checks it.
 /// A managed relay at `us-east.relay.fopull.com` is different: clients verify
 /// that name against the public roots ([`ClientTrust::Verify`]), so the relay
-/// has to present a chain a CA issued for it — and present the RENEWED one
+/// has to present a chain a CA issued for it — and present the renewed one
 /// sixty days later without a restart, because a restart ends every lobby on
 /// the box. This is that chain, loaded from disk; [`QuicServer::set_certificate`]
 /// is the swap.
@@ -346,7 +343,7 @@ impl ServerCertificate {
         Ok(out)
     }
 
-    /// The leaf's SHA-256 fingerprint, `AB:CD:…` — what
+    /// The leaf's sha-256 fingerprint, `AB:CD:…` — what
     /// `openssl x509 -noout -fingerprint -sha256` prints for the same file, so
     /// an operator can tell which certificate a running relay is presenting.
     pub fn fingerprint(&self) -> String {
@@ -374,7 +371,7 @@ impl ServerCertificate {
     }
 }
 
-/// SHA-256 of a DER certificate as `AB:CD:…` (openssl's spelling).
+/// Sha-256 of a DER certificate as `AB:CD:…` (openssl's spelling).
 pub fn fingerprint_of(der: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, der);
     digest
@@ -425,7 +422,7 @@ impl QuicServer {
         Self::bind_with_certificate(port, &ServerCertificate::self_signed()?)
     }
 
-    /// Present a NEWER certificate to every handshake from now on. Connections
+    /// Present a newer certificate to every handshake from now on. Connections
     /// already up keep the one they agreed — quinn swaps the server config
     /// for incoming handshakes only — so this is how a renewed certificate
     /// reaches a relay without ending a single lobby.
@@ -646,8 +643,8 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 /// **Whose certificate a client checks.**
 ///
 /// The open relay and a direct host present a self-signed certificate minted
-/// at startup — the dev-trust model ADR-0022 documents, where the lobby code
-/// is the secret and the transport is not. A MANAGED relay is reached by a
+/// at startup — the dev-trust model, where the lobby code
+/// is the secret and the transport is not. A managed relay is reached by a
 /// name under `fopull.com`, and a name is something a certificate can be
 /// issued for: that connection is verified against the public roots, with
 /// the name as SNI, so a game key and every packet of a managed session go
@@ -958,7 +955,7 @@ mod tests {
     ///
     /// Two asks against the real kernel: a small one every box grants, and
     /// one no box grants (a gibibyte, above any `rmem_max`). The small one
-    /// must read back as APPLIED — on Linux exactly double the ask, which is
+    /// must read back as applied — on Linux exactly double the ask, which is
     /// how the kernel books it — and the two must differ, or the setsockopt
     /// never happened and the read-back is the default wearing a new name.
     /// The huge one must say `clamped` and name the sysctl, because the
@@ -1235,7 +1232,7 @@ mod tests {
         }
     }
 
-    /// **The fallback works and says so.** A client told to VERIFY a server
+    /// **The fallback works and says so.** A client told to verify a server
     /// that presents the dev self-signed certificate cannot verify it — and
     /// connects anyway, once, with a warning the transport hands up. Until
     /// the managed relay's certificate is live this is what every managed

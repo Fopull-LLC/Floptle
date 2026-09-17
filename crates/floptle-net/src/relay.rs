@@ -1,24 +1,22 @@
-//! The rendezvous relay (`docs/multiplayer.md` §10): hosts register and get
-//! a **lobby code**; clients join with the code; the relay forwards opaque
-//! session traffic both ways. Nobody port-forwards — the only reachable
-//! address anyone needs is the relay's. This is the open, self-hostable
-//! reference implementation (ADR-0022); Floptle Cloud runs the managed one.
+//! The rendezvous relay: hosts register and get a lobby code, clients join
+//! with the code, and the relay forwards opaque session traffic both ways.
+//! Nobody port-forwards; the only reachable address anyone needs is the
+//! relay's. This is the open, self-hostable reference implementation; Floptle
+//! Cloud runs the managed one.
 //!
-//! Everything rides the QUIC transport this crate already has: an endpoint's
-//! leg to the relay is an ordinary [`QuicClient`], the relay itself an
-//! ordinary [`QuicServer`] — control + reliable game traffic on the framed
-//! stream (ordered, so a `Join` is always processed before the session's
-//! `Hello` that follows it), unreliable game traffic as datagrams.
+//! Everything rides the quic transport: an endpoint's leg to the relay is an
+//! ordinary [`QuicClient`], the relay itself an ordinary [`QuicServer`].
+//! Control and reliable game traffic go on the framed stream, ordered, so a
+//! `Join` is always processed before the session's `Hello` that follows it;
+//! unreliable game traffic goes as datagrams.
 //!
-//! Sequenced-drop semantics are END-TO-END: the sender stamps a `seq` inside
-//! the relayed message and the FINAL receiver drops stale ones per
-//! `(peer, channel)` — the legs themselves carry unreliable datagrams without
-//! per-leg dedup, so interleaved traffic for different peers can never
-//! false-drop.
+//! Sequenced drops are end-to-end: the sender stamps a `seq` inside the
+//! relayed message and the final receiver drops stale ones per
+//! `(peer, channel)`. The legs carry unreliable datagrams without per-leg
+//! dedup, so interleaved traffic for different peers never false-drops.
 //!
-//! [`RelayServer`] is deliberately dumb: lobbies, peer ids, forwarding. No
-//! game state, no inspection — a session over a relay is the same bytes as a
-//! direct one.
+//! [`RelayServer`] knows lobbies, peer ids and forwarding, and nothing else:
+//! a session over a relay is the same bytes as a direct one.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
@@ -120,45 +118,36 @@ enum RelayMsg {
     /// variant, because a dedicated server may host keyless on a self-hosted
     /// relay too. Appended last, for the reason every variant above it says.
     HostIsDedicated,
-    /// Relay → client: **the lobby exists, and its server is waking up.**
+    /// Relay → client: the lobby exists, and its server is waking up.
     ///
-    /// ⚠ **Not a refusal, and the distinction is the whole point.**
-    /// [`RelayMsg::Refused`] means *this will never succeed* — that is what the
-    /// state is for, separating "not yet" from "never" in a way elapsed time
-    /// cannot. A dedicated server that has been slept to free its machine is
-    /// emphatically "not yet", and answering a join to one with `Refused` tells
-    /// a player holding a perfectly good code that their friend's game does not
+    /// Not a refusal. [`RelayMsg::Refused`] means this will never succeed; a
+    /// dedicated server slept to free its machine is "not yet", and a player
+    /// holding a good code must not be told their friend's game does not
     /// exist.
     ///
-    /// `detail` is words for a human, not a status noun — "about 20 seconds"
-    /// renders as a sentence, where "starting" makes every developer invent one
-    /// and most will not.
+    /// `detail` is words for a human, not a status noun: "about 20 seconds"
+    /// renders as a sentence, where "starting" makes every developer invent
+    /// one.
     ///
-    /// **Appended last, and here that placement is the entire compatibility
-    /// story rather than merely a rule followed.** A build already in players'
-    /// hands has never heard of this variant, so it decodes to nothing and the
-    /// client stays in `connecting` — showing the spinner it already draws,
-    /// which is the correct thing for it to draw. A new build reads the state
-    /// and can say something better. No version negotiation, no flag: old games
-    /// degrade to "slow" instead of to a black screen, for free.
+    /// Appended last. A build already in players' hands decodes this variant
+    /// to nothing and stays in `connecting`, showing the spinner it already
+    /// draws; a new build reads the state and says something better. No
+    /// version negotiation, no flag.
     Starting { detail: String },
-    /// Endpoint → relay: **reclaim this lobby code rather than minting one.**
+    /// Endpoint → relay: reclaim this lobby code rather than minting one.
     ///
-    /// Sent immediately after the host request, on the same connection — the
-    /// same shape as [`RelayMsg::HostIsDedicated`] and for the same reason:
-    /// widening a shipped variant changes its encoding, and every host already
-    /// in the wild would fail to decode.
+    /// Sent immediately after the host request, on the same connection, the
+    /// same shape as [`RelayMsg::HostIsDedicated`]: widening a shipped variant
+    /// changes its encoding, and every host in the wild would fail to decode.
     ///
-    /// ⚠ **A request, never an instruction.** The relay hands the code over
-    /// only when its policy says this key owns it, so a host that asks for
-    /// somebody else's code is simply minted a fresh one. The game key is the
-    /// proof of ownership and it is already validated at registration, so this
-    /// introduces no new secret — the worst a liar achieves is the code they
-    /// would have got anyway.
+    /// A request, never an instruction. The relay hands the code over only
+    /// when its policy says this key owns it, so a host that asks for somebody
+    /// else's code is minted a fresh one. The game key is the proof of
+    /// ownership and is already validated at registration; the worst a liar
+    /// achieves is the code they would have got anyway.
     ///
-    /// This is what makes six characters survive a restart, a sleep and a relay
-    /// upgrade: the code stops being something the relay invents and becomes
-    /// something a managed server brings with it.
+    /// This is what makes six characters survive a restart, a sleep and a
+    /// relay upgrade: a managed server brings its code with it.
     WantCode { code: String },
 }
 
@@ -197,25 +186,20 @@ pub enum HostAdmission {
     Pending,
 }
 
-/// **How long a lobby outlives its host's connection**.
+/// How long a lobby outlives its host's connection.
 ///
-/// A ten-minute Fofighter match over the managed relay had its lobby created
-/// and destroyed **three times**, twice while roughly a megabit a second was
-/// flowing — so not an idle timeout, and with no resource pressure anywhere on
-/// the box. The joiner's socket stayed open, so it went on sending into a lobby
-/// that no longer existed and had no way to know: everything network-owned
-/// aged out of its world while the skybox and the HUD, the only things it draws
-/// that are not replicated, stayed put.
+/// A host that drops for a moment (a NAT rebinding a UDP mapping, a Wi-Fi
+/// roam, a burst of loss) must not end everybody's match. Without this the
+/// joiner's socket stays open, sending into a lobby that no longer exists,
+/// and everything network-owned ages out of its world while the skybox and
+/// the HUD stay put. So the lobby is kept, its players are held, and the host
+/// reclaims it on reconnect. `RelayHost` retries with backoff starting at one
+/// second, so this covers several attempts and far less than a player's
+/// patience.
 ///
-/// A host that drops for a moment — a NAT rebinding a UDP mapping, a Wi-Fi
-/// roam, a burst of loss — should not end everybody's match. The lobby is kept,
-/// its players are held, and the host reclaims it on reconnect. `RelayHost`
-/// already retries with backoff starting at one second, so this is comfortably
-/// more than one attempt and far less than a player's patience.
-///
-/// ⚠ **It is a grace window, not a lease.** Past it the lobby is destroyed and
-/// the clients are told, exactly as before — a host that is really gone must
-/// not hold a code and a room full of people indefinitely.
+/// A grace window, not a lease. Past it the lobby is destroyed and the
+/// clients are told: a host that is really gone must not hold a code and a
+/// room full of people indefinitely.
 pub const HOST_GRACE: Duration = Duration::from_secs(20);
 
 /// Why a lobby ended, for the operator's journal.
@@ -271,7 +255,7 @@ pub const NOT_READY_YET: &str =
 pub const HOST_DECISION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// **What one connection, one address and one lobby may do**, on any relay —
-/// the open one included. A relay MULTIPLIES traffic (one datagram into an
+/// the open one included. A relay multiplies traffic (one datagram into an
 /// eight-player lobby leaves seven times), so it is the cheapest thing on the
 /// box to take down, and a leaked game key makes it the cheapest way to fill
 /// a developer's player cap with phantom lobbies. None of these is a plan
@@ -542,7 +526,7 @@ struct Lobby {
     /// Since when the lobby has had no clients — for [`RelayLimits::idle_lobby`].
     ///
     /// ⚠ Restarted when a host reclaims the lobby: the
-    /// dedicated marker is per CONNECTION, and a server that restarts arrives
+    /// dedicated marker is per connection, and a server that restarts arrives
     /// as a new connection whose marker has not landed yet — so for one sweep
     /// a reclaimed lobby is a player's, and if this clock still says "empty
     /// since morning" the reaper ends it in the same second the reclaim
@@ -567,7 +551,7 @@ pub struct RelayServer {
     /// asked. Re-asked every step; refused at [`HOST_DECISION_DEADLINE`].
     parked: Vec<ParkedHost>,
     /// Connections that declared themselves dedicated servers
-    /// ([`RelayMsg::HostIsDedicated`]). Held per CONNECTION rather than per
+    /// ([`RelayMsg::HostIsDedicated`]). Held per connection rather than per
     /// lobby because the marker can arrive while the host is still parked, so
     /// there is not yet a code to file it under.
     dedicated: HashSet<PeerId>,
@@ -688,7 +672,7 @@ impl RelayServer {
 
     /// Run under an admission policy — Floptle Cloud's managed mode.
     ///
-    /// Without this the relay is the open one ADR-0022 promises: no keys, no
+    /// Without this the relay is the open one: no keys, no
     /// control plane, nothing to authorize against. That is not a fallback, it
     /// is the product — a self-hosted relay must keep working exactly as it
     /// does today, and there is a guard that says so.
@@ -876,7 +860,7 @@ impl RelayServer {
                 let Some(Role::Client { code, game_peer }) = self.conns.get(&from) else {
                     return;
                 };
-                // A host has to DECODE what a client sends; a modified client
+                // A host has to decode what a client sends; a modified client
                 // pushing a megabyte at it is the cheapest way to hurt one.
                 if leg_channel == Channel::Reliable && bytes.len() > MAX_CLIENT_RELIABLE {
                     self.limit_drops += 1;
@@ -943,9 +927,9 @@ impl RelayServer {
     /// wire and reaches the player verbatim — the whole value of "connect your
     /// project at fopull.com/cloud" is that somebody reads it.
     fn open_lobby(&mut self, from: PeerId, key: Option<&str>, build: Option<&str>) {
-        // **One live lobby per connection.** A second `Host` on a connection
-        // that already hosts used to open a second lobby and forget the first
-        // — its players attached to a code nobody was serving.
+        // One live lobby per connection. A second `Host` on a connection that
+        // already hosts must not open a second lobby and forget the first,
+        // with its players attached to a code nobody serves.
         if let Some(Role::Host { code }) = self.conns.get(&from) {
             let code = code.clone();
             self.refuse_limit(from, &format!("this connection already hosts lobby {code}"));
@@ -1001,7 +985,7 @@ impl RelayServer {
         // A code somebody is actively hosting is never handed over, however good
         // the claim — that would move live players into a different lobby.
         let wanted = self.wanted.remove(&from);
-        // ⚠ **A held lobby is REJOINED, not replaced**. This is
+        // ⚠ **A held lobby is rejoined, not replaced**. This is
         // the case that saves a match: the host blipped, its lobby is inside
         // the grace window with everybody still attached, and it has come back
         // asking for its own code. Re-point the lobby at the new connection and
@@ -1139,11 +1123,10 @@ impl RelayServer {
         self.dedicated.remove(&c);
         match self.conns.remove(&c) {
             Some(Role::Host { code }) => {
-                // ⚠ **The lobby is held, not destroyed**. A
-                // host whose connection blipped for a few seconds used to take
-                // everybody's match with it, and the players were left sending
-                // into a lobby that no longer existed — their sockets were
-                // still open, so nothing told them. The grace window is swept
+                // The lobby is held, not destroyed. A host whose connection
+                // blips for a few seconds must not take everybody's match with
+                // it, leaving the players sending into a lobby that no longer
+                // exists with nothing to tell them. The grace window is swept
                 // in `step`; if the host does not come back, it ends there with
                 // a reason.
                 if let Some(l) = self.lobbies.get_mut(&code) {
@@ -1289,7 +1272,7 @@ struct SeqState {
 }
 
 impl SeqState {
-    /// True when the message should be DROPPED (stale sequenced).
+    /// True when the message should be dropped (stale sequenced).
     fn stale(&mut self, peer: u64, channel: u8, seq: u64) -> bool {
         if channel != CH_SEQUENCED {
             return false;
@@ -1303,7 +1286,7 @@ impl SeqState {
     }
 }
 
-/// The host's end of a relayed session: one QUIC leg to the relay, a lobby
+/// The host's end of a relayed session: one quic leg to the relay, a lobby
 /// code for friends, and the same [`Transport`] the sessions already speak —
 /// peers appear exactly as if they had connected directly.
 pub struct RelayHost {
@@ -1313,13 +1296,11 @@ pub struct RelayHost {
     dedup: SeqState,
     /// Why the relay turned this host away, if it did.
     ///
-    /// **This used to be dropped on the floor.** A managed relay's refusals are
-    /// the product's own words — "connect your project at fopull.com/cloud",
-    /// "this game is at its 20-player limit on the free plan" — and the host
-    /// leg parsed `Refused` into `_ => {}`, so all of them arrived as a three
-    /// second wait and then "no lobby code (is a relay running there?)": a
-    /// message that is not merely unhelpful but points at the wrong thing
-    /// entirely, since the relay is plainly running and plainly answering.
+    /// A managed relay's refusals are the product's own words: "connect your
+    /// project at fopull.com/cloud", "this game is at its 20-player limit on
+    /// the free plan". Dropped, they would arrive as a three second wait and
+    /// then "no lobby code (is a relay running there?)", which points at the
+    /// wrong thing entirely.
     refused: Option<String>,
     /// Things the relay said about this lobby that a developer should read,
     /// drained by whoever is hosting — see [`Transport::take_notices`].
@@ -1361,22 +1342,18 @@ impl RelayHost {
         Self::connect_and_host(relay_addr, RelayMsg::Host, None)
     }
 
-    /// Host **as a registered game**, presenting the project's Floptle Cloud
-    /// key (and its build hash, when the build has one).
+    /// Host as a registered game, presenting the project's Floptle Cloud key
+    /// (and its build hash, when the build has one).
     ///
     /// A managed relay refuses a keyless host, so this is the call an exported
     /// game makes once its project is connected. A self-hosted relay ignores
-    /// the key entirely, which is deliberate: it has nothing to check it
-    /// against and is not entitled to an opinion about it.
+    /// the key: it has nothing to check it against.
     ///
-    /// **The fallback is the compatibility story in the other direction.** New
-    /// variants are appended to `RelayMsg`, so a relay older than managed mode
-    /// cannot decode `HostKeyed` and drops it — silently, because that is what
-    /// an unknown postcard variant does. Rather than let a developer who points
-    /// a connected project at their own older relay sit through a three second
-    /// timeout and a wrong diagnosis, the plain `Host` goes out after
-    /// [`OLD_RELAY_FALLBACK_POLLS`] and that relay hosts them normally. On a
-    /// managed relay the answer has always arrived long before then.
+    /// A relay older than managed mode cannot decode `HostKeyed` and drops it
+    /// silently, as an unknown postcard variant is dropped. So the plain
+    /// `Host` goes out after [`OLD_RELAY_FALLBACK_POLLS`] and that relay hosts
+    /// the game normally, rather than a three second timeout and a wrong
+    /// diagnosis. On a managed relay the answer arrives long before then.
     pub fn host_keyed(
         relay_addr: &str,
         key: &str,
@@ -1755,7 +1732,7 @@ impl Transport for RelayClient {
                     // The relay told us exactly what was wrong — usually that
                     // the code doesn't match a lobby. Carry it: mistyping the
                     // code is the most common thing that will ever go wrong in
-                    // an online session, and it used to arrive at the game
+                    // an online session, and it must not arrive at the game
                     // indistinguishable from the host closing their laptop.
                     Some(RelayMsg::Refused { reason }) => {
                         // Never, rather than not yet. Stop asking.
@@ -1802,7 +1779,7 @@ mod tests {
 
     /// **Every wire variant keeps the number it was born with.**
     ///
-    /// Postcard indexes enum variants by DECLARATION order, so inserting one
+    /// Postcard indexes enum variants by declaration order, so inserting one
     /// anywhere but the end renumbers everything after it — and a build in the
     /// wild then sends `HostKeyed` at an index the relay now reads as something
     /// else. The failure is silent on both sides: a decode returns `None` and
@@ -2265,7 +2242,7 @@ mod tests {
         let me = peer.my_peer().expect("the Welcome must assign the joiner a peer id");
         assert_ne!(me, SERVER, "a joiner must not believe it is the host");
 
-        // field shape: the lobby is hosted in the MENU scene, so a long stretch
+        // field shape: the lobby is hosted in the menu scene, so a long stretch
         // of ordinary predicted traffic — snapshots, acks, pings — runs before
         // the scene switch flips the session into rollback. Anything that
         // survives that transition wrongly only shows up if it happened.
@@ -2388,7 +2365,7 @@ mod tests {
 /// Managed mode (Floptle Cloud): who may host this relay, who
 /// may join, and what a refusal says.
 ///
-/// These drive a **real relay over real QUIC** with a policy that answers from
+/// These drive a **real relay over real quic** with a policy that answers from
 /// a table, because the thing worth asserting is what an endpoint experiences —
 /// a code, or a sentence, or (the bug that started this) three seconds of
 /// silence and a wrong diagnosis.
@@ -2428,7 +2405,7 @@ mod managed_tests {
     }
 
     /// The refusal text, or a failure naming what was expected. `RelayHost` is
-    /// not `Debug` (it owns a QUIC endpoint), so `expect_err` is unavailable.
+    /// not `Debug` (it owns a quic endpoint), so `expect_err` is unavailable.
     fn refusal(r: Result<(RelayHost, String), String>, what: &str) -> String {
         match r {
             Err(e) => e,
@@ -2436,11 +2413,10 @@ mod managed_tests {
         }
     }
 
-    /// **The negative control, and it is the product.** ADR-0022 promises the
-    /// relay stays open and self-hostable: a relay with no policy must behave
-    /// exactly as it did before managed mode was written — keyless hosts, five
-    /// character codes, nothing to authorize against. If this ever goes red,
-    /// managed mode has leaked into the open relay, and that is a licence
+    /// The negative control, and it is the product: the relay stays open and
+    /// self-hostable. A relay with no policy hosts keyless hosts with five
+    /// character codes and nothing to authorize against. If this ever goes
+    /// red, managed mode has leaked into the open relay, and that is a licence
     /// question rather than a bug.
     #[test]
     fn a_self_hosted_relay_still_hosts_keyless_with_a_five_character_code() {
@@ -2468,7 +2444,7 @@ mod managed_tests {
     /// cannot tell them apart by looking — so the host says which it is, on the
     /// same connection, straight after the host request.
     ///
-    /// Asserted end to end over real QUIC rather than as a call, because this
+    /// Asserted end to end over real quic rather than as a call, because this
     /// is a seam: a marker that is sent and never routed to the policy looks
     /// exactly like one that works, and the number it corrects is only read
     /// somewhere else entirely.
@@ -2626,19 +2602,14 @@ mod managed_tests {
         assert_eq!(relay.lobbies.load(Ordering::Relaxed), 0, "a reclaimed player lobby became immortal");
     }
 
-    /// ⚠ **A host whose connection blips keeps its match**.
+    /// A host whose connection blips keeps its match.
     ///
-    /// Two people played Fofighter over the managed relay and the host's
-    /// lobby was created and destroyed **three times in ten minutes** — twice
-    /// while about a megabit a second was flowing, so not an idle timeout, on a
-    /// box using one tenth of one percent of its link. For the joiner every
-    /// networked thing in the world vanished while the skybox and the HUD, the
-    /// only two things it draws that are not replicated, stayed.
-    ///
-    /// The relay used to destroy the lobby the instant the host's connection
-    /// closed. Now it holds it, and a host that comes back reclaims the same
-    /// lobby **with its players still in it** — so a NAT rebinding a UDP
-    /// mapping costs a stutter instead of everybody's match.
+    /// A relay that destroys the lobby the instant the host's connection
+    /// closes ends a ten-minute match three times on a healthy link, and for
+    /// the joiner every networked thing in the world vanishes while the skybox
+    /// and the HUD stay. Held instead, a host that comes back reclaims the
+    /// same lobby with its players still in it, so a NAT rebinding a UDP
+    /// mapping costs a stutter.
     #[test]
     fn a_host_that_reconnects_inside_the_grace_window_keeps_its_players() {
         let relay = TestRelay::managed_with_grace(

@@ -1,29 +1,23 @@
-//! The session input log (`docs/multiplayer.md` §5) — what makes
-//! match replays and the referee the same feature wearing different hats.
+//! The session input log: match replays and the referee are the same feature.
 //!
 //! A rollback match is a pure function of (scene, match seed, input delay,
-//! roster, every peer's input per applied tick). Nothing else gets in: no wall
-//! clock, no unseeded RNG, no frame-rate dependence — that is the determinism
-//! contract the whole design rests on. So the inputs **are** the replay file,
-//! and playback is not playback at all, it is running the match again.
+//! roster, every peer's input per applied tick). No wall clock, no unseeded
+//! RNG, no frame-rate dependence. So the inputs are the replay file, and
+//! playback is running the match again.
 //!
-//! That single fact buys three things off one log:
-//!
-//! - **Match replays.** Kilobytes for a full match, and the replay is the match
-//!   rather than a recording of it — you can step it, watch it from another
-//!   camera, or diff two runs of it.
-//! - **The referee.** The host runs the same simulation at the confirmed
-//!   frontier only, never guessing and never rolling back, and holds the
-//!   authoritative result. A client reporting a different checksum is either
-//!   desynced or lying, and from the referee's side those look the same, which
-//!   is exactly what you want from anti-cheat.
-//! - **Spectators and late joiners** (future): the log plus a keyframe.
+//! - Match replays: kilobytes for a full match, and the replay is the match
+//!   rather than a recording of it. Step it, watch it from another camera,
+//!   diff two runs of it.
+//! - The referee: the host runs the same simulation at the confirmed frontier
+//!   only, never guessing and never rolling back, and holds the authoritative
+//!   result. A client reporting a different checksum is either desynced or
+//!   lying, and from the referee's side those look the same.
+//! - Spectators and late joiners, in a later release: the log plus a keyframe.
 //!
 //! The log is only meaningful to a build that agrees about all of it, so it
 //! records `proto` and the input-map hash and refuses to load into anything
-//! else. Actions are indexed positionally on the wire; a log replayed against a
-//! differently-ordered `input.ron` would not fail, it would silently play a
-//! different match.
+//! else. Actions are indexed positionally on the wire; a log replayed against
+//! a differently-ordered `input.ron` would silently play a different match.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +48,7 @@ pub struct InputLog {
     /// re-derived.
     pub peers: Vec<PeerId>,
     /// The recording build's `input.ron` hash. Actions ride the wire by
-    /// POSITION, so a log played against a differently-ordered map plays a
+    /// Position, so a log played against a differently-ordered map plays a
     /// different match without erroring anywhere.
     pub input_map_hash: u64,
     /// Sorted by `(tick, peer)` — arrival order is a property of the network,
@@ -218,7 +212,7 @@ mod tests {
         assert_eq!(back, l);
     }
 
-    /// Both refusals exist because the failure they prevent is SILENT: the
+    /// Both refusals exist because the failure they prevent is silent: the
     /// replay would run, and play a different match.
     #[test]
     fn a_log_from_another_build_or_another_input_map_is_refused() {

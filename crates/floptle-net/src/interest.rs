@@ -1,36 +1,29 @@
-//! Interest management (`docs/multiplayer.md` §5.2) — the player-count
-//! feature.
+//! Interest management: the player-count feature.
 //!
 //! Replicating everything to everyone is right up to a few dozen players and
-//! then melts: cost per client grows with the *world's* population, so the
-//! ceiling is set by the busiest moment rather than by what any one player can
-//! see. This makes each client pay for its neighbourhood instead. A far-away
-//! idle crate syncs eventually; a nearby fighting player syncs every snapshot.
+//! then melts, because cost per client grows with the world's population.
+//! This makes each client pay for its neighbourhood instead: a far-away idle
+//! crate syncs eventually, a nearby fighting player syncs every snapshot.
 //!
-//! Two mechanisms, and they do different jobs:
+//! Two mechanisms with different jobs:
 //!
-//! - **Relevance** decides what a client is *allowed* to hear about — a radius
+//! - Relevance decides what a client is allowed to hear about: a radius
 //!   around its own avatar, plus whatever is flagged always-relevant, plus
 //!   anything it owns. Hysteresis keeps a node hovering on the boundary from
 //!   flickering in and out.
-//! - **The priority accumulator** decides what it hears about *this snapshot*,
-//!   because relevance alone still overflows a link when a hundred relevant
+//! - The priority accumulator decides what it hears about this snapshot,
+//!   since relevance alone still overflows a link when a hundred relevant
 //!   things all move. Every relevant node accrues priority each snapshot; the
 //!   budget is spent newest-and-nearest-first; whatever misses out keeps its
-//!   priority and wins the next round. **Nothing is dropped, only deferred** —
-//!   which is what makes this safe to turn on without auditing a game for
-//!   things that must never be missed.
+//!   priority and wins the next round. Nothing is dropped, only deferred, so
+//!   turning this on needs no audit of a game for things that must never be
+//!   missed.
 //!
-//! ## What leaving the set means
-//!
-//! The design says an entity leaving a client's set despawns there and respawns
-//! on re-entry. That is right for **runtime spawns** — the server holds their
-//! authoring data (`spawned_docs`) and can recreate them exactly. It is wrong
-//! for **scene-authored** nodes: the client already has them from the scene
-//! file, the server has no ron to send back, and despawning one would remove it
-//! for good. So a scene node that goes irrelevant simply stops being updated
-//! (it is out of sight by construction) and is sent in full the moment it
-//! becomes relevant again. Same bandwidth win, no unrecoverable state.
+//! A runtime spawn that leaves a client's set despawns there and respawns on
+//! re-entry; the server holds its authoring data (`spawned_docs`) and
+//! recreates it exactly. A scene-authored node cannot be recreated that way,
+//! so one that goes irrelevant stops being updated (it is out of sight by
+//! construction) and is sent in full the moment it becomes relevant again.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,7 +48,7 @@ pub struct InterestConfig {
     /// default: it costs a ray per candidate per client, and most games do not
     /// need it.
     pub occlusion: bool,
-    /// Consecutive snapshots a node the client already holds must test BLOCKED
+    /// Consecutive snapshots a node the client already holds must test blocked
     /// before it goes quiet. Coming back is immediate — a player stepping out
     /// from behind a wall has to appear on the frame they step out, while a
     /// body strobing behind a door frame must not flicker.
@@ -205,7 +198,7 @@ impl PeerInterest {
     /// get back whether it should go quiet now.
     ///
     /// Asymmetric on purpose. Losing sight is damped by `grace`, so a body
-    /// strobing behind a door frame or a lamp post keeps streaming; REGAINING
+    /// strobing behind a door frame or a lamp post keeps streaming; regaining
     /// sight is instant, because a player stepping out from cover has to be
     /// there on the frame they step out. Damping that direction too would trade
     /// the flicker for a player who appears three snapshots after they shot you.

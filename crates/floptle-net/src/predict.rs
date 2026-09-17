@@ -1,11 +1,11 @@
-//! Client-side prediction bookkeeping (`docs/multiplayer.md` §6): the
-//! input/predicted-state ring, reconciliation against authoritative
-//! snapshots, and the visual error-smoothing offset.
+//! Client-side prediction bookkeeping: the input and predicted-state ring,
+//! reconciliation against authoritative snapshots, and the visual
+//! error-smoothing offset.
 //!
-//! The [`Predictor`] is pure bookkeeping — it decides *whether* and *what* to
-//! replay; the driver (editor play loop / headless runtime) owns the actual
-//! re-simulation, because that means running the node's `fixedUpdate` + its
-//! physics body, which live outside this crate. The loop is:
+//! The [`Predictor`] decides whether and what to replay; the driver (the
+//! editor play loop or the headless runtime) owns the re-simulation, since
+//! that means running the node's `fixedUpdate` and its physics body, which
+//! live outside this crate. The loop is:
 //!
 //! 1. Each tick: simulate locally, then [`Predictor::record`] (tick, input,
 //!    post-tick state).
@@ -41,7 +41,7 @@ const RING_CAP: usize = 128;
 /// this count as "prediction confirmed" (f32 physics wobble, not divergence).
 pub const DEFAULT_EPSILON: f64 = 1e-3;
 
-/// Corrections larger than this (metres) SNAP instead of smoothing — gliding
+/// Corrections larger than this (metres) snap instead of smoothing — gliding
 /// the character several metres reads worse than one honest cut (and usually
 /// means a teleport/major desync, where smoothing lies about position).
 pub const SNAP_LIMIT: f64 = 3.0;
@@ -90,7 +90,7 @@ impl Predictor {
         }
     }
 
-    /// Overwrite the stored state for a REPLAYED tick (the input is unchanged —
+    /// Overwrite the stored state for a replayed tick (the input is unchanged —
     /// replay re-derives states from the same inputs off the corrected base).
     pub fn rerecord(&mut self, tick: u64, state: PredictedState) {
         if let Some(entry) = self.ring.iter_mut().find(|(t, _, _)| *t == tick) {
