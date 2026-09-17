@@ -1,39 +1,26 @@
-//! **The command line, as data** — ADR-0027.
+//! The command line, as data.
 //!
 //! One table, [`VERBS`], is the source of truth. The parser is generated from
 //! it, `--help` is generated from it, and so is `floptle help --json`, which
 //! publishes the whole surface to a caller that cannot read this file.
 //!
-//! ## Why a table rather than a derive
+//! The table carries what an automated caller needs to know before it runs
+//! anything: whether a verb needs a GPU, whether it writes into the project,
+//! what comes back, and what each exit code means. `clap`'s builder does the
+//! parsing from the same table, so the parser, the help and the metadata
+//! cannot drift.
 //!
-//! `clap`'s derive models *how to parse this*. It has nowhere to put the things
-//! an automated caller most needs to know before it runs anything: does this
-//! verb need a GPU, does it write into my project, what comes back, and what
-//! does each exit code mean. That metadata would have to live somewhere anyway,
-//! and two descriptions of one command line is exactly the failure this replaces
-//! — three hand-rolled parsers that disagreed about unknown arguments, about
-//! `--flag=value`, and about what exits with what.
+//! No verb is implemented here. Every arm calls the function the editor's own
+//! menu item calls — `new_project`, `migrate_project`,
+//! `export::headless_export`, `anim::extract_clips` — so a command line and
+//! its panel cannot disagree.
 //!
-//! So the table carries all of it, `clap`'s **builder** does the parsing, and
-//! neither can drift from the other because only one of them is written down.
-//!
-//! ## What this module does not do
-//!
-//! It does not implement any verb. Every arm calls the function the editor's
-//! own menu item calls — `new_project`, `migrate_project`,
-//! `export::headless_export`, `anim::extract_clips`. That is the rule
-//! `docs/export-builds.md` set for the export path and it generalises: a command
-//! line that reimplements a panel drifts from it, and one that calls the same
-//! function cannot.
-//!
-//! ## The old flags still work
-//!
-//! `--export`, `--new`, `--migrate`, `--version` and the rest are a shipped
-//! interface with callers nobody here controls — the Hub, CI, anybody's scripts.
-//! [`dispatch`] only claims a command line whose first argument is a **verb**;
-//! everything else falls through to the original loop in `main.rs`, untouched.
-//! One consequence worth knowing: a directory named `check` is shadowed by the
-//! verb of that name, and `floptle open check` is the way to say the directory.
+//! The flag form still works: `--export`, `--new`, `--migrate`, `--version` and
+//! the rest are a shipped interface for the Hub, CI and anybody's scripts.
+//! [`dispatch`] claims only a command line whose first argument is a verb;
+//! everything else falls through to the loop in `main.rs`. A directory named
+//! `check` is shadowed by the verb of that name; `floptle open check` names
+//! the directory.
 
 use std::path::{Path, PathBuf};
 
@@ -1741,9 +1728,8 @@ fn help_text(verb: Option<&str>) -> Outcome {
     };
     // A nested verb can be asked for either way: `help bake` or `help "bake gi"`.
     let mut parts = name.split_whitespace();
-    // `floptle help " "` is a verb name made only of spaces. It used to exit 2
-    // saying nothing at all, which is the one thing a help command must never
-    // do.
+    // `floptle help " "` is a verb name made only of spaces; a help command
+    // must never exit saying nothing at all.
     let Some(head) = parts.next() else {
         floptle_say::say_err!("`{name}` is not a verb name — try `floptle help`");
         return Outcome::Exit(1);
