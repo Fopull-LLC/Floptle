@@ -4088,697 +4088,9 @@ impl ApplicationHandler for Editor {
                     self.set_cursor_freed(true);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-                // Don't trigger shortcuts/tools (or fly the camera) while typing
-                // into a field. `typing` is read live each event.
-                //
-                // **A text field, not any focused widget.** This was
-                // `egui_wants_keyboard_input()`, which is literally
-                // `memory.focused().is_some()` — and in egui every clickable
-                // widget takes focus when you click it. So one click on a
-                // toolbar button, a checkbox, a slider or a combo left `typing`
-                // stuck true, and from that moment Ctrl+C / Ctrl+V / Ctrl+D /
-                // Delete / F silently did nothing until you happened to click
-                // some non-interactive background that surrendered focus. That
-                // is the "copy between scenes just stops working" report, and it
-                // is why it looked random: the trigger was the last thing you
-                // clicked, not anything about the copy.
-                //
-                // `text_edit_focused()` is egui's own answer to "is the user
-                // typing" — it loads the focused id's `TextEditState` and is
-                // true for exactly the widgets that want the letters.
-                let typing = self.egui.as_ref().is_some_and(|e| e.ctx.text_edit_focused());
-                // The Game view plays like a build: no editor free-fly camera, no editor
-                // shortcuts — only raw key state is tracked (below) for the game's scripts.
-                let game_view = self.game_view();
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    // Held movement keys. The bit is `pressed && !typing && !ctrl`:
-                    // a release (pressed == false) always clears it, so a key can
-                    // never stick on if the release lands while a field is focused
-                    // (e.g. hold W, click into the IDE, release W). C moves down.
-                    // Fly-camera keys arm while the pointer is over the Scene
-                    // viewport or while RMB mouse-look is active — wasd in the
-                    // Animating tab (or any other panel) must not drive the editor
-                    // camera. The `looking` clause is load-bearing: entering look
-                    // grabs+hides the cursor and nulls `self.cursor`, so
-                    // `cursor_over_scene()` can no longer see it. Without it the
-                    // classic hold-RMB + wasd fly combo is impossible and the two
-                    // inputs silently cancel each other (the "camera freezes" bug).
-                    let mv =
-                        pressed && !typing && !game_view && (self.input.looking || self.cursor_over_scene());
-                    match code {
-                        KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
-                        KeyCode::KeyS => self.input.back = mv && !self.ctrl,
-                        KeyCode::KeyA => self.input.left = mv && !self.ctrl,
-                        KeyCode::KeyD => self.input.right = mv && !self.ctrl,
-                        KeyCode::Space => self.input.up = mv,
-                        KeyCode::KeyC => self.input.down = mv && !self.ctrl,
-                        _ => {}
-                    }
-                    // Track raw key state for the script `input` API (works in play
-                    // mode regardless of which panel has focus). Edges land in both
-                    // the per-frame sets (for `update`) and the per-tick accumulators
-                    // (for `fixedUpdate` — consumed tick by tick, never lost).
-                    if let Some(name) = key_name(code) {
-                        if pressed {
-                            if self.input_keys.insert(name.to_string()) {
-                                self.input_keys_pressed.insert(name.to_string());
-                                self.tick_keys_pressed.insert(name.to_string());
-                            }
-                        } else if self.input_keys.remove(name) {
-                            self.input_keys_released.insert(name.to_string());
-                            self.tick_keys_released.insert(name.to_string());
-                        }
-                    }
-                    // What the player typed, as opposed to which key they hit.
-                    // Layout-resolved by the OS, so an azerty `a` is an `a`.
-                    // Only while the game owns the keyboard: typing into the
-                    // Inspector must not also type into a menu behind it.
-                    if pressed && !typing && self.playing && !self.ctrl {
-                        if let Some(text) = event.text.as_ref() {
-                            // Control characters stay actions: Enter submits,
-                            // Backspace deletes, Tab moves — none of them is a
-                            // glyph, and a game that received one as text would
-                            // print a box.
-                            let typed: String = text.chars().filter(|c| !c.is_control()).collect();
-                            self.input_typed.push_str(&typed);
-                            self.tick_typed.push_str(&typed);
-                        }
-                        self.note_ui_text_key(code);
-                    }
-                    // The clipboard chords, which are the same keys with Ctrl
-                    // held and so are excluded above.
-                    if pressed && !typing && self.playing && self.ctrl {
-                        match code {
-                            KeyCode::KeyV => {
-                                self.ensure_os_clipboard();
-                                if let Some(t) = self.os_clipboard.as_mut().and_then(|c| c.get()) {
-                                    // A paste is typing that happens to be
-                                    // fast, so it arrives the same way — a game
-                                    // never special-cases Ctrl-V.
-                                    let t: String = t.chars().filter(|c| !c.is_control()).collect();
-                                    self.input_typed.push_str(&t);
-                                    self.tick_typed.push_str(&t);
-                                }
-                            }
-                            KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX
-                            | KeyCode::ArrowLeft | KeyCode::ArrowRight
-                            | KeyCode::Backspace => self.note_ui_text_key(code),
-                            _ => {}
-                        }
-                    }
-                    // …and the same event into the action layer. Both views of
-                    // the keyboard are filled here so they can never disagree
-                    // within a frame.
-                    self.note_action_key(code, pressed);
-                    // A Map keybind being re-recorded swallows the next key.
-                    if pressed && !typing && self.map_rebind.is_some() {
-                        self.capture_map_rebind(code);
-                        return;
-                    }
-                    // ▦ Model tool keybinds. They run before the editor's own
-                    // shortcuts but only inside the map context (tool active,
-                    // not typing, no Ctrl), and map_keys.rs refuses to bind
-                    // anything the editor answers in that same context — so
-                    // this can shadow nothing. A command that declines (delete
-                    // with no faces selected) falls through untouched.
-                    if pressed
-                        && !typing
-                        && !game_view
-                        && !self.ctrl
-                        && self.tool == Tool::MapEdit
-                        && !self.playing
-                        // A focused timeline (Animating / Graph / Particles /
-                        // Shaders) owns its own keys — the map stays out of it,
-                        // exactly as the editor's other shortcuts do.
-                        && !matches!(
-                            self.focused_tab,
-                            Some(
-                                EditorTab::Animation
-                                    | EditorTab::AnimGraph
-                                    | EditorTab::Particles
-                                    | EditorTab::ShaderGraph
-                                    | EditorTab::Image
-                            )
-                        )
-                        && let Some(cmd) = self.map_keys.command(code, self.shift)
-                        && self.run_map_command(cmd)
-                    {
-                        return;
-                    }
-                    // Discrete commands fire on press only.
-                    if pressed && !typing {
-                        // Engine controls work in any view (Play/Pause/Quit).
-                        match code {
-                            KeyCode::Escape => {
-                                // Escape is a "cancel" gesture first: free a trapped Game
-                                // cursor, back out of an in-progress transition drag or the
-                                // graph window, and never silently discard unsaved work.
-                                // A build (player mode) only ever frees the cursor — games
-                                // don't quit on Escape.
-                                if matches!(self.focused_tab, Some(EditorTab::Image))
-                                    && self.image.cancel_pen()
-                                {
-                                    // Backed out of an in-progress vector path.
-                                } else if self.map_knife_cancel()
-                                    || self.map_draw_cancel()
-                                    || self.map_arm.take().is_some()
-                                {
-                                    // Back out of a pending cut / a draw gesture,
-                                    // then disarm the knife or the shape, before
-                                    // anything else claims Escape.
-                                } else if self.game_trap || self.game_holds_cursor() {
-                                    // Free both lock owners — a script that holds the
-                                    // mouse (setMouseLocked) must not survive Escape,
-                                    // or the cursor stays gone with no way back.
-                                    //
-                                    // And it has to stay free. Clearing the script's
-                                    // flag was not enough: a first-person camera calls
-                                    // setMouseLocked(true) every frame from `update`,
-                                    // so the grab came back on the very next one and
-                                    // Escape looked like it did nothing at all. The
-                                    // editor now holds the pointer until you click
-                                    // back into the Game view.
-                                    self.set_cursor_freed(true);
-                                } else if self.player_mode {
-                                    // nothing else to cancel in a build
-                                } else if self.anim_ui.drag_from.is_some() {
-                                    self.anim_ui.drag_from = None;
-                                }
-                                // …and when there is nothing to cancel, Escape does
-                                // nothing. It used to quit the editor, which is a
-                                // catastrophic default for a key every tool binds to
-                                // "back out of this": one stray press while a map mode
-                                // was already disarmed closed the app. Quitting lives
-                                // where quitting belongs — the window's close button,
-                                // File ⏵ Exit, Ctrl+Q.
-                                
-                            }
-                            // Ctrl+Q — the deliberate quit, now that Escape isn't
-                            // one. Two keys together can't be pressed by accident
-                            // the way a lone Escape can, and it still routes through
-                            // the unsaved-changes confirm. Editor only: a build has
-                            // no editor to leave (its window close / Alt+F4 quit it).
-                            KeyCode::KeyQ if self.ctrl && !self.player_mode => {
-                                if self.unsaved_work() {
-                                    self.show_quit_confirm = true;
-                                } else {
-                                    event_loop.exit();
-                                }
-                            }
-                            // In a build, Play is the program — F1 opens the
-                            // multiplayer menu instead, and pause is editor-only.
-                            KeyCode::F1 if self.player_mode => {
-                                self.show_net_panel = !self.show_net_panel;
-                            }
-                            // F11, and Alt+Enter: the two spellings of
-                            // "fullscreen" a player will try without reading
-                            // anything. A build answers both itself, so a game
-                            // has it even when its menu forgot.
-                            KeyCode::F11 if self.player_mode => {
-                                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
-                                self.app_set_fullscreen(!on);
-                            }
-                            KeyCode::Enter if self.player_mode && self.alt => {
-                                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
-                                self.app_set_fullscreen(!on);
-                            }
-                            KeyCode::F1 => self.toggle_play(),
-                            KeyCode::F2 if self.player_mode => {}
-                            KeyCode::F2 => self.toggle_pause(),
-                            KeyCode::F3 if self.shift => self.step_tick_back(),
-                            KeyCode::F3 => self.step_tick(1),
-                            // Everything else is an editor shortcut — suppressed in the
-                            // Game view so it behaves like a real build.
-                            _ if !game_view => {
-                                // A focused timeline tab (Animating/Graph/Particles) owns
-                                // Delete, the arrows, F, Space, Home/End for its own
-                                // keyframes/events — so suppress the scene versions here,
-                                // letting the panel's own egui handlers run. App-wide
-                                // controls (undo/redo/save) still fire everywhere.
-                                // …or, for the dopesheet, the pointer is simply
-                                // over it. Dock focus is not set by every click
-                                // that plainly means "I am working in here"
-                                // (egui_dock skips it when another layer is over
-                                // the point), and the panel's own handler reads
-                                // the same two flags — so exactly one of the two
-                                // acts on the chord, never both and never neither.
-                                let in_timeline = matches!(
-                                    self.focused_tab,
-                                    Some(
-                                        EditorTab::Animation
-                                            | EditorTab::AnimGraph
-                                            | EditorTab::Particles
-                                            | EditorTab::ShaderGraph
-                                            | EditorTab::Image
-                                    )
-                                ) || self.anim_ui.sheet_hovered;
-                                // The 🖼 Image canvas keeps its own undo stack —
-                                // a scene snapshot per brush stroke would be
-                                // absurd, and image edits aren't scene edits
-                                // (image-editor proposal §11.4).
-                                let in_image =
-                                    matches!(self.focused_tab, Some(EditorTab::Image));
-                                // The ◈ Shaders canvas has its own undo stack
-                                // (printed sources) — scene undo stays out.
-                                let in_graph =
-                                    matches!(self.focused_tab, Some(EditorTab::ShaderGraph));
-                                // Posing a model object/bone happens through the scene
-                                // viewport (so focus isn't the Animating tab), but the
-                                // Context is the animator: route undo/redo to the open clip
-                                // and keep scene-destructive keys (Delete, copy/paste/dup)
-                                // out — else Ctrl+Z respawns the World (breaking the rig you
-                                // selected) and Delete removes the node you're animating.
-                                let posing_bone = self.bone_selection.is_some();
-                                if self.ctrl {
-                                    match code {
-                                        KeyCode::KeyZ if posing_bone => {
-                                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, false) {
-                                                self.anim_ui.clip_dirty = true;
-                                            }
-                                        }
-                                        KeyCode::KeyY if posing_bone => {
-                                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, true) {
-                                                self.anim_ui.clip_dirty = true;
-                                            }
-                                        }
-                                        // The Animating panel owns its clip history.  Do not
-                                        // let these raw window events fall through to scene
-                                        // history: egui receives the same key event and applies
-                                        // the clip undo below during its frame.  Routing it here
-                                        // used to restore a scene snapshot while editing keys.
-                                        KeyCode::KeyZ
-                                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
-                                        KeyCode::KeyY
-                                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
-                                        KeyCode::KeyZ if in_image => self.image.undo(),
-                                        KeyCode::KeyY if in_image => self.image.redo(),
-                                        // Ctrl+A and Ctrl+D both mean "stop
-                                        // clipping me": with no selection the
-                                        // whole canvas is editable.
-                                        KeyCode::KeyA | KeyCode::KeyD if in_image => {
-                                            self.image.deselect()
-                                        }
-                                        // …and a copy goes out to the OS
-                                        // clipboard too, so the 🖼 tab is a
-                                        // participant in the system clipboard
-                                        // rather than an island.
-                                        KeyCode::KeyC if in_image => {
-                                            self.image.copy_selection(false);
-                                            self.image_clip_to_os();
-                                        }
-                                        KeyCode::KeyX if in_image => {
-                                            self.image.copy_selection(true);
-                                            self.image_clip_to_os();
-                                        }
-                                        // Whatever is on the OS clipboard first
-                                        // — a browser image, a screenshot —
-                                        // then the tab's own copy buffer.
-                                        KeyCode::KeyV if in_image => {
-                                            self.image_paste();
-                                        }
-                                        KeyCode::KeyT if in_image => {
-                                            self.image.tool = crate::image_edit::ImgTool::Transform;
-                                            self.image.begin_transform();
-                                        }
-                                        // Duplicate the selection in place, the
-                                        // universal binding for it, and one that
-                                        // does not go through the clipboard.
-                                        KeyCode::KeyJ if in_image => {
-                                            self.image.duplicate_selection();
-                                        }
-                                        KeyCode::KeyZ if !in_graph => self.undo(),
-                                        KeyCode::KeyY if !in_graph => self.redo(),
-                                        KeyCode::KeyS => self.save_all(),
-                                        // Scene-mutating — not while a timeline has focus or
-                                        // while posing a bone in the viewport.
-                                        KeyCode::KeyC if !in_timeline && !posing_bone => self.copy_selected(),
-                                        KeyCode::KeyV if !in_timeline && !posing_bone => self.paste(),
-                                        KeyCode::KeyD if !in_timeline && !posing_bone => self.duplicate_selected(),
-                                        // ▦ Model tool: Ctrl+A selects every
-                                        // vertex/edge/face of the mesh you are
-                                        // editing, not every node in the scene.
-                                        //
-                                        // The map's own bind list cannot express
-                                        // this: Ctrl chords are reserved for the
-                                        // application by design, and plain A is
-                                        // the fly camera. So "select all" ended up
-                                        // on U, which is the one key nobody
-                                        // guesses — the tool had the feature and
-                                        // no way to reach it. U still works.
-                                        KeyCode::KeyA
-                                            if !in_timeline
-                                                && !posing_bone
-                                                && self.tool == Tool::MapEdit
-                                                && self.run_map_command(
-                                                    crate::map_keys::MapCmd::SelectAll,
-                                                ) => {}
-                                        KeyCode::KeyA if !in_timeline && !posing_bone => self.select_all(),
-                                        _ => {}
-                                    }
-                                } else if in_image {
-                                    crate::image_edit::image_key(&mut self.image, code, self.shift);
-                                } else if !in_timeline {
-                                    // ◫ Tiles letter shortcuts claim their key while the
-                                    // tile tool is held, and fall through otherwise. Two
-                                    // of them (F, G) are the editor's frame-selection and
-                                    // grid toggle everywhere else — claiming beats doing
-                                    // both, which is what running after the match would
-                                    // do. The Tiles tab has its own Grid checkbox, and
-                                    // switching tools hands F back.
-                                    let claimed = self.tool == Tool::Tiles
-                                        && !self.playing
-                                        && letter_of(code)
-                                            .and_then(|c| {
-                                                crate::tile_edit::TileTool::ALL
-                                                    .into_iter()
-                                                    .find(|t| t.key() == c)
-                                            })
-                                            .map(|t| self.tile_tools.tool = t)
-                                            .is_some();
-                                    if claimed {
-                                        return;
-                                    }
-                                    match code {
-                                        // Never delete a scene node while an object/bone is
-                                        // selected for animation (there's no scene selection
-                                        // to delete anyway — this just prevents accidents).
-                                        KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
-                                        // (the ▦ Model tool's delete-faces bind runs
-                                        // before this and only claims the key while
-                                        // faces are selected — see the dispatch above)
-                                        KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
-                                        KeyCode::KeyF => self.focus_selected(),
-                                        KeyCode::KeyQ => self.selection.clear(), // unselect
-                                        KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
-                                        // Gizmos master toggle — H, beside G like the grid.
-                                        KeyCode::KeyH => self.show_gizmos = !self.show_gizmos,
-                                        KeyCode::ArrowUp => self.step_selection(-1),
-                                        KeyCode::ArrowDown => self.step_selection(1),
-                                        KeyCode::Enter | KeyCode::NumpadEnter => {
-                                            self.toggle_folder_selected()
-                                        }
-                                        _ => {
-                                            if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
-                                                self.set_tool(t);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+            WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event_loop, event),
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                // Gated geometrically: `cursor_over_scene()` is true only over the bare
-                // viewport, so a press on a panel/toolbar falls through to egui untouched.
-                let pressed = state == ElementState::Pressed;
-                self.track_mouse_button(0, pressed);
-                if pressed {
-                    // Clicking into the Game view while playing traps the cursor there
-                    // (Escape or Stop releases it) so playing doesn't let the mouse
-                    // wander onto editor panels. `cursor_over_game()` gates it to the
-                    // Game rect, so a click on any panel never grabs. A cursor-driven
-                    // game must keep its cursor: while any interactive game-UI is on
-                    // screen (a main menu's slot buttons, the ship's SAS cluster) the
-                    // pointer is the gameplay — trapping it froze the menu dead.
-                    // Scripts still grab for free-look via input.setMouseLocked.
-                    let ui_interactive = self.ui_hover.is_some() || self.ui_pointer_wanted;
-                    if self.playing && self.cursor_over_game() {
-                        // Clicking back into the Game view is how you hand the
-                        // pointer over after Escape took it — the same gesture
-                        // that focuses a game in any other window, and the
-                        // counterpart to Escape being what takes it away.
-                        //
-                        if self.click_hands_pointer_back(ui_interactive) {
-                            self.set_cursor_freed(false);
-                        }
-                        if !self.game_trap && !self.cursor_freed && !ui_interactive {
-                            self.game_trap = true;
-                            if let Some(window) = self.window.as_ref() {
-                                self.cursor_lock_soft = grab_cursor(window, true);
-                            }
-                            self.cursor = None;
-                        }
-                    }
-                    // Clicking anywhere outside a text field ends text editing —
-                    // a click into the viewport (which egui never sees) included.
-                    if let Some(eg) = self.egui.as_ref()
-                        && !eg.ctx.is_pointer_over_egui()
-                            && let Some(f) = eg.ctx.memory(|m| m.focused()) {
-                                eg.ctx.memory_mut(|m| m.surrender_focus(f));
-                            }
-                    // In the Game view a left click is a game input only — never an editor
-                    // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
-                    // over the scene for editor purposes.
-                    let over_scene = self.cursor_over_scene() && !self.game_view();
-                    let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-                    if over_scene && self.tool == Tool::Paint && !self.playing {
-                        // Paint tool takes the whole click — no pick, no gizmo grab.
-                        // The dab lands next frame in vertex_paint_frame_update, once
-                        // the cursor ray has told us which node is under it.
-                        self.context_menu = None;
-                        self.painting = true;
-                        self.last_dab_pos = None; // first dab fires immediately
-                        self.last_dab_time = None;
-                        self.paint_stroke_snapshot = None;
-                        self.paint_stroke_dabbed = false;
-                    } else if over_scene && self.tool == Tool::Tiles && !self.playing {
-                        // The tile tools take the whole click: painting a square is
-                        // not a pick, and a stray pick mid-stroke would swap the
-                        // layer out from under the brush.
-                        self.context_menu = None;
-                        if let Some(cursor) = self.cursor {
-                            self.tile_press(cursor);
-                        }
-                    } else if over_scene && self.tool == Tool::Sculpt {
-                        // Sculpt tool: start a brush stroke on the terrain (applied
-                        // next frame in terrain_frame_update).
-                        self.context_menu = None;
-                        if !self.terrains.is_empty() {
-                            self.sculpting = true;
-                            self.last_dab_pos = None; // first dab fires immediately
-                            self.last_dab_time = None;
-                            // The pre-stroke field is captured on the first dab (once
-                            // we know which terrain is under the cursor).
-                            self.stroke_snapshot = None;
-                            self.stroke_dabbed = false;
-                        }
-                    } else if over_scene {
-                        // Clicking the viewport dismisses an open context menu (but
-                        // clicking a panel/menu, which isn't over_scene, keeps it).
-                        self.context_menu = None;
-                        if self.ui_overlay_hot {
-                            // On a UI-overlay interact (element rect / Rect handle):
-                            // egui owns this press — selecting or dragging happens
-                            // there. Picking here would miss (elements are 2D) and
-                            // clear the selection, killing the handle mid-grab.
-                        } else if self.tool == Tool::MapEdit && self.playing {
-                            // Play owns the viewport; map editing resumes on Stop.
-                        } else if self.tool == Tool::MapEdit && self.map_draw.is_some() {
-                            // Second click of a draw gesture: commit the height.
-                            self.map_draw_commit();
-                        } else if self.tool == Tool::MapEdit && self.map_arm.is_some() {
-                            // A shape is armed: this press starts laying out its base.
-                            self.context_menu = None;
-                            if let Some(cursor) = self.cursor {
-                                self.map_draw_begin(cursor);
-                            }
-                        } else if self.tool == Tool::MapEdit
-                            && self.map_knife_on
-                            && self.map_target().is_some()
-                        {
-                            // ✂ armed: the click is a cut, not a selection. With
-                            // no map node targeted yet it is not — the knife has
-                            // nothing to cut, and swallowing the click would
-                            // leave no way to pick the node you meant to cut.
-                            self.context_menu = None;
-                            if let Some(cursor) = self.cursor {
-                                self.map_knife_click(cursor);
-                            }
-                        } else if self.tool == Tool::MapEdit {
-                            // Map tool: a gizmo grab drags the sub-object selection;
-                            // otherwise the press only anchors, and the release decides
-                            // whether the gesture was a click (pick what's under it) or
-                            // a drag (box-select). Selecting on press is what used to
-                            // confine box-select to empty space — and a blockout that
-                            // fills the screen has none, which is what made picking a
-                            // row of faces a click-at-a-time job.
-                            if let (Some(h), Some(e), Some(start_xf)) =
-                                (hovered, self.primary(), self.map_gizmo_xf())
-                            {
-                                if self.map_begin_drag() {
-                                    self.drag_group.clear();
-                                    self.grabbed = Some(h);
-                                    self.drag = Some(DragState {
-                                        handle: h,
-                                        entity: e,
-                                        bone: None,
-                                        start_xf,
-                                        cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
-                                    });
-                                }
-                            } else if let Some(cursor) = self.cursor {
-                                self.map_box = Some(cursor);
-                            }
-                        } else if let (Some(h), Some(e)) = (hovered, self.primary()) {
-                            // On a gizmo handle ⏵ start an undoable edit and grab it.
-                            // start_xf is the world transform; gizmo math runs in world
-                            // space and is converted back to local on write (parenting).
-                            if self.world.get::<Transform>(e).is_some() {
-                                let start_xf = floptle_core::world_transform(&self.world, e);
-                                self.begin_edit();
-                                self.grabbed = Some(h);
-                                self.drag = Some(DragState {
-                                    handle: h,
-                                    entity: e,
-                                    bone: None,
-                                    start_xf,
-                                    cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
-                                });
-                                // Multi-select: snapshot every other selected node so the
-                                // drag moves them all. Nodes whose ancestor is also in the
-                                // selection are skipped (the parent's move carries them).
-                                self.drag_group = self
-                                    .selection
-                                    .iter()
-                                    .copied()
-                                    .filter(|&o| {
-                                        o != e
-                                            && self.world.get::<Transform>(o).is_some()
-                                            && !self.selection.iter().any(|&a| {
-                                                a != o && self.is_descendant(o, a)
-                                            })
-                                    })
-                                    .map(|o| (o, floptle_core::world_transform(&self.world, o)))
-                                    .collect();
-                            }
-                        } else if let (Some(h), Some((mesh, idx, start_xf))) =
-                            (hovered, self.bone_gizmo_target())
-                        {
-                            // On a gizmo handle while an armature bone is selected: grab
-                            // it to pose the bone. No begin_edit — the clip has its own
-                            // coalesced save (clip_dirty), bones aren't scene undo.
-                            self.drag_group.clear(); // bones never group-drag
-                            self.grabbed = Some(h);
-                            self.drag = Some(DragState {
-                                handle: h,
-                                entity: mesh,
-                                bone: Some(idx),
-                                start_xf,
-                                cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
-                            });
-                        } else if let Some(cursor) = self.cursor {
-                            // A drawn joint wins over the body behind it: the
-                            // rig is only on screen for a mesh you already
-                            // selected, and it is drawn over the model, so a
-                            // click that lands on a joint meant the joint.
-                            // …and when it missed every joint dot, the bone body
-                            // is still a target. A rig is mostly bone and very
-                            // little joint, so requiring the dot made posing a
-                            // game of darts.
-                            if let Some((mesh, idx)) =
-                                crate::viz::pick_joint(&self.rig_gizmos, cursor)
-                                    .or_else(|| crate::viz::pick_bone(&self.rig_gizmos, cursor))
-                                    .filter(|&(mesh, idx)| self.select_bone(mesh, idx))
-                            {
-                                // Taken — `select_bone` has already done the
-                                // swap (or kept the locked model selected and
-                                // just moved the bone). Nothing left to do but
-                                // stop the node pick below from also running.
-                                let _ = (mesh, idx);
-                            } else if self.selection_locked {
-                                // A held selection still refuses everything
-                                // else a viewport click could mean.
-                            } else {
-                                // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
-                                // (Ctrl matches the Hierarchy's toggle-select).
-                                match self.pick(cursor) {
-                                    Some(e) if self.shift || self.ctrl => self.select_toggle(e),
-                                    Some(e) => self.select_single(e),
-                                    None if !self.shift && !self.ctrl => {
-                                        self.clear_selection();
-                                        // Empty space clears the bone too, or a
-                                        // rig with nothing selected stays lit.
-                                        self.bone_selection = None;
-                                    }
-                                    None => {}
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    self.grabbed = None;
-                    self.drag = None;
-                    self.drag_group.clear();
-                    // End of a tile gesture: a rubber-band tool commits here (the
-                    // rectangle is not known until the release), and a stroke's
-                    // writes were already coalesced into one `begin_edit` step.
-                    // Before `self.editing = false`, because committing needs the
-                    // step still open.
-                    self.tile_release(self.cursor);
-                    self.editing = false;
-                    self.sculpting = false;
-                    // End of a paint stroke: bank the whole stroke as one undo step.
-                    if self.painting {
-                        self.painting = false;
-                        self.end_paint_stroke();
-                    }
-                    // End of a sculpt stroke: bank one undo step if it changed anything,
-                    // and re-derive the shadow proxy if the stroke outgrew its box.
-                    if let Some((id, snap)) = self.stroke_snapshot.take()
-                        && self.stroke_dabbed {
-                            self.push_history(Snapshot::Terrain(id, snap));
-                            self.end_sculpt_stroke();
-                        }
-                    // End of a Map-tool gesture: a sub-object drag banks its
-                    // pre-drag mesh as one step (only if it actually moved);
-                    // a box-select applies its rect to the selection.
-                    if self.map_drag.take().is_some()
-                        && let Some((id, pre)) = self.map_stroke.take()
-                        && self.maps.meshes.get(&id) != Some(&pre)
-                    {
-                        self.push_map_history(id, pre);
-                    }
-                    self.map_stroke = None;
-                    if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)
-                        && self.tool == Tool::MapEdit
-                    {
-                        // One place reads the modifiers, but a box and a click do
-                        // not mean the same thing by them: Ctrl+click takes the
-                        // shortest path (as it does in Blender), while Ctrl+box
-                        // keeps subtracting, which is what a box is for.
-                        let drag = (cursor - anchor).length() > map_edit::MAP_DRAG_PX;
-                        let how = if drag {
-                            map_edit::SelectMode::of_drag(self.shift, self.ctrl)
-                        } else {
-                            map_edit::SelectMode::of(self.shift, self.ctrl)
-                        };
-                        if drag {
-                            self.map_box_apply(anchor, cursor, how);
-                        } else if !self.map_click(cursor, how) {
-                            // A click that hit no sub-object: re-pick the node, so
-                            // clicking another map mesh starts editing it and
-                            // clicking empty space steps out. Without this the map
-                            // tool was a one-way street into the first node you
-                            // selected.
-                            match self.pick(cursor) {
-                                Some(e) if how.keeps_existing() => self.select_toggle(e),
-                                Some(e) => self.select_single(e),
-                                None if !how.keeps_existing() => self.clear_selection(),
-                                None => {}
-                            }
-                        }
-                    }
-                    // A drawn footprint finishes on release (flat shapes commit,
-                    // solids move on to their height).
-                    if self.tool == Tool::MapEdit && self.map_draw.is_some() {
-                        self.map_draw_release();
-                    }
-                }
+                self.left_mouse_input(state == ElementState::Pressed);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -4941,6 +4253,714 @@ impl ApplicationHandler for Editor {
         }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+        }
+    }
+}
+
+/// The window events too big to read inline in `window_event`.
+#[cfg(feature = "editor-ui")]
+impl Editor {
+    /// A key went down or up: fly-camera keys, raw key state for scripts,
+    /// typed text for the game, map keybind recording, and the commands.
+    fn keyboard_input(&mut self, event_loop: &ActiveEventLoop, event: winit::event::KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+        // Don't trigger shortcuts/tools (or fly the camera) while typing
+        // into a field. `typing` is read live each event.
+        //
+        // **A text field, not any focused widget.** This was
+        // `egui_wants_keyboard_input()`, which is literally
+        // `memory.focused().is_some()` — and in egui every clickable
+        // widget takes focus when you click it. So one click on a
+        // toolbar button, a checkbox, a slider or a combo left `typing`
+        // stuck true, and from that moment Ctrl+C / Ctrl+V / Ctrl+D /
+        // Delete / F silently did nothing until you happened to click
+        // some non-interactive background that surrendered focus. That
+        // is the "copy between scenes just stops working" report, and it
+        // is why it looked random: the trigger was the last thing you
+        // clicked, not anything about the copy.
+        //
+        // `text_edit_focused()` is egui's own answer to "is the user
+        // typing" — it loads the focused id's `TextEditState` and is
+        // true for exactly the widgets that want the letters.
+        let typing = self.egui.as_ref().is_some_and(|e| e.ctx.text_edit_focused());
+        // The Game view plays like a build: no editor free-fly camera, no editor
+        // shortcuts — only raw key state is tracked (below) for the game's scripts.
+        let game_view = self.game_view();
+        if let PhysicalKey::Code(code) = event.physical_key {
+            // Held movement keys. The bit is `pressed && !typing && !ctrl`:
+            // a release (pressed == false) always clears it, so a key can
+            // never stick on if the release lands while a field is focused
+            // (e.g. hold W, click into the IDE, release W). C moves down.
+            // Fly-camera keys arm while the pointer is over the Scene
+            // viewport or while RMB mouse-look is active — wasd in the
+            // Animating tab (or any other panel) must not drive the editor
+            // camera. The `looking` clause is load-bearing: entering look
+            // grabs+hides the cursor and nulls `self.cursor`, so
+            // `cursor_over_scene()` can no longer see it. Without it the
+            // classic hold-RMB + wasd fly combo is impossible and the two
+            // inputs silently cancel each other (the "camera freezes" bug).
+            let mv =
+                pressed && !typing && !game_view && (self.input.looking || self.cursor_over_scene());
+            match code {
+                KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
+                KeyCode::KeyS => self.input.back = mv && !self.ctrl,
+                KeyCode::KeyA => self.input.left = mv && !self.ctrl,
+                KeyCode::KeyD => self.input.right = mv && !self.ctrl,
+                KeyCode::Space => self.input.up = mv,
+                KeyCode::KeyC => self.input.down = mv && !self.ctrl,
+                _ => {}
+            }
+            // Track raw key state for the script `input` API (works in play
+            // mode regardless of which panel has focus). Edges land in both
+            // the per-frame sets (for `update`) and the per-tick accumulators
+            // (for `fixedUpdate` — consumed tick by tick, never lost).
+            if let Some(name) = key_name(code) {
+                if pressed {
+                    if self.input_keys.insert(name.to_string()) {
+                        self.input_keys_pressed.insert(name.to_string());
+                        self.tick_keys_pressed.insert(name.to_string());
+                    }
+                } else if self.input_keys.remove(name) {
+                    self.input_keys_released.insert(name.to_string());
+                    self.tick_keys_released.insert(name.to_string());
+                }
+            }
+            // What the player typed, as opposed to which key they hit.
+            // Layout-resolved by the OS, so an azerty `a` is an `a`.
+            // Only while the game owns the keyboard: typing into the
+            // Inspector must not also type into a menu behind it.
+            if pressed && !typing && self.playing && !self.ctrl {
+                if let Some(text) = event.text.as_ref() {
+                    // Control characters stay actions: Enter submits,
+                    // Backspace deletes, Tab moves — none of them is a
+                    // glyph, and a game that received one as text would
+                    // print a box.
+                    let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+                    self.input_typed.push_str(&typed);
+                    self.tick_typed.push_str(&typed);
+                }
+                self.note_ui_text_key(code);
+            }
+            // The clipboard chords, which are the same keys with Ctrl
+            // held and so are excluded above.
+            if pressed && !typing && self.playing && self.ctrl {
+                match code {
+                    KeyCode::KeyV => {
+                        self.ensure_os_clipboard();
+                        if let Some(t) = self.os_clipboard.as_mut().and_then(|c| c.get()) {
+                            // A paste is typing that happens to be
+                            // fast, so it arrives the same way — a game
+                            // never special-cases Ctrl-V.
+                            let t: String = t.chars().filter(|c| !c.is_control()).collect();
+                            self.input_typed.push_str(&t);
+                            self.tick_typed.push_str(&t);
+                        }
+                    }
+                    KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX
+                    | KeyCode::ArrowLeft | KeyCode::ArrowRight
+                    | KeyCode::Backspace => self.note_ui_text_key(code),
+                    _ => {}
+                }
+            }
+            // …and the same event into the action layer. Both views of
+            // the keyboard are filled here so they can never disagree
+            // within a frame.
+            self.note_action_key(code, pressed);
+            // A Map keybind being re-recorded swallows the next key.
+            if pressed && !typing && self.map_rebind.is_some() {
+                self.capture_map_rebind(code);
+                return;
+            }
+            // ▦ Model tool keybinds. They run before the editor's own
+            // shortcuts but only inside the map context (tool active,
+            // not typing, no Ctrl), and map_keys.rs refuses to bind
+            // anything the editor answers in that same context — so
+            // this can shadow nothing. A command that declines (delete
+            // with no faces selected) falls through untouched.
+            if pressed
+                && !typing
+                && !game_view
+                && !self.ctrl
+                && self.tool == Tool::MapEdit
+                && !self.playing
+                // A focused timeline (Animating / Graph / Particles /
+                // Shaders) owns its own keys — the map stays out of it,
+                // exactly as the editor's other shortcuts do.
+                && !matches!(
+                    self.focused_tab,
+                    Some(
+                        EditorTab::Animation
+                            | EditorTab::AnimGraph
+                            | EditorTab::Particles
+                            | EditorTab::ShaderGraph
+                            | EditorTab::Image
+                    )
+                )
+                && let Some(cmd) = self.map_keys.command(code, self.shift)
+                && self.run_map_command(cmd)
+            {
+                return;
+            }
+            // Discrete commands fire on press only.
+            if pressed && !typing {
+                self.key_command(event_loop, code, game_view);
+            }
+        }
+    }
+
+    /// A key that fires a command on press — Play, Pause, Quit, the tool
+    /// shortcuts, the clipboard, and the view keys. `game_view` withholds the
+    /// editor-only ones.
+    fn key_command(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, game_view: bool) {
+        // Engine controls work in any view (Play/Pause/Quit).
+        match code {
+            KeyCode::Escape => {
+                // Escape is a "cancel" gesture first: free a trapped Game
+                // cursor, back out of an in-progress transition drag or the
+                // graph window, and never silently discard unsaved work.
+                // A build (player mode) only ever frees the cursor — games
+                // don't quit on Escape.
+                if matches!(self.focused_tab, Some(EditorTab::Image))
+                    && self.image.cancel_pen()
+                {
+                    // Backed out of an in-progress vector path.
+                } else if self.map_knife_cancel()
+                    || self.map_draw_cancel()
+                    || self.map_arm.take().is_some()
+                {
+                    // Back out of a pending cut / a draw gesture,
+                    // then disarm the knife or the shape, before
+                    // anything else claims Escape.
+                } else if self.game_trap || self.game_holds_cursor() {
+                    // Free both lock owners — a script that holds the
+                    // mouse (setMouseLocked) must not survive Escape,
+                    // or the cursor stays gone with no way back.
+                    //
+                    // And it has to stay free. Clearing the script's
+                    // flag was not enough: a first-person camera calls
+                    // setMouseLocked(true) every frame from `update`,
+                    // so the grab came back on the very next one and
+                    // Escape looked like it did nothing at all. The
+                    // editor now holds the pointer until you click
+                    // back into the Game view.
+                    self.set_cursor_freed(true);
+                } else if self.player_mode {
+                    // nothing else to cancel in a build
+                } else if self.anim_ui.drag_from.is_some() {
+                    self.anim_ui.drag_from = None;
+                }
+                // …and when there is nothing to cancel, Escape does
+                // nothing. It used to quit the editor, which is a
+                // catastrophic default for a key every tool binds to
+                // "back out of this": one stray press while a map mode
+                // was already disarmed closed the app. Quitting lives
+                // where quitting belongs — the window's close button,
+                // File ⏵ Exit, Ctrl+Q.
+
+            }
+            // Ctrl+Q — the deliberate quit, now that Escape isn't
+            // one. Two keys together can't be pressed by accident
+            // the way a lone Escape can, and it still routes through
+            // the unsaved-changes confirm. Editor only: a build has
+            // no editor to leave (its window close / Alt+F4 quit it).
+            KeyCode::KeyQ if self.ctrl && !self.player_mode => {
+                if self.unsaved_work() {
+                    self.show_quit_confirm = true;
+                } else {
+                    event_loop.exit();
+                }
+            }
+            // In a build, Play is the program — F1 opens the
+            // multiplayer menu instead, and pause is editor-only.
+            KeyCode::F1 if self.player_mode => {
+                self.show_net_panel = !self.show_net_panel;
+            }
+            // F11, and Alt+Enter: the two spellings of
+            // "fullscreen" a player will try without reading
+            // anything. A build answers both itself, so a game
+            // has it even when its menu forgot.
+            KeyCode::F11 if self.player_mode => {
+                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+                self.app_set_fullscreen(!on);
+            }
+            KeyCode::Enter if self.player_mode && self.alt => {
+                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+                self.app_set_fullscreen(!on);
+            }
+            KeyCode::F1 => self.toggle_play(),
+            KeyCode::F2 if self.player_mode => {}
+            KeyCode::F2 => self.toggle_pause(),
+            KeyCode::F3 if self.shift => self.step_tick_back(),
+            KeyCode::F3 => self.step_tick(1),
+            // Everything else is an editor shortcut — suppressed in the
+            // Game view so it behaves like a real build.
+            _ if !game_view => {
+                // A focused timeline tab (Animating/Graph/Particles) owns
+                // Delete, the arrows, F, Space, Home/End for its own
+                // keyframes/events — so suppress the scene versions here,
+                // letting the panel's own egui handlers run. App-wide
+                // controls (undo/redo/save) still fire everywhere.
+                // …or, for the dopesheet, the pointer is simply
+                // over it. Dock focus is not set by every click
+                // that plainly means "I am working in here"
+                // (egui_dock skips it when another layer is over
+                // the point), and the panel's own handler reads
+                // the same two flags — so exactly one of the two
+                // acts on the chord, never both and never neither.
+                let in_timeline = matches!(
+                    self.focused_tab,
+                    Some(
+                        EditorTab::Animation
+                            | EditorTab::AnimGraph
+                            | EditorTab::Particles
+                            | EditorTab::ShaderGraph
+                            | EditorTab::Image
+                    )
+                ) || self.anim_ui.sheet_hovered;
+                // The 🖼 Image canvas keeps its own undo stack —
+                // a scene snapshot per brush stroke would be
+                // absurd, and image edits aren't scene edits
+                // (image-editor proposal §11.4).
+                let in_image =
+                    matches!(self.focused_tab, Some(EditorTab::Image));
+                // The ◈ Shaders canvas has its own undo stack
+                // (printed sources) — scene undo stays out.
+                let in_graph =
+                    matches!(self.focused_tab, Some(EditorTab::ShaderGraph));
+                // Posing a model object/bone happens through the scene
+                // viewport (so focus isn't the Animating tab), but the
+                // Context is the animator: route undo/redo to the open clip
+                // and keep scene-destructive keys (Delete, copy/paste/dup)
+                // out — else Ctrl+Z respawns the World (breaking the rig you
+                // selected) and Delete removes the node you're animating.
+                let posing_bone = self.bone_selection.is_some();
+                if self.ctrl {
+                    match code {
+                        KeyCode::KeyZ if posing_bone => {
+                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, false) {
+                                self.anim_ui.clip_dirty = true;
+                            }
+                        }
+                        KeyCode::KeyY if posing_bone => {
+                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, true) {
+                                self.anim_ui.clip_dirty = true;
+                            }
+                        }
+                        // The Animating panel owns its clip history.  Do not
+                        // let these raw window events fall through to scene
+                        // history: egui receives the same key event and applies
+                        // the clip undo below during its frame.  Routing it here
+                        // used to restore a scene snapshot while editing keys.
+                        KeyCode::KeyZ
+                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
+                        KeyCode::KeyY
+                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
+                        KeyCode::KeyZ if in_image => self.image.undo(),
+                        KeyCode::KeyY if in_image => self.image.redo(),
+                        // Ctrl+A and Ctrl+D both mean "stop
+                        // clipping me": with no selection the
+                        // whole canvas is editable.
+                        KeyCode::KeyA | KeyCode::KeyD if in_image => {
+                            self.image.deselect()
+                        }
+                        // …and a copy goes out to the OS
+                        // clipboard too, so the 🖼 tab is a
+                        // participant in the system clipboard
+                        // rather than an island.
+                        KeyCode::KeyC if in_image => {
+                            self.image.copy_selection(false);
+                            self.image_clip_to_os();
+                        }
+                        KeyCode::KeyX if in_image => {
+                            self.image.copy_selection(true);
+                            self.image_clip_to_os();
+                        }
+                        // Whatever is on the OS clipboard first
+                        // — a browser image, a screenshot —
+                        // then the tab's own copy buffer.
+                        KeyCode::KeyV if in_image => {
+                            self.image_paste();
+                        }
+                        KeyCode::KeyT if in_image => {
+                            self.image.tool = crate::image_edit::ImgTool::Transform;
+                            self.image.begin_transform();
+                        }
+                        // Duplicate the selection in place, the
+                        // universal binding for it, and one that
+                        // does not go through the clipboard.
+                        KeyCode::KeyJ if in_image => {
+                            self.image.duplicate_selection();
+                        }
+                        KeyCode::KeyZ if !in_graph => self.undo(),
+                        KeyCode::KeyY if !in_graph => self.redo(),
+                        KeyCode::KeyS => self.save_all(),
+                        // Scene-mutating — not while a timeline has focus or
+                        // while posing a bone in the viewport.
+                        KeyCode::KeyC if !in_timeline && !posing_bone => self.copy_selected(),
+                        KeyCode::KeyV if !in_timeline && !posing_bone => self.paste(),
+                        KeyCode::KeyD if !in_timeline && !posing_bone => self.duplicate_selected(),
+                        // ▦ Model tool: Ctrl+A selects every
+                        // vertex/edge/face of the mesh you are
+                        // editing, not every node in the scene.
+                        //
+                        // The map's own bind list cannot express
+                        // this: Ctrl chords are reserved for the
+                        // application by design, and plain A is
+                        // the fly camera. So "select all" ended up
+                        // on U, which is the one key nobody
+                        // guesses — the tool had the feature and
+                        // no way to reach it. U still works.
+                        KeyCode::KeyA
+                            if !in_timeline
+                                && !posing_bone
+                                && self.tool == Tool::MapEdit
+                                && self.run_map_command(
+                                    crate::map_keys::MapCmd::SelectAll,
+                                ) => {}
+                        KeyCode::KeyA if !in_timeline && !posing_bone => self.select_all(),
+                        _ => {}
+                    }
+                } else if in_image {
+                    crate::image_edit::image_key(&mut self.image, code, self.shift);
+                } else if !in_timeline {
+                    // ◫ Tiles letter shortcuts claim their key while the
+                    // tile tool is held, and fall through otherwise. Two
+                    // of them (F, G) are the editor's frame-selection and
+                    // grid toggle everywhere else — claiming beats doing
+                    // both, which is what running after the match would
+                    // do. The Tiles tab has its own Grid checkbox, and
+                    // switching tools hands F back.
+                    let claimed = self.tool == Tool::Tiles
+                        && !self.playing
+                        && letter_of(code)
+                            .and_then(|c| {
+                                crate::tile_edit::TileTool::ALL
+                                    .into_iter()
+                                    .find(|t| t.key() == c)
+                            })
+                            .map(|t| self.tile_tools.tool = t)
+                            .is_some();
+                    if claimed {
+                        return;
+                    }
+                    match code {
+                        // Never delete a scene node while an object/bone is
+                        // selected for animation (there's no scene selection
+                        // to delete anyway — this just prevents accidents).
+                        KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
+                        // (the ▦ Model tool's delete-faces bind runs
+                        // before this and only claims the key while
+                        // faces are selected — see the dispatch above)
+                        KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+                        KeyCode::KeyF => self.focus_selected(),
+                        KeyCode::KeyQ => self.selection.clear(), // unselect
+                        KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
+                        // Gizmos master toggle — H, beside G like the grid.
+                        KeyCode::KeyH => self.show_gizmos = !self.show_gizmos,
+                        KeyCode::ArrowUp => self.step_selection(-1),
+                        KeyCode::ArrowDown => self.step_selection(1),
+                        KeyCode::Enter | KeyCode::NumpadEnter => {
+                            self.toggle_folder_selected()
+                        }
+                        _ => {
+                            if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
+                                self.set_tool(t);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The left button over the viewport: pick, start or end a gizmo drag,
+    /// paint, or drive the map tool. A press on a panel falls through to egui.
+    fn left_mouse_input(&mut self, pressed: bool) {
+        // Gated geometrically: `cursor_over_scene()` is true only over the bare
+        // viewport, so a press on a panel/toolbar falls through to egui untouched.
+        self.track_mouse_button(0, pressed);
+        if pressed {
+            // Clicking into the Game view while playing traps the cursor there
+            // (Escape or Stop releases it) so playing doesn't let the mouse
+            // wander onto editor panels. `cursor_over_game()` gates it to the
+            // Game rect, so a click on any panel never grabs. A cursor-driven
+            // game must keep its cursor: while any interactive game-UI is on
+            // screen (a main menu's slot buttons, the ship's SAS cluster) the
+            // pointer is the gameplay — trapping it froze the menu dead.
+            // Scripts still grab for free-look via input.setMouseLocked.
+            let ui_interactive = self.ui_hover.is_some() || self.ui_pointer_wanted;
+            if self.playing && self.cursor_over_game() {
+                // Clicking back into the Game view is how you hand the
+                // pointer over after Escape took it — the same gesture
+                // that focuses a game in any other window, and the
+                // counterpart to Escape being what takes it away.
+                //
+                if self.click_hands_pointer_back(ui_interactive) {
+                    self.set_cursor_freed(false);
+                }
+                if !self.game_trap && !self.cursor_freed && !ui_interactive {
+                    self.game_trap = true;
+                    if let Some(window) = self.window.as_ref() {
+                        self.cursor_lock_soft = grab_cursor(window, true);
+                    }
+                    self.cursor = None;
+                }
+            }
+            // Clicking anywhere outside a text field ends text editing —
+            // a click into the viewport (which egui never sees) included.
+            if let Some(eg) = self.egui.as_ref()
+                && !eg.ctx.is_pointer_over_egui()
+                    && let Some(f) = eg.ctx.memory(|m| m.focused()) {
+                        eg.ctx.memory_mut(|m| m.surrender_focus(f));
+                    }
+            // In the Game view a left click is a game input only — never an editor
+            // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
+            // over the scene for editor purposes.
+            let over_scene = self.cursor_over_scene() && !self.game_view();
+            let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
+            if over_scene && self.tool == Tool::Paint && !self.playing {
+                // Paint tool takes the whole click — no pick, no gizmo grab.
+                // The dab lands next frame in vertex_paint_frame_update, once
+                // the cursor ray has told us which node is under it.
+                self.context_menu = None;
+                self.painting = true;
+                self.last_dab_pos = None; // first dab fires immediately
+                self.last_dab_time = None;
+                self.paint_stroke_snapshot = None;
+                self.paint_stroke_dabbed = false;
+            } else if over_scene && self.tool == Tool::Tiles && !self.playing {
+                // The tile tools take the whole click: painting a square is
+                // not a pick, and a stray pick mid-stroke would swap the
+                // layer out from under the brush.
+                self.context_menu = None;
+                if let Some(cursor) = self.cursor {
+                    self.tile_press(cursor);
+                }
+            } else if over_scene && self.tool == Tool::Sculpt {
+                // Sculpt tool: start a brush stroke on the terrain (applied
+                // next frame in terrain_frame_update).
+                self.context_menu = None;
+                if !self.terrains.is_empty() {
+                    self.sculpting = true;
+                    self.last_dab_pos = None; // first dab fires immediately
+                    self.last_dab_time = None;
+                    // The pre-stroke field is captured on the first dab (once
+                    // we know which terrain is under the cursor).
+                    self.stroke_snapshot = None;
+                    self.stroke_dabbed = false;
+                }
+            } else if over_scene {
+                // Clicking the viewport dismisses an open context menu (but
+                // clicking a panel/menu, which isn't over_scene, keeps it).
+                self.context_menu = None;
+                if self.ui_overlay_hot {
+                    // On a UI-overlay interact (element rect / Rect handle):
+                    // egui owns this press — selecting or dragging happens
+                    // there. Picking here would miss (elements are 2D) and
+                    // clear the selection, killing the handle mid-grab.
+                } else if self.tool == Tool::MapEdit && self.playing {
+                    // Play owns the viewport; map editing resumes on Stop.
+                } else if self.tool == Tool::MapEdit && self.map_draw.is_some() {
+                    // Second click of a draw gesture: commit the height.
+                    self.map_draw_commit();
+                } else if self.tool == Tool::MapEdit && self.map_arm.is_some() {
+                    // A shape is armed: this press starts laying out its base.
+                    self.context_menu = None;
+                    if let Some(cursor) = self.cursor {
+                        self.map_draw_begin(cursor);
+                    }
+                } else if self.tool == Tool::MapEdit
+                    && self.map_knife_on
+                    && self.map_target().is_some()
+                {
+                    // ✂ armed: the click is a cut, not a selection. With
+                    // no map node targeted yet it is not — the knife has
+                    // nothing to cut, and swallowing the click would
+                    // leave no way to pick the node you meant to cut.
+                    self.context_menu = None;
+                    if let Some(cursor) = self.cursor {
+                        self.map_knife_click(cursor);
+                    }
+                } else if self.tool == Tool::MapEdit {
+                    // Map tool: a gizmo grab drags the sub-object selection;
+                    // otherwise the press only anchors, and the release decides
+                    // whether the gesture was a click (pick what's under it) or
+                    // a drag (box-select). Selecting on press is what used to
+                    // confine box-select to empty space — and a blockout that
+                    // fills the screen has none, which is what made picking a
+                    // row of faces a click-at-a-time job.
+                    if let (Some(h), Some(e), Some(start_xf)) =
+                        (hovered, self.primary(), self.map_gizmo_xf())
+                    {
+                        if self.map_begin_drag() {
+                            self.drag_group.clear();
+                            self.grabbed = Some(h);
+                            self.drag = Some(DragState {
+                                handle: h,
+                                entity: e,
+                                bone: None,
+                                start_xf,
+                                cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                            });
+                        }
+                    } else if let Some(cursor) = self.cursor {
+                        self.map_box = Some(cursor);
+                    }
+                } else if let (Some(h), Some(e)) = (hovered, self.primary()) {
+                    // On a gizmo handle ⏵ start an undoable edit and grab it.
+                    // start_xf is the world transform; gizmo math runs in world
+                    // space and is converted back to local on write (parenting).
+                    if self.world.get::<Transform>(e).is_some() {
+                        let start_xf = floptle_core::world_transform(&self.world, e);
+                        self.begin_edit();
+                        self.grabbed = Some(h);
+                        self.drag = Some(DragState {
+                            handle: h,
+                            entity: e,
+                            bone: None,
+                            start_xf,
+                            cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                        });
+                        // Multi-select: snapshot every other selected node so the
+                        // drag moves them all. Nodes whose ancestor is also in the
+                        // selection are skipped (the parent's move carries them).
+                        self.drag_group = self
+                            .selection
+                            .iter()
+                            .copied()
+                            .filter(|&o| {
+                                o != e
+                                    && self.world.get::<Transform>(o).is_some()
+                                    && !self.selection.iter().any(|&a| {
+                                        a != o && self.is_descendant(o, a)
+                                    })
+                            })
+                            .map(|o| (o, floptle_core::world_transform(&self.world, o)))
+                            .collect();
+                    }
+                } else if let (Some(h), Some((mesh, idx, start_xf))) =
+                    (hovered, self.bone_gizmo_target())
+                {
+                    // On a gizmo handle while an armature bone is selected: grab
+                    // it to pose the bone. No begin_edit — the clip has its own
+                    // coalesced save (clip_dirty), bones aren't scene undo.
+                    self.drag_group.clear(); // bones never group-drag
+                    self.grabbed = Some(h);
+                    self.drag = Some(DragState {
+                        handle: h,
+                        entity: mesh,
+                        bone: Some(idx),
+                        start_xf,
+                        cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                    });
+                } else if let Some(cursor) = self.cursor {
+                    // A drawn joint wins over the body behind it: the
+                    // rig is only on screen for a mesh you already
+                    // selected, and it is drawn over the model, so a
+                    // click that lands on a joint meant the joint.
+                    // …and when it missed every joint dot, the bone body
+                    // is still a target. A rig is mostly bone and very
+                    // little joint, so requiring the dot made posing a
+                    // game of darts.
+                    if let Some((mesh, idx)) =
+                        crate::viz::pick_joint(&self.rig_gizmos, cursor)
+                            .or_else(|| crate::viz::pick_bone(&self.rig_gizmos, cursor))
+                            .filter(|&(mesh, idx)| self.select_bone(mesh, idx))
+                    {
+                        // Taken — `select_bone` has already done the
+                        // swap (or kept the locked model selected and
+                        // just moved the bone). Nothing left to do but
+                        // stop the node pick below from also running.
+                        let _ = (mesh, idx);
+                    } else if self.selection_locked {
+                        // A held selection still refuses everything
+                        // else a viewport click could mean.
+                    } else {
+                        // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
+                        // (Ctrl matches the Hierarchy's toggle-select).
+                        match self.pick(cursor) {
+                            Some(e) if self.shift || self.ctrl => self.select_toggle(e),
+                            Some(e) => self.select_single(e),
+                            None if !self.shift && !self.ctrl => {
+                                self.clear_selection();
+                                // Empty space clears the bone too, or a
+                                // rig with nothing selected stays lit.
+                                self.bone_selection = None;
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+        } else {
+            self.grabbed = None;
+            self.drag = None;
+            self.drag_group.clear();
+            // End of a tile gesture: a rubber-band tool commits here (the
+            // rectangle is not known until the release), and a stroke's
+            // writes were already coalesced into one `begin_edit` step.
+            // Before `self.editing = false`, because committing needs the
+            // step still open.
+            self.tile_release(self.cursor);
+            self.editing = false;
+            self.sculpting = false;
+            // End of a paint stroke: bank the whole stroke as one undo step.
+            if self.painting {
+                self.painting = false;
+                self.end_paint_stroke();
+            }
+            // End of a sculpt stroke: bank one undo step if it changed anything,
+            // and re-derive the shadow proxy if the stroke outgrew its box.
+            if let Some((id, snap)) = self.stroke_snapshot.take()
+                && self.stroke_dabbed {
+                    self.push_history(Snapshot::Terrain(id, snap));
+                    self.end_sculpt_stroke();
+                }
+            // End of a Map-tool gesture: a sub-object drag banks its
+            // pre-drag mesh as one step (only if it actually moved);
+            // a box-select applies its rect to the selection.
+            if self.map_drag.take().is_some()
+                && let Some((id, pre)) = self.map_stroke.take()
+                && self.maps.meshes.get(&id) != Some(&pre)
+            {
+                self.push_map_history(id, pre);
+            }
+            self.map_stroke = None;
+            if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)
+                && self.tool == Tool::MapEdit
+            {
+                // One place reads the modifiers, but a box and a click do
+                // not mean the same thing by them: Ctrl+click takes the
+                // shortest path (as it does in Blender), while Ctrl+box
+                // keeps subtracting, which is what a box is for.
+                let drag = (cursor - anchor).length() > map_edit::MAP_DRAG_PX;
+                let how = if drag {
+                    map_edit::SelectMode::of_drag(self.shift, self.ctrl)
+                } else {
+                    map_edit::SelectMode::of(self.shift, self.ctrl)
+                };
+                if drag {
+                    self.map_box_apply(anchor, cursor, how);
+                } else if !self.map_click(cursor, how) {
+                    // A click that hit no sub-object: re-pick the node, so
+                    // clicking another map mesh starts editing it and
+                    // clicking empty space steps out. Without this the map
+                    // tool was a one-way street into the first node you
+                    // selected.
+                    match self.pick(cursor) {
+                        Some(e) if how.keeps_existing() => self.select_toggle(e),
+                        Some(e) => self.select_single(e),
+                        None if !how.keeps_existing() => self.clear_selection(),
+                        None => {}
+                    }
+                }
+            }
+            // A drawn footprint finishes on release (flat shapes commit,
+            // solids move on to their height).
+            if self.tool == Tool::MapEdit && self.map_draw.is_some() {
+                self.map_draw_release();
+            }
         }
     }
 }
