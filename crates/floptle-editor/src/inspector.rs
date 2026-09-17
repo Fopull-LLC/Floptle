@@ -1347,6 +1347,2352 @@ pub(crate) fn material_props_ui(
     }
     r
 }
+/// What the per-type editors read from the tab besides the node's own
+/// Matter: the command sink, and the editor-wide facts a type's knobs show
+/// (the asset tree, bake status, the light cap, the camera preview).
+struct TypeCtx<'a> {
+    cmd: &'a mut crate::EditorCmd,
+    e: floptle_core::Entity,
+    /// The node's Material sheet (cols, rows), if any, and whether it has a texture;
+    /// read before the Matter borrow the Sprite editor holds.
+    sprite_facts: (Option<(u32, u32)>, bool),
+    asset_tree: &'a [crate::assets::AssetEntry],
+    project_root: &'a Path,
+    cam_preview: Option<egui::TextureId>,
+    light_counts: (usize, usize),
+    sky_uniforms: &'a [floptle_shader::Uniform],
+    nav: &'a crate::nav_bake::NavStatus,
+    gi: crate::gi_bake::GiStatus,
+    layer_names: &'a [String],
+    entity_names: &'a [(floptle_core::Entity, String)],
+    post_flsl_cache: &'a crate::shaders::PostFlslCache,
+}
+
+/// Tilemap: the grid, its tileset, and the tile the brush paints.
+fn tilemap_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::Tilemap { cols, rows, tile, data, tileset } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("grid");
+        cmd.inspector_changed |= ui
+            .add(egui::DragValue::new(cols).speed(1.0).prefix("cols ").range(0..=1024))
+            .changed();
+        cmd.inspector_changed |= ui
+            .add(egui::DragValue::new(rows).speed(1.0).prefix("rows ").range(0..=1024))
+            .changed();
+    });
+    cmd.inspector_changed |= ui
+        .add(egui::DragValue::new(tile).speed(0.01).prefix("tile ").range(0.001..=64.0))
+        .on_hover_text("world size of one tile's edge")
+        .changed();
+    let want = (*cols as usize) * (*rows as usize);
+    let placed = data
+        .iter()
+        .filter(|&&p| p != floptle_core::EMPTY_TILE)
+        .count();
+    ui.small(format!("{placed} of {want} squares placed"));
+    if data.len() != want && ui.button("resize to fit").clicked() {
+        data.resize(want, floptle_core::EMPTY_TILE);
+        cmd.inspector_changed = true;
+    }
+    // The tileset — what says whether these tiles collide,
+    // what they are tagged, and how they autotile. Read-only
+    // here on purpose: attaching one is a ◫ Tiles operation
+    // (it needs the sheet's dimensions to make sense of), and
+    // a free-text path field is a way to typo a level solid.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("tileset");
+        if tileset.is_empty() {
+            // Named as the two features somebody would
+            // go looking for, and coloured, because
+            // this was reported twice as the engine
+            // not having either of them.
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 200, 80),
+                "none",
+            );
+        } else {
+            ui.small(
+                floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
+            );
+        }
+        if ui.small_button("◫ Tiles").clicked() {
+            cmd.focus_tiles = true;
+        }
+    });
+    if tileset.is_empty() {
+        ui.small(
+            "Without one, these tiles collide with nothing and \
+             cannot autotile — both are per-tile facts and live \
+             in a tileset. Make one in ◫ Tiles; it takes its \
+             sheet from this node's Material.",
+        );
+    }
+    ui.small(
+        "the sheet comes from this node's Material (texture + \
+         sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \
+         it from a script: node:setTilemap{...} then tm:set(x, y, cell).",
+    );
+}
+
+/// Sprite: pixels per unit or a world size, the sheet cell, flips and pivot.
+fn sprite_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    let sprite_facts = ctx.sprite_facts;
+    // `ppu` measures the texture, so with no texture
+    // there is nothing to measure and the sprite
+    // falls back to `size` — a field this mode hides.
+    // Silently, that is a headline control that does
+    // nothing on a node somebody just created.
+    // (Read before the Matter borrow — see `sprite_facts`.)
+    let (sheet, has_tex) = sprite_facts;
+    if !has_tex {
+        crate::responsive::para(
+            ui,
+            egui::RichText::new(
+                "no texture yet — give this node a Material with one, and the sheet's cols/rows in its import settings",
+            )
+            .weak()
+            .small(),
+        );
+    }
+    // Size, two ways, and only one of them live at a
+    // time — a pixels-per-unit sprite takes its size
+    // from the image, so leaving the world-size field
+    // editable beside it would offer a number that
+    // does nothing.
+    let mut by_px = *ppu > 0.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("size from");
+        for (on, label, hover) in [
+            (true, "pixels", "the image decides: a 32x32 cell at 32 pixels per unit is one unit across. The number a pixel artist already has."),
+            (false, "world units", "you decide: an edge length, whatever the image is."),
+        ] {
+            if ui
+                .selectable_label(by_px == on, label)
+                .on_hover_text(hover)
+                .clicked()
+                && by_px != on
+            {
+                by_px = on;
+                // Leaving a remembered `ppu` behind
+                // would make "world units" silently
+                // revert next time it was touched.
+                *ppu = if on { 32.0 } else { 0.0 };
+                cmd.inspector_changed = true;
+            }
+        }
+    });
+    if by_px {
+        cmd.inspector_changed |= ui
+            .add(
+                egui::DragValue::new(ppu)
+                    .speed(1.0)
+                    .range(1.0..=1024.0)
+                    .prefix("pixels per unit "),
+            )
+            .on_hover_text(
+                "measured against ONE CELL of the sheet, not the \
+                 whole image — so slicing a sheet finer does not \
+                 resize every sprite on it",
+            )
+            .changed();
+    } else {
+        cmd.inspector_changed |= ui
+            .add(
+                egui::DragValue::new(size)
+                    .speed(0.01)
+                    .range(0.001..=1024.0)
+                    .prefix("size "),
+            )
+            .on_hover_text("world edge length")
+            .changed();
+    }
+    let cells = sheet.map(|(c, r)| c.max(1) * r.max(1)).unwrap_or(1);
+    // Labelled, because it was a bare number box
+    // under "pixels per unit" — and the Material
+    // section below has a whole grid of cells that
+    // looks far more like the control. They are the
+    // same value; this one is the number.
+    cmd.inspector_changed |= ui
+        .add(
+            egui::DragValue::new(cell)
+                .speed(1)
+                .prefix("cell ")
+                .range(0..=cells.saturating_sub(1)),
+        )
+        .on_hover_text(if cells > 1 {
+            "which cell of the Material's sheet, row-major from the \
+             top-left"
+        } else {
+            "this Material's texture is not sliced into a sheet, so \
+             there is only one cell — set cols/rows in the texture's \
+             import settings"
+        })
+        .changed();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("flip");
+        cmd.inspector_changed |=
+            crate::responsive::check(ui, flip_x, "x").changed();
+        cmd.inspector_changed |=
+            crate::responsive::check(ui, flip_y, "y").changed();
+        crate::responsive::para(
+            ui,
+            egui::RichText::new("mirrors the picture, not the node")
+                .weak()
+                .small(),
+        );
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("pivot");
+        for (i, axis) in ["x ", "y "].iter().enumerate() {
+            cmd.inspector_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut pivot[i])
+                        .speed(0.01)
+                        .range(-2.0..=3.0)
+                        .prefix(*axis),
+                )
+                .on_hover_text(
+                    "where the node's origin sits in the sprite, \
+                     0..1 from the bottom-left; 0.5, 0.5 is the \
+                     centre. Outside 0..1 is allowed and puts the \
+                     origin off the picture entirely, which is \
+                     occasionally what a hand-drawn rig wants.",
+                )
+                .changed();
+        }
+        if ui
+            .small_button("feet")
+            .on_hover_text(
+                "0.5, 0 — the origin at the bottom of the sprite. \
+                 What a Y-sorted character wants: sorting reads \
+                 the node's Y, and a centred origin sorts by a \
+                 point floating at the character's waist.",
+            )
+            .clicked()
+        {
+            *pivot = [0.5, 0.0];
+            cmd.inspector_changed = true;
+        }
+    });
+}
+
+/// Camera: the live preview, projection, clip planes, and the active/from-view actions.
+fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::Camera {
+        fov_y,
+        active,
+        target,
+        cull_mask,
+        target_w,
+        target_h,
+        target_hz,
+        ortho,
+        ortho_height,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    let e = ctx.e;
+    ui.label("camera");
+    ui.small("a viewpoint — play mode renders from the active camera");
+    // Live preview of what this camera sees.
+    if let Some(tex) = ctx.cam_preview {
+        let w = ui.available_width().min(300.0);
+        let size = egui::vec2(w, w * 9.0 / 16.0);
+        ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
+        ui.small("preview — what this camera sees");
+    }
+    // Perspective or orthographic. The two knobs are
+    // exclusive and only the live one is shown —
+    // greying out the other would still invite
+    // dragging a number that does nothing.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("projection").on_hover_text(
+            "orthographic draws everything at the same scale at \
+             every distance — what a 2D, isometric or strategy \
+             camera wants. Perspective is the 3D default.",
+        );
+        for (label, want) in
+            [("perspective", false), ("orthographic", true)]
+        {
+            if ui.selectable_label(*ortho == want, label).clicked()
+                && *ortho != want
+            {
+                *ortho = want;
+                cmd.inspector_changed = true;
+            }
+        }
+    });
+    if *ortho {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("height").on_hover_text(
+                "how many world units the view covers top to \
+                 bottom. With 1-unit tiles this is how many tiles \
+                 tall the shot is; the width follows the aspect.",
+            );
+            let mut h = *ortho_height;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut h)
+                        .speed(0.1)
+                        .range(0.1..=1000.0)
+                        .suffix(" units"),
+                )
+                .changed()
+            {
+                *ortho_height = Matter::clamp_ortho_height(h);
+                cmd.inspector_changed = true;
+            }
+        });
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("field of view");
+            let mut deg = fov_y.to_degrees();
+            if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
+                *fov_y = deg.to_radians();
+                cmd.inspector_changed = true;
+            }
+        });
+    }
+    // A1: render-target name — a live texture any material
+    // or UI image can wear as `rt:<name>`.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("target").on_hover_text(
+            "render this camera into a live texture every frame; \
+             use it as texture \"rt:<name>\" on a material or UI \
+             image — cockpit screens, monitors, mirrors",
+        );
+        if ui.text_edit_singleline(target).changed() {
+            cmd.inspector_changed = true;
+        }
+    });
+    if !target.is_empty() {
+        ui.small(format!("live texture: rt:{target}"));
+        // Size + refresh rate: a minimap is not worth a
+        // full-rate 480×270.
+        ui.horizontal_wrapped(|ui| {
+            ui.label("size").on_hover_text(
+                "the target texture's pixel size — smaller is \
+                 cheaper, and a screen a few metres away does \
+                 not need many",
+            );
+            let mut w = *target_w as i32;
+            let mut h = *target_h as i32;
+            let lo = Matter::TARGET_MIN as i32;
+            let hi = Matter::TARGET_MAX as i32;
+            let cw = ui.add(egui::DragValue::new(&mut w).range(lo..=hi));
+            ui.label("×");
+            let ch = ui.add(egui::DragValue::new(&mut h).range(lo..=hi));
+            if cw.changed() || ch.changed() {
+                *target_w = w as u32;
+                *target_h = h as u32;
+                cmd.inspector_changed = true;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("refresh").on_hover_text(
+                "how often the target redraws, in Hz. 0 = every \
+                 frame. A 10 Hz minimap costs a sixth of a 60 Hz one.",
+            );
+            let mut hz = *target_hz;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut hz)
+                        .range(0.0..=240.0)
+                        .speed(0.5),
+                )
+                .changed()
+            {
+                *target_hz = hz.max(0.0);
+                cmd.inspector_changed = true;
+            }
+            ui.small(if *target_hz <= 0.0 {
+                "every frame".to_string()
+            } else {
+                format!("{:.0} Hz", *target_hz)
+            });
+        });
+    }
+    // Per-layer cull checkboxes (bit i = project layer i).
+    let label = if *cull_mask == u32::MAX {
+        "renders: all layers".to_string()
+    } else {
+        format!(
+            "renders: {}/{} layers",
+            cull_mask.count_ones().min(ctx.layer_names.len() as u32),
+            ctx.layer_names.len()
+        )
+    };
+    ui.menu_button(label, |ui| {
+        for (i, name) in ctx.layer_names.iter().enumerate() {
+            let mut on = (*cull_mask >> i) & 1 == 1;
+            if crate::responsive::check(ui, &mut on, name).changed() {
+                *cull_mask ^= 1 << i;
+                cmd.inspector_changed = true;
+            }
+        }
+        if ui.small_button("all").clicked() {
+            *cull_mask = u32::MAX;
+            cmd.inspector_changed = true;
+        }
+    });
+    if *active {
+        ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
+    } else if ui.button("⌖ Make active camera").clicked() {
+        cmd.set_active_camera = Some(e);
+    }
+    if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
+        cmd.camera_from_view = Some(e);
+    }
+}
+
+/// Point light: colour, range and shadow knobs, and where the scene stands against the light cap.
+fn point_light_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PointLight {
+        color,
+        intensity,
+        range,
+        shape,
+        shadows,
+        spot_angle,
+        spot_softness,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    use floptle_core::LightShape as LS;
+    let aimed = floptle_core::is_spot(*spot_angle);
+    ui.label(if aimed { "spot light" } else { "light" });
+    ui.small("position and facing come from the transform below");
+    // **Where this scene stands against the cap**.
+    // Naming the sixteen is the
+    // easy half and it is the half that does not
+    // help: "twelve, plus whatever the room has" is
+    // exactly the arithmetic that crosses it, and a
+    // number that only appears in the notes is one
+    // nobody reads at the moment it matters. The
+    // live count is the half that does.
+    {
+        let (msg, warn) = light_slot_line(ctx.light_counts);
+        let r = if warn {
+            ui.colored_label(egui::Color32::from_rgb(220, 170, 90), msg)
+        } else {
+            ui.small(msg)
+        };
+        r.on_hover_text(
+            "sixteen lights reach the shader at once, across the \
+             whole scene — 3D and 2D together. Past that the ones \
+             contributing most at the camera win and the rest are \
+             simply not drawn, which reads as \"my seventeenth \
+             torch does nothing\".\n\nA light at intensity 0 gives \
+             its slot back, which is how you pool them. The same \
+             two numbers are perf.counts().lights and \
+             .lightsDropped.",
+        );
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("color");
+        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+    });
+    cmd.inspector_changed |=
+        crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
+    cmd.inspector_changed |=
+        crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
+    cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
+        .on_hover_text(
+            "stop this lamp at the walls between it and what it lights, instead \
+             of shining through them. Per lamp, because it costs a march per lit \
+             pixel and most lights in a level have nothing to be blocked by. \
+             Shadows from what is ON SCREEN: a wall casts while it is in frame \
+             and stops when you look away from it. Quality and darkness are on \
+             the Lighting node.",
+        )
+        .changed();
+    // Aiming it. Above the emitter section because
+    // it is the bigger question — "does this lamp
+    // light the room or one thing in it" changes
+    // what every control under it means.
+    ui.separator();
+    let mut on = aimed;
+    if crate::responsive::check(ui, &mut on, "aim it (spot)")
+        .on_hover_text(
+            "cone down the node's forward, the same axis a camera looks \
+             down — rotate the node to aim it. Off means the lamp lights \
+             everything around it, which is what it has always done.",
+        )
+        .changed()
+    {
+        // Turning it off parks the angle at omni and
+        // keeps the softness, so switching a spot off
+        // and on again gives back the same cone
+        // rather than the default one.
+        *spot_angle =
+            if on { 45.0 } else { floptle_core::OMNI_ANGLE };
+        cmd.inspector_changed = true;
+    }
+    if on {
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
+                    spot_angle,
+                    floptle_core::MIN_SPOT_ANGLE
+                        ..=floptle_core::OMNI_ANGLE - 0.5,
+                )
+                    
+                .suffix("°"), "cone")
+            .on_hover_text(
+                "the FULL angle, the number on a real fixture — 45° is a \
+                 45° cone, not a 90° one",
+            )
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0), "edge")
+            .on_hover_text(
+                "how much of the cone is falloff. 0 is a hard circle; 1 \
+                 fades from the middle out. A fraction of the cone, so \
+                 widening the beam keeps the edge you gave it.",
+            )
+            .changed();
+    }
+
+    // The emitter. Switching shape keeps whatever
+    // size the old one had where the two agree, so
+    // trying rect against disk is one click and not
+    // a re-measure.
+    ui.separator();
+    let old = *shape;
+    let size = old.extent().max(0.25);
+    ui.horizontal_wrapped(|ui| {
+        ui.label("emits from");
+        let mut pick = |ui: &mut egui::Ui, label: &str, on: bool, make: LS| {
+            if ui.selectable_label(on, label).clicked() && !on {
+                *shape = make;
+                cmd.inspector_changed = true;
+            }
+        };
+        pick(ui, "point", matches!(old, LS::Point), LS::Point);
+        pick(ui, "sphere", matches!(old, LS::Sphere { .. }), LS::Sphere { radius: size });
+        pick(
+            ui,
+            "rect",
+            matches!(old, LS::Rect { .. }),
+            LS::Rect { width: size * 2.0, height: size * 2.0, two_sided: false },
+        );
+        pick(ui, "disk", matches!(old, LS::Disk { .. }), LS::Disk { radius: size, two_sided: false });
+        pick(ui, "tube", matches!(old, LS::Tube { .. }), LS::Tube { length: size * 4.0, radius: size * 0.25 });
+    });
+    let drag = |ui: &mut egui::Ui, label: &str, v: &mut f32| -> bool {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(v).speed(0.05).range(0.001..=200.0).suffix("m"))
+                .changed()
+        })
+        .inner
+    };
+    match shape {
+        LS::Point => {
+            ui.small(
+                "a dimensionless point — a hard highlight and a hard shadow edge, \
+                 which is right for a bare bulb and wrong for a window",
+            );
+        }
+        LS::Sphere { radius } => {
+            cmd.inspector_changed |= drag(ui, "radius", radius);
+            ui.small("a bulb with size: the highlight becomes a disc and the terminator softens");
+        }
+        LS::Rect { width, height, two_sided } => {
+            cmd.inspector_changed |= drag(ui, "width", width);
+            cmd.inspector_changed |= drag(ui, "height", height);
+            cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways")
+                .on_hover_text("off = a window, on = a floating panel that glows from both faces")
+                .changed();
+            ui.small("faces the node's forward — rotate the node to aim it");
+        }
+        LS::Disk { radius, two_sided } => {
+            cmd.inspector_changed |= drag(ui, "radius", radius);
+            cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways").changed();
+            ui.small("faces the node's forward — rotate the node to aim it");
+        }
+        LS::Tube { length, radius } => {
+            cmd.inspector_changed |= drag(ui, "length", length);
+            cmd.inspector_changed |= drag(ui, "thickness", radius);
+            ui.small("lies along the node's local X, and streaks its highlight along itself");
+        }
+    }
+}
+
+/// Water volume: the box, the surface look, and the wave motion.
+fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::WaterVolume {
+        kind,
+        radius,
+        half_extents,
+        density,
+        drag,
+        angular_drag,
+        frozen,
+        tint,
+        visibility,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    use floptle_core::WaterKind;
+    ui.label("water volume");
+    ui.small(
+        "buoyancy, drag and an underwater look. A Sea is a sphere \
+         about this node (a planet's ocean); a Pool is an oriented \
+         box — rotate the node and the surface tilts with it.",
+    );
+    ui.horizontal_wrapped(|ui| {
+        for k in WaterKind::ALL {
+            if ui.selectable_label(*kind == k, k.label()).clicked()
+                && *kind != k
+            {
+                *kind = k;
+                cmd.inspector_changed = true;
+            }
+        }
+    });
+    match kind {
+        WaterKind::Sea => {
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 1.0..=100_000.0)
+                        .logarithmic(true),
+                        "sea radius")
+                .changed();
+        }
+        WaterKind::Pool => {
+            for (i, label) in ["half X", "half Y (depth)", "half Z"]
+                .iter()
+                .enumerate()
+            {
+                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
+                            &mut half_extents[i],
+                            0.1..=1000.0,
+                        )
+                        .logarithmic(true),
+                        label)
+                    .changed();
+            }
+        }
+    }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
+                "density kg/m³")
+        .on_hover_text(
+            "1000 = fresh water. What decides whether a given hull \
+             floats is this against the hull's own density, so a \
+             denser sea carries heavier craft.",
+        )
+        .changed();
+    cmd.inspector_changed |=
+        crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0), "drag").changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
+        .changed();
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("underwater tint");
+        cmd.inspector_changed |=
+            ui.color_edit_button_rgb(tint).changed();
+    });
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(visibility, 1.0..=500.0)
+                .logarithmic(true),
+                "visibility m")
+        .on_hover_text(
+            "How far you can see from inside. Replaces the scene's \
+             own fog while the camera is under, so meshes, terrain \
+             and particles go murky together.",
+        )
+        .changed();
+    ui.separator();
+    cmd.inspector_changed |= crate::responsive::check(ui, frozen, "frozen")
+        .on_hover_text(
+            "A frozen sea is not a fluid: no buoyancy, no drag, no \
+             underwater state. Add a Collidable surface and it \
+             becomes walkable ground. A script can thaw it.",
+        )
+        .changed();
+}
+
+/// Skybox: a Sky-stage shader with its uniforms, or a solid colour and a texture.
+fn skybox_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::Skybox { color, size, texture, tint, shader, shader_params } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    ui.label("skybox");
+    ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+    // A Sky-stage .flsl overrides the solid/texture look with a
+    // procedural sky (per-ray-direction color). Clear it to fall
+    // back to the solid/texture controls below.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("shader");
+        let cur = shader.clone().unwrap_or_default();
+        let slabel = if cur.is_empty() {
+            "(none — built-in sky)".to_string()
+        } else {
+            Path::new(&cur).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(cur.clone())
+        };
+        if let Some(pick) = crate::ui_widgets::asset_picker(
+            ui,
+            egui::Id::new("sky-shader"),
+            ctx.project_root,
+            &slabel,
+            None,
+            ctx.asset_tree,
+            crate::assets::is_shader,
+            180.0,
+        ) {
+            // A different sky shader has different knobs — the old
+            // overrides would misfill by name, so drop them (same
+            // as the Material path clears params on shader change).
+            if *shader != pick {
+                shader_params.clear();
+            }
+            *shader = pick;
+            cmd.inspector_changed = true;
+        }
+        if let Some(path) = shader.clone()
+            && ui
+                .button("◈")
+                .on_hover_text("edit this shader in the ◈ Shaders graph")
+                .clicked()
+        {
+            cmd.open_shader_graph = Some(path);
+        }
+        if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
+            *shader = None;
+            shader_params.clear();
+            cmd.inspector_changed = true;
+        }
+    });
+    if shader.is_some() {
+        ui.small("a `stage sky` .flsl computes the sky from `skyDir`.");
+        // Knob rows from the compiled sky shader's uniform schema —
+        // same widgets as a Material's shader params. Edits write
+        // into `shader_params`; the raymarch reads them next frame.
+        if ctx.sky_uniforms.is_empty() {
+            ui.small("(its knobs appear here once it compiles — check the Console if not)");
+        } else {
+            crate::responsive::grid(ui, "sky_shader_rows", |ui| {
+                    if shader_uniform_rows(ui, ctx.sky_uniforms, shader_params) {
+                        cmd.inspector_changed = true;
+                    }
+                });
+            if ui
+                .button("Reset knobs")
+                .on_hover_text("back to the shader's own defaults")
+                .clicked()
+            {
+                shader_params.clear();
+                cmd.inspector_changed = true;
+            }
+        }
+    }
+    let mut textured = texture.is_some();
+    ui.horizontal_wrapped(|ui| {
+        if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
+            *texture = None;
+            cmd.inspector_changed = true;
+        }
+        if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
+            let mut tl = Vec::new();
+            collect_texture_paths(ctx.asset_tree, &mut tl);
+            *texture = Some(tl.first().cloned().unwrap_or_default());
+            cmd.inspector_changed = true;
+        }
+    });
+    textured = texture.is_some();
+    if !textured {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("color");
+            cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+        });
+    } else {
+        let tree = ctx.asset_tree;
+        let cur = texture.clone().unwrap_or_default();
+        let label = |p: &str| {
+            Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label("texture");
+            if let Some(Some(p)) = crate::ui_widgets::asset_picker(
+                ui,
+                egui::Id::new("sky-tex"),
+                ctx.project_root,
+                &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
+                None,
+                tree,
+                is_texture,
+                180.0,
+            ) {
+                *texture = Some(p);
+                cmd.inspector_changed = true;
+            }
+        });
+        ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("tint");
+            cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
+        });
+    }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true), "size (radius)")
+        .changed();
+}
+
+/// Nav Mesh: what gets baked, the box, the walking character, and how regions join up.
+fn nav_mesh_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::NavMesh {
+        id: _,
+        half_extents,
+        auto_bounds,
+        layers,
+        agent_radius,
+        agent_height,
+        max_slope,
+        step_height,
+        cell_size,
+        enabled,
+        auto_rebake,
+        max_drop,
+        max_jump,
+        min_region_area,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    let nav = ctx.nav.clone();
+    if crate::responsive::check(ui, enabled, "characters can path on this").changed() {
+        cmd.inspector_changed = true;
+    }
+    ui.small(
+        "Where characters can walk. Bakes what they would collide \
+         with — narrow it by layer, or drop one object with the \
+         Navmesh Exclude switch on it.",
+    );
+    ui.separator();
+
+    // ---- what gets baked ----------------------------
+    let label = if layers.is_empty() {
+        "layers: everything".to_string()
+    } else {
+        format!("layers: {}", layers.join(", "))
+    };
+    ui.menu_button(label, |ui| {
+        for name in ctx.layer_names.iter() {
+            let mut on = layers.iter().any(|l| l == name);
+            if crate::responsive::check(ui, &mut on, name).changed() {
+                if on {
+                    layers.push(name.clone());
+                } else {
+                    layers.retain(|l| l != name);
+                }
+                cmd.inspector_changed = true;
+            }
+        }
+        if ui.small_button("everything").clicked() {
+            layers.clear();
+            cmd.inspector_changed = true;
+        }
+    })
+    .response
+    .on_hover_text(
+        "Which layers count as level geometry. Nothing ticked means \
+         every layer.",
+    );
+    ui.small(format!(
+        "{} object{} would be baked",
+        nav.sources,
+        if nav.sources == 1 { "" } else { "s" }
+    ));
+    if nav.sources == 0 {
+        ui.small(
+            "— nothing matches. A navmesh bakes what a character \
+             would collide with, so level geometry needs the \
+             collidable switch on it.",
+        );
+    }
+
+    // ---- the box ------------------------------------
+    ui.separator();
+    if crate::responsive::check(ui, auto_bounds, "fit the box to what it finds")
+        .on_hover_text(
+            "Work the volume out from the geometry instead of \
+             sizing it by hand. A box that is too small clips the \
+             level, and nothing about the result says which.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+    if !*auto_bounds {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("size");
+            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                let mut full = half_extents[i] * 2.0;
+                let r = ui.add(
+                    egui::DragValue::new(&mut full)
+                        .speed(0.25)
+                        .range(0.5..=100000.0)
+                        .prefix(format!("{axis} ")),
+                );
+                if r.changed() {
+                    half_extents[i] = full * 0.5;
+                    cmd.inspector_changed = true;
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "The volume's full size in world units, before the \
+             node's scale. Move the node to move the box.",
+        );
+    }
+
+    // ---- the character ------------------------------
+    ui.separator();
+    ui.small("the character this is for");
+    let mut touched = false;
+    touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0),
+                "radius")
+        .on_hover_text(
+            "How wide it is. Ground closer than this to a wall or a \
+             drop is not walkable, so a path can be walked by \
+             something with a body rather than by a point.",
+        )
+        .changed();
+    touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0),
+                "height")
+        .on_hover_text(
+            "How tall it is. Ground with less headroom than this is \
+             not walkable.",
+        )
+        .changed();
+    touched |= crate::responsive::slider(ui, egui::Slider::new(max_slope, 0.0..=89.0)
+                .suffix("°"),
+                "max slope")
+        .on_hover_text("The steepest floor it will walk up.")
+        .changed();
+    touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0),
+                "step height")
+        .on_hover_text(
+            "The tallest lip it steps over rather than walks around. \
+             This is what makes a staircase one place and a ledge \
+             two.",
+        )
+        .changed();
+    touched |= crate::responsive::slider(ui, egui::Slider::new(cell_size, 0.02..=2.0)
+                .logarithmic(true),
+                "cell size")
+        .on_hover_text(
+            "How finely the level is sampled. The one performance \
+             knob: halving it quadruples the bake.",
+        )
+        .changed();
+    if touched {
+        cmd.inspector_changed = true;
+    }
+
+    // ---- what joins it up, and what it drops --------
+    //
+    // A navmesh is a surface, and a surface stops at
+    // every ledge. The first two turn the stopping
+    // points back into a level a character can cross —
+    // the difference between "the AI is stuck on a
+    // kerb" and an AI. The third throws away the ground
+    // that was never worth stopping at.
+    ui.add_space(4.0);
+    ui.small("how the ledges are joined up");
+    let mut joined = false;
+    joined |= crate::responsive::slider(ui, egui::Slider::new(max_drop, 0.0..=10.0),
+                "drop height")
+        .on_hover_text(
+            "The tallest ledge it steps off deliberately. Anything \
+             between the step height above and this gets a one-way \
+             link off the edge, so a route can take it rather than \
+             treating a knee-high lip as a wall.\n\n0 switches drop \
+             links off.",
+        )
+        .changed();
+    joined |= crate::responsive::slider(ui, egui::Slider::new(max_jump, 0.0..=10.0),
+                "jump distance")
+        .on_hover_text(
+            "The widest gap it will jump, measured between the two \
+             edges of the walkable surface — the distance you can \
+             see in the overlay, which is wider than the hole in the \
+             floor by the radius at each side. Gets a two-way \
+             link.\n\n0 switches jump links off.",
+        )
+        .changed();
+    joined |= crate::responsive::slider(ui, egui::Slider::new(min_region_area, 0.0..=20.0)
+                .suffix(" m²"),
+                "smallest patch")
+        .on_hover_text(
+            "Walkable ground in a patch smaller than this is \
+             thrown away. A level bakes hundreds of specks — a \
+             window sill, the top of a crate — and each one is an \
+             island nothing can reach and somewhere a character can \
+             be put by mistake. The biggest patch is never thrown \
+             away.",
+        )
+        .changed();
+    if joined {
+        cmd.inspector_changed = true;
+    }
+    if *max_drop <= 0.0 && *max_jump <= 0.0 {
+        ui.small(
+            egui::RichText::new(
+                "both off — every ledge in the level is a wall, \
+                 and the only ways across are the Nav Link nodes \
+                 you place by hand.",
+            )
+            .color(egui::Color32::from_rgb(230, 180, 90)),
+        );
+    }
+    // The one setting that quietly does something other
+    // than what it says, named with the number to use.
+    if let Some(advice) = nav.advice.as_deref() {
+        ui.add_space(2.0);
+        ui.small(egui::RichText::new(advice).color(
+            egui::Color32::from_rgb(230, 180, 90),
+        ));
+    }
+
+    // ---- the bake -----------------------------------
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("⬚  Bake")
+            .on_hover_text(
+                "Work out where this character can walk. Saved next \
+                 to the scene as a .fnav.",
+            )
+            .clicked()
+        {
+            cmd.nav_bake = true;
+        }
+        if nav.polys > 0
+            && ui
+                .button("🗑  Clear")
+                .on_hover_text("Throw the bake away.")
+                .clicked()
+        {
+            cmd.nav_clear = true;
+        }
+    });
+    if crate::responsive::check(ui, auto_rebake, "bake again when the level changes")
+        .on_hover_text(
+            "Off is right for a finished level: the bake is a file \
+             saved beside the scene and loaded with it, so it never \
+             needs doing twice.\n\nOn, the volume watches what it \
+             would bake, waits for it to stop moving, and bakes on \
+             another thread — so the editor keeps its frame rate, \
+             and a game that puts buildings down while it runs gets \
+             a navmesh that knows about them.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+    if nav.baking {
+        ui.small("baking…");
+    }
+    if nav.polys == 0 {
+        ui.small("no bake yet — nothing can path here.");
+        ui.small(
+            "A bake is saved beside the scene and loaded with it, so \
+             this is a one-off — not something to do again each time \
+             you open the project.",
+        );
+    } else {
+        ui.small(format!(
+            "baked: {} polygons over {:.0} m², from {} triangles in \
+             {:.2}s",
+            nav.polys, nav.area, nav.triangles, nav.seconds
+        ));
+        // Where it lives. A bake is a file, it is
+        // loaded with the scene, and saying so is
+        // the difference between trusting that and
+        // pressing Bake every time out of habit.
+        match nav.file.as_deref() {
+            Some(f) => {
+                ui.small(format!("saved in {f} — it loads with the scene"));
+            }
+            None => {
+                ui.small(
+                    egui::RichText::new(
+                        "not saved to disk — this bake will be gone \
+                         when the scene is closed",
+                    )
+                    .color(egui::Color32::from_rgb(230, 180, 90)),
+                );
+            }
+        }
+        // What actually joins the level up. Said before
+        // the island count, because it is the answer to
+        // the question the island count raises.
+        let made = nav.drops + nav.jumps;
+        if made > 0 {
+            ui.small(format!(
+                "{made} way{} across found: {} drop{}, {} jump{}",
+                if made == 1 { "" } else { "s" },
+                nav.drops,
+                if nav.drops == 1 { "" } else { "s" },
+                nav.jumps,
+                if nav.jumps == 1 { "" } else { "s" },
+            ));
+        } else if *max_drop > 0.0 || *max_jump > 0.0 {
+            ui.small(
+                "no drops or jumps found — every ledge in this bake \
+                 is either taller than the drop height or wider than \
+                 the jump distance.",
+            );
+        }
+        if nav.placed_links > 0 {
+            ui.small(format!(
+                "{} nav link{} placed by hand",
+                nav.placed_links,
+                if nav.placed_links == 1 { "" } else { "s" }
+            ));
+        }
+        if nav.lost_links > 0 {
+            ui.small(
+                egui::RichText::new(format!(
+                    "{} link{} could not find the ground at one end \
+                     and do nothing — the Console names them",
+                    nav.lost_links,
+                    if nav.lost_links == 1 { "" } else { "s" }
+                ))
+                .color(egui::Color32::from_rgb(230, 180, 90)),
+            );
+        }
+        if nav.capped {
+            ui.small(
+                egui::RichText::new(
+                    "the level hit the ceiling on generated links. \
+                     A coarser cell size, or a smaller drop height, \
+                     will find the ones that matter instead of every \
+                     one there is.",
+                )
+                .color(egui::Color32::from_rgb(230, 180, 90)),
+            );
+        }
+        // More than one island is worth seeing rather than
+        // finding out about when a character will not go
+        // somewhere: it is usually a door nobody fits
+        // through. The share is what makes the number
+        // actionable — "494 areas" says nothing, "the
+        // biggest holds 3% of the floor" says the bake
+        // is shattered and points at the settings.
+        if nav.regions > 1 {
+            let share = nav.biggest_share * 100.0;
+            let line = format!(
+                "{} separate areas — a character cannot walk between \
+                 them. The largest holds {share:.0}% of the walkable \
+                 ground.",
+                nav.regions
+            );
+            if nav.biggest_share < 0.5 {
+                ui.small(
+                    egui::RichText::new(line)
+                        .color(egui::Color32::from_rgb(230, 180, 90)),
+                );
+                ui.small(
+                    "A bake in this many pieces is usually a cell \
+                     size too coarse next to the agent radius, or a \
+                     drop height too low for the level's ledges.",
+                );
+            } else {
+                ui.small(line);
+            }
+        }
+        if nav.stale {
+            ui.small(
+                egui::RichText::new(
+                    "the settings have changed since this was baked",
+                )
+                .color(egui::Color32::from_rgb(230, 180, 90)),
+            );
+        }
+        // The box was smaller than the level. Said
+        // here as well as in the Console, because
+        // this is the panel somebody opens when a
+        // character will not walk somewhere, and a
+        // bake of one corner of the map looks
+        // exactly like a bake of the map.
+        if let Some(missed) = nav.coverage.as_deref() {
+            ui.add_space(2.0);
+            ui.small(
+                egui::RichText::new(missed)
+                    .color(egui::Color32::from_rgb(230, 180, 90)),
+            );
+        }
+    }
+}
+
+/// Nav Link: an off-mesh hop between two points, and what it costs.
+fn nav_link_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::NavLink {
+        id: _,
+        to,
+        bidirectional,
+        cost,
+        area,
+        duration,
+        enabled,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    if crate::responsive::check(ui, enabled, "this way is open").changed() {
+        cmd.inspector_changed = true;
+    }
+    ui.small(
+        "A way across that is not walking: a ladder, a jump down, a \
+         vault, a door. This node is one end; the offset below is \
+         the other. Both ends have to land on the navmesh.",
+    );
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("far end");
+        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+            cmd.inspector_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut to[i])
+                        .speed(0.1)
+                        .prefix(format!("{axis} ")),
+                )
+                .changed();
+        }
+    })
+    .response
+    .on_hover_text(
+        "Where it comes out, measured in this node's own space — so \
+         a link inside a prefab turns and scales with the prefab.",
+    );
+    if crate::responsive::check(ui, bidirectional, "can be crossed both ways")
+        .on_hover_text(
+            "A ladder can. A jump down cannot, and making one \
+             two-way is a character walking up a cliff.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=100.0)
+                .logarithmic(true),
+                "cost")
+        .on_hover_text(
+            "What crossing costs the router, in metres of ordinary \
+             walking. Raise it to make this a last resort; lower it \
+             to make it a shortcut.",
+        )
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(duration, 0.0..=10.0)
+                .suffix(" s"),
+                "crossing takes")
+        .on_hover_text(
+            "How long an agent spends on it. 0 means at walking \
+             speed, which is right for a vault and wrong for a lift.",
+        )
+        .changed();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("area");
+        cmd.inspector_changed |=
+            ui.text_edit_singleline(area).changed();
+    })
+    .response
+    .on_hover_text(
+        "Optional. Name a nav area and one exclusion can rule out \
+         every link like this — every jump in the level, say — \
+         rather than one per link.",
+    );
+    ui.separator();
+    ui.small(
+        "In a script: agent.link is this link's name while it is \
+         being crossed, and agent.linkProgress runs 0 to 1 — which \
+         is what a climb animation is driven by. nav.link(name, \
+         false) shuts it.",
+    );
+}
+
+/// Nav Area: a box that retags or blocks the walkable surface under it.
+fn nav_area_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::NavArea { half_extents, area, cost, blocks, enabled } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    if crate::responsive::check(ui, enabled, "this volume counts").changed() {
+        cmd.inspector_changed = true;
+    }
+    ui.small(
+        "Changes what the ground inside it means — either it costs \
+         more to cross, or it is not walkable at all.",
+    );
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("size");
+        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+            let mut full = half_extents[i] * 2.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut full)
+                        .speed(0.25)
+                        .range(0.1..=100000.0)
+                        .prefix(format!("{axis} ")),
+                )
+                .changed()
+            {
+                half_extents[i] = full * 0.5;
+                cmd.inspector_changed = true;
+            }
+        }
+    });
+    if crate::responsive::check(ui, blocks, "carve this out of the navmesh")
+        .on_hover_text(
+            "Nothing walks here, whatever it thinks of the ground. \
+             The answer to \"keep out of this room\" that does not \
+             involve an invisible wall nobody remembers building.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+    if !*blocks {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("area");
+            cmd.inspector_changed |=
+                ui.text_edit_singleline(area).changed();
+        })
+        .response
+        .on_hover_text(
+            "What this ground is called — water, mud, road, danger. \
+             The name is what scripts ask for, so two volumes with \
+             the same name are the same kind of ground.",
+        );
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=50.0)
+                    .logarithmic(true),
+                    "costs")
+            .on_hover_text(
+                "How expensive a metre of it is next to ordinary \
+                 ground. Above 1 is walked round when there is a way \
+                 round; below 1 is sought out, which is how a road \
+                 works.",
+            )
+            .changed();
+        ui.small(
+            "One character can disagree: nav.agent(node, { filter = \
+             { avoid = {\"water\"}, cost = { mud = 0.5 } } }).",
+        );
+    }
+    ui.separator();
+    ui.small(
+        "Bake the navmesh again after moving this — a volume is \
+         read when the bake runs, not while the game is playing.",
+    );
+}
+
+/// Light probes: the box, the grid, and the bake with what it costs.
+fn light_probes_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::LightProbes {
+        half_extents,
+        spacing,
+        enabled,
+        intensity,
+        bounces,
+        quality,
+        leak,
+        normal_bias,
+        exclude_layers,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    let gi = ctx.gi;
+    if crate::responsive::check(ui, enabled, "light this scene").changed() {
+        cmd.inspector_changed = true;
+        cmd.gi_changed = true;
+    }
+    ui.small(
+        "Baked bounce light. Inside this box the scene's flat ambient \
+         is replaced by what the surfaces around it actually reflect.",
+    );
+    ui.separator();
+
+    // ---- the box ------------------------------------
+    ui.horizontal_wrapped(|ui| {
+        ui.label("size");
+        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+            let mut full = half_extents[i] * 2.0;
+            let r = ui.add(
+                egui::DragValue::new(&mut full)
+                    .speed(0.25)
+                    .range(0.5..=4000.0)
+                    .prefix(format!("{axis} ")),
+            );
+            if r.changed() {
+                half_extents[i] = full * 0.5;
+                cmd.inspector_changed = true;
+                cmd.gi_changed = true;
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "The volume's full size in world units, before the node's \
+         scale. Move the node to move the box.",
+    );
+    if crate::responsive::slider(ui, egui::Slider::new(spacing, 0.25..=16.0)
+                .logarithmic(true),
+                "probe spacing")
+        .on_hover_text(
+            "World units between probes. This is the resolution of \
+             the bounce: it cannot represent a shadow sharper than \
+             one cell.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+        cmd.gi_changed = true;
+    }
+    let planned = gi.planned_count();
+    ui.small(format!(
+        "{}×{}×{} = {planned} probes  ·  {} renders per bounce",
+        gi.planned[0],
+        gi.planned[1],
+        gi.planned[2],
+        planned * 6
+    ));
+
+    // ---- the bake -----------------------------------
+    ui.separator();
+    if gi.baking {
+        ui.add(
+            egui::ProgressBar::new(gi.progress).text(format!(
+                "baking — bounce {}/{}  ·  {:.0}s",
+                gi.bounce, gi.bounces, gi.seconds
+            )),
+        );
+        if ui.button("✖  Cancel").clicked() {
+            cmd.gi_cancel = true;
+        }
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("☀  Bake")
+                .on_hover_text(
+                    "Render the scene from every probe and keep the \
+                     light. Saved next to the scene as a .fgi.",
+                )
+                .clicked()
+            {
+                cmd.gi_bake = true;
+            }
+            if gi.baked_probes > 0
+                && ui
+                    .button("🗑  Clear")
+                    .on_hover_text("Throw the bake away.")
+                    .clicked()
+            {
+                cmd.gi_clear = true;
+            }
+        });
+        if gi.baked_probes == 0 {
+            ui.small("no bake yet — this volume lights nothing.");
+        } else {
+            ui.small(format!(
+                "baked: {} probes, {} bounce{}",
+                gi.baked_probes,
+                gi.baked_bounces,
+                if gi.baked_bounces == 1 { "" } else { "s" }
+            ));
+        }
+        // Said plainly rather than by going dark: a
+        // volume you just resized is still lit by the
+        // old data, and that is a choice, not a bug.
+        if gi.stale {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 180, 90),
+                "⚠ the box changed since this was baked — \
+                 still using the old light",
+            );
+        }
+    }
+
+    // ---- how it is baked ----------------------------
+    ui.separator();
+    let mut b = *bounces;
+    if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4), "bounces")
+        .on_hover_text(
+            "1 is light coming off surfaces once — the difference \
+             between a black corner and a lit one. Each extra bounce \
+             re-renders every probe.",
+        )
+        .changed()
+    {
+        *bounces = b;
+        cmd.inspector_changed = true;
+    }
+    let mut q = *quality;
+    if crate::responsive::slider(ui, egui::Slider::new(&mut q, 8..=64)
+                .step_by(8.0),
+                "bake detail")
+        .on_hover_text(
+            "Pixels per cube face. Higher resolves small bright \
+             things — a lamp, a window — and does not change how \
+             bright the result is.",
+        )
+        .changed()
+    {
+        *quality = q;
+        cmd.inspector_changed = true;
+    }
+    let names: Vec<String> = ctx.layer_names.to_vec();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("skip layers");
+        egui::ComboBox::from_id_salt("gi_skip")
+            .width(crate::responsive::fit_here(ui, 220.0))
+            .wrap_mode(egui::TextWrapMode::Truncate)
+            .selected_text(if exclude_layers.is_empty() {
+                "none".to_string()
+            } else {
+                exclude_layers.join(", ")
+            })
+            .show_ui(ui, |ui| {
+                for n in &names {
+                    let mut on = exclude_layers.contains(n);
+                    if crate::responsive::check(ui, &mut on, n).changed() {
+                        if on {
+                            exclude_layers.push(n.clone());
+                        } else {
+                            exclude_layers.retain(|x| x != n);
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+    })
+    .response
+    .on_hover_text(
+        "Anything that moves — a character, a door, a lift — should \
+         not be baked into the light it happens to be standing in.",
+    );
+
+    // ---- how it is applied --------------------------
+    ui.separator();
+    if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "intensity")
+        .on_hover_text(
+            "1 is the light as measured. Past that is a look, not a \
+             mistake. Changing this does not need a re-bake.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+        cmd.gi_changed = true;
+    }
+    if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0), "leak rejection")
+        .on_hover_text(
+            "Throws away probes buried in geometry, so the lit room \
+             next door stops glowing through the wall. Costs some \
+             bounce in tight spaces. 0 = off.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+        cmd.gi_changed = true;
+    }
+    if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0),
+                "surface offset")
+        .on_hover_text(
+            "How far a surface steps along its own normal before \
+             looking the light up, in cells. Too little leaks at \
+             corners; too much drags light around them.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+        cmd.gi_changed = true;
+    }
+
+    // ---- looking at it ------------------------------
+    ui.separator();
+    let mut show_only = gi.show_only;
+    if crate::responsive::check(ui, &mut show_only, "show only the bounce")
+        .on_hover_text(
+            "Every direct light off, so what is left on screen is \
+             exactly what was baked. The fastest way to tell a dark \
+             bake from a dark scene.",
+        )
+        .changed()
+    {
+        cmd.gi_show_only = Some(show_only);
+    }
+    let mut show_probes = gi.show_probes;
+    if crate::responsive::check(ui, &mut show_probes, "show the probes")
+        .on_hover_text(
+            "Draw each probe in the colour it baked. A grid that is \
+             too coarse, or a row of probes buried in the floor, is \
+             invisible in the final picture and obvious here.",
+        )
+        .changed()
+    {
+        cmd.gi_show_probes = Some(show_probes);
+    }
+}
+
+/// Reflection probe: the room it captures and how it fades out.
+fn reflection_probe_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::ReflectionProbe { half_extents, enabled, intensity, fade } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    if crate::responsive::check(ui, enabled, "reflect this room").changed() {
+        cmd.inspector_changed = true;
+    }
+    ui.small(
+        "What reflective surfaces inside this box show when what \
+         they are reflecting is not on screen. Without one they show \
+         the sky — daylight, indoors, through the ceiling.",
+    );
+    ui.separator();
+
+    // ---- the box ------------------------------------
+    ui.horizontal_wrapped(|ui| {
+        ui.label("size");
+        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+            let mut full = half_extents[i] * 2.0;
+            let r = ui.add(
+                egui::DragValue::new(&mut full)
+                    .speed(0.25)
+                    .range(0.5..=4000.0)
+                    .prefix(format!("{axis} ")),
+            );
+            if r.changed() {
+                half_extents[i] = full * 0.5;
+                cmd.inspector_changed = true;
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "The room, in world units. This decides which surfaces the \
+         probe covers AND where the reflection lands: sized to the \
+         walls, a reflected wall sits on the wall instead of \
+         sliding as the camera moves.",
+    );
+    if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0), "edge fade")
+        .on_hover_text(
+            "How far outside the box the room's reflection gives way \
+             to the sky, in world units. A doorway wants a metre or \
+             two so walking out does not switch in one step.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+    if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "strength")
+        .on_hover_text(
+            "How much of the capture to apply. 1 is what was \
+             measured; this is the artistic knob for a room that \
+             reads too busy or too dim in the reflections.",
+        )
+        .changed()
+    {
+        cmd.inspector_changed = true;
+    }
+
+    // ---- the capture --------------------------------
+    ui.separator();
+    ui.small(
+        "Captured when the scene loads and whenever the probe is \
+         moved or resized. Nothing is saved to disk, so a capture \
+         cannot go stale in a file.",
+    );
+    if ui
+        .button("recapture")
+        .on_hover_text(
+            "Take it again now — after relighting the room, or \
+             moving the furniture in it.",
+        )
+        .clicked()
+    {
+        cmd.recapture_probes = true;
+    }
+}
+
+/// Post process: tonemap, bloom, vignette, AO, grading, and the .flsl passes.
+fn post_process_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
+    let Matter::PostProcess {
+        tonemap,
+        enabled,
+        bloom,
+        bloom_threshold,
+        bloom_intensity,
+        vignette,
+        vignette_strength,
+        vignette_radius,
+        ao,
+        ao_strength,
+        ao_radius,
+        posterize_bands,
+        posterize_dither,
+        posterize_chroma,
+        exposure,
+        contrast,
+        saturation,
+        temperature,
+        tint,
+        lift,
+        grade_gamma,
+        gain,
+        aberration,
+        distortion,
+        sharpen,
+        denoise,
+        grain,
+        grain_size,
+        dof_focus,
+        dof_range,
+        dof_near_range,
+        dof_max_blur,
+        dof_blades,
+        dof_blade_rotation,
+        dof_highlight,
+        dof_quality,
+        motion_blur,
+        motion_samples,
+        dof_show_focus,
+        dof_focus_node,
+        screen_shaders,
+    } = m else { return };
+    let cmd = &mut *ctx.cmd;
+    use floptle_core::AoMode;
+    ui.label("post processing");
+    ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
+    cmd.inspector_changed |= crate::responsive::check(ui, enabled, "enabled")
+        .on_hover_text("master switch for the whole chain")
+        .changed();
+    ui.add_enabled_ui(*enabled, |ui| {
+        ui.separator();
+        ui.label("Ambient occlusion");
+        ui.horizontal_wrapped(|ui| {
+            let mut m = *ao;
+            if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
+                m = AoMode::Off;
+            }
+            if ui
+                .selectable_label(m == AoMode::ScreenSpace, "Screen space")
+                .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
+                .clicked()
+            {
+                m = AoMode::ScreenSpace;
+            }
+            if ui
+                .selectable_label(m == AoMode::Sdf, "SDF (true)")
+                .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
+                .clicked()
+            {
+                m = AoMode::Sdf;
+            }
+            if m != *ao {
+                *ao = m;
+                cmd.inspector_changed = true;
+            }
+        });
+        if *ao != AoMode::Off {
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
+                .changed();
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
+                .changed();
+        }
+        ui.separator();
+        cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
+        if *bloom {
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
+                .changed();
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
+                .changed();
+        }
+        cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
+        if *vignette {
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
+                .changed();
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
+                .changed();
+        }
+        // Posterize — crush the ART to a limited palette. It runs
+        // before the 2D light rather than at the end of the frame,
+        // which is why the tooltip says palette.
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Posterize")
+                .on_hover_text(
+                    "reduce your ART to a fixed number of levels per channel — a \
+                     limited-palette / banded retro look. It quantises the palette \
+                     only: 2D lights, the vignette, bloom and ambient occlusion are \
+                     applied on top and stay smooth.",
+                );
+            let plabel = match *posterize_bands {
+                0 | 1 => "off".to_string(),
+                n => format!("{n} levels"),
+            };
+            egui::ComboBox::from_id_salt("posterize_bands")
+                .width(crate::responsive::fit_here(ui, 220.0))
+                .wrap_mode(egui::TextWrapMode::Truncate)
+                .selected_text(plabel)
+                .show_ui(ui, |ui| {
+                    cmd.inspector_changed |=
+                        ui.selectable_value(posterize_bands, 0, "off").clicked();
+                    for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
+                        cmd.inspector_changed |= ui
+                            .selectable_value(posterize_bands, nb, format!("{nb} levels"))
+                            .clicked();
+                    }
+                });
+        });
+        ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
+            cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
+                .on_hover_text(
+                    "ordered dither, so a gradient in your ART stipples between two \
+                     levels instead of hard-stepping — a painted sky, a soft-edged \
+                     sprite. It has no effect on lighting.",
+                )
+                .changed();
+            cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
+                .on_hover_text(
+                    "off — the default — steps each colour channel on its own, which is a real \
+                     look and what every project built before now is made of. It is often not \
+                     what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
+                     boundary at a different value, so it steps through colours nobody chose. \
+                     On, the step happens once to brightness and the colour rides along — a grey \
+                     pixel comes out identical either way.",
+                )
+                .changed();
+        });
+    });
+
+    // ---- the look chain -------------------------
+    //
+    // One collapsing section per effect, each with
+    // its own reset, because a grade you cannot get
+    // back to neutral is a grade you stop touching.
+    // Every heading says what off is, so "is this
+    // doing anything" is answerable at a glance.
+    let acc = egui::Color32::from_rgb(255, 200, 80);
+
+    // Tonemap first, and on its own, because it is
+    // not one effect among the others: it is how the
+    // scene's light reaches the display at all. The
+    // grade below it is working in the range this
+    // choice defines.
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("tonemap").on_hover_text(
+            "The scene is lit in real, unbounded light — a lamp can \
+             be ten times brighter than white. A screen stops at \
+             white. This chooses how to get from one to the other.\n\n\
+             Doing nothing is a choice too: each colour channel \
+             clips on its own, so a very bright colour slides toward \
+             white through whatever hue clips last. That is why \
+             blown highlights can go strange colours.",
+        );
+        let names = [
+            ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
+            ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
+            ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
+            ("AgX", "AgX — bright colours whiten the way film does, instead of \
+                     hitting a flat ceiling of their own hue"),
+        ];
+        let cur = (*tonemap as usize).min(3);
+        egui::ComboBox::from_id_salt("pp_tonemap")
+            .width(crate::responsive::fit_here(ui, 220.0))
+            .wrap_mode(egui::TextWrapMode::Truncate)
+            .selected_text(names[cur].0)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for (i, (short, long)) in names.iter().enumerate() {
+                    if ui
+                        .selectable_label(cur == i, *short)
+                        .on_hover_text(*long)
+                        .clicked()
+                    {
+                        *tonemap = i as u32;
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+    });
+    if *tonemap == 0 {
+        ui.small(
+            egui::RichText::new(
+                "anything brighter than white is clipped — try AgX \
+                 if bright lights look like flat blocks of colour",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+    }
+
+    // ---- the scene's own screen shaders ---------
+    //
+    // Placed after the tonemap and before the grade
+    // because that is where they run, and a panel
+    // that lists effects in an order the frame does
+    // not follow is a panel that teaches the wrong
+    // thing.
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("screen shaders");
+        ui.small(
+            egui::RichText::new(format!(
+                "{} pass{}",
+                screen_shaders.len(),
+                if screen_shaders.len() == 1 { "" } else { "es" }
+            ))
+            .color(ui.visuals().weak_text_color()),
+        );
+    });
+    ui.small(
+        "full-screen passes you wrote — a `stage post` .flsl gets the \
+         finished frame plus its depth and normals, and returns a new \
+         colour. They run in this order, over the picture, before the \
+         grade and the lens below.",
+    );
+    {
+        let mut remove: Option<usize> = None;
+        let mut swap: Option<(usize, usize)> = None;
+        let n = screen_shaders.len();
+        for (i, pass) in screen_shaders.iter_mut().enumerate() {
+            let name = Path::new(&pass.shader)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| pass.shader.clone());
+            let entry = ctx.post_flsl_cache.get(&pass.shader);
+            let err = entry.and_then(|e| e.error.as_deref());
+            crate::responsive::group(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
+                        .on_hover_text(
+                            "off keeps the pass and its settings \
+                             without running it",
+                        )
+                        .changed();
+                    ui.label(egui::RichText::new(&name).strong());
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui
+                                .button("✖")
+                                .on_hover_text("remove this pass")
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                            // Straight to the graph, the
+                            // same door a Material's
+                            // shader row opens — a pass
+                            // you can add and tune but
+                            // not open is a pass you
+                            // hunt for in the Assets
+                            // panel every time.
+                            if ui
+                                .button("◈")
+                                .on_hover_text("edit this shader in the ◈ Shaders graph")
+                                .clicked()
+                            {
+                                cmd.open_shader_graph =
+                                    Some(pass.shader.clone());
+                            }
+                            if ui
+                                .add_enabled(
+                                    i + 1 < n,
+                                    egui::Button::new("▼"),
+                                )
+                                .on_hover_text("run later")
+                                .clicked()
+                            {
+                                swap = Some((i, i + 1));
+                            }
+                            if ui
+                                .add_enabled(i > 0, egui::Button::new("▲"))
+                                .on_hover_text("run earlier")
+                                .clicked()
+                            {
+                                swap = Some((i, i - 1));
+                            }
+                        },
+                    );
+                });
+                match (err, entry.and_then(|e| e.compiled.as_ref())) {
+                    (Some(msg), _) => {
+                        ui.small(
+                            egui::RichText::new(format!("◈ {msg}"))
+                                .color(egui::Color32::from_rgb(
+                                    255, 120, 110,
+                                )),
+                        );
+                    }
+                    (None, None) => {
+                        ui.small("(compiling — its knobs appear here)");
+                    }
+                    (None, Some(_)) => {}
+                }
+                // Knobs from the compiled shader's own schema. Shown
+                // even when the newest edit failed, because they are
+                // still driving the last good pipeline.
+                if let Some((compiled, _)) =
+                    entry.and_then(|e| e.compiled.as_ref())
+                    && !compiled.uniforms.is_empty()
+                {
+                    crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
+                            if shader_uniform_rows(
+                                ui,
+                                &compiled.uniforms,
+                                &mut pass.params,
+                            ) {
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                    if !pass.params.is_empty()
+                        && ui
+                            .button("Reset knobs")
+                            .on_hover_text(
+                                "back to the shader's own defaults",
+                            )
+                            .clicked()
+                    {
+                        pass.params.clear();
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+        }
+        if let Some((a, b)) = swap {
+            screen_shaders.swap(a, b);
+            cmd.inspector_changed = true;
+        }
+        if let Some(i) = remove {
+            screen_shaders.remove(i);
+            cmd.inspector_changed = true;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if let Some(pick) = crate::ui_widgets::asset_picker(
+                ui,
+                egui::Id::new("pp-add-screen-shader"),
+                ctx.project_root,
+                "+ Add screen shader",
+                None,
+                ctx.asset_tree,
+                crate::assets::is_shader,
+                200.0,
+            ) && let Some(path) = pick
+            {
+                screen_shaders
+                    .push(floptle_core::ScreenShader::new(path));
+                cmd.inspector_changed = true;
+            }
+            ui.small(
+                egui::RichText::new(
+                    "try shaders/examples/inkOutline.flsl",
+                )
+                .color(ui.visuals().weak_text_color()),
+            );
+        });
+    }
+
+    ui.separator();
+    ui.label("colour grade");
+    {
+        let neutral = *exposure == 0.0
+            && *contrast == 1.0
+            && *saturation == 1.0
+            && *temperature == 0.0
+            && *tint == 0.0
+            && *lift == 0.0
+            && *grade_gamma == 1.0
+            && *gain == 1.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.small(if neutral {
+                "neutral — no pass runs"
+            } else {
+                "grading"
+            });
+            if !neutral && ui.small_button("reset").clicked() {
+                *exposure = 0.0;
+                *contrast = 1.0;
+                *saturation = 1.0;
+                *temperature = 0.0;
+                *tint = 0.0;
+                *lift = 0.0;
+                *grade_gamma = 1.0;
+                *gain = 1.0;
+                cmd.inspector_changed = true;
+            }
+        });
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
+            .on_hover_text(
+                "in STOPS: +1 is twice the light. The unit a camera and a \
+                 renderer already share — it keeps meaning the same thing \
+                 when the scene's brightness changes.",
+            )
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
+            .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
+            .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
+            .on_hover_text("cool (−) ↔ warm (+)")
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
+            .on_hover_text(
+                "green (−) ↔ magenta (+) — the axis temperature can't reach, \
+                 and the one that fixes a scene that has gone subtly sickly",
+            )
+            .changed();
+        ui.small("shadows / midtones / highlights");
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
+            .on_hover_text("raise or crush the black floor — a lifted black is the film look")
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
+            .on_hover_text("bend the midtones without moving black or white")
+            .changed();
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
+            .on_hover_text("scale the highlights")
+            .changed();
+    }
+
+    ui.separator();
+    ui.label("lens");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
+        .on_hover_text(
+            "red and blue drift apart toward the edges, the way real glass \
+             disperses. 0 = off.",
+        )
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
+        .on_hover_text(
+            "positive barrels (fisheye), negative pincushions. The corners go \
+             BLACK rather than smearing the edge pixel outward — a bent frame \
+             genuinely has no picture out there.",
+        )
+        .changed();
+    if *aberration == 0.0 && *distortion == 0.0 {
+        ui.small("both at 0 — no lens pass runs");
+    }
+
+    ui.separator();
+    ui.label("detail");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
+        .on_hover_text(
+            "unsharp mask, clamped to the local neighbourhood so edges get \
+             crisper without growing a bright halo. 0 = off.",
+        )
+        .changed();
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
+        .on_hover_text(
+            "bilateral: averages within a flat region and refuses to average \
+             across an edge, which is the difference between removing noise \
+             and removing detail. Runs FIRST in the chain, on the raw frame. \
+             0 = off.",
+        )
+        .changed();
+    if *sharpen > 0.0 && *denoise > 0.0 {
+        ui.small("denoise runs first, then sharpen — the useful order");
+    }
+
+    ui.separator();
+    ui.label("film grain");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
+        .on_hover_text(
+            "multiplicative and strongest in the MIDTONES, the way emulsion \
+             responds — additive grain lifts every shadow into grey mud, \
+             which is the tell of a cheap filter. Applied last, so nothing \
+             downstream turns it into crawling static. 0 = off.",
+        )
+        .changed();
+    ui.add_enabled_ui(*grain > 0.0, |ui| {
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
+            .on_hover_text(
+                "grain cell in pixels. 1 is per-pixel — which under a retro \
+                 upscale is invisible, then suddenly a flat shimmer. 2–4 is \
+                 what reads as film.",
+            )
+            .changed();
+    });
+
+    ui.separator();
+    ui.label("depth of field");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
+                .logarithmic(true),
+                "focus distance")
+        .on_hover_text("world units from the camera that are sharp. 0 = off.")
+        .changed();
+    // Focus on a node instead of a number: the focus
+    // distance becomes the camera's distance to it,
+    // every frame. This is what a rack focus is made
+    // of, and by hand it means a script measuring a
+    // distance the engine already knows.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("follow");
+        let cur = dof_focus_node.clone();
+        let label = if cur.is_empty() {
+            "(a fixed distance)".to_string()
+        } else {
+            cur.clone()
+        };
+        egui::ComboBox::from_id_salt("pp_dof_follow")
+            .width(crate::responsive::fit_here(ui, 220.0))
+            .wrap_mode(egui::TextWrapMode::Truncate)
+            .selected_text(label)
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(cur.is_empty(), "(a fixed distance)")
+                    .clicked()
+                    && !cur.is_empty()
+                {
+                    dof_focus_node.clear();
+                    cmd.inspector_changed = true;
+                }
+                for (_, name) in ctx.entity_names {
+                    if ui.selectable_label(cur == *name, name).clicked()
+                        && cur != *name
+                    {
+                        *dof_focus_node = name.clone();
+                        cmd.inspector_changed = true;
+                    }
+                }
+            });
+    })
+    .response
+    .on_hover_text(
+        "keep this node in focus — the focus distance becomes the \
+         camera's distance to it, measured every frame and per \
+         viewport, so the Scene view shows its own focus while you \
+         fly around. A name that matches nothing falls back to the \
+         slider above rather than to zero.",
+    );
+    if !dof_focus_node.is_empty()
+        && !ctx.entity_names.iter().any(|(_, n)| n == dof_focus_node)
+    {
+        ui.colored_label(
+            acc,
+            format!(
+                "⚠ no node named \"{dof_focus_node}\" in this scene — \
+                 using the focus distance above"
+            ),
+        );
+    }
+    ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
+            .on_hover_text("how far BEYOND the focus distance stays sharp")
+            .changed();
+        let mut near = *dof_near_range;
+        let auto = near <= 0.0;
+        if auto {
+            near = *dof_range * 0.5;
+        }
+        let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
+            .on_hover_text(
+                "how far IN FRONT of it stays sharp. A lens goes soft \
+                 on the near side much sooner than on the far side, \
+                 which is why these are two numbers: a portrait wants \
+                 the foreground gone and the background readable.",
+            );
+        if r.changed() {
+            *dof_near_range = near;
+            cmd.inspector_changed = true;
+        }
+        if auto {
+            ui.small(
+                egui::RichText::new("near range is following the far one (half of it)")
+                    .color(ui.visuals().weak_text_color()),
+            );
+        } else if ui
+            .small_button("link to far range")
+            .on_hover_text("back to half the far range")
+            .clicked()
+        {
+            *dof_near_range = 0.0;
+            cmd.inspector_changed = true;
+        }
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
+            .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
+            .changed();
+
+        ui.add_space(3.0);
+        ui.small("the iris");
+        let mut blades = *dof_blades as f32;
+        let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
+                    .step_by(1.0),
+                    "blades")
+            .on_hover_text(
+                "0 is a round iris. 3 and up gives the polygonal bokeh \
+                 of a real lens — six is the classic hexagon.",
+            );
+        if r.changed() {
+            *dof_blades = blades.max(0.0) as u32;
+            cmd.inspector_changed = true;
+        }
+        if *dof_blades >= 3 {
+            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
+                        "blade angle°")
+                .on_hover_text("turn the polygon")
+                .changed();
+        }
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
+            .on_hover_text(
+                "how much brighter-than-white pixels dominate the \
+                 blur. 0 averages them away into grey; turn it up and \
+                 a specular glint spreads into a visible disc. It \
+                 reads the scene's real light, so it needs something \
+                 genuinely brighter than white to work on.",
+            )
+            .changed();
+        let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
+        let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
+            .on_hover_text(
+                "taps in the blur. More is smoother bokeh and costs \
+                 linearly more; fewer is the chunky look, on purpose.",
+            );
+        if r.changed() {
+            *dof_quality = q.round().clamp(4.0, 64.0) as u32;
+            cmd.inspector_changed = true;
+        }
+        cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
+            .on_hover_text(
+                "a tuning view: cool where the near side is going \
+                 soft, warm where the far side is, the picture itself \
+                 where it is sharp. Which half of the band a pixel is \
+                 on is the one thing you cannot read off a blurred \
+                 frame.",
+            )
+            .changed();
+    });
+    if *dof_show_focus {
+        ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
+    }
+    if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
+        && *dof_max_blur <= 0.0
+    {
+        ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
+    }
+
+    // ---- motion blur --------------------------------
+    ui.separator();
+    ui.strong("≈ Motion blur");
+    ui.small("shows in the Game view");
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
+        .on_hover_text(
+            "How much of the frame's camera motion is smeared. 0 is off. \
+             0.5 is the 180° shutter a film camera has and is the one \
+             that reads as footage; 1 leaves the shutter open for the \
+             whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
+             motion — a pan, a whip, a dolly, a roll. Something crossing \
+             a locked-off shot stays sharp.\n\nThe Scene view is left \
+             alone deliberately: you have to be able to place things \
+             while the camera is moving.",
+        )
+        .changed();
+    if *motion_blur > 0.0 {
+        let mut taps =
+            if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
+        if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
+            .on_hover_text(
+                "Taps along the streak. Too few and a fast pan bands \
+                 into separate copies of the picture.",
+            )
+            .changed()
+        {
+            *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
+            cmd.inspector_changed = true;
+        }
+    }
+}
+
 impl EditorTabViewer<'_> {
     /// The Inspector for a selected armature bone: shows which mesh it belongs to and
     /// edits its local transform. Editing auto-keys the bone into the open animator clip
@@ -2618,6 +4964,21 @@ impl EditorTabViewer<'_> {
                 let mat = world.get::<Material>(e);
                 (mat.map(|m| m.sheet()), mat.is_some_and(|m| m.texture.is_some()))
             };
+            let mut ctx = TypeCtx {
+                cmd,
+                e,
+                sprite_facts,
+                asset_tree: self.asset_tree,
+                project_root: self.project_root,
+                cam_preview: self.cam_preview,
+                light_counts: self.light_counts,
+                sky_uniforms: self.sky_uniforms,
+                nav: &self.nav,
+                gi: self.gi,
+                layer_names: self.layer_names,
+                entity_names: self.entity_names,
+                post_flsl_cache: self.post_flsl_cache,
+            };
             if let Some(m) = world.get_mut::<Matter>(e) {
                 match m {
                     Matter::Primitive { shape, color } => {
@@ -2649,69 +5010,7 @@ impl EditorTabViewer<'_> {
                     // Lua — a room is re-dressed per floor — so the
                     // Inspector states the shape and the one thing that
                     // is easy to get wrong: the sheet is the material's.
-                    Matter::Tilemap { cols, rows, tile, data, tileset } => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("grid");
-                            cmd.inspector_changed |= ui
-                                .add(egui::DragValue::new(cols).speed(1.0).prefix("cols ").range(0..=1024))
-                                .changed();
-                            cmd.inspector_changed |= ui
-                                .add(egui::DragValue::new(rows).speed(1.0).prefix("rows ").range(0..=1024))
-                                .changed();
-                        });
-                        cmd.inspector_changed |= ui
-                            .add(egui::DragValue::new(tile).speed(0.01).prefix("tile ").range(0.001..=64.0))
-                            .on_hover_text("world size of one tile's edge")
-                            .changed();
-                        let want = (*cols as usize) * (*rows as usize);
-                        let placed = data
-                            .iter()
-                            .filter(|&&p| p != floptle_core::EMPTY_TILE)
-                            .count();
-                        ui.small(format!("{placed} of {want} squares placed"));
-                        if data.len() != want && ui.button("resize to fit").clicked() {
-                            data.resize(want, floptle_core::EMPTY_TILE);
-                            cmd.inspector_changed = true;
-                        }
-                        // The tileset — what says whether these tiles collide,
-                        // what they are tagged, and how they autotile. Read-only
-                        // here on purpose: attaching one is a ◫ Tiles operation
-                        // (it needs the sheet's dimensions to make sense of), and
-                        // a free-text path field is a way to typo a level solid.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("tileset");
-                            if tileset.is_empty() {
-                                // Named as the two features somebody would
-                                // go looking for, and coloured, because
-                                // this was reported twice as the engine
-                                // not having either of them.
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(255, 200, 80),
-                                    "none",
-                                );
-                            } else {
-                                ui.small(
-                                    floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
-                                );
-                            }
-                            if ui.small_button("◫ Tiles").clicked() {
-                                cmd.focus_tiles = true;
-                            }
-                        });
-                        if tileset.is_empty() {
-                            ui.small(
-                                "Without one, these tiles collide with nothing and \
-                                 cannot autotile — both are per-tile facts and live \
-                                 in a tileset. Make one in ◫ Tiles; it takes its \
-                                 sheet from this node's Material.",
-                            );
-                        }
-                        ui.small(
-                            "the sheet comes from this node's Material (texture + \
-                             sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \
-                             it from a script: node:setTilemap{...} then tm:set(x, y, cell).",
-                        );
-                    }
+                    Matter::Tilemap { .. } => tilemap_type_ui(ui, &mut ctx, m),
                     Matter::SpriteBatch { size } => {
                         cmd.inspector_changed |= ui
                             .add(egui::DragValue::new(size).speed(0.01).prefix("sprite size ").range(0.001..=64.0))
@@ -2724,145 +5023,7 @@ impl EditorTabViewer<'_> {
                              cannot give it.",
                         );
                     }
-                    Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
-                        // `ppu` measures the texture, so with no texture
-                        // there is nothing to measure and the sprite
-                        // falls back to `size` — a field this mode hides.
-                        // Silently, that is a headline control that does
-                        // nothing on a node somebody just created.
-                        // (Read before the Matter borrow — see `sprite_facts`.)
-                        let (sheet, has_tex) = sprite_facts;
-                        if !has_tex {
-                            crate::responsive::para(
-                                ui,
-                                egui::RichText::new(
-                                    "no texture yet — give this node a Material with one, and the sheet's cols/rows in its import settings",
-                                )
-                                .weak()
-                                .small(),
-                            );
-                        }
-                        // Size, two ways, and only one of them live at a
-                        // time — a pixels-per-unit sprite takes its size
-                        // from the image, so leaving the world-size field
-                        // editable beside it would offer a number that
-                        // does nothing.
-                        let mut by_px = *ppu > 0.0;
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("size from");
-                            for (on, label, hover) in [
-                                (true, "pixels", "the image decides: a 32x32 cell at 32 pixels per unit is one unit across. The number a pixel artist already has."),
-                                (false, "world units", "you decide: an edge length, whatever the image is."),
-                            ] {
-                                if ui
-                                    .selectable_label(by_px == on, label)
-                                    .on_hover_text(hover)
-                                    .clicked()
-                                    && by_px != on
-                                {
-                                    by_px = on;
-                                    // Leaving a remembered `ppu` behind
-                                    // would make "world units" silently
-                                    // revert next time it was touched.
-                                    *ppu = if on { 32.0 } else { 0.0 };
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        });
-                        if by_px {
-                            cmd.inspector_changed |= ui
-                                .add(
-                                    egui::DragValue::new(ppu)
-                                        .speed(1.0)
-                                        .range(1.0..=1024.0)
-                                        .prefix("pixels per unit "),
-                                )
-                                .on_hover_text(
-                                    "measured against ONE CELL of the sheet, not the \
-                                     whole image — so slicing a sheet finer does not \
-                                     resize every sprite on it",
-                                )
-                                .changed();
-                        } else {
-                            cmd.inspector_changed |= ui
-                                .add(
-                                    egui::DragValue::new(size)
-                                        .speed(0.01)
-                                        .range(0.001..=1024.0)
-                                        .prefix("size "),
-                                )
-                                .on_hover_text("world edge length")
-                                .changed();
-                        }
-                        let cells = sheet.map(|(c, r)| c.max(1) * r.max(1)).unwrap_or(1);
-                        // Labelled, because it was a bare number box
-                        // under "pixels per unit" — and the Material
-                        // section below has a whole grid of cells that
-                        // looks far more like the control. They are the
-                        // same value; this one is the number.
-                        cmd.inspector_changed |= ui
-                            .add(
-                                egui::DragValue::new(cell)
-                                    .speed(1)
-                                    .prefix("cell ")
-                                    .range(0..=cells.saturating_sub(1)),
-                            )
-                            .on_hover_text(if cells > 1 {
-                                "which cell of the Material's sheet, row-major from the \
-                                 top-left"
-                            } else {
-                                "this Material's texture is not sliced into a sheet, so \
-                                 there is only one cell — set cols/rows in the texture's \
-                                 import settings"
-                            })
-                            .changed();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("flip");
-                            cmd.inspector_changed |=
-                                crate::responsive::check(ui, flip_x, "x").changed();
-                            cmd.inspector_changed |=
-                                crate::responsive::check(ui, flip_y, "y").changed();
-                            crate::responsive::para(
-                                ui,
-                                egui::RichText::new("mirrors the picture, not the node")
-                                    .weak()
-                                    .small(),
-                            );
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("pivot");
-                            for (i, axis) in ["x ", "y "].iter().enumerate() {
-                                cmd.inspector_changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut pivot[i])
-                                            .speed(0.01)
-                                            .range(-2.0..=3.0)
-                                            .prefix(*axis),
-                                    )
-                                    .on_hover_text(
-                                        "where the node's origin sits in the sprite, \
-                                         0..1 from the bottom-left; 0.5, 0.5 is the \
-                                         centre. Outside 0..1 is allowed and puts the \
-                                         origin off the picture entirely, which is \
-                                         occasionally what a hand-drawn rig wants.",
-                                    )
-                                    .changed();
-                            }
-                            if ui
-                                .small_button("feet")
-                                .on_hover_text(
-                                    "0.5, 0 — the origin at the bottom of the sprite. \
-                                     What a Y-sorted character wants: sorting reads \
-                                     the node's Y, and a centred origin sorts by a \
-                                     point floating at the character's waist.",
-                                )
-                                .clicked()
-                            {
-                                *pivot = [0.5, 0.0];
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                    }
+                    Matter::Sprite { .. } => sprite_type_ui(ui, &mut ctx, m),
                     Matter::FieldShape { radius } => {
                         cmd.inspector_changed |= ui
                             .add(egui::DragValue::new(radius).speed(0.02).prefix("bounds radius ").range(0.05..=200.0))
@@ -2966,335 +5127,8 @@ impl EditorTabViewer<'_> {
                         });
                         ui.small("takes effect on the next Play");
                     }
-                    Matter::Camera {
-                        fov_y,
-                        active,
-                        target,
-                        cull_mask,
-                        target_w,
-                        target_h,
-                        target_hz,
-                        ortho,
-                        ortho_height,
-                    } => {
-                        ui.label("camera");
-                        ui.small("a viewpoint — play mode renders from the active camera");
-                        // Live preview of what this camera sees.
-                        if let Some(tex) = self.cam_preview {
-                            let w = ui.available_width().min(300.0);
-                            let size = egui::vec2(w, w * 9.0 / 16.0);
-                            ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
-                            ui.small("preview — what this camera sees");
-                        }
-                        // Perspective or orthographic. The two knobs are
-                        // exclusive and only the live one is shown —
-                        // greying out the other would still invite
-                        // dragging a number that does nothing.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("projection").on_hover_text(
-                                "orthographic draws everything at the same scale at \
-                                 every distance — what a 2D, isometric or strategy \
-                                 camera wants. Perspective is the 3D default.",
-                            );
-                            for (label, want) in
-                                [("perspective", false), ("orthographic", true)]
-                            {
-                                if ui.selectable_label(*ortho == want, label).clicked()
-                                    && *ortho != want
-                                {
-                                    *ortho = want;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        });
-                        if *ortho {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("height").on_hover_text(
-                                    "how many world units the view covers top to \
-                                     bottom. With 1-unit tiles this is how many tiles \
-                                     tall the shot is; the width follows the aspect.",
-                                );
-                                let mut h = *ortho_height;
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut h)
-                                            .speed(0.1)
-                                            .range(0.1..=1000.0)
-                                            .suffix(" units"),
-                                    )
-                                    .changed()
-                                {
-                                    *ortho_height = Matter::clamp_ortho_height(h);
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                        } else {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("field of view");
-                                let mut deg = fov_y.to_degrees();
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
-                                    *fov_y = deg.to_radians();
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                        }
-                        // A1: render-target name — a live texture any material
-                        // or UI image can wear as `rt:<name>`.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("target").on_hover_text(
-                                "render this camera into a live texture every frame; \
-                                 use it as texture \"rt:<name>\" on a material or UI \
-                                 image — cockpit screens, monitors, mirrors",
-                            );
-                            if ui.text_edit_singleline(target).changed() {
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        if !target.is_empty() {
-                            ui.small(format!("live texture: rt:{target}"));
-                            // Size + refresh rate: a minimap is not worth a
-                            // full-rate 480×270.
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("size").on_hover_text(
-                                    "the target texture's pixel size — smaller is \
-                                     cheaper, and a screen a few metres away does \
-                                     not need many",
-                                );
-                                let mut w = *target_w as i32;
-                                let mut h = *target_h as i32;
-                                let lo = Matter::TARGET_MIN as i32;
-                                let hi = Matter::TARGET_MAX as i32;
-                                let cw = ui.add(egui::DragValue::new(&mut w).range(lo..=hi));
-                                ui.label("×");
-                                let ch = ui.add(egui::DragValue::new(&mut h).range(lo..=hi));
-                                if cw.changed() || ch.changed() {
-                                    *target_w = w as u32;
-                                    *target_h = h as u32;
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("refresh").on_hover_text(
-                                    "how often the target redraws, in Hz. 0 = every \
-                                     frame. A 10 Hz minimap costs a sixth of a 60 Hz one.",
-                                );
-                                let mut hz = *target_hz;
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut hz)
-                                            .range(0.0..=240.0)
-                                            .speed(0.5),
-                                    )
-                                    .changed()
-                                {
-                                    *target_hz = hz.max(0.0);
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(if *target_hz <= 0.0 {
-                                    "every frame".to_string()
-                                } else {
-                                    format!("{:.0} Hz", *target_hz)
-                                });
-                            });
-                        }
-                        // Per-layer cull checkboxes (bit i = project layer i).
-                        let label = if *cull_mask == u32::MAX {
-                            "renders: all layers".to_string()
-                        } else {
-                            format!(
-                                "renders: {}/{} layers",
-                                cull_mask.count_ones().min(self.layer_names.len() as u32),
-                                self.layer_names.len()
-                            )
-                        };
-                        ui.menu_button(label, |ui| {
-                            for (i, name) in self.layer_names.iter().enumerate() {
-                                let mut on = (*cull_mask >> i) & 1 == 1;
-                                if crate::responsive::check(ui, &mut on, name).changed() {
-                                    *cull_mask ^= 1 << i;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                            if ui.small_button("all").clicked() {
-                                *cull_mask = u32::MAX;
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        if *active {
-                            ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
-                        } else if ui.button("⌖ Make active camera").clicked() {
-                            cmd.set_active_camera = Some(e);
-                        }
-                        if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
-                            cmd.camera_from_view = Some(e);
-                        }
-                    }
-                    Matter::PointLight {
-                        color,
-                        intensity,
-                        range,
-                        shape,
-                        shadows,
-                        spot_angle,
-                        spot_softness,
-                    } => {
-                        use floptle_core::LightShape as LS;
-                        let aimed = floptle_core::is_spot(*spot_angle);
-                        ui.label(if aimed { "spot light" } else { "light" });
-                        ui.small("position and facing come from the transform below");
-                        // **Where this scene stands against the cap**.
-                        // Naming the sixteen is the
-                        // easy half and it is the half that does not
-                        // help: "twelve, plus whatever the room has" is
-                        // exactly the arithmetic that crosses it, and a
-                        // number that only appears in the notes is one
-                        // nobody reads at the moment it matters. The
-                        // live count is the half that does.
-                        {
-                            let (msg, warn) = light_slot_line(self.light_counts);
-                            let r = if warn {
-                                ui.colored_label(egui::Color32::from_rgb(220, 170, 90), msg)
-                            } else {
-                                ui.small(msg)
-                            };
-                            r.on_hover_text(
-                                "sixteen lights reach the shader at once, across the \
-                                 whole scene — 3D and 2D together. Past that the ones \
-                                 contributing most at the camera win and the rest are \
-                                 simply not drawn, which reads as \"my seventeenth \
-                                 torch does nothing\".\n\nA light at intensity 0 gives \
-                                 its slot back, which is how you pool them. The same \
-                                 two numbers are perf.counts().lights and \
-                                 .lightsDropped.",
-                            );
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("color");
-                            cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                        });
-                        cmd.inspector_changed |=
-                            crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
-                        cmd.inspector_changed |=
-                            crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
-                        cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
-                            .on_hover_text(
-                                "stop this lamp at the walls between it and what it lights, instead \
-                                 of shining through them. Per lamp, because it costs a march per lit \
-                                 pixel and most lights in a level have nothing to be blocked by. \
-                                 Shadows from what is ON SCREEN: a wall casts while it is in frame \
-                                 and stops when you look away from it. Quality and darkness are on \
-                                 the Lighting node.",
-                            )
-                            .changed();
-                        // Aiming it. Above the emitter section because
-                        // it is the bigger question — "does this lamp
-                        // light the room or one thing in it" changes
-                        // what every control under it means.
-                        ui.separator();
-                        let mut on = aimed;
-                        if crate::responsive::check(ui, &mut on, "aim it (spot)")
-                            .on_hover_text(
-                                "cone down the node's forward, the same axis a camera looks \
-                                 down — rotate the node to aim it. Off means the lamp lights \
-                                 everything around it, which is what it has always done.",
-                            )
-                            .changed()
-                        {
-                            // Turning it off parks the angle at omni and
-                            // keeps the softness, so switching a spot off
-                            // and on again gives back the same cone
-                            // rather than the default one.
-                            *spot_angle =
-                                if on { 45.0 } else { floptle_core::OMNI_ANGLE };
-                            cmd.inspector_changed = true;
-                        }
-                        if on {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
-                                        spot_angle,
-                                        floptle_core::MIN_SPOT_ANGLE
-                                            ..=floptle_core::OMNI_ANGLE - 0.5,
-                                    )
-                                    
-                                    .suffix("°"), "cone")
-                                .on_hover_text(
-                                    "the FULL angle, the number on a real fixture — 45° is a \
-                                     45° cone, not a 90° one",
-                                )
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0), "edge")
-                                .on_hover_text(
-                                    "how much of the cone is falloff. 0 is a hard circle; 1 \
-                                     fades from the middle out. A fraction of the cone, so \
-                                     widening the beam keeps the edge you gave it.",
-                                )
-                                .changed();
-                        }
-
-                        // The emitter. Switching shape keeps whatever
-                        // size the old one had where the two agree, so
-                        // trying rect against disk is one click and not
-                        // a re-measure.
-                        ui.separator();
-                        let old = *shape;
-                        let size = old.extent().max(0.25);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("emits from");
-                            let mut pick = |ui: &mut egui::Ui, label: &str, on: bool, make: LS| {
-                                if ui.selectable_label(on, label).clicked() && !on {
-                                    *shape = make;
-                                    cmd.inspector_changed = true;
-                                }
-                            };
-                            pick(ui, "point", matches!(old, LS::Point), LS::Point);
-                            pick(ui, "sphere", matches!(old, LS::Sphere { .. }), LS::Sphere { radius: size });
-                            pick(
-                                ui,
-                                "rect",
-                                matches!(old, LS::Rect { .. }),
-                                LS::Rect { width: size * 2.0, height: size * 2.0, two_sided: false },
-                            );
-                            pick(ui, "disk", matches!(old, LS::Disk { .. }), LS::Disk { radius: size, two_sided: false });
-                            pick(ui, "tube", matches!(old, LS::Tube { .. }), LS::Tube { length: size * 4.0, radius: size * 0.25 });
-                        });
-                        let drag = |ui: &mut egui::Ui, label: &str, v: &mut f32| -> bool {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(label);
-                                ui.add(egui::DragValue::new(v).speed(0.05).range(0.001..=200.0).suffix("m"))
-                                    .changed()
-                            })
-                            .inner
-                        };
-                        match shape {
-                            LS::Point => {
-                                ui.small(
-                                    "a dimensionless point — a hard highlight and a hard shadow edge, \
-                                     which is right for a bare bulb and wrong for a window",
-                                );
-                            }
-                            LS::Sphere { radius } => {
-                                cmd.inspector_changed |= drag(ui, "radius", radius);
-                                ui.small("a bulb with size: the highlight becomes a disc and the terminator softens");
-                            }
-                            LS::Rect { width, height, two_sided } => {
-                                cmd.inspector_changed |= drag(ui, "width", width);
-                                cmd.inspector_changed |= drag(ui, "height", height);
-                                cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways")
-                                    .on_hover_text("off = a window, on = a floating panel that glows from both faces")
-                                    .changed();
-                                ui.small("faces the node's forward — rotate the node to aim it");
-                            }
-                            LS::Disk { radius, two_sided } => {
-                                cmd.inspector_changed |= drag(ui, "radius", radius);
-                                cmd.inspector_changed |= crate::responsive::check(ui, two_sided, "lights both ways").changed();
-                                ui.small("faces the node's forward — rotate the node to aim it");
-                            }
-                            LS::Tube { length, radius } => {
-                                cmd.inspector_changed |= drag(ui, "length", length);
-                                cmd.inspector_changed |= drag(ui, "thickness", radius);
-                                ui.small("lies along the node's local X, and streaks its highlight along itself");
-                            }
-                        }
-                    }
+                    Matter::Camera { .. } => camera_type_ui(ui, &mut ctx, m),
+                    Matter::PointLight { .. } => point_light_type_ui(ui, &mut ctx, m),
                     Matter::GravityVolume { mode, strength, radius } => {
                         use floptle_core::GravityMode;
                         ui.label("gravity volume");
@@ -3321,1750 +5155,14 @@ impl EditorTabViewer<'_> {
                                 .changed();
                         }
                     }
-                    Matter::WaterVolume {
-                        kind,
-                        radius,
-                        half_extents,
-                        density,
-                        drag,
-                        angular_drag,
-                        frozen,
-                        tint,
-                        visibility,
-                    } => {
-                        use floptle_core::WaterKind;
-                        ui.label("water volume");
-                        ui.small(
-                            "buoyancy, drag and an underwater look. A Sea is a sphere \
-                             about this node (a planet's ocean); a Pool is an oriented \
-                             box — rotate the node and the surface tilts with it.",
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            for k in WaterKind::ALL {
-                                if ui.selectable_label(*kind == k, k.label()).clicked()
-                                    && *kind != k
-                                {
-                                    *kind = k;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        });
-                        match kind {
-                            WaterKind::Sea => {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 1.0..=100_000.0)
-                                            .logarithmic(true),
-                                            "sea radius")
-                                    .changed();
-                            }
-                            WaterKind::Pool => {
-                                for (i, label) in ["half X", "half Y (depth)", "half Z"]
-                                    .iter()
-                                    .enumerate()
-                                {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(
-                                                &mut half_extents[i],
-                                                0.1..=1000.0,
-                                            )
-                                            .logarithmic(true),
-                                            label)
-                                        .changed();
-                                }
-                            }
-                        }
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
-                                    "density kg/m³")
-                            .on_hover_text(
-                                "1000 = fresh water. What decides whether a given hull \
-                                 floats is this against the hull's own density, so a \
-                                 denser sea carries heavier craft.",
-                            )
-                            .changed();
-                        cmd.inspector_changed |=
-                            crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0), "drag").changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
-                            .changed();
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("underwater tint");
-                            cmd.inspector_changed |=
-                                ui.color_edit_button_rgb(tint).changed();
-                        });
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(visibility, 1.0..=500.0)
-                                    .logarithmic(true),
-                                    "visibility m")
-                            .on_hover_text(
-                                "How far you can see from inside. Replaces the scene's \
-                                 own fog while the camera is under, so meshes, terrain \
-                                 and particles go murky together.",
-                            )
-                            .changed();
-                        ui.separator();
-                        cmd.inspector_changed |= crate::responsive::check(ui, frozen, "frozen")
-                            .on_hover_text(
-                                "A frozen sea is not a fluid: no buoyancy, no drag, no \
-                                 underwater state. Add a Collidable surface and it \
-                                 becomes walkable ground. A script can thaw it.",
-                            )
-                            .changed();
-                    }
-                    Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
-                        ui.label("skybox");
-                        ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
-                        // A Sky-stage .flsl overrides the solid/texture look with a
-                        // procedural sky (per-ray-direction color). Clear it to fall
-                        // back to the solid/texture controls below.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("shader");
-                            let cur = shader.clone().unwrap_or_default();
-                            let slabel = if cur.is_empty() {
-                                "(none — built-in sky)".to_string()
-                            } else {
-                                Path::new(&cur).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(cur.clone())
-                            };
-                            if let Some(pick) = crate::ui_widgets::asset_picker(
-                                ui,
-                                egui::Id::new("sky-shader"),
-                                self.project_root,
-                                &slabel,
-                                None,
-                                self.asset_tree,
-                                crate::assets::is_shader,
-                                180.0,
-                            ) {
-                                // A different sky shader has different knobs — the old
-                                // overrides would misfill by name, so drop them (same
-                                // as the Material path clears params on shader change).
-                                if *shader != pick {
-                                    shader_params.clear();
-                                }
-                                *shader = pick;
-                                cmd.inspector_changed = true;
-                            }
-                            if let Some(path) = shader.clone()
-                                && ui
-                                    .button("◈")
-                                    .on_hover_text("edit this shader in the ◈ Shaders graph")
-                                    .clicked()
-                            {
-                                cmd.open_shader_graph = Some(path);
-                            }
-                            if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
-                                *shader = None;
-                                shader_params.clear();
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        if shader.is_some() {
-                            ui.small("a `stage sky` .flsl computes the sky from `skyDir`.");
-                            // Knob rows from the compiled sky shader's uniform schema —
-                            // same widgets as a Material's shader params. Edits write
-                            // into `shader_params`; the raymarch reads them next frame.
-                            if self.sky_uniforms.is_empty() {
-                                ui.small("(its knobs appear here once it compiles — check the Console if not)");
-                            } else {
-                                crate::responsive::grid(ui, "sky_shader_rows", |ui| {
-                                        if shader_uniform_rows(ui, self.sky_uniforms, shader_params) {
-                                            cmd.inspector_changed = true;
-                                        }
-                                    });
-                                if ui
-                                    .button("Reset knobs")
-                                    .on_hover_text("back to the shader's own defaults")
-                                    .clicked()
-                                {
-                                    shader_params.clear();
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        }
-                        let mut textured = texture.is_some();
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
-                                *texture = None;
-                                cmd.inspector_changed = true;
-                            }
-                            if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
-                                let mut tl = Vec::new();
-                                collect_texture_paths(self.asset_tree, &mut tl);
-                                *texture = Some(tl.first().cloned().unwrap_or_default());
-                                cmd.inspector_changed = true;
-                            }
-                        });
-                        textured = texture.is_some();
-                        if !textured {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("color");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                            });
-                        } else {
-                            let tree = self.asset_tree;
-                            let cur = texture.clone().unwrap_or_default();
-                            let label = |p: &str| {
-                                Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
-                            };
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("texture");
-                                if let Some(Some(p)) = crate::ui_widgets::asset_picker(
-                                    ui,
-                                    egui::Id::new("sky-tex"),
-                                    self.project_root,
-                                    &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
-                                    None,
-                                    tree,
-                                    is_texture,
-                                    180.0,
-                                ) {
-                                    *texture = Some(p);
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("tint");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
-                            });
-                        }
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true), "size (radius)")
-                            .changed();
-                    }
-                    Matter::NavMesh {
-                        id: _,
-                        half_extents,
-                        auto_bounds,
-                        layers,
-                        agent_radius,
-                        agent_height,
-                        max_slope,
-                        step_height,
-                        cell_size,
-                        enabled,
-                        auto_rebake,
-                        max_drop,
-                        max_jump,
-                        min_region_area,
-                    } => {
-                        let nav = self.nav.clone();
-                        if crate::responsive::check(ui, enabled, "characters can path on this").changed() {
-                            cmd.inspector_changed = true;
-                        }
-                        ui.small(
-                            "Where characters can walk. Bakes what they would collide \
-                             with — narrow it by layer, or drop one object with the \
-                             Navmesh Exclude switch on it.",
-                        );
-                        ui.separator();
-
-                        // ---- what gets baked ----------------------------
-                        let label = if layers.is_empty() {
-                            "layers: everything".to_string()
-                        } else {
-                            format!("layers: {}", layers.join(", "))
-                        };
-                        ui.menu_button(label, |ui| {
-                            for name in self.layer_names.iter() {
-                                let mut on = layers.iter().any(|l| l == name);
-                                if crate::responsive::check(ui, &mut on, name).changed() {
-                                    if on {
-                                        layers.push(name.clone());
-                                    } else {
-                                        layers.retain(|l| l != name);
-                                    }
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                            if ui.small_button("everything").clicked() {
-                                layers.clear();
-                                cmd.inspector_changed = true;
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "Which layers count as level geometry. Nothing ticked means \
-                             every layer.",
-                        );
-                        ui.small(format!(
-                            "{} object{} would be baked",
-                            nav.sources,
-                            if nav.sources == 1 { "" } else { "s" }
-                        ));
-                        if nav.sources == 0 {
-                            ui.small(
-                                "— nothing matches. A navmesh bakes what a character \
-                                 would collide with, so level geometry needs the \
-                                 collidable switch on it.",
-                            );
-                        }
-
-                        // ---- the box ------------------------------------
-                        ui.separator();
-                        if crate::responsive::check(ui, auto_bounds, "fit the box to what it finds")
-                            .on_hover_text(
-                                "Work the volume out from the geometry instead of \
-                                 sizing it by hand. A box that is too small clips the \
-                                 level, and nothing about the result says which.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-                        if !*auto_bounds {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("size");
-                                for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                    let mut full = half_extents[i] * 2.0;
-                                    let r = ui.add(
-                                        egui::DragValue::new(&mut full)
-                                            .speed(0.25)
-                                            .range(0.5..=100000.0)
-                                            .prefix(format!("{axis} ")),
-                                    );
-                                    if r.changed() {
-                                        half_extents[i] = full * 0.5;
-                                        cmd.inspector_changed = true;
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "The volume's full size in world units, before the \
-                                 node's scale. Move the node to move the box.",
-                            );
-                        }
-
-                        // ---- the character ------------------------------
-                        ui.separator();
-                        ui.small("the character this is for");
-                        let mut touched = false;
-                        touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0),
-                                    "radius")
-                            .on_hover_text(
-                                "How wide it is. Ground closer than this to a wall or a \
-                                 drop is not walkable, so a path can be walked by \
-                                 something with a body rather than by a point.",
-                            )
-                            .changed();
-                        touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0),
-                                    "height")
-                            .on_hover_text(
-                                "How tall it is. Ground with less headroom than this is \
-                                 not walkable.",
-                            )
-                            .changed();
-                        touched |= crate::responsive::slider(ui, egui::Slider::new(max_slope, 0.0..=89.0)
-                                    .suffix("°"),
-                                    "max slope")
-                            .on_hover_text("The steepest floor it will walk up.")
-                            .changed();
-                        touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0),
-                                    "step height")
-                            .on_hover_text(
-                                "The tallest lip it steps over rather than walks around. \
-                                 This is what makes a staircase one place and a ledge \
-                                 two.",
-                            )
-                            .changed();
-                        touched |= crate::responsive::slider(ui, egui::Slider::new(cell_size, 0.02..=2.0)
-                                    .logarithmic(true),
-                                    "cell size")
-                            .on_hover_text(
-                                "How finely the level is sampled. The one performance \
-                                 knob: halving it quadruples the bake.",
-                            )
-                            .changed();
-                        if touched {
-                            cmd.inspector_changed = true;
-                        }
-
-                        // ---- what joins it up, and what it drops --------
-                        //
-                        // A navmesh is a surface, and a surface stops at
-                        // every ledge. The first two turn the stopping
-                        // points back into a level a character can cross —
-                        // the difference between "the AI is stuck on a
-                        // kerb" and an AI. The third throws away the ground
-                        // that was never worth stopping at.
-                        ui.add_space(4.0);
-                        ui.small("how the ledges are joined up");
-                        let mut joined = false;
-                        joined |= crate::responsive::slider(ui, egui::Slider::new(max_drop, 0.0..=10.0),
-                                    "drop height")
-                            .on_hover_text(
-                                "The tallest ledge it steps off deliberately. Anything \
-                                 between the step height above and this gets a one-way \
-                                 link off the edge, so a route can take it rather than \
-                                 treating a knee-high lip as a wall.\n\n0 switches drop \
-                                 links off.",
-                            )
-                            .changed();
-                        joined |= crate::responsive::slider(ui, egui::Slider::new(max_jump, 0.0..=10.0),
-                                    "jump distance")
-                            .on_hover_text(
-                                "The widest gap it will jump, measured between the two \
-                                 edges of the walkable surface — the distance you can \
-                                 see in the overlay, which is wider than the hole in the \
-                                 floor by the radius at each side. Gets a two-way \
-                                 link.\n\n0 switches jump links off.",
-                            )
-                            .changed();
-                        joined |= crate::responsive::slider(ui, egui::Slider::new(min_region_area, 0.0..=20.0)
-                                    .suffix(" m²"),
-                                    "smallest patch")
-                            .on_hover_text(
-                                "Walkable ground in a patch smaller than this is \
-                                 thrown away. A level bakes hundreds of specks — a \
-                                 window sill, the top of a crate — and each one is an \
-                                 island nothing can reach and somewhere a character can \
-                                 be put by mistake. The biggest patch is never thrown \
-                                 away.",
-                            )
-                            .changed();
-                        if joined {
-                            cmd.inspector_changed = true;
-                        }
-                        if *max_drop <= 0.0 && *max_jump <= 0.0 {
-                            ui.small(
-                                egui::RichText::new(
-                                    "both off — every ledge in the level is a wall, \
-                                     and the only ways across are the Nav Link nodes \
-                                     you place by hand.",
-                                )
-                                .color(egui::Color32::from_rgb(230, 180, 90)),
-                            );
-                        }
-                        // The one setting that quietly does something other
-                        // than what it says, named with the number to use.
-                        if let Some(advice) = nav.advice.as_deref() {
-                            ui.add_space(2.0);
-                            ui.small(egui::RichText::new(advice).color(
-                                egui::Color32::from_rgb(230, 180, 90),
-                            ));
-                        }
-
-                        // ---- the bake -----------------------------------
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .button("⬚  Bake")
-                                .on_hover_text(
-                                    "Work out where this character can walk. Saved next \
-                                     to the scene as a .fnav.",
-                                )
-                                .clicked()
-                            {
-                                cmd.nav_bake = true;
-                            }
-                            if nav.polys > 0
-                                && ui
-                                    .button("🗑  Clear")
-                                    .on_hover_text("Throw the bake away.")
-                                    .clicked()
-                            {
-                                cmd.nav_clear = true;
-                            }
-                        });
-                        if crate::responsive::check(ui, auto_rebake, "bake again when the level changes")
-                            .on_hover_text(
-                                "Off is right for a finished level: the bake is a file \
-                                 saved beside the scene and loaded with it, so it never \
-                                 needs doing twice.\n\nOn, the volume watches what it \
-                                 would bake, waits for it to stop moving, and bakes on \
-                                 another thread — so the editor keeps its frame rate, \
-                                 and a game that puts buildings down while it runs gets \
-                                 a navmesh that knows about them.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-                        if nav.baking {
-                            ui.small("baking…");
-                        }
-                        if nav.polys == 0 {
-                            ui.small("no bake yet — nothing can path here.");
-                            ui.small(
-                                "A bake is saved beside the scene and loaded with it, so \
-                                 this is a one-off — not something to do again each time \
-                                 you open the project.",
-                            );
-                        } else {
-                            ui.small(format!(
-                                "baked: {} polygons over {:.0} m², from {} triangles in \
-                                 {:.2}s",
-                                nav.polys, nav.area, nav.triangles, nav.seconds
-                            ));
-                            // Where it lives. A bake is a file, it is
-                            // loaded with the scene, and saying so is
-                            // the difference between trusting that and
-                            // pressing Bake every time out of habit.
-                            match nav.file.as_deref() {
-                                Some(f) => {
-                                    ui.small(format!("saved in {f} — it loads with the scene"));
-                                }
-                                None => {
-                                    ui.small(
-                                        egui::RichText::new(
-                                            "not saved to disk — this bake will be gone \
-                                             when the scene is closed",
-                                        )
-                                        .color(egui::Color32::from_rgb(230, 180, 90)),
-                                    );
-                                }
-                            }
-                            // What actually joins the level up. Said before
-                            // the island count, because it is the answer to
-                            // the question the island count raises.
-                            let made = nav.drops + nav.jumps;
-                            if made > 0 {
-                                ui.small(format!(
-                                    "{made} way{} across found: {} drop{}, {} jump{}",
-                                    if made == 1 { "" } else { "s" },
-                                    nav.drops,
-                                    if nav.drops == 1 { "" } else { "s" },
-                                    nav.jumps,
-                                    if nav.jumps == 1 { "" } else { "s" },
-                                ));
-                            } else if *max_drop > 0.0 || *max_jump > 0.0 {
-                                ui.small(
-                                    "no drops or jumps found — every ledge in this bake \
-                                     is either taller than the drop height or wider than \
-                                     the jump distance.",
-                                );
-                            }
-                            if nav.placed_links > 0 {
-                                ui.small(format!(
-                                    "{} nav link{} placed by hand",
-                                    nav.placed_links,
-                                    if nav.placed_links == 1 { "" } else { "s" }
-                                ));
-                            }
-                            if nav.lost_links > 0 {
-                                ui.small(
-                                    egui::RichText::new(format!(
-                                        "{} link{} could not find the ground at one end \
-                                         and do nothing — the Console names them",
-                                        nav.lost_links,
-                                        if nav.lost_links == 1 { "" } else { "s" }
-                                    ))
-                                    .color(egui::Color32::from_rgb(230, 180, 90)),
-                                );
-                            }
-                            if nav.capped {
-                                ui.small(
-                                    egui::RichText::new(
-                                        "the level hit the ceiling on generated links. \
-                                         A coarser cell size, or a smaller drop height, \
-                                         will find the ones that matter instead of every \
-                                         one there is.",
-                                    )
-                                    .color(egui::Color32::from_rgb(230, 180, 90)),
-                                );
-                            }
-                            // More than one island is worth seeing rather than
-                            // finding out about when a character will not go
-                            // somewhere: it is usually a door nobody fits
-                            // through. The share is what makes the number
-                            // actionable — "494 areas" says nothing, "the
-                            // biggest holds 3% of the floor" says the bake
-                            // is shattered and points at the settings.
-                            if nav.regions > 1 {
-                                let share = nav.biggest_share * 100.0;
-                                let line = format!(
-                                    "{} separate areas — a character cannot walk between \
-                                     them. The largest holds {share:.0}% of the walkable \
-                                     ground.",
-                                    nav.regions
-                                );
-                                if nav.biggest_share < 0.5 {
-                                    ui.small(
-                                        egui::RichText::new(line)
-                                            .color(egui::Color32::from_rgb(230, 180, 90)),
-                                    );
-                                    ui.small(
-                                        "A bake in this many pieces is usually a cell \
-                                         size too coarse next to the agent radius, or a \
-                                         drop height too low for the level's ledges.",
-                                    );
-                                } else {
-                                    ui.small(line);
-                                }
-                            }
-                            if nav.stale {
-                                ui.small(
-                                    egui::RichText::new(
-                                        "the settings have changed since this was baked",
-                                    )
-                                    .color(egui::Color32::from_rgb(230, 180, 90)),
-                                );
-                            }
-                            // The box was smaller than the level. Said
-                            // here as well as in the Console, because
-                            // this is the panel somebody opens when a
-                            // character will not walk somewhere, and a
-                            // bake of one corner of the map looks
-                            // exactly like a bake of the map.
-                            if let Some(missed) = nav.coverage.as_deref() {
-                                ui.add_space(2.0);
-                                ui.small(
-                                    egui::RichText::new(missed)
-                                        .color(egui::Color32::from_rgb(230, 180, 90)),
-                                );
-                            }
-                        }
-                    }
-                    Matter::NavLink {
-                        id: _,
-                        to,
-                        bidirectional,
-                        cost,
-                        area,
-                        duration,
-                        enabled,
-                    } => {
-                        if crate::responsive::check(ui, enabled, "this way is open").changed() {
-                            cmd.inspector_changed = true;
-                        }
-                        ui.small(
-                            "A way across that is not walking: a ladder, a jump down, a \
-                             vault, a door. This node is one end; the offset below is \
-                             the other. Both ends have to land on the navmesh.",
-                        );
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("far end");
-                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                cmd.inspector_changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut to[i])
-                                            .speed(0.1)
-                                            .prefix(format!("{axis} ")),
-                                    )
-                                    .changed();
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "Where it comes out, measured in this node's own space — so \
-                             a link inside a prefab turns and scales with the prefab.",
-                        );
-                        if crate::responsive::check(ui, bidirectional, "can be crossed both ways")
-                            .on_hover_text(
-                                "A ladder can. A jump down cannot, and making one \
-                                 two-way is a character walking up a cliff.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=100.0)
-                                    .logarithmic(true),
-                                    "cost")
-                            .on_hover_text(
-                                "What crossing costs the router, in metres of ordinary \
-                                 walking. Raise it to make this a last resort; lower it \
-                                 to make it a shortcut.",
-                            )
-                            .changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(duration, 0.0..=10.0)
-                                    .suffix(" s"),
-                                    "crossing takes")
-                            .on_hover_text(
-                                "How long an agent spends on it. 0 means at walking \
-                                 speed, which is right for a vault and wrong for a lift.",
-                            )
-                            .changed();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("area");
-                            cmd.inspector_changed |=
-                                ui.text_edit_singleline(area).changed();
-                        })
-                        .response
-                        .on_hover_text(
-                            "Optional. Name a nav area and one exclusion can rule out \
-                             every link like this — every jump in the level, say — \
-                             rather than one per link.",
-                        );
-                        ui.separator();
-                        ui.small(
-                            "In a script: agent.link is this link's name while it is \
-                             being crossed, and agent.linkProgress runs 0 to 1 — which \
-                             is what a climb animation is driven by. nav.link(name, \
-                             false) shuts it.",
-                        );
-                    }
-                    Matter::NavArea { half_extents, area, cost, blocks, enabled } => {
-                        if crate::responsive::check(ui, enabled, "this volume counts").changed() {
-                            cmd.inspector_changed = true;
-                        }
-                        ui.small(
-                            "Changes what the ground inside it means — either it costs \
-                             more to cross, or it is not walkable at all.",
-                        );
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("size");
-                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                let mut full = half_extents[i] * 2.0;
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut full)
-                                            .speed(0.25)
-                                            .range(0.1..=100000.0)
-                                            .prefix(format!("{axis} ")),
-                                    )
-                                    .changed()
-                                {
-                                    half_extents[i] = full * 0.5;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        });
-                        if crate::responsive::check(ui, blocks, "carve this out of the navmesh")
-                            .on_hover_text(
-                                "Nothing walks here, whatever it thinks of the ground. \
-                                 The answer to \"keep out of this room\" that does not \
-                                 involve an invisible wall nobody remembers building.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-                        if !*blocks {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("area");
-                                cmd.inspector_changed |=
-                                    ui.text_edit_singleline(area).changed();
-                            })
-                            .response
-                            .on_hover_text(
-                                "What this ground is called — water, mud, road, danger. \
-                                 The name is what scripts ask for, so two volumes with \
-                                 the same name are the same kind of ground.",
-                            );
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=50.0)
-                                        .logarithmic(true),
-                                        "costs")
-                                .on_hover_text(
-                                    "How expensive a metre of it is next to ordinary \
-                                     ground. Above 1 is walked round when there is a way \
-                                     round; below 1 is sought out, which is how a road \
-                                     works.",
-                                )
-                                .changed();
-                            ui.small(
-                                "One character can disagree: nav.agent(node, { filter = \
-                                 { avoid = {\"water\"}, cost = { mud = 0.5 } } }).",
-                            );
-                        }
-                        ui.separator();
-                        ui.small(
-                            "Bake the navmesh again after moving this — a volume is \
-                             read when the bake runs, not while the game is playing.",
-                        );
-                    }
-                    Matter::LightProbes {
-                        half_extents,
-                        spacing,
-                        enabled,
-                        intensity,
-                        bounces,
-                        quality,
-                        leak,
-                        normal_bias,
-                        exclude_layers,
-                    } => {
-                        let gi = self.gi;
-                        if crate::responsive::check(ui, enabled, "light this scene").changed() {
-                            cmd.inspector_changed = true;
-                            cmd.gi_changed = true;
-                        }
-                        ui.small(
-                            "Baked bounce light. Inside this box the scene's flat ambient \
-                             is replaced by what the surfaces around it actually reflect.",
-                        );
-                        ui.separator();
-
-                        // ---- the box ------------------------------------
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("size");
-                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                let mut full = half_extents[i] * 2.0;
-                                let r = ui.add(
-                                    egui::DragValue::new(&mut full)
-                                        .speed(0.25)
-                                        .range(0.5..=4000.0)
-                                        .prefix(format!("{axis} ")),
-                                );
-                                if r.changed() {
-                                    half_extents[i] = full * 0.5;
-                                    cmd.inspector_changed = true;
-                                    cmd.gi_changed = true;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "The volume's full size in world units, before the node's \
-                             scale. Move the node to move the box.",
-                        );
-                        if crate::responsive::slider(ui, egui::Slider::new(spacing, 0.25..=16.0)
-                                    .logarithmic(true),
-                                    "probe spacing")
-                            .on_hover_text(
-                                "World units between probes. This is the resolution of \
-                                 the bounce: it cannot represent a shadow sharper than \
-                                 one cell.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                            cmd.gi_changed = true;
-                        }
-                        let planned = gi.planned_count();
-                        ui.small(format!(
-                            "{}×{}×{} = {planned} probes  ·  {} renders per bounce",
-                            gi.planned[0],
-                            gi.planned[1],
-                            gi.planned[2],
-                            planned * 6
-                        ));
-
-                        // ---- the bake -----------------------------------
-                        ui.separator();
-                        if gi.baking {
-                            ui.add(
-                                egui::ProgressBar::new(gi.progress).text(format!(
-                                    "baking — bounce {}/{}  ·  {:.0}s",
-                                    gi.bounce, gi.bounces, gi.seconds
-                                )),
-                            );
-                            if ui.button("✖  Cancel").clicked() {
-                                cmd.gi_cancel = true;
-                            }
-                        } else {
-                            ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .button("☀  Bake")
-                                    .on_hover_text(
-                                        "Render the scene from every probe and keep the \
-                                         light. Saved next to the scene as a .fgi.",
-                                    )
-                                    .clicked()
-                                {
-                                    cmd.gi_bake = true;
-                                }
-                                if gi.baked_probes > 0
-                                    && ui
-                                        .button("🗑  Clear")
-                                        .on_hover_text("Throw the bake away.")
-                                        .clicked()
-                                {
-                                    cmd.gi_clear = true;
-                                }
-                            });
-                            if gi.baked_probes == 0 {
-                                ui.small("no bake yet — this volume lights nothing.");
-                            } else {
-                                ui.small(format!(
-                                    "baked: {} probes, {} bounce{}",
-                                    gi.baked_probes,
-                                    gi.baked_bounces,
-                                    if gi.baked_bounces == 1 { "" } else { "s" }
-                                ));
-                            }
-                            // Said plainly rather than by going dark: a
-                            // volume you just resized is still lit by the
-                            // old data, and that is a choice, not a bug.
-                            if gi.stale {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(220, 180, 90),
-                                    "⚠ the box changed since this was baked — \
-                                     still using the old light",
-                                );
-                            }
-                        }
-
-                        // ---- how it is baked ----------------------------
-                        ui.separator();
-                        let mut b = *bounces;
-                        if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4), "bounces")
-                            .on_hover_text(
-                                "1 is light coming off surfaces once — the difference \
-                                 between a black corner and a lit one. Each extra bounce \
-                                 re-renders every probe.",
-                            )
-                            .changed()
-                        {
-                            *bounces = b;
-                            cmd.inspector_changed = true;
-                        }
-                        let mut q = *quality;
-                        if crate::responsive::slider(ui, egui::Slider::new(&mut q, 8..=64)
-                                    .step_by(8.0),
-                                    "bake detail")
-                            .on_hover_text(
-                                "Pixels per cube face. Higher resolves small bright \
-                                 things — a lamp, a window — and does not change how \
-                                 bright the result is.",
-                            )
-                            .changed()
-                        {
-                            *quality = q;
-                            cmd.inspector_changed = true;
-                        }
-                        let names: Vec<String> = self.layer_names.to_vec();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("skip layers");
-                            egui::ComboBox::from_id_salt("gi_skip")
-                                .width(crate::responsive::fit_here(ui, 220.0))
-        .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selected_text(if exclude_layers.is_empty() {
-                                    "none".to_string()
-                                } else {
-                                    exclude_layers.join(", ")
-                                })
-                                .show_ui(ui, |ui| {
-                                    for n in &names {
-                                        let mut on = exclude_layers.contains(n);
-                                        if crate::responsive::check(ui, &mut on, n).changed() {
-                                            if on {
-                                                exclude_layers.push(n.clone());
-                                            } else {
-                                                exclude_layers.retain(|x| x != n);
-                                            }
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                        })
-                        .response
-                        .on_hover_text(
-                            "Anything that moves — a character, a door, a lift — should \
-                             not be baked into the light it happens to be standing in.",
-                        );
-
-                        // ---- how it is applied --------------------------
-                        ui.separator();
-                        if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "intensity")
-                            .on_hover_text(
-                                "1 is the light as measured. Past that is a look, not a \
-                                 mistake. Changing this does not need a re-bake.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                            cmd.gi_changed = true;
-                        }
-                        if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0), "leak rejection")
-                            .on_hover_text(
-                                "Throws away probes buried in geometry, so the lit room \
-                                 next door stops glowing through the wall. Costs some \
-                                 bounce in tight spaces. 0 = off.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                            cmd.gi_changed = true;
-                        }
-                        if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0),
-                                    "surface offset")
-                            .on_hover_text(
-                                "How far a surface steps along its own normal before \
-                                 looking the light up, in cells. Too little leaks at \
-                                 corners; too much drags light around them.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                            cmd.gi_changed = true;
-                        }
-
-                        // ---- looking at it ------------------------------
-                        ui.separator();
-                        let mut show_only = gi.show_only;
-                        if crate::responsive::check(ui, &mut show_only, "show only the bounce")
-                            .on_hover_text(
-                                "Every direct light off, so what is left on screen is \
-                                 exactly what was baked. The fastest way to tell a dark \
-                                 bake from a dark scene.",
-                            )
-                            .changed()
-                        {
-                            cmd.gi_show_only = Some(show_only);
-                        }
-                        let mut show_probes = gi.show_probes;
-                        if crate::responsive::check(ui, &mut show_probes, "show the probes")
-                            .on_hover_text(
-                                "Draw each probe in the colour it baked. A grid that is \
-                                 too coarse, or a row of probes buried in the floor, is \
-                                 invisible in the final picture and obvious here.",
-                            )
-                            .changed()
-                        {
-                            cmd.gi_show_probes = Some(show_probes);
-                        }
-                    }
-                    Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
-                        if crate::responsive::check(ui, enabled, "reflect this room").changed() {
-                            cmd.inspector_changed = true;
-                        }
-                        ui.small(
-                            "What reflective surfaces inside this box show when what \
-                             they are reflecting is not on screen. Without one they show \
-                             the sky — daylight, indoors, through the ceiling.",
-                        );
-                        ui.separator();
-
-                        // ---- the box ------------------------------------
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("size");
-                            for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                                let mut full = half_extents[i] * 2.0;
-                                let r = ui.add(
-                                    egui::DragValue::new(&mut full)
-                                        .speed(0.25)
-                                        .range(0.5..=4000.0)
-                                        .prefix(format!("{axis} ")),
-                                );
-                                if r.changed() {
-                                    half_extents[i] = full * 0.5;
-                                    cmd.inspector_changed = true;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "The room, in world units. This decides which surfaces the \
-                             probe covers AND where the reflection lands: sized to the \
-                             walls, a reflected wall sits on the wall instead of \
-                             sliding as the camera moves.",
-                        );
-                        if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0), "edge fade")
-                            .on_hover_text(
-                                "How far outside the box the room's reflection gives way \
-                                 to the sky, in world units. A doorway wants a metre or \
-                                 two so walking out does not switch in one step.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-                        if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "strength")
-                            .on_hover_text(
-                                "How much of the capture to apply. 1 is what was \
-                                 measured; this is the artistic knob for a room that \
-                                 reads too busy or too dim in the reflections.",
-                            )
-                            .changed()
-                        {
-                            cmd.inspector_changed = true;
-                        }
-
-                        // ---- the capture --------------------------------
-                        ui.separator();
-                        ui.small(
-                            "Captured when the scene loads and whenever the probe is \
-                             moved or resized. Nothing is saved to disk, so a capture \
-                             cannot go stale in a file.",
-                        );
-                        if ui
-                            .button("recapture")
-                            .on_hover_text(
-                                "Take it again now — after relighting the room, or \
-                                 moving the furniture in it.",
-                            )
-                            .clicked()
-                        {
-                            cmd.recapture_probes = true;
-                        }
-                    }
-                    Matter::PostProcess {
-                        tonemap,
-                        enabled,
-                        bloom,
-                        bloom_threshold,
-                        bloom_intensity,
-                        vignette,
-                        vignette_strength,
-                        vignette_radius,
-                        ao,
-                        ao_strength,
-                        ao_radius,
-                        posterize_bands,
-                        posterize_dither,
-                        posterize_chroma,
-                        exposure,
-                        contrast,
-                        saturation,
-                        temperature,
-                        tint,
-                        lift,
-                        grade_gamma,
-                        gain,
-                        aberration,
-                        distortion,
-                        sharpen,
-                        denoise,
-                        grain,
-                        grain_size,
-                        dof_focus,
-                        dof_range,
-                        dof_near_range,
-                        dof_max_blur,
-                        dof_blades,
-                        dof_blade_rotation,
-                        dof_highlight,
-                        dof_quality,
-                        motion_blur,
-                        motion_samples,
-                        dof_show_focus,
-                        dof_focus_node,
-                        screen_shaders,
-                    } => {
-                        use floptle_core::AoMode;
-                        ui.label("post processing");
-                        ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
-                        cmd.inspector_changed |= crate::responsive::check(ui, enabled, "enabled")
-                            .on_hover_text("master switch for the whole chain")
-                            .changed();
-                        ui.add_enabled_ui(*enabled, |ui| {
-                            ui.separator();
-                            ui.label("Ambient occlusion");
-                            ui.horizontal_wrapped(|ui| {
-                                let mut m = *ao;
-                                if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
-                                    m = AoMode::Off;
-                                }
-                                if ui
-                                    .selectable_label(m == AoMode::ScreenSpace, "Screen space")
-                                    .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
-                                    .clicked()
-                                {
-                                    m = AoMode::ScreenSpace;
-                                }
-                                if ui
-                                    .selectable_label(m == AoMode::Sdf, "SDF (true)")
-                                    .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
-                                    .clicked()
-                                {
-                                    m = AoMode::Sdf;
-                                }
-                                if m != *ao {
-                                    *ao = m;
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            if *ao != AoMode::Off {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
-                                    .changed();
-                            }
-                            ui.separator();
-                            cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
-                            if *bloom {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
-                                    .changed();
-                            }
-                            cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
-                            if *vignette {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
-                                    .changed();
-                            }
-                            // Posterize — crush the ART to a limited palette. It runs
-                            // before the 2D light rather than at the end of the frame,
-                            // which is why the tooltip says palette.
-                            ui.separator();
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Posterize")
-                                    .on_hover_text(
-                                        "reduce your ART to a fixed number of levels per channel — a \
-                                         limited-palette / banded retro look. It quantises the palette \
-                                         only: 2D lights, the vignette, bloom and ambient occlusion are \
-                                         applied on top and stay smooth.",
-                                    );
-                                let plabel = match *posterize_bands {
-                                    0 | 1 => "off".to_string(),
-                                    n => format!("{n} levels"),
-                                };
-                                egui::ComboBox::from_id_salt("posterize_bands")
-                                    .width(crate::responsive::fit_here(ui, 220.0))
-        .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selected_text(plabel)
-                                    .show_ui(ui, |ui| {
-                                        cmd.inspector_changed |=
-                                            ui.selectable_value(posterize_bands, 0, "off").clicked();
-                                        for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
-                                            cmd.inspector_changed |= ui
-                                                .selectable_value(posterize_bands, nb, format!("{nb} levels"))
-                                                .clicked();
-                                        }
-                                    });
-                            });
-                            ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
-                                cmd.inspector_changed |= crate::responsive::check(ui, posterize_dither, "dither the bands")
-                                    .on_hover_text(
-                                        "ordered dither, so a gradient in your ART stipples between two \
-                                         levels instead of hard-stepping — a painted sky, a soft-edged \
-                                         sprite. It has no effect on lighting.",
-                                    )
-                                    .changed();
-                                cmd.inspector_changed |= crate::responsive::check(ui, posterize_chroma, "step brightness, keep colour")
-                                    .on_hover_text(
-                                        "off — the default — steps each colour channel on its own, which is a real \
-                                         look and what every project built before now is made of. It is often not \
-                                         what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
-                                         boundary at a different value, so it steps through colours nobody chose. \
-                                         On, the step happens once to brightness and the colour rides along — a grey \
-                                         pixel comes out identical either way.",
-                                    )
-                                    .changed();
-                            });
-                        });
-
-                        // ---- the look chain -------------------------
-                        //
-                        // One collapsing section per effect, each with
-                        // its own reset, because a grade you cannot get
-                        // back to neutral is a grade you stop touching.
-                        // Every heading says what off is, so "is this
-                        // doing anything" is answerable at a glance.
-                        let acc = egui::Color32::from_rgb(255, 200, 80);
-
-                        // Tonemap first, and on its own, because it is
-                        // not one effect among the others: it is how the
-                        // scene's light reaches the display at all. The
-                        // grade below it is working in the range this
-                        // choice defines.
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("tonemap").on_hover_text(
-                                "The scene is lit in real, unbounded light — a lamp can \
-                                 be ten times brighter than white. A screen stops at \
-                                 white. This chooses how to get from one to the other.\n\n\
-                                 Doing nothing is a choice too: each colour channel \
-                                 clips on its own, so a very bright colour slides toward \
-                                 white through whatever hue clips last. That is why \
-                                 blown highlights can go strange colours.",
-                            );
-                            let names = [
-                                ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
-                                ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
-                                ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
-                                ("AgX", "AgX — bright colours whiten the way film does, instead of \
-                                         hitting a flat ceiling of their own hue"),
-                            ];
-                            let cur = (*tonemap as usize).min(3);
-                            egui::ComboBox::from_id_salt("pp_tonemap")
-                                .width(crate::responsive::fit_here(ui, 220.0))
-        .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selected_text(names[cur].0)
-                                .width(160.0)
-                                .show_ui(ui, |ui| {
-                                    for (i, (short, long)) in names.iter().enumerate() {
-                                        if ui
-                                            .selectable_label(cur == i, *short)
-                                            .on_hover_text(*long)
-                                            .clicked()
-                                        {
-                                            *tonemap = i as u32;
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                        });
-                        if *tonemap == 0 {
-                            ui.small(
-                                egui::RichText::new(
-                                    "anything brighter than white is clipped — try AgX \
-                                     if bright lights look like flat blocks of colour",
-                                )
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-
-                        // ---- the scene's own screen shaders ---------
-                        //
-                        // Placed after the tonemap and before the grade
-                        // because that is where they run, and a panel
-                        // that lists effects in an order the frame does
-                        // not follow is a panel that teaches the wrong
-                        // thing.
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("screen shaders");
-                            ui.small(
-                                egui::RichText::new(format!(
-                                    "{} pass{}",
-                                    screen_shaders.len(),
-                                    if screen_shaders.len() == 1 { "" } else { "es" }
-                                ))
-                                .color(ui.visuals().weak_text_color()),
-                            );
-                        });
-                        ui.small(
-                            "full-screen passes you wrote — a `stage post` .flsl gets the \
-                             finished frame plus its depth and normals, and returns a new \
-                             colour. They run in this order, over the picture, before the \
-                             grade and the lens below.",
-                        );
-                        {
-                            let mut remove: Option<usize> = None;
-                            let mut swap: Option<(usize, usize)> = None;
-                            let n = screen_shaders.len();
-                            for (i, pass) in screen_shaders.iter_mut().enumerate() {
-                                let name = Path::new(&pass.shader)
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| pass.shader.clone());
-                                let entry = self.post_flsl_cache.get(&pass.shader);
-                                let err = entry.and_then(|e| e.error.as_deref());
-                                crate::responsive::group(ui, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        cmd.inspector_changed |= crate::responsive::check(ui, &mut pass.enabled, "")
-                                            .on_hover_text(
-                                                "off keeps the pass and its settings \
-                                                 without running it",
-                                            )
-                                            .changed();
-                                        ui.label(egui::RichText::new(&name).strong());
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .button("✖")
-                                                    .on_hover_text("remove this pass")
-                                                    .clicked()
-                                                {
-                                                    remove = Some(i);
-                                                }
-                                                // Straight to the graph, the
-                                                // same door a Material's
-                                                // shader row opens — a pass
-                                                // you can add and tune but
-                                                // not open is a pass you
-                                                // hunt for in the Assets
-                                                // panel every time.
-                                                if ui
-                                                    .button("◈")
-                                                    .on_hover_text("edit this shader in the ◈ Shaders graph")
-                                                    .clicked()
-                                                {
-                                                    cmd.open_shader_graph =
-                                                        Some(pass.shader.clone());
-                                                }
-                                                if ui
-                                                    .add_enabled(
-                                                        i + 1 < n,
-                                                        egui::Button::new("▼"),
-                                                    )
-                                                    .on_hover_text("run later")
-                                                    .clicked()
-                                                {
-                                                    swap = Some((i, i + 1));
-                                                }
-                                                if ui
-                                                    .add_enabled(i > 0, egui::Button::new("▲"))
-                                                    .on_hover_text("run earlier")
-                                                    .clicked()
-                                                {
-                                                    swap = Some((i, i - 1));
-                                                }
-                                            },
-                                        );
-                                    });
-                                    match (err, entry.and_then(|e| e.compiled.as_ref())) {
-                                        (Some(msg), _) => {
-                                            ui.small(
-                                                egui::RichText::new(format!("◈ {msg}"))
-                                                    .color(egui::Color32::from_rgb(
-                                                        255, 120, 110,
-                                                    )),
-                                            );
-                                        }
-                                        (None, None) => {
-                                            ui.small("(compiling — its knobs appear here)");
-                                        }
-                                        (None, Some(_)) => {}
-                                    }
-                                    // Knobs from the compiled shader's own schema. Shown
-                                    // even when the newest edit failed, because they are
-                                    // still driving the last good pipeline.
-                                    if let Some((compiled, _)) =
-                                        entry.and_then(|e| e.compiled.as_ref())
-                                        && !compiled.uniforms.is_empty()
-                                    {
-                                        crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
-                                                if shader_uniform_rows(
-                                                    ui,
-                                                    &compiled.uniforms,
-                                                    &mut pass.params,
-                                                ) {
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            });
-                                        if !pass.params.is_empty()
-                                            && ui
-                                                .button("Reset knobs")
-                                                .on_hover_text(
-                                                    "back to the shader's own defaults",
-                                                )
-                                                .clicked()
-                                        {
-                                            pass.params.clear();
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                            }
-                            if let Some((a, b)) = swap {
-                                screen_shaders.swap(a, b);
-                                cmd.inspector_changed = true;
-                            }
-                            if let Some(i) = remove {
-                                screen_shaders.remove(i);
-                                cmd.inspector_changed = true;
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                if let Some(pick) = crate::ui_widgets::asset_picker(
-                                    ui,
-                                    egui::Id::new("pp-add-screen-shader"),
-                                    self.project_root,
-                                    "+ Add screen shader",
-                                    None,
-                                    self.asset_tree,
-                                    crate::assets::is_shader,
-                                    200.0,
-                                ) && let Some(path) = pick
-                                {
-                                    screen_shaders
-                                        .push(floptle_core::ScreenShader::new(path));
-                                    cmd.inspector_changed = true;
-                                }
-                                ui.small(
-                                    egui::RichText::new(
-                                        "try shaders/examples/inkOutline.flsl",
-                                    )
-                                    .color(ui.visuals().weak_text_color()),
-                                );
-                            });
-                        }
-
-                        ui.separator();
-                        ui.label("colour grade");
-                        {
-                            let neutral = *exposure == 0.0
-                                && *contrast == 1.0
-                                && *saturation == 1.0
-                                && *temperature == 0.0
-                                && *tint == 0.0
-                                && *lift == 0.0
-                                && *grade_gamma == 1.0
-                                && *gain == 1.0;
-                            ui.horizontal_wrapped(|ui| {
-                                ui.small(if neutral {
-                                    "neutral — no pass runs"
-                                } else {
-                                    "grading"
-                                });
-                                if !neutral && ui.small_button("reset").clicked() {
-                                    *exposure = 0.0;
-                                    *contrast = 1.0;
-                                    *saturation = 1.0;
-                                    *temperature = 0.0;
-                                    *tint = 0.0;
-                                    *lift = 0.0;
-                                    *grade_gamma = 1.0;
-                                    *gain = 1.0;
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
-                                .on_hover_text(
-                                    "in STOPS: +1 is twice the light. The unit a camera and a \
-                                     renderer already share — it keeps meaning the same thing \
-                                     when the scene's brightness changes.",
-                                )
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
-                                .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
-                                .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
-                                .on_hover_text("cool (−) ↔ warm (+)")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
-                                .on_hover_text(
-                                    "green (−) ↔ magenta (+) — the axis temperature can't reach, \
-                                     and the one that fixes a scene that has gone subtly sickly",
-                                )
-                                .changed();
-                            ui.small("shadows / midtones / highlights");
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
-                                .on_hover_text("raise or crush the black floor — a lifted black is the film look")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
-                                .on_hover_text("bend the midtones without moving black or white")
-                                .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
-                                .on_hover_text("scale the highlights")
-                                .changed();
-                        }
-
-                        ui.separator();
-                        ui.label("lens");
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
-                            .on_hover_text(
-                                "red and blue drift apart toward the edges, the way real glass \
-                                 disperses. 0 = off.",
-                            )
-                            .changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
-                            .on_hover_text(
-                                "positive barrels (fisheye), negative pincushions. The corners go \
-                                 BLACK rather than smearing the edge pixel outward — a bent frame \
-                                 genuinely has no picture out there.",
-                            )
-                            .changed();
-                        if *aberration == 0.0 && *distortion == 0.0 {
-                            ui.small("both at 0 — no lens pass runs");
-                        }
-
-                        ui.separator();
-                        ui.label("detail");
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
-                            .on_hover_text(
-                                "unsharp mask, clamped to the local neighbourhood so edges get \
-                                 crisper without growing a bright halo. 0 = off.",
-                            )
-                            .changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
-                            .on_hover_text(
-                                "bilateral: averages within a flat region and refuses to average \
-                                 across an edge, which is the difference between removing noise \
-                                 and removing detail. Runs FIRST in the chain, on the raw frame. \
-                                 0 = off.",
-                            )
-                            .changed();
-                        if *sharpen > 0.0 && *denoise > 0.0 {
-                            ui.small("denoise runs first, then sharpen — the useful order");
-                        }
-
-                        ui.separator();
-                        ui.label("film grain");
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
-                            .on_hover_text(
-                                "multiplicative and strongest in the MIDTONES, the way emulsion \
-                                 responds — additive grain lifts every shadow into grey mud, \
-                                 which is the tell of a cheap filter. Applied last, so nothing \
-                                 downstream turns it into crawling static. 0 = off.",
-                            )
-                            .changed();
-                        ui.add_enabled_ui(*grain > 0.0, |ui| {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
-                                .on_hover_text(
-                                    "grain cell in pixels. 1 is per-pixel — which under a retro \
-                                     upscale is invisible, then suddenly a flat shimmer. 2–4 is \
-                                     what reads as film.",
-                                )
-                                .changed();
-                        });
-
-                        ui.separator();
-                        ui.label("depth of field");
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
-                                    .logarithmic(true),
-                                    "focus distance")
-                            .on_hover_text("world units from the camera that are sharp. 0 = off.")
-                            .changed();
-                        // Focus on a node instead of a number: the focus
-                        // distance becomes the camera's distance to it,
-                        // every frame. This is what a rack focus is made
-                        // of, and by hand it means a script measuring a
-                        // distance the engine already knows.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("follow");
-                            let cur = dof_focus_node.clone();
-                            let label = if cur.is_empty() {
-                                "(a fixed distance)".to_string()
-                            } else {
-                                cur.clone()
-                            };
-                            egui::ComboBox::from_id_salt("pp_dof_follow")
-                                .width(crate::responsive::fit_here(ui, 220.0))
-        .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selected_text(label)
-                                .width(170.0)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(cur.is_empty(), "(a fixed distance)")
-                                        .clicked()
-                                        && !cur.is_empty()
-                                    {
-                                        dof_focus_node.clear();
-                                        cmd.inspector_changed = true;
-                                    }
-                                    for (_, name) in self.entity_names {
-                                        if ui.selectable_label(cur == *name, name).clicked()
-                                            && cur != *name
-                                        {
-                                            *dof_focus_node = name.clone();
-                                            cmd.inspector_changed = true;
-                                        }
-                                    }
-                                });
-                        })
-                        .response
-                        .on_hover_text(
-                            "keep this node in focus — the focus distance becomes the \
-                             camera's distance to it, measured every frame and per \
-                             viewport, so the Scene view shows its own focus while you \
-                             fly around. A name that matches nothing falls back to the \
-                             slider above rather than to zero.",
-                        );
-                        if !dof_focus_node.is_empty()
-                            && !self.entity_names.iter().any(|(_, n)| n == dof_focus_node)
-                        {
-                            ui.colored_label(
-                                acc,
-                                format!(
-                                    "⚠ no node named \"{dof_focus_node}\" in this scene — \
-                                     using the focus distance above"
-                                ),
-                            );
-                        }
-                        ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
-                                .on_hover_text("how far BEYOND the focus distance stays sharp")
-                                .changed();
-                            let mut near = *dof_near_range;
-                            let auto = near <= 0.0;
-                            if auto {
-                                near = *dof_range * 0.5;
-                            }
-                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
-                                .on_hover_text(
-                                    "how far IN FRONT of it stays sharp. A lens goes soft \
-                                     on the near side much sooner than on the far side, \
-                                     which is why these are two numbers: a portrait wants \
-                                     the foreground gone and the background readable.",
-                                );
-                            if r.changed() {
-                                *dof_near_range = near;
-                                cmd.inspector_changed = true;
-                            }
-                            if auto {
-                                ui.small(
-                                    egui::RichText::new("near range is following the far one (half of it)")
-                                        .color(ui.visuals().weak_text_color()),
-                                );
-                            } else if ui
-                                .small_button("link to far range")
-                                .on_hover_text("back to half the far range")
-                                .clicked()
-                            {
-                                *dof_near_range = 0.0;
-                                cmd.inspector_changed = true;
-                            }
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
-                                .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
-                                .changed();
-
-                            ui.add_space(3.0);
-                            ui.small("the iris");
-                            let mut blades = *dof_blades as f32;
-                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
-                                        .step_by(1.0),
-                                        "blades")
-                                .on_hover_text(
-                                    "0 is a round iris. 3 and up gives the polygonal bokeh \
-                                     of a real lens — six is the classic hexagon.",
-                                );
-                            if r.changed() {
-                                *dof_blades = blades.max(0.0) as u32;
-                                cmd.inspector_changed = true;
-                            }
-                            if *dof_blades >= 3 {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
-                                            "blade angle°")
-                                    .on_hover_text("turn the polygon")
-                                    .changed();
-                            }
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
-                                .on_hover_text(
-                                    "how much brighter-than-white pixels dominate the \
-                                     blur. 0 averages them away into grey; turn it up and \
-                                     a specular glint spreads into a visible disc. It \
-                                     reads the scene's real light, so it needs something \
-                                     genuinely brighter than white to work on.",
-                                )
-                                .changed();
-                            let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
-                            let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
-                                .on_hover_text(
-                                    "taps in the blur. More is smoother bokeh and costs \
-                                     linearly more; fewer is the chunky look, on purpose.",
-                                );
-                            if r.changed() {
-                                *dof_quality = q.round().clamp(4.0, 64.0) as u32;
-                                cmd.inspector_changed = true;
-                            }
-                            cmd.inspector_changed |= crate::responsive::check(ui, dof_show_focus, "show the focus band")
-                                .on_hover_text(
-                                    "a tuning view: cool where the near side is going \
-                                     soft, warm where the far side is, the picture itself \
-                                     where it is sharp. Which half of the band a pixel is \
-                                     on is the one thing you cannot read off a blurred \
-                                     frame.",
-                                )
-                                .changed();
-                        });
-                        if *dof_show_focus {
-                            ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
-                        }
-                        if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
-                            && *dof_max_blur <= 0.0
-                        {
-                            ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
-                        }
-
-                        // ---- motion blur --------------------------------
-                        ui.separator();
-                        ui.strong("≈ Motion blur");
-                        ui.small("shows in the Game view");
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
-                            .on_hover_text(
-                                "How much of the frame's camera motion is smeared. 0 is off. \
-                                 0.5 is the 180° shutter a film camera has and is the one \
-                                 that reads as footage; 1 leaves the shutter open for the \
-                                 whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
-                                 motion — a pan, a whip, a dolly, a roll. Something crossing \
-                                 a locked-off shot stays sharp.\n\nThe Scene view is left \
-                                 alone deliberately: you have to be able to place things \
-                                 while the camera is moving.",
-                            )
-                            .changed();
-                        if *motion_blur > 0.0 {
-                            let mut taps =
-                                if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
-                            if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
-                                .on_hover_text(
-                                    "Taps along the streak. Too few and a fast pan bands \
-                                     into separate copies of the picture.",
-                                )
-                                .changed()
-                            {
-                                *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
-                                cmd.inspector_changed = true;
-                            }
-                        }
-                    }
+                    Matter::WaterVolume { .. } => water_volume_type_ui(ui, &mut ctx, m),
+                    Matter::Skybox { .. } => skybox_type_ui(ui, &mut ctx, m),
+                    Matter::NavMesh { .. } => nav_mesh_type_ui(ui, &mut ctx, m),
+                    Matter::NavLink { .. } => nav_link_type_ui(ui, &mut ctx, m),
+                    Matter::NavArea { .. } => nav_area_type_ui(ui, &mut ctx, m),
+                    Matter::LightProbes { .. } => light_probes_type_ui(ui, &mut ctx, m),
+                    Matter::ReflectionProbe { .. } => reflection_probe_type_ui(ui, &mut ctx, m),
+                    Matter::PostProcess { .. } => post_process_type_ui(ui, &mut ctx, m),
                 }
             }
         });
