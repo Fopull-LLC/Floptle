@@ -167,8 +167,9 @@ type ReadOpts = (Vec<(String, String)>, f64, Option<bool>);
 
 /// Read `opts` into (headers, timeout, explicit-json), refusing anything else.
 ///
-/// A misspelled `header = {...}` used to send the request without the header —
-/// so the server answered 401 and the game reported "the API is down".
+/// A misspelled `header = {...}` is refused rather than sent without the
+/// header, which would make the server answer 401 and the game report "the
+/// API is down".
 fn read_opts(
     call: &str,
     opts: Option<&Table>,
@@ -827,8 +828,8 @@ pub(crate) fn install_http_api(
 /// its own syntax. Refused otherwise, with the reason.
 ///
 /// **Parsed, not pattern-matched.** `https://a.example/?q="&calc.exe` starts
-/// with `https://` and is not a link; on the one platform where the opener
-/// used to be a shell, the `&` ran a program. The parse is the same on every
+/// with `https://` and is not a link; handed to a shell, the `&` runs a
+/// program. The parse is the same on every
 /// platform so the rule is one rule, and a link that fails it here fails it
 /// on a developer's machine before it ever reaches a player's.
 pub fn browser_url(url: &str) -> std::io::Result<url::Url> {

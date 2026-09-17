@@ -45,9 +45,8 @@ pub struct ScriptState {
     ///
     /// A correction must put back everything the replay needs to reproduce, but
     /// the checksum should only fire on divergence the *simulation* can feel.
-    /// Those are different sets, and `snapshot()` used to be all-or-nothing —
-    /// so presentation state smuggled itself into the checksum through the only
-    /// door available.
+    /// Those are different sets; an all-or-nothing `snapshot()` would let
+    /// presentation state into the checksum through the only door available.
     ///
     /// That cost a cross-platform match: a model's turn-toward-the-opponent
     /// angle, smoothed with `math.exp`, which is library code and is not

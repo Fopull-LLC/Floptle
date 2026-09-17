@@ -369,10 +369,9 @@ pub fn apply_component_color(
     match comp_head {
         // **A material's colours, as colours.** The mirror publishes them per
         // channel (`m.r`, `m.emissiveG`) because a keyframe holds one number,
-        // and every one of those works — but `m.color = color(1, 0.8, 0.6)` is
-        // what anybody writes first, and it used to land in the colour map and
-        // be dropped on the floor here. Silently: the write "succeeded", the
-        // material did not change.
+        // and every one of those works — and `m.color = color(1, 0.8, 0.6)` is
+        // what anybody writes first, so it must not land in the colour map and
+        // be dropped here with the write looking successful.
         "Material" | OBJECT_MATERIAL_PREFIX => {
             let known = matches!(field, "color" | "tint" | "emissive" | "specular" | "rim");
             let Some(m) = material_target(world, ent, comp, known) else { return };
@@ -786,12 +785,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
-    // A material's numbers, **every one of them**.
+    // A material's numbers, every one of them.
     //
-    // This used to be the three spritesheet fields alone, on the reasoning that
-    // everything else was set through `node:setMaterial{...}`. That reasoning
-    // holds for a script, which can name any key it likes — and it silently
-    // decided what the animation system can key, because the timeline's record
+    // Not only the three spritesheet fields: a script can set the rest through
+    // `node:setMaterial{...}`, but this list also decides what the animation
+    // system can key, because the timeline's record
     // pass reads this map to notice a change. A material's opacity could be set
     // from Lua and could not be animated, and the Animating tab said nothing
     // about why: the field was simply not in the list.
@@ -3850,10 +3848,10 @@ let node_mt = lua.create_table()?;
         if hit != Value::Nil {
             return Ok(hit);
         }
-        // A casing slip on a real method used to die at the call — "attempt
-        // to call method 'getChild' (a nil value)" — which names the symptom
-        // and not one thing to do about it. Answer it here instead, the way
-        // the animator metatable does. Only a case-insensitive exact match
+        // A casing slip on a real method would die at the call with "attempt
+        // to call method 'getChild' (a nil value)", which names the symptom
+        // and nothing to do about it. Answer it here instead, the way the
+        // animator metatable does. Only a case-insensitive exact match
         // raises: anything genuinely unknown still indexes to nil, so
         // feature probes (`if node.someday then`) keep working.
         for pair in methods.pairs::<String, Value>() {
@@ -4223,7 +4221,7 @@ let node_mt = lua.create_table()?;
         // are built fresh per call, so the write lands on a table nobody
         // will hold again and reads back nil from the very next lookup —
         // and the same is true of a casing slip on a field that does exist
-        // (`node.Yaw = 3`). Both used to be silent. Say it once.
+        // (`node.Yaw = 3`). Say it once.
         let own = this.raw_get::<f64>("x").is_ok();
         if !own {
             warn_once(&logs, &warned, format!("nodestash:{e}:{key}"), || {
@@ -4404,10 +4402,9 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             {
                 return Ok(wrap(*v));
             }
-            // **Strings, which used to be write-only.** `mat.texture = p`
-            // worked and `mat.texture` answered nil, however many times it
-            // had been set — so a script could tell a material what to wear
-            // and never ask. This frame's pending write first, then the
+            // Strings read back too: `mat.texture = p` then `mat.texture`
+            // answers `p`, so a script can ask a material what it wears. This
+            // frame's pending write first, then the
             // mirror, exactly as the numbers above do it.
             if let Some(v) = strs_r.borrow().get(&(e, comp.clone(), key.clone())) {
                 return Ok(Value::String(lua.create_string(v)?));
@@ -4696,8 +4693,8 @@ let script_mt = lua.create_table()?;
             // No environment. Two very different things read `nil` here: a
             // script that has no such export, and a script that failed TO
             // Load and therefore has no exports at all. The second wants a
-            // completely different fix and used to be indistinguishable
-            // from the first at every call site, so say
+            // completely different fix and looks identical to the first at
+            // every call site, so say
             // which it is — once per `(script, key)`, because a handle
             // polled in `update` would otherwise say it sixty times a
             // second.
@@ -6148,9 +6145,9 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         )
                     })?,
                 };
-                // Checked here, through the parser the write itself uses: a
-                // misspelled shape used to become a cube, silently — a
-                // different object standing exactly where you put it.
+                // Checked here, through the parser the write itself uses, so
+                // a misspelled shape raises rather than becoming a cube
+                // standing exactly where you put it.
                 let shape = crate::opts::parse_enum(
                     "node:setPrimitive",
                     "shape",
@@ -6507,10 +6504,9 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
     }
     // Method lookup goes through a function so a casing typo fails with a
     // fix instead of a bare nil-call: the animator API is camelCase
-    // (`anim:isPlaying`), and `anim:IsPlaying(...)` used to die with
-    // "attempt to call a nil value (method 'IsPlaying')" — no hint at all.
-    // A case-insensitive near-miss now errors with "did you mean
-    // 'isPlaying'?". Genuinely unknown keys still index to nil, so
+    // (`anim:isPlaying`), and a case-insensitive near-miss such as
+    // `anim:IsPlaying(...)` errors with "did you mean 'isPlaying'?" rather than
+    // "attempt to call a nil value (method 'IsPlaying')". Genuinely unknown keys still index to nil, so
     // feature probes (`if anim.someday then`) keep working.
     let anim_mt = lua.create_table()?;
     anim_mt.set(
@@ -6738,9 +6734,9 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
 
 // ---- orientation, local ↔ world, movement ---------------------------------------
 //
-// The half of the API that used to be written out longhand in every script:
+// The half of the API every script would otherwise write out longhand:
 // `atan2` with two minus signs, a four-line project-onto-plane, and an
-// inverse-parent-transform nobody wanted to derive. Each one names the
+// inverse-parent-transform nobody wants to derive. Each one names the
 // intent, so it cannot get the sign wrong.
 //
 // They all go through the handle's own `__index`/`__newindex` (`this.get` /

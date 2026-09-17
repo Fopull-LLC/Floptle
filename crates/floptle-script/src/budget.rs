@@ -1,9 +1,9 @@
 //! How long a script may run before the engine takes the frame back.
 //!
-//! `while true do end` in an `update` used to freeze the editor, the player
-//! and a dedicated server alike, forever, with nothing to say why. Luau calls
-//! an *interrupt* at every loop back-edge and function call; this module hangs
-//! a deadline on it. The driver arms the deadline when it enters Lua for a
+//! Without one, `while true do end` in an `update` freezes the editor, the
+//! player and a dedicated server alike, with nothing to say why. Luau calls an
+//! interrupt at every loop back-edge and function call; this module hangs a
+//! deadline on it. The driver arms the deadline when it enters Lua for a
 //! pass — every hook, timer and callback in that pass shares it — and the
 //! interrupt raises a Lua error once the clock is past it. The error names the
 //! budget, the script joins [`ScriptHost`](crate::ScriptHost)'s stopped set,

@@ -32,10 +32,10 @@ pub(crate) const PLAY_KEYS: &[&str] = &[
 /// understand.
 ///
 /// Enum strings are case-insensitive (`mode = "spatial"`, `falloff = "linear"`,
-/// `endBehavior = "destroy"`, `loop = true`). A near-miss — `mode = "spacial"` —
-/// used to leave the default in place, so a sound a game asked to be positional
-/// played flat, at full volume, everywhere, forever. There is nothing to see in
-/// that: it is a mix that sounds wrong.
+/// `endBehavior = "destroy"`, `loop = true`). A near-miss such as
+/// `mode = "spacial"` raises rather than leaving the default in place, since a
+/// positional sound played flat at full volume everywhere is a mix that merely
+/// sounds wrong.
 fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     use crate::opts::{check_keys, parse_enum};
     const CALL: &str = "audio.play";

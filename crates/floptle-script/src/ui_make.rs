@@ -143,10 +143,9 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
     let mut hooks = Vec::new();
     let mut roots = Vec::new();
     // An empty table describes nothing, which is how a screen is taken down:
-    // `ui.make(node, {})`. It used to fall through to "a table with no kind and
-    // no properties", i.e. one anonymous box — so hiding a menu left an element
-    // behind on every hide, and the call that most obviously means "clear" was
-    // the one call that could not.
+    // `ui.make(node, {})`. Read as "a table with no kind and no properties" it
+    // would be one anonymous box, and hiding a menu would leave an element
+    // behind on every hide.
     if t.clone().pairs::<Value, Value>().next().is_none() {
         return Ok((roots, hooks));
     }
@@ -158,9 +157,8 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
         // obvious way to say it and leaves a hole in the array. Lua's length
         // operator is only defined up to a border, so a holed table reports
         // whatever its internal array happens to end at: sometimes the full
-        // count, in which case the nil entry used to abort the whole screen —
-        // one absent section and the entire HUD is missing, with an error that
-        // names an index rather than the section — and sometimes the index
+        // count, in which case a nil entry would abort the whole screen with
+        // an error naming an index rather than the section, and sometimes the index
         // before the hole, in which case every later section was silently
         // dropped and nothing was reported at all.
         //
@@ -277,10 +275,9 @@ fn parse_node(
             )));
         }
         // …and the same treatment for a value the property does not take.
-        // `pin = "topCenter"` used to answer `topLeft`,
-        // silently and forever — four HUD elements stacked into one corner, a
-        // report that read as a layout bug, and an afternoon spent nowhere near
-        // the spelling that caused it.
+        // A defaulted `pin = "topCenter"` answers `topLeft` silently and
+        // forever: four HUD elements stacked into one corner, and a report that
+        // reads as a layout bug.
         if let Some(accepts) = floptle_ui::make::prop_values(&key)
             && !floptle_ui::make::known_value(&key, &val)
         {
@@ -298,9 +295,9 @@ fn parse_node(
     // ---- children ----
     // The largest integer key, not `raw_len()`: a child list with a hole in it
     // (`{ header, body, footer }` where `body` is conditionally nil) reports
-    // its length only as far as the hole, so everything after an absent child
-    // used to vanish silently. A nil child is skipped below and always was —
-    // it just had to be reached first.
+    // its length only as far as the hole, and everything after an absent
+    // child would vanish. A nil child is skipped below; it has to be reached
+    // first.
     let mut n = 0usize;
     for pair in t.clone().pairs::<Value, Value>() {
         let (k, _) = pair?;
@@ -597,11 +594,10 @@ mod tests {
         assert!(hook_needs("clicked").contains("Button"));
     }
 
-    /// **Re-making an unchanged UI changes nothing in the world.** A HUD made
-    /// every frame used to re-insert every element's spec, name and marker,
-    /// which the world counts as structural — and the script mirror, which
-    /// trusts that count, rebuilt itself from scratch every frame because of
-    /// three elements that had not moved.
+    /// Re-making an unchanged UI changes nothing in the world. Re-inserting
+    /// every element's spec, name and marker counts as structural, and the
+    /// script mirror, which trusts that count, would rebuild itself from
+    /// scratch every frame because of three elements that had not moved.
     #[test]
     fn re_installing_an_identical_element_leaves_the_world_revision_alone() {
         let mut world = World::default();

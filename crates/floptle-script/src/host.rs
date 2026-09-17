@@ -727,10 +727,9 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
             );
             // Nearest surface wins between static geometry and body hulls.
             //
-            // **`hit.node` is answered for both.** It used to be set only
-            // for a body hull, so a ray down at the floor of a level came
-            // back with no node at all while `spherecast` — documented as
-            // returning the same fields — named the map mesh. The march had
+            // `hit.node` is answered for both static geometry and body hulls,
+            // so a ray down at the floor of a level names the map mesh the way
+            // `spherecast` does. The march has
             // the collider in hand the whole time; the field was dropped,
             // not unavailable, and reading the docs it looked like the
             // engine could not tell you.
@@ -1050,10 +1049,9 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 // `{ additive = true }` layers the scene on top of the
                 // running one instead of replacing it.
                 //
-                // This used to ignore anything else in the table, on the
-                // reasoning that the option set could then grow without
-                // breaking a script that passed one. That reasoning was
-                // wrong in the one direction that matters: a typo'd
+                // Anything else in the table is refused. Ignoring it would let
+                // the option set grow without breaking a script that passed
+                // one, and it is wrong in the one direction that matters: a typo'd
                 // `addative = true` reads as `additive = false`, which
                 // Destroys the running scene instead of layering onto it.
                 // Every node it held is gone, the request queue is cleared,
@@ -4052,10 +4050,9 @@ impl ScriptHost {
     /// Fire `net.on("desync")` with a table the game can actually act on:
     /// `{ tick = n, node = "Player2" }`.
     ///
-    /// It used to fire with no payload at all — not the tick, not the node, not
-    /// the script, not the key — so a game could not tell a player whether
-    /// their connection or their build was at fault, and "desynced",
-    /// "disconnected" and "opponent quit" all reached them as the same thing:
+    /// With no payload, a game could not tell a player whether their
+    /// connection or their build was at fault, and "desynced", "disconnected"
+    /// and "opponent quit" would all reach them as the same thing:
     /// the game closed the match. Which is what they reported.
     pub fn fire_desync(&mut self, world: &mut World, tick: u64, node: Option<&str>) {
         let _budget = self.budget.arm();
@@ -4998,9 +4995,8 @@ impl ScriptHost {
         for eid in drop.clone() {
             self.driver_skip.remove(&eid);
         }
-        // Historic entries: drivers used to write into both of these sets, and
-        // a stale index here would silently skip an unrelated node once the
-        // allocator reused it.
+        // Both sets, in case a driver wrote into both: a stale index here
+        // would silently skip an unrelated node once the allocator reused it.
         for eid in drop.clone() {
             self.script_skip.remove(&eid);
         }
@@ -5667,10 +5663,9 @@ impl ScriptHost {
                     if let Some(live) = &mut live {
                         live.insert(id);
                     }
-                    // the grid used to be `data.clone()`d here,
-                    // unconditionally, twice a frame — a heap allocation and a
-                    // memcpy of the whole map whether or not any script ever
-                    // looked at it. A 200×200 map is 160 KB a frame of pure
+                    // Not `data.clone()`d here twice a frame: that is a heap
+                    // allocation and a memcpy of the whole map whether or not
+                    // any script ever looks at it. A 200×200 map is 160 KB a frame of pure
                     // churn, and a level made of several is worse.
                     //
                     // Reuse the buffer when the map has not changed, which is
@@ -6235,10 +6230,10 @@ impl ScriptHost {
             // The two first-pass warnings are about the scene's wiring — a
             // param stored on the node that the script never declares, a
             // global that shadows a handle key — and have nothing to do with
-            // which hooks this pass wants. They used to live in the full setup
-            // below, so a `fixedUpdate`-only script, whose first Frame pass is
-            // hook-less, consumed `first` on the fast path and was never
-            // warned. The env is resolved here on that one pass only.
+            // which hooks this pass wants. In the full setup below, a
+            // `fixedUpdate`-only script, whose first Frame pass is hook-less,
+            // would consume `first` on the fast path and never be warned. The
+            // env is resolved here on that one pass only.
             let first_env = if first { self.lua.registry_value::<Table>(&inst.env).ok() } else { None };
             if !wants {
                 let body = self.bodies.borrow().get(&eid).copied();
@@ -6565,10 +6560,10 @@ impl ScriptHost {
         rebuild_params: bool,
     ) -> mlua::Result<()> {
         // Built from the seed only when the seed changed or the script wrote
-        // into it last time (`Instance::seed_fp`, `Instance::params_dirty`). It
-        // used to be rebuilt on every hook call, which on sixty scripted nodes
-        // was a hundred and eighty tables a frame that were, almost always,
-        // the table already there.
+        // into it last time (`Instance::seed_fp`, `Instance::params_dirty`).
+        // Rebuilt on every hook call, sixty scripted nodes would cost a hundred
+        // and eighty tables a frame that are, almost always, the table already
+        // there.
         if rebuild_params {
             env.raw_set("params", params_table(&self.lua, env, params, refs, strs)?)?;
             #[cfg(test)]
@@ -6783,8 +6778,8 @@ impl ScriptHost {
     /// number, no such script, an unreadable file, a line past the end.
     ///
     /// The file is read once per version: a script raising in `update` raises
-    /// every frame on every instance, and this used to read the file per error
-    /// (sixty nodes on one broken script: 180 reads a frame). The text lives on
+    /// every frame on every instance, and a read per error would be 180 reads
+    /// a frame for sixty nodes on one broken script. The text lives on
     /// the [`Source`] and goes when its mtime changes, so a quote is never from
     /// a file that is no longer the one running.
     fn explain_runtime(&mut self, name: &str, msg: String) -> String {

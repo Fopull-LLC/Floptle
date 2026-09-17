@@ -116,10 +116,10 @@ pub struct DrawText {
     /// Project-relative `.ttf`/`.otf` path, or empty for the project's own UI
     /// font.
     ///
-    /// Empty used to mean the embedded Roboto and nothing else, because project
-    /// fonts append to the font stack and slot 0 was never theirs. A game whose
-    /// UI is a pixel font could not draw one immediate-mode string in it — and
-    /// the symptom is not "wrong typeface", it is text that reads as badly
+    /// Project fonts append to the font stack and slot 0 is never theirs, so
+    /// without this a game whose UI is a pixel font could not draw one
+    /// immediate-mode string in it, and the symptom is not "wrong typeface"
+    /// but text that reads as badly
     /// spaced, because a layout built on a monospace grid is being handed a
     /// proportional font.
     pub font: String,
@@ -276,10 +276,9 @@ pub use math_api::{ExactVec3, LuaVec3, Vec3Mode};
 /// Read a 3-vector out of any Lua value this engine treats as one: a `vec3` in
 /// either backing, a `vec2` (z = 0), a node handle, or a `{x=, y=, z=}` table.
 ///
-/// **The public read path, and the reason it exists is a bug it now prevents.**
-/// A `vec3` used to be exactly one Rust type in a userdata, so a caller outside
-/// this crate could `borrow::<LuaVec3>()` and be right. With two backings that
-/// is no longer true, and the failure is silent in the worst way:
+/// The public read path. With two backings a caller outside this crate cannot
+/// `borrow::<LuaVec3>()` and be right, and the failure is silent in the worst
+/// way:
 /// `AnyUserData::borrow` is bounded on `'static` and not on `UserData`, so a
 /// borrow of the wrong type still compiles and merely never matches. Ask here
 /// instead.
@@ -775,10 +774,10 @@ pub struct ScriptHost {
     /// ([`ScriptHost::set_reserved_keys`]). The editor reserves Play/Pause/Step;
     /// a headless harness reserves nothing.
     ///
-    /// It exists so the first poll of such a key writes a Console line instead of
-    /// returning `false` forever. Being unavailable used to look
-    /// exactly like not being pressed, which is why a game shipped an inventory
-    /// bound to Tab and heard about it from a player rather than from a test.
+    /// It exists so the first poll of such a key writes a Console line instead
+    /// of returning `false` forever: unavailable looks exactly like not
+    /// pressed, and a game with an inventory bound to Tab would hear about it
+    /// from a player rather than from a test.
     reserved_keys: ReservedKeys,
     /// Where this frame's time went, per subsystem and per script.
     /// Written by the driver and by [`ScriptHost::run_pass`],
@@ -1519,10 +1518,10 @@ pub enum RichSet {
     /// player, and which node that is may be spawned, chosen at a character
     /// select, or handed over mid-level. `follow = ""` stops following without
     /// throwing away the dead zone and limits set beside it.
-    /// Every axis is its own option. Collapsing a pair into `[x, y]` at the
-    /// binding — with `0.0` for the axis nobody mentioned — is how
-    /// `setCamera2D{ maxY = 80 }` used to set `maxX` to zero and park the
-    /// camera against a limit nobody wrote.
+    /// Every axis is its own option. A pair collapsed into `[x, y]` at the
+    /// binding, with `0.0` for the axis nobody mentioned, would let
+    /// `setCamera2D{ maxY = 80 }` set `maxX` to zero and park the camera
+    /// against a limit nobody wrote.
     MatterCamera2D {
         follow: Option<String>,
         smoothing: Option<f32>,
@@ -1549,7 +1548,7 @@ pub enum RichSet {
         flip_x: Option<bool>,
         flip_y: Option<bool>,
         /// Per axis, for the same reason the camera's pairs are: `setSprite{
-        /// pivotY = 0 }` used to put `pivotX` back to 0.5, and that call is the
+        /// pivotY = 0 }` must leave `pivotX` alone, and that call is the
         /// documented way to move a character's origin to its feet.
         pivot_x: Option<f32>,
         pivot_y: Option<f32>,

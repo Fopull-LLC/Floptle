@@ -154,11 +154,9 @@ pub(crate) fn install_hit_meta(lua: &Lua, shared: &QueryShared) {
 /// Build the Lua table one hit becomes — the same field names `raycast`
 /// returns, so a script that handles one handles the other.
 ///
-/// **One builder, because the asymmetry it exists to prevent already
-/// happened.** `raycast` used to assemble its own copy of these fields and set
-/// `node` only for body hulls, so it answered `nil` for the entire level while
-/// `spherecast` — whose comment promised the same fields — named the node.
-/// Two hit tables built in two places is how that survives
+/// One builder, so `raycast` and `spherecast` cannot drift: two hit tables
+/// built in two places is how one of them answers `nil` for `node` on the
+/// entire level while the other names it. That survives
 /// being fixed once.
 pub(crate) fn hit_table(
     lua: &Lua,
