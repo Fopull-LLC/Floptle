@@ -365,7 +365,7 @@ mod tests {
     fn a_still_point_lands_where_it_was_however_far_the_camera_moved() {
         let proj = Mat4::perspective_rh(1.0, 1.6, 0.1, 1000.0);
         // Frame A: camera a long way from the origin (large-world), looking down
-        // -Z. The view matrix carries no translation (ADR-0015), so with an
+        // -Z. The view matrix carries no translation, so with an
         // identity rotation the view-projection is the projection.
         let cam_a = DVec3::new(1.0e6, 20.0, -3.0e5);
         let vp_a = proj;

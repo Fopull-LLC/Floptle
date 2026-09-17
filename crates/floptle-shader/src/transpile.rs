@@ -1,4 +1,4 @@
-//! IR → WGSL (ADR-0007). A checked shader becomes a **chunk** of WGSL that the
+//! IR → WGSL. A checked shader becomes a **chunk** of WGSL that the
 //! renderer concatenates onto its pass module (`raster.wgsl + field.wgsl` for
 //! Fragment-stage shaders) — the same composition trick the engine already
 //! uses for the shared field module. The chunk references pass symbols

@@ -105,7 +105,7 @@ impl GiVolume {
     }
 
     /// Stamp this volume into a frame's globals, with the centre moved into the
-    /// camera-relative space everything else in the field lives in (ADR-0015).
+    /// camera-relative space everything else in the field lives in.
     pub fn apply(&self, g: &mut crate::RaymarchGlobals, cam_world: [f64; 3]) {
         g.gi_meta = self.meta;
         g.gi_dims = self.dims;

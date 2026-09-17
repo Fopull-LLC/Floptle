@@ -1,4 +1,4 @@
-//! The `.flsl` text format — parse and print, round-trippable (ADR-0007).
+//! The `.flsl` text format — parse and print, round-trippable.
 //!
 //! Text is the on-disk canon: `parse(print(ir))` is structurally the same
 //! shader ([`ShaderIr::same_shader`]). The printer is deterministic so diffs

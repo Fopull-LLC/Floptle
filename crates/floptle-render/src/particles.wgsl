@@ -3,7 +3,7 @@
 // Each quad spans a PER-INSTANCE basis (`basis_right`/`basis_up`) the CPU packer
 // picks per orientation mode — face-camera, upright, flat-on-ground, or stretched
 // along velocity — so a track need not face the camera. Positions arrive
-// camera-relative (the view matrix has no translation, ADR-0015: the camera is the
+// camera-relative (the view matrix has no translation: the camera is the
 // origin), so the basis vectors are camera-relative world directions too.
 //
 // Group 0 (per frame): camera globals — view·projection (+ a camera right/up basis
@@ -15,7 +15,7 @@
 // position+spin, size, tint, basis — written by the CPU sim each frame (and, later,
 // by the GPU compute backend directly; this shader never knows which).
 //
-// Deliberately self-contained: when the shader system (ADR-0007) lands, a track's
+// Deliberately self-contained: when the shader system lands, a track's
 // material IR compiles to a replacement fragment stage against these same inputs.
 
 struct ParticleGlobals {

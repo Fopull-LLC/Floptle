@@ -4,7 +4,7 @@
 // analytic morphing blob, and a BAKED MESH VOLUME (a 3D distance texture + a
 // co-located color texture produced by mesh2sdf). Distance AND color blend by the
 // same smin weight, so where the two fuse the textures crossfade across the seam.
-// Rays come from inverse(view_proj) (camera-relative, ADR-0015) and the fragment
+// Rays come from inverse(view_proj) (camera-relative) and the fragment
 // writes frag_depth, so this shares one depth buffer with the raster meshes.
 //
 // The `Globals` struct and all distance-only field machinery (`map_d`, blob/

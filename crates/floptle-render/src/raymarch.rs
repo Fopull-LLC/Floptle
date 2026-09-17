@@ -29,7 +29,7 @@ pub struct RaymarchGlobals {
     pub params: [f32; 4],
     /// Up to [`MAX_VOLUMES`] baked volumes: each xyz camera-relative box center,
     /// w = present (1.0/0.0). Every terrain volume renders at its own native
-    /// resolution — no shared combined grid (ADR-0015 / multi-volume terrain).
+    /// resolution — no shared combined grid (multi-volume terrain).
     pub vol_center: [[f32; 4]; 16],
     /// Per volume: xyz half-extent, w = volume↔volume fuse blend radius k.
     pub vol_half: [[f32; 4]; 16],
@@ -118,7 +118,7 @@ pub struct RaymarchGlobals {
     pub vol_tight_c: [[f32; 4]; 16],
     /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
     pub vol_tight_h: [[f32; 4]; 16],
-    /// Field Shapes (ADR-0007 Sdf stage): x = active count (0..=4).
+    /// Field Shapes (the Sdf stage): x = active count (0..=4).
     pub shape_meta: [f32; 4],
     /// Per shape: xyz = camera-relative position, w = uniform scale.
     pub shape_pos: [[f32; 4]; 4],
@@ -218,7 +218,7 @@ pub struct RaymarchGlobals {
     /// Reflection probes. x = how many are live; the rest is spare.
     pub probe_meta: [f32; 4],
     /// Per probe: xyz = the capture point, CAMERA-RELATIVE like everything else
-    /// in this struct (ADR-0015), w = how much of it to apply.
+    /// in this struct, w = how much of it to apply.
     pub probe_pos: [[f32; 4]; crate::reflect::MAX_PROBES],
     /// Per probe: xyz = the box half-extents that make the reflection land on
     /// the walls and mark which surfaces the probe covers, w = how far outside

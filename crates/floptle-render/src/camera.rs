@@ -1,7 +1,7 @@
 //! A free-fly debug camera and the raw input it reads — the shared way the runtime
 //! and editor move through the world and look at the scene.
 //!
-//! The camera holds an `f64` world position (large-world-safe, ADR-0015) plus
+//! The camera holds an `f64` world position (large-world-safe) plus
 //! yaw/pitch in `f32`. WASD moves on the camera's own axes, Space/Ctrl go
 //! world-up/down, and holding the right mouse button enables mouse-look. It hands
 //! the renderer a [`RenderCamera`]; the world is offset to *it*, never the reverse.

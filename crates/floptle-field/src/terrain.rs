@@ -384,7 +384,7 @@ impl Terrain {
     /// Returns `(anchor, field)`: the field's own coordinates are relative to the
     /// returned **`f64` anchor** (the union's snapped world minimum), never absolute
     /// world space — so the fold is exact no matter how far out the terrains sit
-    /// (ADR-0015). Reconstruct world positions as `anchor + local`. All the interior
+    ///. Reconstruct world positions as `anchor + local`. All the interior
     /// math is `f64` already; only small residuals are ever narrowed to `f32`.
     ///
     /// `k` is the blend radius. Voxel size = the finest of the sources (per axis),
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn combine_is_exact_far_from_world_origin() {
-        // ADR-0015: the fold must not lose precision when the terrains sit millions of
+        // the fold must not lose precision when the terrains sit millions of
         // units out — the largeness lives in the f64 anchor, the field stays small.
         let a = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
         let far = 1.0e7f64;

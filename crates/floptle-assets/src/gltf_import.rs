@@ -1,4 +1,4 @@
-//! glTF 2.0 import (Blender's native export format, ADR-0006).
+//! glTF 2.0 import (Blender's native export format).
 //!
 //! Loads a `.glb`/`.gltf`, walks the scene's node tree baking each node's world
 //! transform into the vertices, and groups triangle primitives **per material**

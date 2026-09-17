@@ -803,7 +803,7 @@ pub struct Raster {
     /// Standalone material textures (decoupled from meshes), bound per-instance so
     /// a Material can re-texture any shape. Indexed by [`TexId`].
     textures: Vec<TexBind>,
-    /// Compiled `.flsl` fragment pipelines (ADR-0007), indexed by [`FlslShaderId`].
+    /// Compiled `.flsl` fragment pipelines, indexed by [`FlslShaderId`].
     flsl_shaders: Vec<FlslShader>,
     /// Live material bindings (group(3) params + textures), indexed by [`FlslBindingId`].
     flsl_bindings: Vec<FlslBinding>,
@@ -3920,7 +3920,7 @@ pub const MAX_GLASS_LAYERS: u32 = floptle_core::Light::MAX_REFRACTION_LAYERS;
 
 /// How far an instance's origin is from the eye.
 ///
-/// Camera-relative rendering (ADR-0015) is what makes this a one-liner: the view
+/// Camera-relative rendering is what makes this a one-liner: the view
 /// matrix carries no translation, so an instance's model translation already is
 /// its position relative to the camera and its length is the distance. No view
 /// matrix has to be threaded in to sort by depth.

@@ -1,4 +1,4 @@
-//! The reference relay (`docs/multiplayer.md` §10, ADR-0022): hosts get a
+//! The reference relay (`docs/multiplayer.md` §10): hosts get a
 //! lobby code, clients join with it, traffic forwards both ways — nobody
 //! port-forwards. Self-hostable by anyone; Floptle Cloud runs the managed one.
 //!
@@ -6,8 +6,7 @@
 //!     floptle-relay --control <url> --region <id> --letter U --token <t>
 //!
 //! **Without the managed flags this is the open relay and nothing else.** No
-//! keys, no control plane, no accounting — byte-identical to the day it was
-//! written, which is what ADR-0022 promises and what `floptle-net`'s
+//! keys, no control plane, no accounting — which `floptle-net`'s
 //! `a_self_hosted_relay_still_hosts_keyless_with_a_five_character_code` holds
 //! us to. Managed mode is additive and opt-in, and a developer running their
 //! own relay never touches any of it.

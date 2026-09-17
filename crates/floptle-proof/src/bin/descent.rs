@@ -1,7 +1,7 @@
 //! Floptle — Beat 2 "Stand in the Dream" proof slice.
 //!
 //! A standalone, hardcoded-WGSL binary (sibling to Beat 1's `main.rs`, which it
-//! leaves untouched). It proves the SDF-first physics thesis (ADR-0012 / -0014):
+//! leaves untouched). It proves the SDF-first physics thesis :
 //! a kinematic capsule walks on a *morphing* fractal planetoid, colliding against
 //! the renderer's own signed-distance field, with SDF-surface gravity defining
 //! "down" so you can run up the shifting walls — and an anti-trapping rule so a
@@ -45,7 +45,7 @@ const NOCLIP_SPEED: f32 = 45.0;
 const DESCEND_RATE: f32 = 1.3; // infinite-descent octaves per second while holding C
 const DIVE_MAX: f32 = 7.0; // descent floor — past here iters cap (4+7=11) and f32
 // precision of fine detail runs out; true-infinite needs the floating-origin
-// rebase (ADR-0020), which the rem_euclid Menger can't do cleanly (measured).
+// rebase, which the rem_euclid Menger can't do cleanly (measured).
 const AUTO_DIVE_RATE: f32 = 1.4; // octaves/sec auto-descent at full gate (open void)
 // Clearance-gated, self-regulating: zoom fast in a big open void, but as you fall
 // toward a wall the clearance drops and the gate closes so you actually LAND;

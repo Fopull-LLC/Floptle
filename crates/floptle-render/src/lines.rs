@@ -2,7 +2,7 @@
 //! over the scene (no depth test — see the pipeline comment) without writing
 //! depth. This is the game-visible line facility (S6 v2 map screens, debug
 //! draws): scripts queue segments via the Lua `draw.line` API each tick and
-//! the editor feeds them here per camera. Camera-relative (ADR-0015): callers
+//! the editor feeds them here per camera. Camera-relative: callers
 //! pre-subtract the camera position, so the GPU never sees a large coordinate.
 
 use glam::Mat4;

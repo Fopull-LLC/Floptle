@@ -1,5 +1,5 @@
 ---@meta
---- Floptle engine scripting API (ADR-0003). Generated — do not edit.
+--- Floptle engine scripting API. Generated — do not edit.
 
 ---@class Node The node's transform, synced to/from the engine each frame.
 ---@field x number World X position.

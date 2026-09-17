@@ -32,7 +32,7 @@ use crate::chunks::{ChunkField, CHUNK};
 
 /// One chunk's extracted geometry. Positions are CHUNK-LOCAL (small numbers); `origin`
 /// places them in field space, which is what the per-chunk instance matrix carries —
-/// keeping vertex coordinates tiny is what makes this floating-origin-safe (ADR-0015).
+/// keeping vertex coordinates tiny is what makes this floating-origin-safe.
 #[derive(Clone, Debug, Default)]
 pub struct ChunkMesh {
     pub positions: Vec<[f32; 3]>,

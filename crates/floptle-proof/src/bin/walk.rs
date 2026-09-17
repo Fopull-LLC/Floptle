@@ -1,7 +1,7 @@
 //! Floptle — Beat 2 "Stand in the Dream" proof slice.
 //!
 //! A standalone, hardcoded-WGSL binary (sibling to Beat 1's `main.rs`, which it
-//! leaves untouched). It proves the SDF-first physics thesis (ADR-0012 / -0014):
+//! leaves untouched). It proves the SDF-first physics thesis :
 //! a kinematic capsule walks on a *morphing* fractal planetoid, colliding against
 //! the renderer's own signed-distance field, with SDF-surface gravity defining
 //! "down" so you can run up the shifting walls — and an anti-trapping rule so a
@@ -156,7 +156,7 @@ fn grad(p: Vec3, t: f32, eps: f32) -> Vec3 {
 
 /// Gravity "down" = -(blend of radial backbone and terrain normal). Radial when
 /// far or where the gradient is weak (never degenerate); follows the wall near
-/// the surface (so you can run up it — ADR-0014).
+/// the surface (so you can run up it).
 fn gravity_down(p: Vec3, t: f32) -> Vec3 {
     let f = f_c(p, t);
     let g = grad(p, t, EPS_G);

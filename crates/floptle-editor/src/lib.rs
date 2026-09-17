@@ -2259,7 +2259,7 @@ struct Editor {
     terrain_slots: Vec<Entity>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
-    /// Terrain 2.0 (ADR terrain-mesh): each terrain's primary-ray rendering is a set of
+    /// Each terrain's primary-ray rendering is a set of
     /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
     /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the
     /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =

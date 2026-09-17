@@ -7,7 +7,7 @@
 //! so a Floptle world is a `lawset.ron` you can diff, hot-reload, hand to an AI,
 //! and gift as "here are the laws — bend them." See
 //! `docs/subsystems/world-rules.md` + `docs/subsystems/field-interaction.md`
-//! (ADR-0018, ADR-0019).
+//!.
 //!
 //! Deliberately **thin and pure-data**: depends only on core + field, and is
 //! read-only to render/physics/matter (no dependency cycles). Build the seam now;
@@ -19,7 +19,7 @@
 //! - `resolve`     : `effective_at(p)` — inside-test resolution + `smin` crossfade,
 //!   cached once per body per step.
 //! - `interaction` : the field-interaction graph (edges: field A modulates B) —
-//!   the *data* half of ADR-0019 (the executor is a runtime system).
+//!   the *data* half (the executor is a runtime system).
 
 /// A law axis is inherited from the parent realm or set to a named model.
 /// Each axis is a small enum (not free parameters) to avoid "property soup".
@@ -46,7 +46,7 @@ pub enum LightLaw {
 pub struct Lawset {
     pub gravity: GravityLaw,
     pub light: LightLaw,
-    /// Local time rate `r` (`None` = inherit); 1.0 normal, 0.0 frozen (ADR-0017).
+    /// Local time rate `r` (`None` = inherit); 1.0 normal, 0.0 frozen.
     pub time_rate: Option<f32>,
 }
 
@@ -59,7 +59,7 @@ impl Lawset {
     };
 }
 
-/// A field that can participate in a coupling edge (ADR-0019).
+/// A field that can participate in a coupling edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Sdf,

@@ -45,7 +45,7 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
 /// `time`, `dt`, the lifecycle hooks, etc. Written to `.floptle/library/`.
 pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@meta
---- Floptle engine scripting API (ADR-0003). Generated — do not edit.
+--- Floptle engine scripting API. Generated — do not edit.
 
 ---@class Node The node's transform, synced to/from the engine each frame.
 ---@field x number World X position.

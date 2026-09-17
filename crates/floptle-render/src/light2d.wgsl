@@ -83,7 +83,7 @@ struct FillOut {
 @vertex
 fn vs_fill(in: FillIn) -> FillOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
-    // The model matrix is already camera-relative (ADR-0015), exactly as the
+    // The model matrix is already camera-relative, exactly as the
     // raster pass builds it — the two are fed from ONE gather, so a flat surface
     // lands on the same pixels in both or neither.
     let world = model * vec4<f32>(in.pos, 1.0);

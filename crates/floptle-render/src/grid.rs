@@ -1,6 +1,6 @@
 //! Editor reference grid — a depth-tested wireframe grid on a horizontal plane that
 //! sits just below the camera (snapped to the grid spacing), centered near the camera
-//! so it's always underfoot at any altitude. Camera-relative (ADR-0015): line
+//! so it's always underfoot at any altitude. Camera-relative: line
 //! endpoints are offset to the camera before upload, so the GPU never sees a large
 //! coordinate. Cheap enough to regenerate every frame.
 

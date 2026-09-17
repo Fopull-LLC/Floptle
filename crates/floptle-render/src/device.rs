@@ -1,7 +1,7 @@
 //! wgpu bootstrap: instance → adapter → device/queue → surface. The single GPU
 //! handle the whole renderer threads through (`docs/subsystems/renderer.md`).
 //!
-//! wgpu is *only* the portability layer (ADR-0002) — everything above this (the
+//! wgpu is *only* the portability layer — everything above this (the
 //! render graph, passes, the SDF/raymarch look) is ours. The lifecycle here
 //! (resize, acquire, present) is real; `Gpu::new` is the one call that needs a
 //! live window, and a battle-tested implementation already exists in

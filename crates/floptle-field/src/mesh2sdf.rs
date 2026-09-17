@@ -1,6 +1,6 @@
 //! Mesh → signed distance field bake (one-time, CPU) — the bridge that turns an
-//! imported triangle mesh into **textured SDF matter** (the unified-field thesis,
-//! ADR-0013). For every voxel of a tight local grid it computes the signed distance
+//! imported triangle mesh into textured SDF matter. For every voxel of a tight
+//! local grid it computes the signed distance
 //! to the mesh (closest-point-on-triangle for magnitude, generalized solid-angle
 //! winding number for the inside/outside sign — robust to the non-watertight
 //! meshes a Blender export can contain) and the **nearest-surface albedo** (the

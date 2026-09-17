@@ -3,7 +3,7 @@
 //! FILLED companion to the line telegraph layer: solid gizmo arrowheads,
 //! rotation discs, world-space markers and held-item highlights. Scripts queue
 //! triangles via the Lua `draw.tri` / `draw.cone` / `draw.disc` API each tick
-//! and the editor feeds them here per camera. Camera-relative (ADR-0015):
+//! and the editor feeds them here per camera. Camera-relative:
 //! callers pre-subtract the camera position, so the GPU never sees a large
 //! coordinate.
 

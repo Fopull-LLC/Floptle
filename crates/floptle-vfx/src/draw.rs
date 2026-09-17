@@ -24,7 +24,7 @@ pub struct BillboardDraw {
 /// [`BillboardDraw`] per non-empty track.
 ///
 /// `local_xf` maps emitter-local space to camera-relative world space (the node's
-/// `render_matrix`, ADR-0015) — used by `Space::Local` tracks; `world_xf` maps the
+/// `render_matrix`) — used by `Space::Local` tracks; `world_xf` maps the
 /// instance's world anchor to camera-relative space — used by `Space::World` tracks
 /// (whose particles are already world-baked). Billboard size scales by the chosen
 /// transform's mean axis scale. `cam_forward`/`cam_right`/`cam_up` are the camera's
@@ -122,7 +122,7 @@ fn ribbon_segment(
     let mid = 0.5 * (a + b);
     let seg = b - a;
     let dir = seg.normalize_or_zero();
-    // Camera-relative space: the camera sits at the origin (ADR-0015), so the view
+    // Camera-relative space: the camera sits at the origin, so the view
     // direction to the segment is just the midpoint's direction.
     let view = mid.normalize_or_zero();
     let mut right = view.cross(dir);
@@ -343,7 +343,7 @@ fn flipbook_uv(flip: Option<Flipbook>, s: &ParticleSample) -> [f32; 4] {
 
 /// The world-space in-plane basis (+X width axis, +Y height axis) a particle's quad
 /// spans, plus the roll spin to apply, for the track's [`BillboardOrient`]. All
-/// vectors are camera-relative (ADR-0015: the camera sits at the origin), so
+/// vectors are camera-relative (the camera sits at the origin), so
 /// `view_dir` is just the direction from the origin to the particle.
 ///
 /// Degenerate cases (zero velocity, velocity parallel to the view, looking straight

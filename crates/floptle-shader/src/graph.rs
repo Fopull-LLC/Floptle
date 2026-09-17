@@ -1,4 +1,4 @@
-//! The graph view of a shader (ADR-0007, proposal §10.2) — headless.
+//! The graph view of a shader — headless.
 //!
 //! Both authoring views project the same [`ShaderIr`]: the text view is
 //! `text::print`/`text::parse`; this module is the node-graph view. It answers

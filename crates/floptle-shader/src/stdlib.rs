@@ -1,7 +1,7 @@
 //! The stdlib: every op a shader can call — its signature (what the parser,
 //! type checker, autocomplete and the graph palette read) and how it emits
 //! WGSL (either a builtin spelling or a support function from
-//! [`SUPPORT_WGSL`]). Growth rule (ADR-0007): if a node doesn't help make
+//! [`SUPPORT_WGSL`]). Growth rule: if a node doesn't help make
 //! something nobody's seen, it waits.
 
 use crate::ir::{Stage, Ty};

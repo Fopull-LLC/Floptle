@@ -1,4 +1,4 @@
-//! The in-memory shader IR — the single source of truth (ADR-0007).
+//! The in-memory shader IR — the single source of truth.
 //!
 //! A shader is a DAG: an arena of expressions ([`Expr`], indexed by [`ExprId`])
 //! plus ordered named bindings (`lets`) and stage-defined output sinks. The
@@ -132,7 +132,7 @@ pub enum Input {
     /// Surface normal, normalized (`vec3`). Fragment only.
     Normal,
     /// CAMERA-RELATIVE position (`vec3`) — the engine's floating-origin space
-    /// (ADR-0015): the camera sits at the origin. Both stages.
+    ///: the camera sits at the origin. Both stages.
     WorldPos,
     /// SURFACE-LOCKED object position (`vec3`) — the mesh-local position scaled
     /// to world units (`in.pos * modelScale`), the same coordinate triplanar

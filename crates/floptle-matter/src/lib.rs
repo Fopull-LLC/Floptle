@@ -5,15 +5,15 @@
 //! soup, stick to surfaces and stretch when pulled, and (later) tear into
 //! stringy strands and split apart. One `MatterModel` per object, multiple
 //! optimized backends, opt-in complexity — you only pay for the behavior you
-//! reach for. See `docs/subsystems/deformable-matter.md` + ADR-0013.
+//! reach for. See `docs/subsystems/deformable-matter.md`.
 //!
 //! It sits on the shared field layer (`floptle-field`) and the SDF physics
 //! (`floptle-physics`), so a deformed object stays cleanly collidable for free.
 //!
 //! Planned modules (the deformation tiers, cheapest → heaviest):
 //! - `model`    : the `MatterModel` component — declares behavior + budget.
-//! - `material` : physical material — density (→ mass `m=ρ·V` & gravity emission,
-//!   ADR-0014), bulk modulus & yield (→ can it be crushed or resist?).
+//! - `material` : physical material — density (→ mass `m=ρ·V` & gravity emission),
+//!   bulk modulus & yield (→ can it be crushed or resist?).
 //! - `morph`    : GPU vertex/field displacement (noise/curves/field) — ~free.
 //! - `csg`      : field blend/mix/reject between objects (smin/smax + rules).
 //! - `softbody` : XPBD constraint solver (distance/volume/shape-match).
@@ -21,7 +21,7 @@
 //! - `fracture` : elastoplastic strain → yield → tear → strands (future).
 
 /// How a piece of matter behaves physically. Higher tiers cost more; an object
-/// uses the cheapest tier that achieves the desired look (see ADR-0013).
+/// uses the cheapest tier that achieves the desired look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatterTier {
     /// Static geometry. No deformation cost.
@@ -47,8 +47,8 @@ pub struct Adhesion {
 }
 
 /// Physical properties of a matter type. Density drives both inertia and the
-/// gravity field it emits (ADR-0014); bulk modulus + yield decide whether it can
-/// be crushed/compacted (soft clay) or resists (hard metal) (ADR-0013).
+/// gravity field it emits; bulk modulus + yield decide whether it can
+/// be crushed/compacted (soft clay) or resists (hard metal).
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalMaterial {
     /// Mass density ρ in kg/m³ (mass = ρ × volume from the SDF/mesh).

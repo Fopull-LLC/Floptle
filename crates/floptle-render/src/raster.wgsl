@@ -277,7 +277,7 @@ fn screen_cone_mip(
 // What this surface reflects of the sky. `n` and `v` are camera-relative but the
 // captured sky is in WORLD directions — which are the same thing here, because
 // the view matrix carries no translation and no rotation into the instance data
-// (ADR-0015): a camera-relative direction IS a world direction.
+//: a camera-relative direction IS a world direction.
 fn env_radiance(r: vec3<f32>, rough: f32) -> vec3<f32> {
     let dims = textureDimensions(env_tex, 0);
     if (dims.x <= 1u || dims.y <= 1u) {
@@ -299,7 +299,7 @@ struct Ssr {
 };
 
 // Camera-relative point -> the uv it lands on. `G.view_proj` carries no
-// translation (ADR-0015), so this is the same mapping the depth prepass wrote.
+// translation, so this is the same mapping the depth prepass wrote.
 fn ssr_uv(ndc: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
@@ -597,7 +597,7 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
 //
 // `n` and `v` are camera-relative but the captured sky is in WORLD directions —
 // which are the same thing here, because the view matrix carries no translation
-// and no rotation into the instance data (ADR-0015): a camera-relative direction
+// and no rotation into the instance data: a camera-relative direction
 // IS a world direction.
 //
 // The two are mixed BEFORE the BRDF, not added after it. A reflection is one
@@ -767,7 +767,7 @@ struct VsOut {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     // The fragment's position relative to the camera (the model matrix is already
-    // camera-relative, ADR-0015), so the camera sits at the origin — view dir is
+    // camera-relative), so the camera sits at the origin — view dir is
     // just -normalize(view_pos). Used for specular + rim.
     @location(3) view_pos: vec3<f32>,
     @location(4) emissive: vec4<f32>,
@@ -777,7 +777,7 @@ struct VsOut {
     @location(8) tile: vec4<f32>,
     // Object-local position + normal: what triplanar projects along, so the
     // texture STICKS to the object (camera-relative space would swim under the
-    // floating origin, ADR-0015).
+    // floating origin).
     @location(9) lpos: vec3<f32>,
     @location(10) lnorm: vec3<f32>,
     // This vertex's painted color, or white when the instance is unpainted. Unlike
@@ -1478,7 +1478,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
 
     // Field sun-shadows + true SDF AO, received from the fused field at group(2).
     // `in.view_pos` is camera-relative — the same space the field lives in
-    // (ADR-0015) — so the mesh fragment marches it directly. Both gate to zero
+    // — so the mesh fragment marches it directly. Both gate to zero
     // work when their Lighting/PostProcess switches are off; only the DIRECTIONAL
     // terms are shadowed (ambient + point lights stay as fill), matching the
     // raymarch pass exactly. (`pix` was computed above the unlit branch.)

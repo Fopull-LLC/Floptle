@@ -1,4 +1,4 @@
-//! Rigged glTF import — models with animations (ADR-0006, animation system).
+//! Rigged glTF import — models with animations (the animation system).
 //!
 //! Unlike [`crate::gltf_import`] (which bakes each node's world transform into
 //! the vertices and discards the tree), this path **keeps the node hierarchy**:

@@ -23,7 +23,7 @@ struct Globals {
     center: vec4<f32>,      // (unused legacy field; blobs now live in `blobs`)
     params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
     // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
-    // 3D atlas (no combined-grid resolution spread — ADR-0015 / multi-volume terrain).
+    // 3D atlas (no combined-grid resolution spread — multi-volume terrain).
     vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = KIND (see `vol_drawn` & co.)
     vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
     vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
@@ -71,7 +71,7 @@ struct Globals {
     // standing inside the brick must not pay to march (and fetch) through it.
     vol_tight_c: array<vec4<f32>, 16>,
     vol_tight_h: array<vec4<f32>, 16>,
-    // ---- Field Shapes (ADR-0007 Sdf stage): up to 4 authored SDF shaders in
+    // ---- Field Shapes (the Sdf stage): up to 4 authored SDF shaders in
     // the scene, each contributing a distance (`custom_d`) min-folded into the
     // field. Shader code is SPLICED into this module by the renderer; per-shape
     // transform/params live here so edits are uniform writes, not recompiles.
@@ -86,7 +86,7 @@ struct Globals {
     shape_specular: array<vec4<f32>, 4>,
     shape_params: array<vec4<f32>, 4>,
     shape_rim: array<vec4<f32>, 4>,
-    // Sky shader (ADR-0007 Sky stage): x = active (0/1). The shader's exposed uniforms ride
+    // Sky shader (the Sky stage): x = active (0/1). The shader's exposed uniforms ride
     // `sky_uniforms`. Appended at the END so the Rust `RaymarchGlobals` stays byte-identical.
     sky_meta: vec4<f32>,
     sky_uniforms: array<vec4<f32>, 16>,
@@ -271,7 +271,7 @@ fn blob_bound(i: u32) -> f32 {
 //   2 = occluder bake — casts shadows ONLY: a baked static level mesh whose real
 //                       triangles the raster pass draws. Deliberately outside the AO
 //                       field (it would double-occlude its own triangles).
-//   3 = shadow + AO, NOT drawn — MESHED TERRAIN (ADR terrain 2.0 / P2). The raster
+//   3 = shadow + AO, not drawn — meshed terrain. The raster
 //                       pass draws its extracted chunk meshes, while the field keeps
 //                       casting its sun shadows AND darkening props that stand on it.
 //
@@ -531,7 +531,7 @@ fn field_eps(p: vec3<f32>) -> f32 {
 // this too (the raster pass binds the field), so meshes RECEIVE field AO — they
 // just don't occlude, not being in the field themselves.
 // Depth fog: blend `color` toward the fog color by camera-relative distance. `pos`
-// is the camera-relative fragment position — the camera is the origin (ADR-0015), so
+// is the camera-relative fragment position — the camera is the origin, so
 // `length(pos)` is the view distance, a small number even at world 1e7 (no depth
 // reconstruction, no precision loss). Off (returns `color`) when fog_params.z == 0.
 // ---- S8 atmospheres: shell scattering shared by SKY rays and GEOMETRY rays.

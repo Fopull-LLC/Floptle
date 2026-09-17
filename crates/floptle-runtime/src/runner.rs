@@ -6,7 +6,7 @@
 //! (a spinning cube, a still sphere, a counter-spinning cube) viewed through a
 //! **free-fly camera** (RMB-drag look, WASD move, Space/Ctrl up/down), with **FPS in
 //! the title bar**. Each object uploads a camera-relative model matrix
-//! (`Transform::render_matrix`, ADR-0015) into the instanced forward pass.
+//! (`Transform::render_matrix`) into the instanced forward pass.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,5 +1,5 @@
 //! The camera and the **camera-relative** view/projection — the render side of
-//! large-world space (ADR-0015).
+//! large-world space.
 //!
 //! The camera holds an `f64` world position, but it is treated as the **render-
 //! space origin**: every object is uploaded at `world - camera_world` (see

@@ -1,6 +1,6 @@
 //! # floptle-shader
 //!
-//! Floptle's signature feature (ADR-0007): a single shader **IR** that is the
+//! Floptle's signature feature: a single shader **IR** that is the
 //! source of truth, presented to the artist as either a node graph (in-editor,
 //! later phase) or as readable text (`.flsl`, opened in VSCode for AI-assisted
 //! editing). The IR transpiles to WGSL, validated by naga — the same naga wgpu

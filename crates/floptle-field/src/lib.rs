@@ -8,8 +8,7 @@
 //! blend radius. The same machinery carries other spatial fields — density `ρ(p)`
 //! and gravity (potential `Φ(p)`, acceleration `g(p)`) — so the engine can treat
 //! space, matter, gravity, and density uniformly.
-//! See `docs/subsystems/deformable-matter.md` + `docs/subsystems/gravity-and-density.md`
-//! (ADR-0013, ADR-0014).
+//! See `docs/subsystems/deformable-matter.md` + `docs/subsystems/gravity-and-density.md`.
 //!
 //! Planned modules:
 //! - `sdf`      : SDF trait + analytic primitives (box/sphere/capsule/…/fractals).
@@ -22,8 +21,7 @@
 //!   when an actual triangle mesh is needed.
 //! - `field`    : baked sparse distance field (brickmap) — cheap shared cache.
 //! - `scalar`   : general scalar/vector spatial fields sampled on the brickmap —
-//!   density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
-//!   (ADR-0014).
+//!   density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`.
 
 pub mod chunks;
 pub mod mesh2sdf;
@@ -65,7 +63,7 @@ pub enum BlendRule {
 }
 
 /// Mass density (kg/m³) of the matter occupying a region — the source term for
-/// both inertia (`m = ρ·V`) and gravity (`∇²Φ = 4πGρ`). See ADR-0014.
+/// both inertia (`m = ρ·V`) and gravity (`∇²Φ = 4πGρ`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Density(pub f32);
 
