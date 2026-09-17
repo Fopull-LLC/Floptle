@@ -65,6 +65,62 @@ pub(crate) struct FrameGather {
     pub(crate) view_proj: Mat4,
 }
 
+/// This frame's lighting, read from the scene once and shared by the raster
+/// globals, the raymarch globals and the particle pass.
+pub(crate) struct FrameLighting {
+    pub(crate) light_node: floptle_core::Light,
+    pub(crate) sun: [f32; 4],
+    pub(crate) li: f32,
+    pub(crate) flat_camera: bool,
+    pub(crate) lights_split: crate::shading::SplitLights,
+    pub(crate) pl_count: [f32; 4],
+    pub(crate) pl_pos: [[f32; 4]; 16],
+    pub(crate) pl_col: [[f32; 4]; 16],
+    pub(crate) pl_shape: [[f32; 4]; 16],
+    pub(crate) pl_rot: [[f32; 4]; 16],
+    pub(crate) pl_cone: [[f32; 4]; 16],
+    pub(crate) sh_params: [f32; 4],
+    pub(crate) sh_tint: [f32; 4],
+    pub(crate) sh_extra: [f32; 4],
+    pub(crate) contact: [f32; 4],
+    pub(crate) point_shadows: bool,
+    pub(crate) ssr: [f32; 4],
+    pub(crate) ssr_prev_vp: [[f32; 4]; 4],
+    pub(crate) probe_meta: [f32; 4],
+    pub(crate) probe_pos: [[f32; 4]; 4],
+    pub(crate) probe_half: [[f32; 4]; 4],
+    pub(crate) fog_color: [f32; 4],
+    pub(crate) fog_params: [f32; 4],
+    pub(crate) fog_extra: [f32; 4],
+    pub(crate) particle_fog: [f32; 4],
+    pub(crate) atmo_meta: [f32; 4],
+    pub(crate) atmo_color: [[f32; 4]; 4],
+    pub(crate) atmo_body: [[f32; 4]; 4],
+    pub(crate) atmo_params: [[f32; 4]; 4],
+    pub(crate) star_meta: [f32; 4],
+    pub(crate) star_pos: [[f32; 4]; 4],
+    pub(crate) star_color: [[f32; 4]; 4],
+    pub(crate) prox_count: [f32; 4],
+    pub(crate) prox_a: [[f32; 4]; 32],
+    pub(crate) prox_b: [[f32; 4]; 32],
+    pub(crate) prox_rot: [[f32; 4]; 32],
+    pub(crate) globals: Globals,
+}
+
+/// The scene turned into draws: every raster instance, the 2D light pass's
+/// list, skinned and custom-shader draws, the blobs the raymarch takes, and
+/// the per-frame tables the draw was gathered against.
+pub(crate) struct FrameInstances {
+    pub(crate) terrain_nearest_mask: u32,
+    pub(crate) sort_z: std::collections::HashMap<Entity, DVec3>,
+    pub(crate) lights_2d: floptle_render::Light2dUniform,
+    pub(crate) instances: Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+    pub(crate) flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)>,
+    pub(crate) skin_draws: Vec<floptle_render::SkinDraw>,
+    pub(crate) flsl_draws: Vec<floptle_render::FlslDraw>,
+    pub(crate) blobs: Vec<(DVec3, f32, MaterialParams)>,
+}
+
 impl Editor {
     /// Gather the World for this frame. `None` when the renderer has not been
     /// created yet, in which case there is nothing to draw.
@@ -78,12 +134,9 @@ impl Editor {
         sky_uniform_vals: [[f32; 4]; 16],
         terrain_base_mat: MaterialParams,
     ) -> Option<FrameGather> {
-        let (Some(gpu), Some(raster), Some(raymarch), Some(egui)) =
-            (self.gpu.as_mut(), self.raster.as_mut(), self.raymarch.as_mut(), self.egui.as_ref())
-        else {
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return None;
         };
-        let scene_history = &mut self.scene_history;
         // One pose table per frame, not per pass: a frame gathers the scene
         // several times over and each pass reads pose indices an earlier gather
         // handed out. The project's era artefacts are set here for the same
@@ -244,737 +297,11 @@ impl Editor {
                 &mut self.gi_probe_dots,
             );
         }
-        if !game_view && self.show_gizmos {
-            let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-            // Only cameras and point lights get gizmos — gather the few Copy fields we
-            // need (no per-frame Matter clone over the whole world).
-            enum Giz {
-                Cam(f32, bool, Option<f32>),
-                Light(f32, floptle_core::LightShape, f32),
-                Gravity(bool, f32), // radial?, radius
-                /// A box whose size decides where something applies, and an
-                /// optional inner box for the part that fades.
-                Volume([f32; 3], Option<f32>),
-                /// Full volume out to the first, silent by the second.
-                Audio(f32, f32),
-                /// A nav link: the far end in the node's own space, and whether
-                /// it can be crossed both ways.
-                Link([f32; 3], bool),
-            }
-            let filter = self.gizmo_filter;
-            let gizmos: Vec<(Entity, Giz)> = self
-                .world
-                .query::<Matter>()
-                .filter_map(|(e, m)| match m {
-                    Matter::Camera { fov_y, active, ortho, ortho_height, .. }
-                        if filter.cameras =>
-                    {
-                        Some((e, Giz::Cam(*fov_y, *active, ortho.then_some(*ortho_height))))
-                    }
-                    Matter::PointLight { range, shape, spot_angle, .. } if filter.lights => {
-                        Some((e, Giz::Light(*range, *shape, *spot_angle)))
-                    }
-                    Matter::GravityVolume { mode, radius, .. } if filter.lights => {
-                        Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
-                    }
-                    // The three boxes you would otherwise size by typing a
-                    // number and reloading to see whether it reached.
-                    Matter::ReflectionProbe { half_extents, fade, .. } if filter.volumes => {
-                        Some((e, Giz::Volume(*half_extents, Some(*fade))))
-                    }
-                    // A plain box, however it is used — one arm, so the three
-                    // cannot drift apart on screen.
-                    Matter::LightProbes { half_extents, .. }
-                    | Matter::NavMesh { half_extents, .. }
-                    | Matter::NavArea { half_extents, .. }
-                        if filter.volumes =>
-                    {
-                        Some((e, Giz::Volume(*half_extents, None)))
-                    }
-                    Matter::NavLink { to, bidirectional, .. } if filter.volumes => {
-                        Some((e, Giz::Link(*to, *bidirectional)))
-                    }
-                    _ => None,
-                })
-                .collect();
-            // Audio sources carry their reach as two numbers on a component
-            // rather than as a `Matter` variant, so they are gathered
-            // separately — the query above is over `Matter` and would never see
-            // one.
-            let gizmos: Vec<(Entity, Giz)> = gizmos
-                .into_iter()
-                // `Flat` ignores position entirely, so it has no reach to draw
-                // — a ring around a music track would be a lie.
-                .chain(
-                    self.world
-                        .query::<floptle_audio::AudioSource>()
-                        .filter(|(_, a)| {
-                            filter.audio
-                                && a.params.mode != floptle_audio::SpatialMode::Flat
-                                && a.params.max_distance > 0.0
-                        })
-                        .map(|(e, a)| {
-                            (e, Giz::Audio(a.params.min_distance, a.params.max_distance))
-                        }),
-                )
-                .collect();
-            for (e, g) in gizmos {
-                let wt = floptle_core::world_transform(&self.world, e);
-                match g {
-                    Giz::Cam(fov_y, active, ortho_height) => {
-                        let lines = camera_frustum_lines(
-                            wt.translation, wt.rotation, fov_y, aspect, cam.world_position, view_proj, gw, gh,
-                            ortho_height,
-                        );
-                        if !lines.is_empty() {
-                            self.camera_gizmos.push(CameraGizmo { lines, active });
-                        }
-                    }
-                    Giz::Light(range, shape, spot_angle) => {
-                        let lines = point_light_lines(
-                            wt.translation, wt.rotation, wt.scale, range, shape, spot_angle,
-                            cam.world_position, view_proj, gw, gh,
-                        );
-                        if !lines.is_empty() {
-                            self.light_gizmos.push(lines);
-                        }
-                    }
-                    Giz::Gravity(radial, radius) => {
-                        let lines = gravity_volume_lines(
-                            wt.translation, radial, radius, cam.world_position, view_proj, gw, gh,
-                        );
-                        if !lines.is_empty() {
-                            self.light_gizmos.push(lines);
-                        }
-                    }
-                    Giz::Volume(half, fade) => {
-                        // The node's transform positions and scales the box, so
-                        // the drawn outline has to be scaled the same way or it
-                        // would describe a volume nothing uses.
-                        let half = floptle_core::math::Vec3::from(half) * wt.scale;
-                        let lines = box_lines(
-                            wt.translation, half, cam.world_position, view_proj, gw, gh,
-                        );
-                        if !lines.is_empty() {
-                            self.volume_gizmos.push(lines);
-                        }
-                        // The inner box is where the effect is at full strength;
-                        // between the two it blends out. Drawn only when it is
-                        // actually inside, so a fade wider than the box does not
-                        // draw a second outline on top of the first.
-                        if let Some(f) = fade
-                            && f > 0.0
-                        {
-                            let inner = half - floptle_core::math::Vec3::splat(f);
-                            if inner.min_element() > 0.05 {
-                                let lines = box_lines(
-                                    wt.translation, inner, cam.world_position, view_proj, gw, gh,
-                                );
-                                if !lines.is_empty() {
-                                    self.volume_gizmos.push(lines);
-                                }
-                            }
-                        }
-                    }
-                    Giz::Link(to, both) => {
-                        // The far end is in the node's own space, so it turns
-                        // and scales with whatever the link is parented to —
-                        // which is what lets a ladder live in a prefab.
-                        let far = wt.mul_transform(&floptle_core::Transform::from_translation(
-                            DVec3::new(to[0] as f64, to[1] as f64, to[2] as f64),
-                        ));
-                        let lines = crate::viz::link_lines(
-                            wt.translation, far.translation, both, cam.world_position, view_proj,
-                            gw, gh,
-                        );
-                        if !lines.is_empty() {
-                            self.volume_gizmos.push(lines);
-                        }
-                    }
-                    Giz::Audio(min_d, max_d) => {
-                        // Two rings: full volume inside the first, silent at the
-                        // second. Both, because the gap between them is the
-                        // fade, and one ring cannot show a gap.
-                        for r in [min_d, max_d] {
-                            let lines = crate::viz::radius_rings(
-                                wt.translation, r, cam.world_position, view_proj, gw, gh,
-                            );
-                            if !lines.is_empty() {
-                                self.volume_gizmos.push(lines);
-                            }
-                        }
-                    }
-                }
-            }
-            // The rig of a selected mesh — the sticks you click to pose it.
-            //
-            // Only for a mesh that is selected, or whose bone is: every rig in
-            // the scene at once buries the picture in white sticks, and the one
-            // being posed would be the hardest of all to find.
-            if filter.bones {
-                let bone_sel = self.bone_selection;
-                let mut rigged: Vec<Entity> = Vec::new();
-                for e in self.selection.iter().copied().chain(bone_sel.map(|(m, _)| m)) {
-                    if !rigged.contains(&e) {
-                        rigged.push(e);
-                    }
-                }
-                for e in rigged {
-                    let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(e) else {
-                        continue;
-                    };
-                    let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
-                    else {
-                        continue;
-                    };
-                    let viz = crate::viz::rig_viz(
-                        e,
-                        rig,
-                        self.anim.poses.get(&e).map(|p| p.as_slice()),
-                        floptle_core::world_transform(&self.world, e).world_matrix(),
-                        bone_sel.filter(|(m, _)| *m == e).map(|(_, i)| i),
-                        cam.world_position,
-                        view_proj,
-                        gw,
-                        gh,
-                    );
-                    if !viz.joints.is_empty() {
-                        self.rig_gizmos.push(viz);
-                    }
-                }
-            }
-            // The directional "sun" Light has no world position, so its direction gizmo
-            // only shows when the Lighting node is selected — anchored in front of the
-            // editor camera so it's always framed, pointing along the light direction.
-            // A POSITIONAL star instead anchors at the star and points at the camera
-            // (any direction is "toward something" for a point source).
-            if filter.lights
-                && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
-            {
-                let l = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-                // Stars mode: anchor at the brightest star body (if any).
-                let star_anchor = if l.stars {
-                    let (meta, pos, _) =
-                        crate::shading::star_uniforms(&self.world, &l, cam.world_position);
-                    (meta[0] > 0.0).then(|| {
-                        cam.world_position
-                            + DVec3::new(pos[0][0] as f64, pos[0][1] as f64, pos[0][2] as f64)
-                    })
-                } else {
-                    None
-                };
-                let (anchor, dir) = if let Some(star) = star_anchor {
-                    let toward = (cam.world_position - star).normalize_or_zero().as_vec3();
-                    (star, if toward == Vec3::ZERO { Vec3::Y } else { toward })
-                } else {
-                    let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
-                    (cam.world_position + fwd * 6.0, Vec3::from(l.direction))
-                };
-                let lines = light_dir_lines(anchor, dir, cam.world_position, view_proj, gw, gh);
-                if !lines.is_empty() {
-                    self.light_gizmos.push(lines);
-                }
-            }
-            // Rigidbody collider outlines, so physics bodies are visible/placeable.
-            let bodies: Vec<(Entity, floptle_core::RigidBody)> = if filter.physics {
-                self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect()
-            } else {
-                Vec::new()
-            };
-            // During Play the live body, not the authored component: a script
-            // that set `node.height` (a controller's stand height, a crouch)
-            // changed the capsule and moved its centre to keep the feet
-            // planted, and an outline drawn from the component then sat a
-            // hand's width above where the body actually met the ground —
-            // an instrument that lied about the one thing it was for.
-            let live: std::collections::HashMap<Entity, (DVec3, f32)> = self
-                .sim
-                .as_ref()
-                .map(|sim| sim.body_states().map(|b| (b.entity, (b.pos, b.height))).collect())
-                .unwrap_or_default();
-            for (e, rb) in bodies {
-                let wt = floptle_core::world_transform(&self.world, e);
-                let (p, height) = match live.get(&e) {
-                    Some(&(pos, h)) => (pos, h),
-                    None => (wt.translation, rb.height),
-                };
-                let lines = if rb.kind == floptle_core::BodyKind::Box {
-                    let s = wt.scale;
-                    let half = Vec3::new(
-                        rb.half_extents[0] * s.x,
-                        rb.half_extents[1] * s.y,
-                        rb.half_extents[2] * s.z,
-                    );
-                    box_lines(p, half, cam.world_position, view_proj, gw, gh)
-                } else {
-                    rigidbody_lines(
-                        p,
-                        rb.kind == floptle_core::BodyKind::Capsule,
-                        rb.radius,
-                        height,
-                        cam.world_position,
-                        view_proj,
-                        gw,
-                        gh,
-                    )
-                };
-                if !lines.is_empty() {
-                    self.body_gizmos.push(lines);
-                }
-            }
-            // Collision telegraph: a small cross at each contact resolved this step.
-            // (Contacts are sim-frame — origin-relative — so convert to world here.)
-            if let Some(sim) = self.sim.as_ref().filter(|_| filter.physics) {
-                let cs = 0.15;
-                for c in &sim.world.contacts {
-                    let cp = sim.world.origin
-                        + DVec3::new(c.point.x as f64, c.point.y as f64, c.point.z as f64);
-                    for off in [DVec3::X, DVec3::Y, DVec3::Z] {
-                        if let (Some(a), Some(b)) = (
-                            project(cp - off * cs, cam.world_position, view_proj, gw, gh),
-                            project(cp + off * cs, cam.world_position, view_proj, gw, gh),
-                        ) {
-                            self.contact_gizmos.push((a, b));
-                        }
-                    }
-                }
-            }
-            // Terrain collider wireframes: the surface physics actually collides
-            // with. For a terrain set to collide with the drawn surface (the
-            // default) that is every drawn triangle, from the same extraction
-            // the collider runs — so this wireframe lies on the picture or the
-            // collider does not, and a screenshot settles it. For one set to
-            // the field it is the field's own zero crossing, coarsely. (It
-            // used to draw the shadow proxy for every terrain, unrotated and
-            // unscaled: a wireframe of a surface nothing collided with, in the
-            // wrong place — an instrument that lied about the thing it was
-            // for.) Cached per terrain in NODE-LOCAL coords, rebuilt when that
-            // terrain's shape changes; posed here through the node's full
-            // transform, so a moved, turned or scaled terrain's wireframe
-            // follows for free.
-            if self.show_terrain_collider && filter.colliders {
-                for (&e, t) in &self.terrains {
-                    let drawn = !matches!(
-                        self.world.get::<Matter>(e),
-                        Some(Matter::Terrain { collision: floptle_core::TerrainCollision::Field, .. })
-                    );
-                    // Rebuilt when the terrain's choice of surface changes too.
-                    self.terrain_wire_world.retain(|(we, d, _)| *we != e || *d == drawn);
-                    if !self.terrain_wire_world.iter().any(|(we, ..)| *we == e) {
-                        let segs = if drawn {
-                            crate::viz::terrain_collision_wire(&t.field)
-                        } else {
-                            let stride =
-                                (t.shadow.dims.into_iter().max().unwrap_or(64) / 48).max(2);
-                            terrain_collider_wire(&t.shadow, stride)
-                        };
-                        self.terrain_wire_world.push((e, drawn, segs));
-                    }
-                }
-                self.terrain_wire_world.retain(|(we, ..)| self.terrains.contains_key(we));
-                for (e, _, segs) in &self.terrain_wire_world {
-                    let wt = floptle_core::world_transform(&self.world, *e);
-                    let (anchor, rot, scale) =
-                        (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6));
-                    let place = |p: Vec3| {
-                        let q = rot * (p * scale);
-                        anchor + DVec3::new(q.x as f64, q.y as f64, q.z as f64)
-                    };
-                    for &(a, b) in segs {
-                        let wa = place(a);
-                        let wb = place(b);
-                        if let (Some(pa), Some(pb)) = (
-                            project(wa, cam.world_position, view_proj, gw, gh),
-                            project(wb, cam.world_position, view_proj, gw, gh),
-                        ) {
-                            self.terrain_wire_gizmo.push((pa, pb));
-                        }
-                    }
-                }
-            }
-            // The baked navmesh. Drawn when its node is selected — the same rule
-            // the collider wireframes use, so verifying the thing you are
-            // editing costs nothing — or whenever the View toggle is on.
-            //
-            // What is drawn is a **surface**, not a field of rectangles. The
-            // bake cuts the walkable ground into rectangles because that is the
-            // shape to search; outlining each of them turned one floor into
-            // scattered boxes and could not answer the only question the picture
-            // is for — *are these two pieces of ground joined?*
-            //
-            // `Overlay` (floptle-nav) decides that from the LINKS, so the
-            // outline is drawn only where the walkable surface actually ends and
-            // the seams of the cut are invisible. `⊞ Cells` puts the old
-            // per-rectangle wireframe back when the bake's working is the
-            // question.
-            // How solid the walkable surface is drawn. Low enough that the
-            // level under it stays legible — the overlay is drawn over
-            // everything, so an opaque one would hide the geometry it is
-            // describing — and high enough to read as a surface rather than a
-            // tint. A step's ribbon is stronger because it is the answer to a
-            // question somebody is deliberately asking.
-            const NAV_FILL_ALPHA: f32 = 0.22;
-            const NAV_STEP_ALPHA: f32 = 0.40;
-            // While a game is running, the mesh it is walking on is the bake
-            // with this session's `nav.obstacle` holes cut into it. Drawing the
-            // bake instead would show a clear corridor beside a unit that just
-            // went round one — a tool lying about the thing it exists to
-            // explain. The rev counter is compared rather than the polygons, so
-            // a frame with nothing carved costs one integer.
-            if self.playing {
-                let rev = self.script_host.nav_obstacle_rev();
-                if rev != self.nav_carved_rev {
-                    self.nav_carved_rev = rev;
-                    self.nav_carved = (rev > 0).then(|| self.script_host.nav_mesh_snapshot()).flatten();
-                    self.nav_overlay = None;
-                }
-            } else if self.nav_carved.is_some() {
-                // Stop gives the level back, and that includes the picture.
-                self.nav_carved = None;
-                self.nav_carved_rev = 0;
-                self.nav_overlay = None;
-            }
-            if let Some(mesh) = self.nav_carved.as_ref().or(self.nav_baked.as_ref()) {
-                let selected = crate::nav_bake::nav_node(&self.world)
-                    .is_some_and(|(e, _)| self.selection.contains(&e));
-                if (self.show_navmesh || selected) && filter.colliders {
-                    let anchor = DVec3::from_array(mesh.anchor);
-                    // A hair above the floor: drawn exactly on it, the overlay
-                    // fights the ground it describes.
-                    let lift = mesh.settings.cell_size * 0.5;
-                    let overlay = self.nav_overlay.get_or_insert_with(|| {
-                        std::rc::Rc::new(floptle_nav::Overlay::build(mesh, lift))
-                    });
-                    // A distinct hue per ISLAND, spun by the golden ratio so
-                    // neighbouring numbers never land on neighbouring colours.
-                    //
-                    // Per island rather than per region, which is what this was.
-                    // The one question the picture exists to answer is *are
-                    // these two pieces of ground joined?*, and a region is the
-                    // bake's own grouping before any link is counted — so a
-                    // balcony and the floor its drop lands on came out two
-                    // colours while a character walks between them freely. A
-                    // level with five hundred ledges in it read as five hundred
-                    // colours and answered nothing.
-                    let hue = |island: u32| crate::viz::hue_rgb((island as f32 * 0.618_034).fract());
-                    let world = |p: [f32; 3]| {
-                        anchor + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
-                    };
-                    // A big level's overlay is hundreds of thousands of
-                    // edges, and all of them were being pushed and uploaded
-                    // every frame however little of the level was on screen —
-                    // which is why the picture got heavier the closer you
-                    // looked at it, exactly backwards. A segment with both ends
-                    // outside the viewport cannot cross it, so it is dropped
-                    // before it reaches the line buffer. The margin is generous
-                    // enough that a line grazing the edge still draws.
-                    const OFFSCREEN_MARGIN: f32 = 64.0;
-                    let onscreen = |p: floptle_core::math::Vec2| {
-                        p.x > -OFFSCREEN_MARGIN
-                            && p.y > -OFFSCREEN_MARGIN
-                            && p.x < gw + OFFSCREEN_MARGIN
-                            && p.y < gh + OFFSCREEN_MARGIN
-                    };
-                    let mut line = |a: [f32; 3], b: [f32; 3], col: [f32; 3]| {
-                        if let (Some(pa), Some(pb)) = (
-                            project(world(a), cam.world_position, view_proj, gw, gh),
-                            project(world(b), cam.world_position, view_proj, gw, gh),
-                        ) && (onscreen(pa) || onscreen(pb))
-                        {
-                            self.nav_gizmo.push((pa, pb, col));
-                        }
-                    };
-
-                    if self.nav_cells {
-                        // Every rectangle, faintly — the bake's working.
-                        for e in &overlay.cells {
-                            let c = hue(e.island);
-                            line(e.a, e.b, [c[0] * 0.45, c[1] * 0.45, c[2] * 0.45]);
-                        }
-                    }
-                    // The edge of the walkable surface, bright.
-                    for e in &overlay.boundary {
-                        line(e.a, e.b, hue(e.island));
-                    }
-                    // Where two heights are genuinely joined — the picture of
-                    // what `max slope` and `step height` just did.
-                    for s in &overlay.steps {
-                        let c = hue(s.island);
-                        for (a, b) in [
-                            (s.low[0], s.high[0]),
-                            (s.low[1], s.high[1]),
-                            (s.low[0], s.low[1]),
-                            (s.high[0], s.high[1]),
-                        ] {
-                            line(a, b, c);
-                        }
-                    }
-
-                    // The filled surface, in real world space so it sits on the
-                    // ground rather than being painted over the window.
-                    let cam_rel = |p: [f32; 3]| {
-                        let w = world(p) - cam.world_position;
-                        [w.x as f32, w.y as f32, w.z as f32]
-                    };
-                    let fill = |c: [f32; 3]| [c[0], c[1], c[2], NAV_FILL_ALPHA];
-                    let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
-                    // The same cull the lines get, done conservatively: a
-                    // triangle is dropped only when all three corners fall off
-                    // the same side of the viewport, which is the one case where
-                    // no part of it can cross the screen. A corner the camera is
-                    // behind projects to nothing, and anything with one of those
-                    // is kept — a wrong answer here would delete floor from the
-                    // middle of the picture, which is far worse than uploading a
-                    // triangle nobody sees.
-                    let offscreen_tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
-                        let ps = [world(a), world(b), world(c)]
-                            .map(|w| project(w, cam.world_position, view_proj, gw, gh));
-                        let Some(ps) = ps.iter().copied().collect::<Option<Vec<_>>>() else {
-                            return false;
-                        };
-                        ps.iter().all(|p| p.x < -OFFSCREEN_MARGIN)
-                            || ps.iter().all(|p| p.x > gw + OFFSCREEN_MARGIN)
-                            || ps.iter().all(|p| p.y < -OFFSCREEN_MARGIN)
-                            || ps.iter().all(|p| p.y > gh + OFFSCREEN_MARGIN)
-                    };
-                    for t in &overlay.tris {
-                        if offscreen_tri(t.a, t.b, t.c) {
-                            continue;
-                        }
-                        // Painted ground reads as painted: its own hue, and
-                        // brighter, because a volume that did nothing and a
-                        // volume that worked have to be tellable apart at a
-                        // glance rather than by baking again and squinting.
-                        let col = if t.area == floptle_nav::WALKABLE {
-                            fill(hue(t.island))
-                        } else {
-                            let c = crate::viz::hue_rgb(
-                                (0.12 + t.area as f32 * 0.17).fract(),
-                            );
-                            [c[0], c[1], c[2], NAV_FILL_ALPHA * 1.9]
-                        };
-                        for p in [t.a, t.b, t.c] {
-                            self.nav_surface
-                                .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
-                        }
-                    }
-                    // The links, as the bake resolved them — not as they were
-                    // placed. An end that missed the floor is drawn in red, and
-                    // that is the whole point: the node's own gizmo can only
-                    // show where you put it, which is the thing that was wrong.
-                    //
-                    // Drawn as an ARC rather than a straight line, and the shape
-                    // of the arc is the kind of crossing: a jump bows up over
-                    // its gap, a drop leaves the ledge flat and falls away. A
-                    // level with a few hundred of these has to be readable at a
-                    // glance, and a field of identical straight segments is not
-                    // — a drop and a ladder looked the same, and a link that
-                    // went the wrong way looked like one that went the right
-                    // way.
-                    for l in &overlay.links {
-                        let col = if !l.resolved {
-                            [1.0, 0.35, 0.3]
-                        } else if !l.enabled {
-                            [0.45, 0.45, 0.5]
-                        } else {
-                            match l.kind {
-                                floptle_nav::LinkKind::Drop => [1.0, 0.72, 0.25],
-                                floptle_nav::LinkKind::Jump => [0.45, 1.0, 0.55],
-                                floptle_nav::LinkKind::Placed => [0.45, 0.95, 1.0],
-                            }
-                        };
-                        // The curve itself comes from `floptle-nav`, so the
-                        // Scene view and the render probe that checks it are
-                        // drawing the same shape rather than two of them.
-                        let steps = floptle_nav::overlay::ARC_STEPS;
-                        let mut prev = l.from;
-                        for k in 1..=steps {
-                            let next = l.point_at(k as f32 / steps as f32);
-                            line(prev, next, col);
-                            prev = next;
-                        }
-                        // A tick at each end you can enter from, so a one-way
-                        // drop and a two-way ladder are not the same picture.
-                        let rise = mesh.settings.step_height.max(0.25);
-                        for (end, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
-                            if draw_it {
-                                line(end, [end[0], end[1] + rise, end[2]], col);
-                            }
-                        }
-                    }
-                    // A step's ribbon is filled too, and more strongly: it is
-                    // the answer to a question somebody is actively asking.
-                    for s in &overlay.steps {
-                        if offscreen_tri(s.low[0], s.low[1], s.high[1]) {
-                            continue;
-                        }
-                        let col = strip(hue(s.island));
-                        for p in [
-                            s.low[0], s.low[1], s.high[1], s.low[0], s.high[1], s.high[0],
-                        ] {
-                            self.nav_surface
-                                .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
-                        }
-                    }
-                }
-            }
-            // Mesh collider wireframes. Every Mesh node flagged Collidable or (legacy)
-            // MeshCollider when the global toggle is on, plus the SELECTED one always (so
-            // you can verify it). Both markers build a static triangle-mesh collider, so
-            // both must draw the wireframe (union; dedup a node flagged both).
-            let mut collider_ents: Vec<Entity> =
-                self.world.query::<floptle_core::Collidable>().map(|(e, _)| e).collect();
-            for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
-                if !collider_ents.contains(&e) {
-                    collider_ents.push(e);
-                }
-            }
-            let mesh_colliders: Vec<(Entity, String)> = collider_ents
-                .into_iter()
-                .filter_map(|e| match self.world.get::<Matter>(e) {
-                    Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
-                    _ => None,
-                })
-                .collect();
-            for (e, path) in mesh_colliders {
-                if !filter.colliders
-                    || (!self.show_mesh_colliders && !self.selection.contains(&e))
-                {
-                    continue;
-                }
-                if !self.mesh_wire_cache.contains_key(&path) {
-                    let file = crate::project::resolve_asset_path(&self.project_root, &path);
-                    let edges = floptle_assets::gltf_import::import(&file)
-                        .map(|m| mesh_collider_wire_local(&m))
-                        .unwrap_or_default();
-                    self.mesh_wire_cache.insert(path.clone(), edges);
-                }
-                let edges = &self.mesh_wire_cache[&path];
-                let wt = floptle_core::world_transform(&self.world, e);
-                let m = Mat4::from_scale_rotation_translation(wt.scale, wt.rotation, wt.translation.as_vec3());
-                for &(a, b) in edges {
-                    let wa = m.transform_point3(a).as_dvec3();
-                    let wb = m.transform_point3(b).as_dvec3();
-                    if let (Some(pa), Some(pb)) = (
-                        project(wa, cam.world_position, view_proj, gw, gh),
-                        project(wb, cam.world_position, view_proj, gw, gh),
-                    ) {
-                        self.mesh_wire_gizmo.push((pa, pb));
-                    }
-                }
-            }
-            // Static PRIMITIVE collider wireframes (the "Collidable" switch on a Cube /
-            // Sphere / Capsule) — drawn with the same toggle as mesh colliders, plus the
-            // selected one always. Each matches the static collider built at Play.
-            let shape_colliders: Vec<(Entity, floptle_core::Shape)> = self
-                .world
-                .query::<floptle_core::Collidable>()
-                .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
-                    Some(Matter::Primitive { shape, .. }) => Some((e, *shape)),
-                    _ => None,
-                })
-                .collect();
-            for (e, shape) in shape_colliders {
-                if !filter.colliders
-                    || (!self.show_mesh_colliders && !self.selection.contains(&e))
-                {
-                    continue;
-                }
-                let wt = floptle_core::world_transform(&self.world, e);
-                let s = wt.scale;
-                let lines = match shape {
-                    floptle_core::Shape::Cube => {
-                        let m = Mat4::from_scale_rotation_translation(s, wt.rotation, wt.translation.as_vec3());
-                        oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
-                    }
-                    floptle_core::Shape::Plane => {
-                        // Flat in Z: outline the thin-box collider proxy.
-                        let thin = Vec3::new(s.x, s.y, 0.02 * s.z.max(1.0));
-                        let m = Mat4::from_scale_rotation_translation(thin, wt.rotation, wt.translation.as_vec3());
-                        oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
-                    }
-                    floptle_core::Shape::Sphere => rigidbody_lines(
-                        wt.translation, false, 0.85 * s.max_element(), 0.0,
-                        cam.world_position, view_proj, gw, gh,
-                    ),
-                    floptle_core::Shape::Capsule => {
-                        let r = 0.5 * s.x.max(s.z);
-                        rigidbody_lines(
-                            wt.translation, true, r, s.y + 2.0 * r,
-                            cam.world_position, view_proj, gw, gh,
-                        )
-                    }
-                };
-                self.mesh_wire_gizmo.extend(lines);
-            }
-
-            // Selected particle track: draw its emitter birth shape + emit direction +
-            // force arrows, so authoring a VFX has spatial feedback. The node is the
-            // Particles-tab preview anchor, or a selected ParticleSystem node; the edited
-            // effect is `vfx_ui.doc`. sel_track only (less clutter) else every track.
-            let particle_node = self
-                .vfx
-                .preview
-                .as_ref()
-                .and_then(|p| p.anchor)
-                .or_else(|| {
-                    self.selection
-                        .last()
-                        .copied()
-                        .filter(|&e| self.world.get::<floptle_core::ParticleSystem>(e).is_some())
-                });
-            if let (Some(node), Some(doc)) =
-                (particle_node.filter(|_| filter.particles), self.vfx_ui.doc.as_ref())
-            {
-                use floptle_scene::{VfxForceDoc, VfxShapeDoc, VfxSpaceDoc};
-                let wt = floptle_core::world_transform(&self.world, node);
-                let m_shape = Mat4::from_scale_rotation_translation(
-                    wt.scale,
-                    wt.rotation,
-                    wt.translation.as_vec3(),
-                );
-                let m_anchor = Mat4::from_translation(wt.translation.as_vec3());
-                let tracks: Vec<usize> = match self.vfx_ui.sel_track {
-                    Some(i) if i < doc.tracks.len() => vec![i],
-                    _ => (0..doc.tracks.len()).collect(),
-                };
-                for ti in tracks {
-                    let t = &doc.tracks[ti];
-                    let shape = match t.shape {
-                        VfxShapeDoc::Point => EmitterViz::Point,
-                        VfxShapeDoc::Cone { angle, radius } => EmitterViz::Cone { angle, radius },
-                        VfxShapeDoc::Sphere { radius, .. } => EmitterViz::Sphere { radius },
-                        VfxShapeDoc::Edge { length } => EmitterViz::Edge { length },
-                        VfxShapeDoc::Ring { radius } => EmitterViz::Ring { radius },
-                    };
-                    let forces: Vec<ForceViz> = t
-                        .forces
-                        .iter()
-                        .filter_map(|f| match *f {
-                            VfxForceDoc::Directional { dir, .. } => {
-                                Some(ForceViz::Directional { dir: Vec3::from(dir) })
-                            }
-                            VfxForceDoc::Point { center, strength } => Some(ForceViz::Point {
-                                center: Vec3::from(center),
-                                attract: strength >= 0.0,
-                            }),
-                            VfxForceDoc::Vortex { center, axis, .. } => Some(ForceViz::Vortex {
-                                center: Vec3::from(center),
-                                axis: Vec3::from(axis),
-                            }),
-                            VfxForceDoc::Turbulence { .. } => None,
-                        })
-                        .collect();
-                    // World-space forces act in world/anchor space (translation only);
-                    // Local-space forces (and every birth shape) ride the emitter frame.
-                    let m_force =
-                        if t.space == VfxSpaceDoc::World { m_anchor } else { m_shape };
-                    self.particle_gizmo.extend(particle_gizmo_lines(
-                        &shape, &forces, m_shape, m_force, cam.world_position, view_proj, gw, gh,
-                    ));
-                }
-            }
+        if !game_view {
+            let gpu_size = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+            self.gather_gizmos(&cam, view_proj, aspect, gpu_size);
         }
+        let gpu = self.gpu.as_ref()?;
 
         // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
         // The Rect tool needs the object's local bounds (None = unsupported matter,
@@ -1047,6 +374,1019 @@ impl Editor {
         // If something made a second anyway, say so once: a script writing "the"
         // 2D base light and this reading "the" 2D base light would then be
         // whichever the ECS happened to yield first.
+        let lighting = self.gather_lighting(&cam, view_proj);
+        let FrameLighting {
+            light_node,
+            sun,
+            li,
+            flat_camera,
+            lights_split,
+            pl_count,
+            pl_pos,
+            pl_col,
+            pl_shape,
+            pl_rot,
+            pl_cone,
+            sh_params,
+            sh_tint,
+            sh_extra,
+            contact,
+            point_shadows,
+            ssr,
+            ssr_prev_vp,
+            probe_meta,
+            probe_pos,
+            probe_half,
+            fog_color,
+            fog_params,
+            fog_extra,
+            particle_fog,
+            atmo_meta,
+            atmo_color,
+            atmo_body,
+            atmo_params,
+            star_meta,
+            star_pos,
+            star_color,
+            prox_count,
+            prox_a,
+            prox_b,
+            prox_rot,
+            globals,
+        } = lighting;
+
+        let FrameInstances {
+            terrain_nearest_mask,
+            sort_z,
+            lights_2d,
+            mut instances,
+            flat2d,
+            skin_draws,
+            flsl_draws,
+            blobs,
+        } = self.gather_instances(&cam, view_proj, game_cull_mask, &lights_split, flat_camera, profile, chunk_now, terrain_base_mat)?;
+
+        // Live particle effects (play mode): pack every instance's billboards for
+        // this frame. Owned data — drawn after the grid, before post, so particles
+        // depth-test against the scene and inherit retro/post like everything else.
+        // The tab's preview draws only while the Particles tab is actually up
+        // (front of its dock leaf) and we're not in Play.
+        let vfx_preview_on = !self.playing
+            && self
+                .dock_state
+                .as_ref()
+                .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
+        let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
+        let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
+        self.vfx.collect(
+            &self.world,
+            &cam,
+            &self.texture_registry,
+            vfx_preview_on,
+            &mut vfx_instances,
+            &mut vfx_batches,
+        );
+        // Mesh-render particle tracks ride the raster instance list (lit + shadowed
+        // like scene meshes), so append them to `instances` built above.
+        let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, &cam, vfx_preview_on);
+        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
+
+        // Skybox: a Skybox node drives the environment background — a solid color, or an
+        // equirect texture × tint, rotated by the node so a script can spin the sky.
+        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
+        // The terrain's surface Material (active terrain's, or any terrain that has one)
+        // so terrain shades like the rest of the scene. Neutral default = plain matte.
+        // (Inlined via disjoint field access — a `&self` method can't be called here
+        // while gpu/raster/etc. are mutably borrowed for the render.)
+        let terrain_mat = {
+            let pick = self
+                .active_terrain
+                .filter(|e| self.world.get::<Material>(*e).is_some())
+                .or_else(|| {
+                    self.terrains
+                        .keys()
+                        .copied()
+                        .find(|&e| self.world.get::<Material>(e).is_some())
+                });
+            pick.and_then(|e| self.world.get::<Material>(e))
+                .map(material_params)
+                .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+        };
+        // The scene's PostProcess node drives the whole post chain (per scene, not
+        // per project): PostStack settings + the raymarch SDF-AO params.
+        let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
+        // The player's colour-vision filter rides on top of the scene's chain,
+        // and deliberately survives a scene whose PostProcess node is disabled
+        //: a scene must not be able to veto an accessibility
+        // setting the player turned on.
+        post_settings.color_filter = self.access.color_filter.lane();
+        post_settings.color_filter_strength = self.access.color_filter_strength;
+        post_settings.simulate_deficiency = self.access.simulate_deficiency;
+        // Film grain needs a clock or it is a dirty lens, not film. Reduced
+        // motion is deliberately not applied here: grain is texture, not
+        // movement, and freezing it makes it more of a fixed pattern to look at.
+        post_settings.time = self.fog_time;
+        // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
+        // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
+        // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)
+        let (sky_meta, sky_uniforms): ([f32; 4], [[f32; 4]; 16]) = if sky_active {
+            ([1.0, 0.0, 0.0, 0.0], sky_uniform_vals)
+        } else {
+            ([0.0; 4], [[0.0; 4]; 16])
+        };
+        // Build raymarch globals for a set of blobs (all of them, or just one for the
+        // selection mask). Up to 16 blobs are folded together in one march.
+        let (vol_fog_a, vol_fog_b, vol_fog_c) =
+            vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
+        let terrain_scale = crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale);
+        let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
+            let mut arr = [[0.0f32; 4]; 16];
+            let n = set.len().min(16);
+            for (i, (center, scale, _)) in set.iter().take(16).enumerate() {
+                let c = (*center - cam.world_position).as_vec3();
+                arr[i] = [c.x, c.y, c.z, scale.max(0.05)];
+            }
+            let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) = blob_mat_arrays(set);
+            let tm = &terrain_mat;
+            RaymarchGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                light_dir: sun,
+                light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
+                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+                bg: [clear[0], clear[1], clear[2], 1.0],
+                center: [0.0; 4],
+                params: [elapsed, n as f32, 0.0, 0.0],
+                vol_center: [[0.0; 4]; 16],
+                vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
+                vol_atlas: [[0.0; 4]; 16],
+                vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
+                // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
+                // is one texture_2d_array with one sampler, so the shader can't pick a
+                // sampler per slot — it reads this mask and selects the result instead.
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask as f32],
+                terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
+                terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
+                terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
+                terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
+                blobs: arr,
+                point_count: pl_count,
+                point_pos: pl_pos,
+                point_color: pl_col,
+                point_shape: pl_shape,
+                point_rot: pl_rot,
+                point_cone: pl_cone,
+                blob_tint,
+                blob_emissive,
+                blob_specular,
+                blob_params,
+                blob_rim,
+                sky_params,
+                sky_tint,
+                sky_rot,
+                ao_params: rm_ao_params,
+                shadow_params: sh_params,
+                shadow_tint: sh_tint,
+                shadow_extra: sh_extra,
+                prox_count,
+                prox_a,
+                prox_b,
+                prox_rot,
+                fog_color,
+                fog_params,
+                fog_extra,
+                terrain_scale,
+                vol_fog_a,
+                vol_fog_b,
+                vol_fog_c,
+                contact,
+                ssr,
+                ssr_prev_vp,
+                probe_meta,
+                probe_pos,
+                probe_half,
+                sky_meta,
+                sky_uniforms,
+                atmo_meta,
+                atmo_color,
+                atmo_body,
+                atmo_params,
+                star_meta,
+                star_pos,
+                star_color,
+                // vol_tight_* are renderer-patched at draw time from the uploaded
+                // volumes; the default is "unbounded" (behaves like the full brick).
+                ..Default::default()
+            }
+        };
+
+        // Selection outline source: every selected object's silhouette into the
+        // mask — mesh instances, plus (for blobs/field shapes) a raymarch whose
+        // outline hugs only the selected SDF surfaces. All selected entities get
+        // an outline, not just the primary.
+        let (mask_mesh, mask_skins, mask_blob) = if game_view {
+            (Vec::new(), Vec::new(), None)
+        } else {
+            self.gather_masks(&cam, &sort_z, &make_rm)
+        };
+        let raymarch = self.raymarch.as_ref()?;
+
+        // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
+        // and/or the combined terrain volume — and it's also what draws a textured
+        // skybox (rays that miss every bound sample the sky, zero march steps), so a
+        // scene with no terrain/blobs still runs it when the sky has a texture; a
+        // solid-color sky is just the raster clear. The globals are built either way
+        // — on frames with nothing to raymarch they're still uploaded (not drawn) so
+        // the raster pass's field bind group has this frame's shadow/proxy data.
+        let show_blobs = self.project.matter && !blobs.is_empty();
+        let rm_draw = show_blobs
+            || !self.terrains.is_empty()
+            || sky_params[0] >= 0.5
+            || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
+            || !self.flsl_shape_slots.is_empty();
+        let rm = {
+            let mut g = make_rm(if show_blobs { &blobs } else { &[] });
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
+            crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
+            // Baked GI. The renderer owns the probe texture; these four lanes
+            // are only where the volume is, and they have to be stamped per
+            // view because the field is camera-relative (ADR-0015).
+            raymarch.gi().apply(&mut g, cam.world_position.into());
+            g
+        };
+
+        Some(FrameGather {
+            aspect,
+            cam,
+            clear,
+            contact,
+            flat2d,
+            flsl_draws,
+            fog_color,
+            game_view,
+            gizmo_tool,
+            globals,
+            instances,
+            light_node,
+            lights_2d,
+            mask_blob,
+            mask_mesh,
+            mask_skins,
+            particle_fog,
+            point_shadows,
+            post_settings,
+            rm,
+            rm_draw,
+            skin_draws,
+            vfx_batches,
+            vfx_instances,
+            view_proj,
+        })
+    }
+
+    /// The Scene view's gizmos for this frame — cameras, lights, colliders,
+    /// emitters, the navmesh, the selection's handles — written into the
+    /// editor's overlay lists for the draw. `gpu_size` is the surface in
+    /// pixels, which the screen-space handles are sized against.
+    fn gather_gizmos(&mut self, cam: &RenderCamera, view_proj: Mat4, aspect: f32, gpu_size: (f32, f32)) {
+        if !self.show_gizmos {
+            return;
+        }
+        let (gw, gh) = gpu_size;
+        // Only cameras and point lights get gizmos — gather the few Copy fields we
+        // need (no per-frame Matter clone over the whole world).
+        enum Giz {
+            Cam(f32, bool, Option<f32>),
+            Light(f32, floptle_core::LightShape, f32),
+            Gravity(bool, f32), // radial?, radius
+            /// A box whose size decides where something applies, and an
+            /// optional inner box for the part that fades.
+            Volume([f32; 3], Option<f32>),
+            /// Full volume out to the first, silent by the second.
+            Audio(f32, f32),
+            /// A nav link: the far end in the node's own space, and whether
+            /// it can be crossed both ways.
+            Link([f32; 3], bool),
+        }
+        let filter = self.gizmo_filter;
+        let gizmos: Vec<(Entity, Giz)> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Camera { fov_y, active, ortho, ortho_height, .. }
+                    if filter.cameras =>
+                {
+                    Some((e, Giz::Cam(*fov_y, *active, ortho.then_some(*ortho_height))))
+                }
+                Matter::PointLight { range, shape, spot_angle, .. } if filter.lights => {
+                    Some((e, Giz::Light(*range, *shape, *spot_angle)))
+                }
+                Matter::GravityVolume { mode, radius, .. } if filter.lights => {
+                    Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
+                }
+                // The three boxes you would otherwise size by typing a
+                // number and reloading to see whether it reached.
+                Matter::ReflectionProbe { half_extents, fade, .. } if filter.volumes => {
+                    Some((e, Giz::Volume(*half_extents, Some(*fade))))
+                }
+                // A plain box, however it is used — one arm, so the three
+                // cannot drift apart on screen.
+                Matter::LightProbes { half_extents, .. }
+                | Matter::NavMesh { half_extents, .. }
+                | Matter::NavArea { half_extents, .. }
+                    if filter.volumes =>
+                {
+                    Some((e, Giz::Volume(*half_extents, None)))
+                }
+                Matter::NavLink { to, bidirectional, .. } if filter.volumes => {
+                    Some((e, Giz::Link(*to, *bidirectional)))
+                }
+                _ => None,
+            })
+            .collect();
+        // Audio sources carry their reach as two numbers on a component
+        // rather than as a `Matter` variant, so they are gathered
+        // separately — the query above is over `Matter` and would never see
+        // one.
+        let gizmos: Vec<(Entity, Giz)> = gizmos
+            .into_iter()
+            // `Flat` ignores position entirely, so it has no reach to draw
+            // — a ring around a music track would be a lie.
+            .chain(
+                self.world
+                    .query::<floptle_audio::AudioSource>()
+                    .filter(|(_, a)| {
+                        filter.audio
+                            && a.params.mode != floptle_audio::SpatialMode::Flat
+                            && a.params.max_distance > 0.0
+                    })
+                    .map(|(e, a)| {
+                        (e, Giz::Audio(a.params.min_distance, a.params.max_distance))
+                    }),
+            )
+            .collect();
+        for (e, g) in gizmos {
+            let wt = floptle_core::world_transform(&self.world, e);
+            match g {
+                Giz::Cam(fov_y, active, ortho_height) => {
+                    let lines = camera_frustum_lines(
+                        wt.translation, wt.rotation, fov_y, aspect, cam.world_position, view_proj, gw, gh,
+                        ortho_height,
+                    );
+                    if !lines.is_empty() {
+                        self.camera_gizmos.push(CameraGizmo { lines, active });
+                    }
+                }
+                Giz::Light(range, shape, spot_angle) => {
+                    let lines = point_light_lines(
+                        wt.translation, wt.rotation, wt.scale, range, shape, spot_angle,
+                        cam.world_position, view_proj, gw, gh,
+                    );
+                    if !lines.is_empty() {
+                        self.light_gizmos.push(lines);
+                    }
+                }
+                Giz::Gravity(radial, radius) => {
+                    let lines = gravity_volume_lines(
+                        wt.translation, radial, radius, cam.world_position, view_proj, gw, gh,
+                    );
+                    if !lines.is_empty() {
+                        self.light_gizmos.push(lines);
+                    }
+                }
+                Giz::Volume(half, fade) => {
+                    // The node's transform positions and scales the box, so
+                    // the drawn outline has to be scaled the same way or it
+                    // would describe a volume nothing uses.
+                    let half = floptle_core::math::Vec3::from(half) * wt.scale;
+                    let lines = box_lines(
+                        wt.translation, half, cam.world_position, view_proj, gw, gh,
+                    );
+                    if !lines.is_empty() {
+                        self.volume_gizmos.push(lines);
+                    }
+                    // The inner box is where the effect is at full strength;
+                    // between the two it blends out. Drawn only when it is
+                    // actually inside, so a fade wider than the box does not
+                    // draw a second outline on top of the first.
+                    if let Some(f) = fade
+                        && f > 0.0
+                    {
+                        let inner = half - floptle_core::math::Vec3::splat(f);
+                        if inner.min_element() > 0.05 {
+                            let lines = box_lines(
+                                wt.translation, inner, cam.world_position, view_proj, gw, gh,
+                            );
+                            if !lines.is_empty() {
+                                self.volume_gizmos.push(lines);
+                            }
+                        }
+                    }
+                }
+                Giz::Link(to, both) => {
+                    // The far end is in the node's own space, so it turns
+                    // and scales with whatever the link is parented to —
+                    // which is what lets a ladder live in a prefab.
+                    let far = wt.mul_transform(&floptle_core::Transform::from_translation(
+                        DVec3::new(to[0] as f64, to[1] as f64, to[2] as f64),
+                    ));
+                    let lines = crate::viz::link_lines(
+                        wt.translation, far.translation, both, cam.world_position, view_proj,
+                        gw, gh,
+                    );
+                    if !lines.is_empty() {
+                        self.volume_gizmos.push(lines);
+                    }
+                }
+                Giz::Audio(min_d, max_d) => {
+                    // Two rings: full volume inside the first, silent at the
+                    // second. Both, because the gap between them is the
+                    // fade, and one ring cannot show a gap.
+                    for r in [min_d, max_d] {
+                        let lines = crate::viz::radius_rings(
+                            wt.translation, r, cam.world_position, view_proj, gw, gh,
+                        );
+                        if !lines.is_empty() {
+                            self.volume_gizmos.push(lines);
+                        }
+                    }
+                }
+            }
+        }
+        // The rig of a selected mesh — the sticks you click to pose it.
+        //
+        // Only for a mesh that is selected, or whose bone is: every rig in
+        // the scene at once buries the picture in white sticks, and the one
+        // being posed would be the hardest of all to find.
+        if filter.bones {
+            let bone_sel = self.bone_selection;
+            let mut rigged: Vec<Entity> = Vec::new();
+            for e in self.selection.iter().copied().chain(bone_sel.map(|(m, _)| m)) {
+                if !rigged.contains(&e) {
+                    rigged.push(e);
+                }
+            }
+            for e in rigged {
+                let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(e) else {
+                    continue;
+                };
+                let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
+                else {
+                    continue;
+                };
+                let viz = crate::viz::rig_viz(
+                    e,
+                    rig,
+                    self.anim.poses.get(&e).map(|p| p.as_slice()),
+                    floptle_core::world_transform(&self.world, e).world_matrix(),
+                    bone_sel.filter(|(m, _)| *m == e).map(|(_, i)| i),
+                    cam.world_position,
+                    view_proj,
+                    gw,
+                    gh,
+                );
+                if !viz.joints.is_empty() {
+                    self.rig_gizmos.push(viz);
+                }
+            }
+        }
+        // The directional "sun" Light has no world position, so its direction gizmo
+        // only shows when the Lighting node is selected — anchored in front of the
+        // editor camera so it's always framed, pointing along the light direction.
+        // A POSITIONAL star instead anchors at the star and points at the camera
+        // (any direction is "toward something" for a point source).
+        if filter.lights
+            && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
+        {
+            let l = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+            // Stars mode: anchor at the brightest star body (if any).
+            let star_anchor = if l.stars {
+                let (meta, pos, _) =
+                    crate::shading::star_uniforms(&self.world, &l, cam.world_position);
+                (meta[0] > 0.0).then(|| {
+                    cam.world_position
+                        + DVec3::new(pos[0][0] as f64, pos[0][1] as f64, pos[0][2] as f64)
+                })
+            } else {
+                None
+            };
+            let (anchor, dir) = if let Some(star) = star_anchor {
+                let toward = (cam.world_position - star).normalize_or_zero().as_vec3();
+                (star, if toward == Vec3::ZERO { Vec3::Y } else { toward })
+            } else {
+                let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+                (cam.world_position + fwd * 6.0, Vec3::from(l.direction))
+            };
+            let lines = light_dir_lines(anchor, dir, cam.world_position, view_proj, gw, gh);
+            if !lines.is_empty() {
+                self.light_gizmos.push(lines);
+            }
+        }
+        // Rigidbody collider outlines, so physics bodies are visible/placeable.
+        let bodies: Vec<(Entity, floptle_core::RigidBody)> = if filter.physics {
+            self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect()
+        } else {
+            Vec::new()
+        };
+        // During Play the live body, not the authored component: a script
+        // that set `node.height` (a controller's stand height, a crouch)
+        // changed the capsule and moved its centre to keep the feet
+        // planted, and an outline drawn from the component then sat a
+        // hand's width above where the body actually met the ground —
+        // an instrument that lied about the one thing it was for.
+        let live: std::collections::HashMap<Entity, (DVec3, f32)> = self
+            .sim
+            .as_ref()
+            .map(|sim| sim.body_states().map(|b| (b.entity, (b.pos, b.height))).collect())
+            .unwrap_or_default();
+        for (e, rb) in bodies {
+            let wt = floptle_core::world_transform(&self.world, e);
+            let (p, height) = match live.get(&e) {
+                Some(&(pos, h)) => (pos, h),
+                None => (wt.translation, rb.height),
+            };
+            let lines = if rb.kind == floptle_core::BodyKind::Box {
+                let s = wt.scale;
+                let half = Vec3::new(
+                    rb.half_extents[0] * s.x,
+                    rb.half_extents[1] * s.y,
+                    rb.half_extents[2] * s.z,
+                );
+                box_lines(p, half, cam.world_position, view_proj, gw, gh)
+            } else {
+                rigidbody_lines(
+                    p,
+                    rb.kind == floptle_core::BodyKind::Capsule,
+                    rb.radius,
+                    height,
+                    cam.world_position,
+                    view_proj,
+                    gw,
+                    gh,
+                )
+            };
+            if !lines.is_empty() {
+                self.body_gizmos.push(lines);
+            }
+        }
+        // Collision telegraph: a small cross at each contact resolved this step.
+        // (Contacts are sim-frame — origin-relative — so convert to world here.)
+        if let Some(sim) = self.sim.as_ref().filter(|_| filter.physics) {
+            let cs = 0.15;
+            for c in &sim.world.contacts {
+                let cp = sim.world.origin
+                    + DVec3::new(c.point.x as f64, c.point.y as f64, c.point.z as f64);
+                for off in [DVec3::X, DVec3::Y, DVec3::Z] {
+                    if let (Some(a), Some(b)) = (
+                        project(cp - off * cs, cam.world_position, view_proj, gw, gh),
+                        project(cp + off * cs, cam.world_position, view_proj, gw, gh),
+                    ) {
+                        self.contact_gizmos.push((a, b));
+                    }
+                }
+            }
+        }
+        // Terrain collider wireframes: the surface physics actually collides
+        // with. For a terrain set to collide with the drawn surface (the
+        // default) that is every drawn triangle, from the same extraction
+        // the collider runs — so this wireframe lies on the picture or the
+        // collider does not, and a screenshot settles it. For one set to
+        // the field it is the field's own zero crossing, coarsely. (It
+        // used to draw the shadow proxy for every terrain, unrotated and
+        // unscaled: a wireframe of a surface nothing collided with, in the
+        // wrong place — an instrument that lied about the thing it was
+        // for.) Cached per terrain in NODE-LOCAL coords, rebuilt when that
+        // terrain's shape changes; posed here through the node's full
+        // transform, so a moved, turned or scaled terrain's wireframe
+        // follows for free.
+        if self.show_terrain_collider && filter.colliders {
+            for (&e, t) in &self.terrains {
+                let drawn = !matches!(
+                    self.world.get::<Matter>(e),
+                    Some(Matter::Terrain { collision: floptle_core::TerrainCollision::Field, .. })
+                );
+                // Rebuilt when the terrain's choice of surface changes too.
+                self.terrain_wire_world.retain(|(we, d, _)| *we != e || *d == drawn);
+                if !self.terrain_wire_world.iter().any(|(we, ..)| *we == e) {
+                    let segs = if drawn {
+                        crate::viz::terrain_collision_wire(&t.field)
+                    } else {
+                        let stride =
+                            (t.shadow.dims.into_iter().max().unwrap_or(64) / 48).max(2);
+                        terrain_collider_wire(&t.shadow, stride)
+                    };
+                    self.terrain_wire_world.push((e, drawn, segs));
+                }
+            }
+            self.terrain_wire_world.retain(|(we, ..)| self.terrains.contains_key(we));
+            for (e, _, segs) in &self.terrain_wire_world {
+                let wt = floptle_core::world_transform(&self.world, *e);
+                let (anchor, rot, scale) =
+                    (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6));
+                let place = |p: Vec3| {
+                    let q = rot * (p * scale);
+                    anchor + DVec3::new(q.x as f64, q.y as f64, q.z as f64)
+                };
+                for &(a, b) in segs {
+                    let wa = place(a);
+                    let wb = place(b);
+                    if let (Some(pa), Some(pb)) = (
+                        project(wa, cam.world_position, view_proj, gw, gh),
+                        project(wb, cam.world_position, view_proj, gw, gh),
+                    ) {
+                        self.terrain_wire_gizmo.push((pa, pb));
+                    }
+                }
+            }
+        }
+        // The baked navmesh. Drawn when its node is selected — the same rule
+        // the collider wireframes use, so verifying the thing you are
+        // editing costs nothing — or whenever the View toggle is on.
+        //
+        // What is drawn is a **surface**, not a field of rectangles. The
+        // bake cuts the walkable ground into rectangles because that is the
+        // shape to search; outlining each of them turned one floor into
+        // scattered boxes and could not answer the only question the picture
+        // is for — *are these two pieces of ground joined?*
+        //
+        // `Overlay` (floptle-nav) decides that from the LINKS, so the
+        // outline is drawn only where the walkable surface actually ends and
+        // the seams of the cut are invisible. `⊞ Cells` puts the old
+        // per-rectangle wireframe back when the bake's working is the
+        // question.
+        // How solid the walkable surface is drawn. Low enough that the
+        // level under it stays legible — the overlay is drawn over
+        // everything, so an opaque one would hide the geometry it is
+        // describing — and high enough to read as a surface rather than a
+        // tint. A step's ribbon is stronger because it is the answer to a
+        // question somebody is deliberately asking.
+        const NAV_FILL_ALPHA: f32 = 0.22;
+        const NAV_STEP_ALPHA: f32 = 0.40;
+        // While a game is running, the mesh it is walking on is the bake
+        // with this session's `nav.obstacle` holes cut into it. Drawing the
+        // bake instead would show a clear corridor beside a unit that just
+        // went round one — a tool lying about the thing it exists to
+        // explain. The rev counter is compared rather than the polygons, so
+        // a frame with nothing carved costs one integer.
+        if self.playing {
+            let rev = self.script_host.nav_obstacle_rev();
+            if rev != self.nav_carved_rev {
+                self.nav_carved_rev = rev;
+                self.nav_carved = (rev > 0).then(|| self.script_host.nav_mesh_snapshot()).flatten();
+                self.nav_overlay = None;
+            }
+        } else if self.nav_carved.is_some() {
+            // Stop gives the level back, and that includes the picture.
+            self.nav_carved = None;
+            self.nav_carved_rev = 0;
+            self.nav_overlay = None;
+        }
+        if let Some(mesh) = self.nav_carved.as_ref().or(self.nav_baked.as_ref()) {
+            let selected = crate::nav_bake::nav_node(&self.world)
+                .is_some_and(|(e, _)| self.selection.contains(&e));
+            if (self.show_navmesh || selected) && filter.colliders {
+                let anchor = DVec3::from_array(mesh.anchor);
+                // A hair above the floor: drawn exactly on it, the overlay
+                // fights the ground it describes.
+                let lift = mesh.settings.cell_size * 0.5;
+                let overlay = self.nav_overlay.get_or_insert_with(|| {
+                    std::rc::Rc::new(floptle_nav::Overlay::build(mesh, lift))
+                });
+                // A distinct hue per ISLAND, spun by the golden ratio so
+                // neighbouring numbers never land on neighbouring colours.
+                //
+                // Per island rather than per region, which is what this was.
+                // The one question the picture exists to answer is *are
+                // these two pieces of ground joined?*, and a region is the
+                // bake's own grouping before any link is counted — so a
+                // balcony and the floor its drop lands on came out two
+                // colours while a character walks between them freely. A
+                // level with five hundred ledges in it read as five hundred
+                // colours and answered nothing.
+                let hue = |island: u32| crate::viz::hue_rgb((island as f32 * 0.618_034).fract());
+                let world = |p: [f32; 3]| {
+                    anchor + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+                };
+                // A big level's overlay is hundreds of thousands of
+                // edges, and all of them were being pushed and uploaded
+                // every frame however little of the level was on screen —
+                // which is why the picture got heavier the closer you
+                // looked at it, exactly backwards. A segment with both ends
+                // outside the viewport cannot cross it, so it is dropped
+                // before it reaches the line buffer. The margin is generous
+                // enough that a line grazing the edge still draws.
+                const OFFSCREEN_MARGIN: f32 = 64.0;
+                let onscreen = |p: floptle_core::math::Vec2| {
+                    p.x > -OFFSCREEN_MARGIN
+                        && p.y > -OFFSCREEN_MARGIN
+                        && p.x < gw + OFFSCREEN_MARGIN
+                        && p.y < gh + OFFSCREEN_MARGIN
+                };
+                let mut line = |a: [f32; 3], b: [f32; 3], col: [f32; 3]| {
+                    if let (Some(pa), Some(pb)) = (
+                        project(world(a), cam.world_position, view_proj, gw, gh),
+                        project(world(b), cam.world_position, view_proj, gw, gh),
+                    ) && (onscreen(pa) || onscreen(pb))
+                    {
+                        self.nav_gizmo.push((pa, pb, col));
+                    }
+                };
+
+                if self.nav_cells {
+                    // Every rectangle, faintly — the bake's working.
+                    for e in &overlay.cells {
+                        let c = hue(e.island);
+                        line(e.a, e.b, [c[0] * 0.45, c[1] * 0.45, c[2] * 0.45]);
+                    }
+                }
+                // The edge of the walkable surface, bright.
+                for e in &overlay.boundary {
+                    line(e.a, e.b, hue(e.island));
+                }
+                // Where two heights are genuinely joined — the picture of
+                // what `max slope` and `step height` just did.
+                for s in &overlay.steps {
+                    let c = hue(s.island);
+                    for (a, b) in [
+                        (s.low[0], s.high[0]),
+                        (s.low[1], s.high[1]),
+                        (s.low[0], s.low[1]),
+                        (s.high[0], s.high[1]),
+                    ] {
+                        line(a, b, c);
+                    }
+                }
+
+                // The filled surface, in real world space so it sits on the
+                // ground rather than being painted over the window.
+                let cam_rel = |p: [f32; 3]| {
+                    let w = world(p) - cam.world_position;
+                    [w.x as f32, w.y as f32, w.z as f32]
+                };
+                let fill = |c: [f32; 3]| [c[0], c[1], c[2], NAV_FILL_ALPHA];
+                let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
+                // The same cull the lines get, done conservatively: a
+                // triangle is dropped only when all three corners fall off
+                // the same side of the viewport, which is the one case where
+                // no part of it can cross the screen. A corner the camera is
+                // behind projects to nothing, and anything with one of those
+                // is kept — a wrong answer here would delete floor from the
+                // middle of the picture, which is far worse than uploading a
+                // triangle nobody sees.
+                let offscreen_tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
+                    let ps = [world(a), world(b), world(c)]
+                        .map(|w| project(w, cam.world_position, view_proj, gw, gh));
+                    let Some(ps) = ps.iter().copied().collect::<Option<Vec<_>>>() else {
+                        return false;
+                    };
+                    ps.iter().all(|p| p.x < -OFFSCREEN_MARGIN)
+                        || ps.iter().all(|p| p.x > gw + OFFSCREEN_MARGIN)
+                        || ps.iter().all(|p| p.y < -OFFSCREEN_MARGIN)
+                        || ps.iter().all(|p| p.y > gh + OFFSCREEN_MARGIN)
+                };
+                for t in &overlay.tris {
+                    if offscreen_tri(t.a, t.b, t.c) {
+                        continue;
+                    }
+                    // Painted ground reads as painted: its own hue, and
+                    // brighter, because a volume that did nothing and a
+                    // volume that worked have to be tellable apart at a
+                    // glance rather than by baking again and squinting.
+                    let col = if t.area == floptle_nav::WALKABLE {
+                        fill(hue(t.island))
+                    } else {
+                        let c = crate::viz::hue_rgb(
+                            (0.12 + t.area as f32 * 0.17).fract(),
+                        );
+                        [c[0], c[1], c[2], NAV_FILL_ALPHA * 1.9]
+                    };
+                    for p in [t.a, t.b, t.c] {
+                        self.nav_surface
+                            .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
+                    }
+                }
+                // The links, as the bake resolved them — not as they were
+                // placed. An end that missed the floor is drawn in red, and
+                // that is the whole point: the node's own gizmo can only
+                // show where you put it, which is the thing that was wrong.
+                //
+                // Drawn as an ARC rather than a straight line, and the shape
+                // of the arc is the kind of crossing: a jump bows up over
+                // its gap, a drop leaves the ledge flat and falls away. A
+                // level with a few hundred of these has to be readable at a
+                // glance, and a field of identical straight segments is not
+                // — a drop and a ladder looked the same, and a link that
+                // went the wrong way looked like one that went the right
+                // way.
+                for l in &overlay.links {
+                    let col = if !l.resolved {
+                        [1.0, 0.35, 0.3]
+                    } else if !l.enabled {
+                        [0.45, 0.45, 0.5]
+                    } else {
+                        match l.kind {
+                            floptle_nav::LinkKind::Drop => [1.0, 0.72, 0.25],
+                            floptle_nav::LinkKind::Jump => [0.45, 1.0, 0.55],
+                            floptle_nav::LinkKind::Placed => [0.45, 0.95, 1.0],
+                        }
+                    };
+                    // The curve itself comes from `floptle-nav`, so the
+                    // Scene view and the render probe that checks it are
+                    // drawing the same shape rather than two of them.
+                    let steps = floptle_nav::overlay::ARC_STEPS;
+                    let mut prev = l.from;
+                    for k in 1..=steps {
+                        let next = l.point_at(k as f32 / steps as f32);
+                        line(prev, next, col);
+                        prev = next;
+                    }
+                    // A tick at each end you can enter from, so a one-way
+                    // drop and a two-way ladder are not the same picture.
+                    let rise = mesh.settings.step_height.max(0.25);
+                    for (end, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
+                        if draw_it {
+                            line(end, [end[0], end[1] + rise, end[2]], col);
+                        }
+                    }
+                }
+                // A step's ribbon is filled too, and more strongly: it is
+                // the answer to a question somebody is actively asking.
+                for s in &overlay.steps {
+                    if offscreen_tri(s.low[0], s.low[1], s.high[1]) {
+                        continue;
+                    }
+                    let col = strip(hue(s.island));
+                    for p in [
+                        s.low[0], s.low[1], s.high[1], s.low[0], s.high[1], s.high[0],
+                    ] {
+                        self.nav_surface
+                            .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
+                    }
+                }
+            }
+        }
+        // Mesh collider wireframes. Every Mesh node flagged Collidable or (legacy)
+        // MeshCollider when the global toggle is on, plus the SELECTED one always (so
+        // you can verify it). Both markers build a static triangle-mesh collider, so
+        // both must draw the wireframe (union; dedup a node flagged both).
+        let mut collider_ents: Vec<Entity> =
+            self.world.query::<floptle_core::Collidable>().map(|(e, _)| e).collect();
+        for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
+            if !collider_ents.contains(&e) {
+                collider_ents.push(e);
+            }
+        }
+        let mesh_colliders: Vec<(Entity, String)> = collider_ents
+            .into_iter()
+            .filter_map(|e| match self.world.get::<Matter>(e) {
+                Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
+                _ => None,
+            })
+            .collect();
+        for (e, path) in mesh_colliders {
+            if !filter.colliders
+                || (!self.show_mesh_colliders && !self.selection.contains(&e))
+            {
+                continue;
+            }
+            if !self.mesh_wire_cache.contains_key(&path) {
+                let file = crate::project::resolve_asset_path(&self.project_root, &path);
+                let edges = floptle_assets::gltf_import::import(&file)
+                    .map(|m| mesh_collider_wire_local(&m))
+                    .unwrap_or_default();
+                self.mesh_wire_cache.insert(path.clone(), edges);
+            }
+            let edges = &self.mesh_wire_cache[&path];
+            let wt = floptle_core::world_transform(&self.world, e);
+            let m = Mat4::from_scale_rotation_translation(wt.scale, wt.rotation, wt.translation.as_vec3());
+            for &(a, b) in edges {
+                let wa = m.transform_point3(a).as_dvec3();
+                let wb = m.transform_point3(b).as_dvec3();
+                if let (Some(pa), Some(pb)) = (
+                    project(wa, cam.world_position, view_proj, gw, gh),
+                    project(wb, cam.world_position, view_proj, gw, gh),
+                ) {
+                    self.mesh_wire_gizmo.push((pa, pb));
+                }
+            }
+        }
+        // Static PRIMITIVE collider wireframes (the "Collidable" switch on a Cube /
+        // Sphere / Capsule) — drawn with the same toggle as mesh colliders, plus the
+        // selected one always. Each matches the static collider built at Play.
+        let shape_colliders: Vec<(Entity, floptle_core::Shape)> = self
+            .world
+            .query::<floptle_core::Collidable>()
+            .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
+                Some(Matter::Primitive { shape, .. }) => Some((e, *shape)),
+                _ => None,
+            })
+            .collect();
+        for (e, shape) in shape_colliders {
+            if !filter.colliders
+                || (!self.show_mesh_colliders && !self.selection.contains(&e))
+            {
+                continue;
+            }
+            let wt = floptle_core::world_transform(&self.world, e);
+            let s = wt.scale;
+            let lines = match shape {
+                floptle_core::Shape::Cube => {
+                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, wt.translation.as_vec3());
+                    oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
+                }
+                floptle_core::Shape::Plane => {
+                    // Flat in Z: outline the thin-box collider proxy.
+                    let thin = Vec3::new(s.x, s.y, 0.02 * s.z.max(1.0));
+                    let m = Mat4::from_scale_rotation_translation(thin, wt.rotation, wt.translation.as_vec3());
+                    oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
+                }
+                floptle_core::Shape::Sphere => rigidbody_lines(
+                    wt.translation, false, 0.85 * s.max_element(), 0.0,
+                    cam.world_position, view_proj, gw, gh,
+                ),
+                floptle_core::Shape::Capsule => {
+                    let r = 0.5 * s.x.max(s.z);
+                    rigidbody_lines(
+                        wt.translation, true, r, s.y + 2.0 * r,
+                        cam.world_position, view_proj, gw, gh,
+                    )
+                }
+            };
+            self.mesh_wire_gizmo.extend(lines);
+        }
+
+        // Selected particle track: draw its emitter birth shape + emit direction +
+        // force arrows, so authoring a VFX has spatial feedback. The node is the
+        // Particles-tab preview anchor, or a selected ParticleSystem node; the edited
+        // effect is `vfx_ui.doc`. sel_track only (less clutter) else every track.
+        let particle_node = self
+            .vfx
+            .preview
+            .as_ref()
+            .and_then(|p| p.anchor)
+            .or_else(|| {
+                self.selection
+                    .last()
+                    .copied()
+                    .filter(|&e| self.world.get::<floptle_core::ParticleSystem>(e).is_some())
+            });
+        if let (Some(node), Some(doc)) =
+            (particle_node.filter(|_| filter.particles), self.vfx_ui.doc.as_ref())
+        {
+            use floptle_scene::{VfxForceDoc, VfxShapeDoc, VfxSpaceDoc};
+            let wt = floptle_core::world_transform(&self.world, node);
+            let m_shape = Mat4::from_scale_rotation_translation(
+                wt.scale,
+                wt.rotation,
+                wt.translation.as_vec3(),
+            );
+            let m_anchor = Mat4::from_translation(wt.translation.as_vec3());
+            let tracks: Vec<usize> = match self.vfx_ui.sel_track {
+                Some(i) if i < doc.tracks.len() => vec![i],
+                _ => (0..doc.tracks.len()).collect(),
+            };
+            for ti in tracks {
+                let t = &doc.tracks[ti];
+                let shape = match t.shape {
+                    VfxShapeDoc::Point => EmitterViz::Point,
+                    VfxShapeDoc::Cone { angle, radius } => EmitterViz::Cone { angle, radius },
+                    VfxShapeDoc::Sphere { radius, .. } => EmitterViz::Sphere { radius },
+                    VfxShapeDoc::Edge { length } => EmitterViz::Edge { length },
+                    VfxShapeDoc::Ring { radius } => EmitterViz::Ring { radius },
+                };
+                let forces: Vec<ForceViz> = t
+                    .forces
+                    .iter()
+                    .filter_map(|f| match *f {
+                        VfxForceDoc::Directional { dir, .. } => {
+                            Some(ForceViz::Directional { dir: Vec3::from(dir) })
+                        }
+                        VfxForceDoc::Point { center, strength } => Some(ForceViz::Point {
+                            center: Vec3::from(center),
+                            attract: strength >= 0.0,
+                        }),
+                        VfxForceDoc::Vortex { center, axis, .. } => Some(ForceViz::Vortex {
+                            center: Vec3::from(center),
+                            axis: Vec3::from(axis),
+                        }),
+                        VfxForceDoc::Turbulence { .. } => None,
+                    })
+                    .collect();
+                // World-space forces act in world/anchor space (translation only);
+                // Local-space forces (and every birth shape) ride the emitter frame.
+                let m_force =
+                    if t.space == VfxSpaceDoc::World { m_anchor } else { m_shape };
+                self.particle_gizmo.extend(particle_gizmo_lines(
+                    &shape, &forces, m_shape, m_force, cam.world_position, view_proj, gw, gh,
+                ));
+            }
+        }
+    }
+
+    /// The Lighting node's uniforms for this frame: sun, lamps, shadows,
+    /// reflections, fog, atmosphere, stars and the shadow proxies.
+    fn gather_lighting(&mut self, cam: &RenderCamera, view_proj: Mat4) -> FrameLighting {
         let lighting_nodes = self.world.query::<Light>().count();
         if lighting_nodes > 1 && lighting_nodes != self.lighting_nodes_warned {
             self.lighting_nodes_warned = lighting_nodes;
@@ -1123,9 +1463,9 @@ impl Editor {
         // camera the stored frame belongs to.
         let ssr = crate::shading::ssr_uniform(
             &light_node,
-            scene_history.as_ref().is_some_and(|h| h.is_primed()),
+            self.scene_history.as_ref().is_some_and(|h| h.is_primed()),
         );
-        let ssr_prev_vp = scene_history
+        let ssr_prev_vp = self.scene_history
             .as_ref()
             .and_then(|h| h.prev_view_proj(cam.world_position))
             .unwrap_or(floptle_core::math::Mat4::IDENTITY)
@@ -1176,7 +1516,67 @@ impl Editor {
                 0,
             ],
         };
+        FrameLighting {
+            light_node,
+            sun,
+            li,
+            flat_camera,
+            lights_split,
+            pl_count,
+            pl_pos,
+            pl_col,
+            pl_shape,
+            pl_rot,
+            pl_cone,
+            sh_params,
+            sh_tint,
+            sh_extra,
+            contact,
+            point_shadows,
+            ssr,
+            ssr_prev_vp,
+            probe_meta,
+            probe_pos,
+            probe_half,
+            fog_color,
+            fog_params,
+            fog_extra,
+            particle_fog,
+            atmo_meta,
+            atmo_color,
+            atmo_body,
+            atmo_params,
+            star_meta,
+            star_pos,
+            star_color,
+            prox_count,
+            prox_a,
+            prox_b,
+            prox_rot,
+            globals,
+        }
+    }
 
+    /// Walk the World and turn every drawable node into instances for this
+    /// frame's passes. Runs the animation preview and the drag ghost too, since
+    /// both change what is drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_instances(
+        &mut self,
+        cam: &RenderCamera,
+        view_proj: Mat4,
+        game_cull_mask: u32,
+        lights_split: &crate::shading::SplitLights,
+        flat_camera: bool,
+        profile: &Rc<RefCell<floptle_core::profile::FrameProfile>>,
+        chunk_now: Option<f32>,
+        terrain_base_mat: MaterialParams,
+    ) -> Option<FrameInstances> {
+        let (Some(gpu), Some(raster), Some(egui)) =
+            (self.gpu.as_mut(), self.raster.as_mut(), self.egui.as_ref())
+        else {
+            return None;
+        };
         // A model being dragged from Assets shows a live ghost at the cursor's
         // ground point, so you see it follow the cursor and land where you drop.
         // Only while the cursor is actually over the viewport (not over an opaque
@@ -1746,392 +2146,204 @@ impl Editor {
         if !self.anim_ui.record {
             self.anim.restore_preview(&mut self.world);
         }
+        Some(FrameInstances {
+            terrain_nearest_mask,
+            sort_z,
+            lights_2d,
+            instances,
+            flat2d,
+            skin_draws,
+            flsl_draws,
+            blobs,
+        })
+    }
 
-        // Live particle effects (play mode): pack every instance's billboards for
-        // this frame. Owned data — drawn after the grid, before post, so particles
-        // depth-test against the scene and inherit retro/post like everything else.
-        // The tab's preview draws only while the Particles tab is actually up
-        // (front of its dock leaf) and we're not in Play.
-        let vfx_preview_on = !self.playing
-            && self
-                .dock_state
-                .as_ref()
-                .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
-        let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
-        let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
-        self.vfx.collect(
-            &self.world,
-            &cam,
-            &self.texture_registry,
-            vfx_preview_on,
-            &mut vfx_instances,
-            &mut vfx_batches,
-        );
-        // Mesh-render particle tracks ride the raster instance list (lit + shadowed
-        // like scene meshes), so append them to `instances` built above.
-        let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, &cam, vfx_preview_on);
-        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
-
-        // Skybox: a Skybox node drives the environment background — a solid color, or an
-        // equirect texture × tint, rotated by the node so a script can spin the sky.
-        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
-        let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
-        // The terrain's surface Material (active terrain's, or any terrain that has one)
-        // so terrain shades like the rest of the scene. Neutral default = plain matte.
-        // (Inlined via disjoint field access — a `&self` method can't be called here
-        // while gpu/raster/etc. are mutably borrowed for the render.)
-        let terrain_mat = {
-            let pick = self
-                .active_terrain
-                .filter(|e| self.world.get::<Material>(*e).is_some())
-                .or_else(|| {
-                    self.terrains
-                        .keys()
-                        .copied()
-                        .find(|&e| self.world.get::<Material>(e).is_some())
-                });
-            pick.and_then(|e| self.world.get::<Material>(e))
-                .map(material_params)
-                .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+    /// The Scene view's selection masks: the selected meshes, skinned parts and
+    /// blobs drawn once more into the outline pass. `make_rm` builds the
+    /// raymarch globals for a blob set, the same way the frame's own are built.
+    fn gather_masks(
+        &mut self,
+        cam: &RenderCamera,
+        sort_z: &std::collections::HashMap<Entity, DVec3>,
+        make_rm: &impl Fn(&[(DVec3, f32, MaterialParams)]) -> RaymarchGlobals,
+    ) -> (Vec<(MeshId, InstanceRaw)>, Vec<floptle_render::SkinDraw>, Option<RaymarchGlobals>) {
+        let Some(raster) = self.raster.as_mut() else {
+            return (Vec::new(), Vec::new(), None);
         };
-        // The scene's PostProcess node drives the whole post chain (per scene, not
-        // per project): PostStack settings + the raymarch SDF-AO params.
-        let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
-        // The player's colour-vision filter rides on top of the scene's chain,
-        // and deliberately survives a scene whose PostProcess node is disabled
-        //: a scene must not be able to veto an accessibility
-        // setting the player turned on.
-        post_settings.color_filter = self.access.color_filter.lane();
-        post_settings.color_filter_strength = self.access.color_filter_strength;
-        post_settings.simulate_deficiency = self.access.simulate_deficiency;
-        // Film grain needs a clock or it is a dirty lens, not film. Reduced
-        // motion is deliberately not applied here: grain is texture, not
-        // movement, and freezing it makes it more of a fixed pattern to look at.
-        post_settings.time = self.fog_time;
-        // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
-        // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
-        // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)
-        let (sky_meta, sky_uniforms): ([f32; 4], [[f32; 4]; 16]) = if sky_active {
-            ([1.0, 0.0, 0.0, 0.0], sky_uniform_vals)
-        } else {
-            ([0.0; 4], [[0.0; 4]; 16])
-        };
-        // Build raymarch globals for a set of blobs (all of them, or just one for the
-        // selection mask). Up to 16 blobs are folded together in one march.
-        let (vol_fog_a, vol_fog_b, vol_fog_c) =
-            vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
-        let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
-            let mut arr = [[0.0f32; 4]; 16];
-            let n = set.len().min(16);
-            for (i, (center, scale, _)) in set.iter().take(16).enumerate() {
-                let c = (*center - cam.world_position).as_vec3();
-                arr[i] = [c.x, c.y, c.z, scale.max(0.05)];
-            }
-            let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) = blob_mat_arrays(set);
-            let tm = &terrain_mat;
-            RaymarchGlobals {
-                view_proj: view_proj.to_cols_array_2d(),
-                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-                light_dir: sun,
-                light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
-                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
-                bg: [clear[0], clear[1], clear[2], 1.0],
-                center: [0.0; 4],
-                params: [elapsed, n as f32, 0.0, 0.0],
-                vol_center: [[0.0; 4]; 16],
-                vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
-                vol_atlas: [[0.0; 4]; 16],
-                vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
-                // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
-                // is one texture_2d_array with one sampler, so the shader can't pick a
-                // sampler per slot — it reads this mask and selects the result instead.
-                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask as f32],
-                terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
-                terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
-                terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
-                terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
-                blobs: arr,
-                point_count: pl_count,
-                point_pos: pl_pos,
-                point_color: pl_col,
-                point_shape: pl_shape,
-                point_rot: pl_rot,
-                point_cone: pl_cone,
-                blob_tint,
-                blob_emissive,
-                blob_specular,
-                blob_params,
-                blob_rim,
-                sky_params,
-                sky_tint,
-                sky_rot,
-                ao_params: rm_ao_params,
-                shadow_params: sh_params,
-                shadow_tint: sh_tint,
-                shadow_extra: sh_extra,
-                prox_count,
-                prox_a,
-                prox_b,
-                prox_rot,
-                fog_color,
-                fog_params,
-                fog_extra,
-                terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
-                vol_fog_a,
-                vol_fog_b,
-                vol_fog_c,
-                contact,
-                ssr,
-                ssr_prev_vp,
-                probe_meta,
-                probe_pos,
-                probe_half,
-                sky_meta,
-                sky_uniforms,
-                atmo_meta,
-                atmo_color,
-                atmo_body,
-                atmo_params,
-                star_meta,
-                star_pos,
-                star_color,
-                // vol_tight_* are renderer-patched at draw time from the uploaded
-                // volumes; the default is "unbounded" (behaves like the full brick).
-                ..Default::default()
-            }
-        };
-
-        // Selection outline source: every selected object's silhouette into the
-        // mask — mesh instances, plus (for blobs/field shapes) a raymarch whose
-        // outline hugs only the selected SDF surfaces. All selected entities get
-        // an outline, not just the primary.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         // Selected GPU-skinned parts: the silhouette has to hug the POSE, so it
         // goes through the same skinned pipeline the character shades with.
         let mut mask_skins: Vec<floptle_render::SkinDraw> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
         // The Game view plays like a build — no selection outline there.
-        if !game_view {
-            let mut sel_blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
-            let mut sel_shapes: Vec<Entity> = Vec::new();
-            for &e in &self.selection {
-                let Some(m) = self.world.get::<Matter>(e) else { continue };
-                // The same offset the draw uses. Without it the outline of a
-                // parallaxed or sorted sprite is drawn where the node is rather
-                // than where its picture is — which for a background layer is
-                // most of the screen away from the thing it is outlining.
-                let mut t = floptle_core::world_transform(&self.world, e);
-                t.translation += sort_z.get(&e).copied().unwrap_or_default();
-                match m {
-                    Matter::Primitive { shape, .. } => {
-                        if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
-                            let model = t.render_matrix(cam.world_position);
-                            mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
+        let mut sel_blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
+        let mut sel_shapes: Vec<Entity> = Vec::new();
+        for &e in &self.selection {
+            let Some(m) = self.world.get::<Matter>(e) else { continue };
+            // The same offset the draw uses. Without it the outline of a
+            // parallaxed or sorted sprite is drawn where the node is rather
+            // than where its picture is — which for a background layer is
+            // most of the screen away from the thing it is outlining.
+            let mut t = floptle_core::world_transform(&self.world, e);
+            t.translation += sort_z.get(&e).copied().unwrap_or_default();
+            match m {
+                Matter::Primitive { shape, .. } => {
+                    if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                    }
+                }
+                Matter::Tilemap { .. } => {
+                    if let Some(tm) = self.tilemaps.get(&e) {
+                        let model = t.render_matrix(cam.world_position);
+                        // The outline hugs every page, or a layer cut from
+                        // two sheets would only outline half of itself.
+                        for p in &tm.pages {
+                            mask_mesh.push((p.mesh, instance_of(model, [1.0, 1.0, 1.0])));
                         }
                     }
-                    Matter::Tilemap { .. } => {
-                        if let Some(tm) = self.tilemaps.get(&e) {
-                            let model = t.render_matrix(cam.world_position);
-                            // The outline hugs every page, or a layer cut from
-                            // two sheets would only outline half of itself.
-                            for p in &tm.pages {
-                                mask_mesh.push((p.mesh, instance_of(model, [1.0, 1.0, 1.0])));
-                            }
-                        }
+                }
+                // A batch's sprites are this frame's, so outlining them
+                // would trace whatever happened to be alive when you
+                // clicked. The Hierarchy row is the selection you want.
+                Matter::SpriteBatch { .. } => {}
+                // One sprite is a quad, so it can be outlined — unlike a
+                // batch, whose sprites are this frame's and would trace
+                // whatever happened to be alive when you clicked.
+                Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
+                    if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize)
+                    {
+                        let model = t.render_matrix(cam.world_position);
+                        // **The same arguments the draw gets.** This passed
+                        // no material and no texture size, and
+                        // `sprite_world_size` falls back to the authored
+                        // `size` without them — so the outline of a
+                        // pixels-per-unit sprite was a differently-sized quad
+                        // laid over the sprite, which reads as a stretched
+                        // artefact rather than as a selection.
+                        let mat = self.world.get::<Material>(e);
+                        let px = mat
+                            .and_then(|m| m.texture.as_deref())
+                            .and_then(|p| self.texture_registry.get(p).copied())
+                            .and_then(|id| raster.texture_size(id));
+                        let raw = crate::sprite2d::sprite_one_draw(
+                            *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
+                            model, mat, px, [0.0, 0.0],
+                        );
+                        mask_mesh.push((mesh, raw));
                     }
-                    // A batch's sprites are this frame's, so outlining them
-                    // would trace whatever happened to be alive when you
-                    // clicked. The Hierarchy row is the selection you want.
-                    Matter::SpriteBatch { .. } => {}
-                    // One sprite is a quad, so it can be outlined — unlike a
-                    // batch, whose sprites are this frame's and would trace
-                    // whatever happened to be alive when you clicked.
-                    Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
-                        if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize)
-                        {
-                            let model = t.render_matrix(cam.world_position);
-                            // **The same arguments the draw gets.** This passed
-                            // no material and no texture size, and
-                            // `sprite_world_size` falls back to the authored
-                            // `size` without them — so the outline of a
-                            // pixels-per-unit sprite was a differently-sized quad
-                            // laid over the sprite, which reads as a stretched
-                            // artefact rather than as a selection.
-                            let mat = self.world.get::<Material>(e);
-                            let px = mat
-                                .and_then(|m| m.texture.as_deref())
-                                .and_then(|p| self.texture_registry.get(p).copied())
-                                .and_then(|id| raster.texture_size(id));
-                            let raw = crate::sprite2d::sprite_one_draw(
-                                *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
-                                model, mat, px, [0.0, 0.0],
-                            );
-                            mask_mesh.push((mesh, raw));
-                        }
-                    }
-                    Matter::Mesh { asset_path } => {
-                        if let Some(asset) = self.mesh_registry.get(asset_path) {
-                            let model = t.render_matrix(cam.world_position);
-                            if let Some(rig) = asset.rig.as_ref() {
-                                // Match the posed draw so the outline hugs the pose.
-                                let node_world =
-                                    self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
-                                for (i, &mid) in asset.parts.iter().enumerate() {
-                                    if let Some(Some(skin)) = rig.skins.get(i) {
-                                        // A SKINNED part draws from `model` alone —
-                                        // the pose is in the deform, not the matrix.
-                                        // Applying node_world here too would transform
-                                        // it twice, which is the offset outline that was reported
-                                        // on the astronaut. Match the draw.
-                                        let raw = instance_of(model, [1.0, 1.0, 1.0]);
-                                        let base = rig.skin_bases.get(i).copied().unwrap_or(0);
-                                        if base != 0 {
-                                            let part_node =
-                                                rig.part_nodes.get(i).copied().unwrap_or(0);
-                                            let palette: Vec<Mat4> = skin
-                                                .joint_nodes
-                                                .iter()
-                                                .zip(&skin.inverse_bind)
-                                                .map(|(&jn, ib)| {
-                                                    node_world
-                                                        .get(jn)
-                                                        .copied()
-                                                        .unwrap_or(Mat4::IDENTITY)
-                                                        * *ib
-                                                })
-                                                .collect();
-                                            let fallback = node_world
-                                                .get(part_node)
-                                                .copied()
-                                                .unwrap_or(Mat4::IDENTITY);
-                                            let pose =
-                                                raster.push_skin_pose(base, fallback, &palette);
-                                            mask_skins.push(floptle_render::SkinDraw {
-                                                mesh: mid,
-                                                tex: None,
-                                                instance: raw,
-                                                pose,
-                                            });
-                                        } else {
-                                            // CPU fallback: the visible draw baked the
-                                            // pose into this entity's variant buffer.
-                                            let vmid =
-                                                self.skin_variants.get(e, i).unwrap_or(mid);
-                                            mask_mesh.push((vmid, raw));
-                                        }
-                                    } else {
-                                        let local = rig
-                                            .part_nodes
-                                            .get(i)
-                                            .and_then(|&n| node_world.get(n))
+                }
+                Matter::Mesh { asset_path } => {
+                    if let Some(asset) = self.mesh_registry.get(asset_path) {
+                        let model = t.render_matrix(cam.world_position);
+                        if let Some(rig) = asset.rig.as_ref() {
+                            // Match the posed draw so the outline hugs the pose.
+                            let node_world =
+                                self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
+                            for (i, &mid) in asset.parts.iter().enumerate() {
+                                if let Some(Some(skin)) = rig.skins.get(i) {
+                                    // A SKINNED part draws from `model` alone —
+                                    // the pose is in the deform, not the matrix.
+                                    // Applying node_world here too would transform
+                                    // it twice, which is the offset outline that was reported
+                                    // on the astronaut. Match the draw.
+                                    let raw = instance_of(model, [1.0, 1.0, 1.0]);
+                                    let base = rig.skin_bases.get(i).copied().unwrap_or(0);
+                                    if base != 0 {
+                                        let part_node =
+                                            rig.part_nodes.get(i).copied().unwrap_or(0);
+                                        let palette: Vec<Mat4> = skin
+                                            .joint_nodes
+                                            .iter()
+                                            .zip(&skin.inverse_bind)
+                                            .map(|(&jn, ib)| {
+                                                node_world
+                                                    .get(jn)
+                                                    .copied()
+                                                    .unwrap_or(Mat4::IDENTITY)
+                                                    * *ib
+                                            })
+                                            .collect();
+                                        let fallback = node_world
+                                            .get(part_node)
                                             .copied()
                                             .unwrap_or(Mat4::IDENTITY);
-                                        mask_mesh.push((
-                                            mid,
-                                            instance_of(model * local, [1.0, 1.0, 1.0]),
-                                        ));
+                                        let pose =
+                                            raster.push_skin_pose(base, fallback, &palette);
+                                        mask_skins.push(floptle_render::SkinDraw {
+                                            mesh: mid,
+                                            tex: None,
+                                            instance: raw,
+                                            pose,
+                                        });
+                                    } else {
+                                        // CPU fallback: the visible draw baked the
+                                        // pose into this entity's variant buffer.
+                                        let vmid =
+                                            self.skin_variants.get(e, i).unwrap_or(mid);
+                                        mask_mesh.push((vmid, raw));
                                     }
-                                }
-                            } else {
-                                for &mid in &asset.parts {
-                                    mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                                } else {
+                                    let local = rig
+                                        .part_nodes
+                                        .get(i)
+                                        .and_then(|&n| node_world.get(n))
+                                        .copied()
+                                        .unwrap_or(Mat4::IDENTITY);
+                                    mask_mesh.push((
+                                        mid,
+                                        instance_of(model * local, [1.0, 1.0, 1.0]),
+                                    ));
                                 }
                             }
-                        }
-                    }
-                    Matter::MapMesh { id } => {
-                        if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
-                            let model = t.render_matrix(cam.world_position);
+                        } else {
                             for &mid in &asset.parts {
                                 mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
                             }
                         }
                     }
-                    Matter::Blob { scale } => {
-                        let mp = self
-                            .world
-                            .get::<Material>(e)
-                            .map(material_params)
-                            .unwrap_or_else(blob_default_material);
-                        sel_blobs.push((t.translation, scale * t.scale.x, mp));
+                }
+                Matter::MapMesh { id } => {
+                    if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
+                        let model = t.render_matrix(cam.world_position);
+                        for &mid in &asset.parts {
+                            mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                        }
                     }
-                    Matter::FieldShape { .. } => sel_shapes.push(e),
-                    Matter::Empty
-                    | Matter::Terrain { .. }
-                    | Matter::Camera { .. }
-                    | Matter::PointLight { .. }
-                    | Matter::GravityVolume { .. }
-                    | Matter::WaterVolume { .. }
-                    | Matter::LightProbes { .. }
-                    | Matter::NavMesh { .. }
-                    | Matter::NavLink { .. }
-                    | Matter::NavArea { .. }
-                    | Matter::ReflectionProbe { .. }
-                    | Matter::Skybox { .. }
-                    | Matter::PostProcess { .. } => {}
                 }
-            }
-            if !sel_blobs.is_empty() || !sel_shapes.is_empty() {
-                // One raymarch mask covers every selected blob (16-blob fold) and
-                // field shape together.
-                let mut g = make_rm(&sel_blobs);
-                if !sel_shapes.is_empty() {
-                    crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, Some(&sel_shapes));
+                Matter::Blob { scale } => {
+                    let mp = self
+                        .world
+                        .get::<Material>(e)
+                        .map(material_params)
+                        .unwrap_or_else(blob_default_material);
+                    sel_blobs.push((t.translation, scale * t.scale.x, mp));
                 }
-                mask_blob = Some(g);
+                Matter::FieldShape { .. } => sel_shapes.push(e),
+                Matter::Empty
+                | Matter::Terrain { .. }
+                | Matter::Camera { .. }
+                | Matter::PointLight { .. }
+                | Matter::GravityVolume { .. }
+                | Matter::WaterVolume { .. }
+                | Matter::LightProbes { .. }
+                | Matter::NavMesh { .. }
+                | Matter::NavLink { .. }
+                | Matter::NavArea { .. }
+                | Matter::ReflectionProbe { .. }
+                | Matter::Skybox { .. }
+                | Matter::PostProcess { .. } => {}
             }
         }
-
-        // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
-        // and/or the combined terrain volume — and it's also what draws a textured
-        // skybox (rays that miss every bound sample the sky, zero march steps), so a
-        // scene with no terrain/blobs still runs it when the sky has a texture; a
-        // solid-color sky is just the raster clear. The globals are built either way
-        // — on frames with nothing to raymarch they're still uploaded (not drawn) so
-        // the raster pass's field bind group has this frame's shadow/proxy data.
-        let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm_draw = show_blobs
-            || !self.terrains.is_empty()
-            || sky_params[0] >= 0.5
-            || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
-            || !self.flsl_shape_slots.is_empty();
-        let rm = {
-            let mut g = make_rm(if show_blobs { &blobs } else { &[] });
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
-            crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
-            // Baked GI. The renderer owns the probe texture; these four lanes
-            // are only where the volume is, and they have to be stamped per
-            // view because the field is camera-relative (ADR-0015).
-            raymarch.gi().apply(&mut g, cam.world_position.into());
-            g
-        };
-
-        Some(FrameGather {
-            aspect,
-            cam,
-            clear,
-            contact,
-            flat2d,
-            flsl_draws,
-            fog_color,
-            game_view,
-            gizmo_tool,
-            globals,
-            instances,
-            light_node,
-            lights_2d,
-            mask_blob,
-            mask_mesh,
-            mask_skins,
-            particle_fog,
-            point_shadows,
-            post_settings,
-            rm,
-            rm_draw,
-            skin_draws,
-            vfx_batches,
-            vfx_instances,
-            view_proj,
-        })
+        if !sel_blobs.is_empty() || !sel_shapes.is_empty() {
+            // One raymarch mask covers every selected blob (16-blob fold) and
+            // field shape together.
+            let mut g = make_rm(&sel_blobs);
+            if !sel_shapes.is_empty() {
+                crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, Some(&sel_shapes));
+            }
+            mask_blob = Some(g);
+        }
+        (mask_mesh, mask_skins, mask_blob)
     }
 }
