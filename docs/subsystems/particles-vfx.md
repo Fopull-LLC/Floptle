@@ -68,6 +68,7 @@ struct Track {
     // Per-particle: a birth value, times a curve over that particle's own life.
     velocity: ValueOrCurve,   // emitter-space; +Y is "along the emit direction"
     size: ValueOrCurve,
+    squash: ValueOrCurve,           // width × / height ÷, volume-preserving (1 = none)
     rotation: ValueOrCurve,         // radians (billboards use roll only)
     angular_velocity: ValueOrCurve, // radians/sec, integrated over age
     color: ValueOrCurve,            // RGBA
@@ -88,6 +89,12 @@ born as. A `ValueOrCurve` on a property runs over *one particle's* life, `[0..1]
 and shapes what happens to it as it ages. `size` can carry both, and they
 multiply — the effect's crescents get smaller as the slash decays, while each
 crescent still pops in and tapers.
+
+`squash` is squash-and-stretch: the width is multiplied by it and the height
+divided, so the particle keeps its area while its proportions change. Above 1
+flattens, below 1 lengthens; a curve from 0.6 through 1.4 back to 1 is the
+classic pop, and a `Range` gives every particle its own proportions. A mesh
+squashes the same way along its local Y.
 
 `inherit_velocity` is the fix for World-space trails on something fast: smoke off
 a moving vessel used to be left behind in space. At 1 a newborn fully keeps up
@@ -124,6 +131,7 @@ enum EmitShape {
     Sphere { radius: f32, shell: bool },  // emit direction is radial
     Edge   { length: f32 },               // a line along X — slash arcs
     Ring   { radius: f32 },               // a circle in XZ, radially outward
+    Box    { size: Vec3 },                // anywhere inside a box — rain, dust, snow
 }
 
 enum Force {                              // added to velocity each step
@@ -146,7 +154,9 @@ trail records no history and pays for none.
 - **`Billboard { texture }`** — a textured quad, oriented by `Look::orient`
   (camera-facing by default, or aligned to velocity for speed lines).
   `aspect` sets width:height so one size curve can drive non-square quads;
-  `stretch` lengthens a velocity-aligned quad along its motion.
+  `stretch` lengthens a velocity-aligned quad along its motion, and
+  `speed_stretch` adds length per unit of speed, so a fast spark draws a long
+  streak and a slow one stays a dot.
 - **`Mesh { asset_path }`** — instanced geometry through the raster pass. Debris
   that is actually shaped like debris.
 - **`Beam { texture }`** — a single camera-facing ribbon from the effect origin to

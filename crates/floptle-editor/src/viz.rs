@@ -867,6 +867,7 @@ pub(crate) enum EmitterViz {
     Sphere { radius: f32 },
     Edge { length: f32 },
     Ring { radius: f32 },
+    Box { size: Vec3 },
 }
 
 /// A steady force on a track's particles, for the viewport arrow(s).
@@ -988,6 +989,22 @@ pub(crate) fn particle_gizmo_lines(
             for x in [-hx, 0.0, hx] {
                 push_arrow(&mut out, m, Vec3::new(x, 0.0, 0.0), Vec3::Z, 0.35, PG_EMIT, cam_world, vp, w, h);
             }
+        }
+        EmitterViz::Box { size } => {
+            let hx = (size * 0.5).max(Vec3::splat(0.01));
+            let c = |i: u32| Vec3::new(
+                if i & 1 == 0 { -hx.x } else { hx.x },
+                if i & 2 == 0 { -hx.y } else { hx.y },
+                if i & 4 == 0 { -hx.z } else { hx.z },
+            );
+            for i in 0..8u32 {
+                for bit in [1u32, 2, 4] {
+                    if i & bit == 0 {
+                        seg3(&mut out, m, c(i), c(i | bit), PG_SHAPE, cam_world, vp, w, h);
+                    }
+                }
+            }
+            push_arrow(&mut out, m, Vec3::ZERO, Vec3::Y, (hx.y * 0.8).max(0.3), PG_EMIT, cam_world, vp, w, h);
         }
         EmitterViz::Cone { angle, radius } => {
             let r = radius.max(0.0);

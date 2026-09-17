@@ -218,6 +218,10 @@ pub enum VfxShapeDoc {
     Ring {
         radius: f32,
     },
+    /// Anywhere inside a box of these full extents, centred on the emitter.
+    Box {
+        size: [f32; 3],
+    },
 }
 
 /// A steady force field added to a track's particles (wind / attractor / vortex /
@@ -315,6 +319,9 @@ pub struct VfxTrackDoc {
     /// Velocity-orientation length multiplier (1 = neutral).
     #[serde(default = "one_f32", skip_serializing_if = "is_one")]
     pub stretch: f32,
+    /// Velocity-orientation extra length per unit of speed (0 = none).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub speed_stretch: f32,
     /// Sprite-sheet flipbook (None = a plain single-frame texture).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flipbook: Option<VfxFlipbookDoc>,
@@ -377,6 +384,9 @@ pub struct VfxTrackDoc {
     pub velocity: VfxPropDoc,
     #[serde(default = "default_size")]
     pub size: VfxPropDoc,
+    /// Squash and stretch over life: width × value, height ÷ value (1 = none).
+    #[serde(default = "default_squash", skip_serializing_if = "is_default_squash")]
+    pub squash: VfxPropDoc,
     #[serde(default = "default_rotation")]
     pub rotation: VfxPropDoc,
     #[serde(default = "default_angular")]
@@ -549,6 +559,12 @@ fn default_velocity() -> VfxPropDoc {
 fn default_size() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::F32(0.25))
 }
+fn default_squash() -> VfxPropDoc {
+    VfxPropDoc::Const(VfxValueDoc::F32(1.0))
+}
+fn is_default_squash(p: &VfxPropDoc) -> bool {
+    *p == default_squash()
+}
 fn default_rotation() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0]))
 }
@@ -666,6 +682,7 @@ mod tests {
                 orient: VfxOrientDoc::Velocity,
                 aspect: 0.5,
                 stretch: 2.0,
+                speed_stretch: 0.0,
                 flipbook: Some(VfxFlipbookDoc {
                     cols: 4,
                     rows: 4,
@@ -738,6 +755,7 @@ mod tests {
                 particle_lifetime: 1.0,
                 lifetime_jitter: 0.0,
                 velocity: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 9.0, 0.0])),
+                squash: default_squash(),
                 size: VfxPropDoc::Curve(VfxCurveDoc {
                     keys: vec![
                         VfxKeyDoc {
@@ -896,6 +914,25 @@ mod tests {
         assert!(!text.contains("orient"), "default orient must be skipped");
         assert!(!text.contains("aspect"), "default aspect must be skipped");
         assert!(!text.contains("stretch"), "default stretch must be skipped");
+        assert!(!text.contains("squash"), "default squash must be skipped");
+    }
+
+    #[test]
+    fn squash_and_speed_stretch_round_trip_and_default_off() {
+        // A track authored before squash existed reads back as no squash and no
+        // speed stretch; an authored curve survives a save and a load.
+        let t = minimal_track();
+        assert_eq!(t.squash, VfxPropDoc::Const(VfxValueDoc::F32(1.0)));
+        assert_eq!(t.speed_stretch, 0.0);
+        let mut doc: VfxEffectDoc = ron::from_str(r#"(name: "Squashy")"#).unwrap();
+        let mut t = minimal_track();
+        t.squash = VfxPropDoc::Range(VfxValueDoc::F32(0.6), VfxValueDoc::F32(1.4));
+        t.speed_stretch = 0.25;
+        doc.tracks = vec![t];
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        assert!(text.contains("squash") && text.contains("speed_stretch"));
+        let back: VfxEffectDoc = ron::from_str(&text).unwrap();
+        assert_eq!(doc, back);
     }
 
     #[test]

@@ -382,14 +382,16 @@ pub(crate) enum LaneRef {
 pub(crate) enum LifeProp {
     Velocity,
     Size,
+    Squash,
     Rotation,
     AngularVelocity,
     Color,
 }
 
-const LIFE_PROPS: [LifeProp; 5] = [
+const LIFE_PROPS: [LifeProp; 6] = [
     LifeProp::Velocity,
     LifeProp::Size,
+    LifeProp::Squash,
     LifeProp::Rotation,
     LifeProp::AngularVelocity,
     LifeProp::Color,
@@ -410,6 +412,7 @@ fn life_prop_name(p: LifeProp) -> &'static str {
     match p {
         LifeProp::Velocity => "velocity",
         LifeProp::Size => "size",
+        LifeProp::Squash => "squash",
         LifeProp::Rotation => "rotation",
         LifeProp::AngularVelocity => "angular vel",
         LifeProp::Color => "colour",
@@ -427,6 +430,7 @@ fn life_prop_doc(track: &VfxTrackDoc, p: LifeProp) -> &VfxPropDoc {
     match p {
         LifeProp::Velocity => &track.velocity,
         LifeProp::Size => &track.size,
+        LifeProp::Squash => &track.squash,
         LifeProp::Rotation => &track.rotation,
         LifeProp::AngularVelocity => &track.angular_velocity,
         LifeProp::Color => &track.color,
@@ -437,6 +441,7 @@ fn life_prop_doc_mut(track: &mut VfxTrackDoc, p: LifeProp) -> &mut VfxPropDoc {
     match p {
         LifeProp::Velocity => &mut track.velocity,
         LifeProp::Size => &mut track.size,
+        LifeProp::Squash => &mut track.squash,
         LifeProp::Rotation => &mut track.rotation,
         LifeProp::AngularVelocity => &mut track.angular_velocity,
         LifeProp::Color => &mut track.color,

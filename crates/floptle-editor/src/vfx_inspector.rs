@@ -504,6 +504,14 @@ fn orient_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirt
                 .add(egui::DragValue::new(&mut track.stretch).speed(0.05).range(0.1..=40.0))
                 .on_hover_text("how far the quad stretches along its motion")
                 .changed();
+            ui.label("+ by speed");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut track.speed_stretch).speed(0.01).range(0.0..=10.0))
+                .on_hover_text(
+                    "extra stretch per unit of speed: fast particles draw long streaks, \
+                     slow ones stay short. 0 = the same length at any speed",
+                )
+                .changed();
         }
     });
 }
@@ -705,16 +713,18 @@ fn shape_editor(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrac
         VfxShapeDoc::Sphere { .. } => "sphere",
         VfxShapeDoc::Edge { .. } => "edge (slash arc)",
         VfxShapeDoc::Ring { .. } => "ring",
+        VfxShapeDoc::Box { .. } => "box",
     };
     ui.horizontal(|ui| {
         ui.label("shape");
         egui::ComboBox::from_id_salt(("vfx_shape", ti)).selected_text(label).show_ui(ui, |ui| {
-            let opts: [(&str, VfxShapeDoc); 5] = [
+            let opts: [(&str, VfxShapeDoc); 6] = [
                 ("point", VfxShapeDoc::Point),
                 ("cone", VfxShapeDoc::Cone { angle: 25.0, radius: 0.1 }),
                 ("sphere", VfxShapeDoc::Sphere { radius: 0.5, shell: false }),
                 ("edge (slash arc)", VfxShapeDoc::Edge { length: 1.0 }),
                 ("ring", VfxShapeDoc::Ring { radius: 0.5 }),
+                ("box", VfxShapeDoc::Box { size: [4.0, 2.0, 4.0] }),
             ];
             for (l, v) in opts {
                 let same = std::mem::discriminant(&track.shape) == std::mem::discriminant(&v);
@@ -754,6 +764,18 @@ fn shape_editor(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrac
                 *dirty |= ui.add(egui::DragValue::new(radius).speed(0.01).range(0.0..=1000.0)).changed();
             });
         }
+        VfxShapeDoc::Box { size } => {
+            ui.horizontal(|ui| {
+                ui.label("size");
+                for (axis, v) in ["x", "y", "z"].iter().zip(size.iter_mut()) {
+                    *dirty |= ui
+                        .add(egui::DragValue::new(v).speed(0.02).range(0.0..=1000.0).prefix(format!("{axis} ")))
+                        .changed();
+                }
+            })
+            .response
+            .on_hover_text("full extents of the box, centred on the emitter; particles are born anywhere inside and emit along +Y");
+        }
     }
 }
 
@@ -767,6 +789,12 @@ fn particle_section(
     let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
     *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr, None);
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr, Some(0.0));
+    *dirty |= value_or_curve(ui, "squash", &mut track.squash, exp, sk, vr, Some(0.05));
+    hint(
+        ui,
+        "Squash keeps the volume: width × the value, height ÷ it. 1 = as sized; above 1 \
+         flattens, below 1 lengthens. A curve 0.6 → 1.4 → 1 is the classic pop.",
+    );
     *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr, None);
     *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr, None);
     hint(ui, "Rotation is Euler radians (x pitch, y yaw, z roll); a billboard uses roll only.");

@@ -67,6 +67,7 @@ const SALT_LIFE: u32 = 0x5EED_0006;
 /// playhead re-rolls the identical pulse times and counts and re-simulation stays exact.
 const SALT_COUNT: u32 = 0x5EED_0007;
 const SALT_INTERVAL: u32 = 0x5EED_0008;
+const SALT_SQUASH: u32 = 0x5EED_0009;
 
 // ---------------------------------------------------------------------------
 // Force fields — deterministic, WGSL-portable acceleration added each step.
@@ -731,6 +732,10 @@ fn sample_shape(shape: EmitShape, scale: f32, seed: u32) -> (Vec3, Vec3) {
             let dir = Vec3::new(a.cos(), 0.0, a.sin());
             (dir * radius * scale, dir)
         }
+        EmitShape::Box { size } => {
+            let offset = Vec3::new(r0 - 0.5, r1 - 0.5, r2 - 0.5) * size * scale;
+            (offset, Vec3::Y)
+        }
     }
 }
 
@@ -750,6 +755,8 @@ pub struct ParticleSample {
     /// billboard, so debris keeps the pose it was fired with.
     pub frame: Quat,
     pub size: f32,
+    /// Squash and stretch: width × `squash`, height ÷ `squash` (1 = none).
+    pub squash: f32,
     /// Euler rotation in radians `(x=pitch, y=yaw, z=roll)` — base rotation plus the
     /// angular velocity integrated over the particle's age.
     pub rotation: Vec3,
@@ -802,6 +809,7 @@ impl EffectInstance {
                 velocity,
                 frame,
                 size: ct.size.sample_rand(u, rand01(seed, SALT_SIZE)) * p.misc[i].x,
+                squash: ct.squash.sample_rand(u, rand01(seed, SALT_SQUASH)).max(1e-3),
                 rotation,
                 color,
                 age,
@@ -1358,5 +1366,52 @@ mod tests {
         let s = got.expect("one live particle");
         assert!((s.size - 0.5).abs() < 0.03, "size halfway through life, got {}", s.size);
         assert_eq!(s.color[3], 1.0);
+    }
+
+    #[test]
+    fn box_births_fill_the_extents_and_emit_up() {
+        // Every birth lands inside the box, the spread reaches most of each
+        // extent, every octant gets births (a sampler that drew one random for
+        // all three axes would fill a diagonal and pass a span check), and the
+        // emit direction is straight up.
+        let size = Vec3::new(4.0, 1.0, 2.0);
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let mut octants = [0u32; 8];
+        for seed in 0..500u32 {
+            let (p, dir) = sample_shape(EmitShape::Box { size }, 1.0, seed);
+            assert!(p.abs().cmple(size * 0.5).all(), "birth {p} outside {size}");
+            assert_eq!(dir, Vec3::Y);
+            lo = lo.min(p);
+            hi = hi.max(p);
+            octants[(p.x > 0.0) as usize | ((p.y > 0.0) as usize) << 1 | ((p.z > 0.0) as usize) << 2] += 1;
+        }
+        assert!((hi - lo).cmpge(size * 0.9).all(), "births span {lo}..{hi}, box {size}");
+        assert!(octants.iter().all(|&n| n > 20), "births per octant {octants:?}");
+        // The shape-scale lane scales the box like every other shape.
+        let (p, _) = sample_shape(EmitShape::Box { size }, 3.0, 7);
+        let (q, _) = sample_shape(EmitShape::Box { size }, 1.0, 7);
+        assert!((p - q * 3.0).length() < 1e-5);
+    }
+
+    #[test]
+    fn squash_samples_over_life() {
+        // A squash curve 2 → 0.5 reads 2 at birth and 1.25 halfway.
+        let squash = ValueOrCurve::Curve(Curve {
+            keys: vec![Key::new(0.0, Value::F32(2.0)), Key::new(1.0, Value::F32(0.5))],
+            extrapolate: Default::default(),
+        });
+        let fx = one_track_effect(
+            Track { clips: vec![burst_clip(0.0, 1, 1.0)], squash, ..Track::default() },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 2);
+        inst.simulate_to(0.001, NO_G);
+        let mut got = None;
+        inst.sample_track(0, |s| got = Some(s.squash));
+        assert!((got.expect("alive") - 2.0).abs() < 0.02, "squash at birth, got {got:?}");
+        inst.simulate_to(0.5, NO_G);
+        inst.sample_track(0, |s| got = Some(s.squash));
+        assert!((got.expect("alive") - 1.25).abs() < 0.03, "squash halfway, got {got:?}");
     }
 }

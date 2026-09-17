@@ -1414,6 +1414,7 @@ impl Editor {
                     VfxShapeDoc::Sphere { radius, .. } => EmitterViz::Sphere { radius },
                     VfxShapeDoc::Edge { length } => EmitterViz::Edge { length },
                     VfxShapeDoc::Ring { radius } => EmitterViz::Ring { radius },
+                    VfxShapeDoc::Box { size } => EmitterViz::Box { size: Vec3::from_array(size) },
                 };
                 let forces: Vec<ForceViz> = t
                     .forces

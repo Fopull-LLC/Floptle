@@ -52,17 +52,19 @@ pub fn collect_billboards(
         let orient = ct.look.orient;
         let aspect = inst.track_aspect(ti);
         let stretch = ct.look.stretch.max(1e-3);
+        let speed_stretch = ct.look.speed_stretch.max(0.0);
         let flip = ct.look.flipbook;
         let soft = ct.look.soft.max(0.0);
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
             let base = s.size * scale;
-            // Width takes the aspect ratio; height stays the size (velocity stretch
-            // rides the up-vector length, so the shader needs no stretch term).
-            let (w, h) = (base * aspect, base);
+            // Width takes the aspect ratio and the squash; height takes the size
+            // over the squash (velocity stretch rides the up-vector length, so the
+            // shader needs no stretch term).
+            let (w, h) = (base * aspect * s.squash, base / s.squash);
             let (right, up, spin) =
-                billboard_basis(orient, &xf, world, &s, cam_right, cam_up, stretch);
+                billboard_basis(orient, &xf, world, &s, cam_right, cam_up, (stretch, speed_stretch));
             // Flipbook UV sub-rect [min_u, min_v, du, dv] packed into the spare
             // channels (full quad [0,0,1,1] when there's no flipbook).
             let uv = flipbook_uv(flip, &s);
@@ -356,17 +358,19 @@ fn billboard_basis(
     s: &ParticleSample,
     cam_right: Vec3,
     cam_up: Vec3,
-    stretch: f32,
+    (stretch, speed_stretch): (f32, f32),
 ) -> (Vec3, Vec3, f32) {
     const EPS: f32 = 1e-6;
     let view_dir = world_pos.normalize_or_zero();
     match orient {
         // Classic billboard: the camera basis, spun by roll.
         BillboardOrient::FaceCamera => (cam_right, cam_up, s.rotation.z),
-        // Stretched along motion: up = velocity (scaled by stretch), width faces the
-        // camera around that axis. Roll is meaningless here, so it's dropped.
+        // Stretched along motion: up = velocity (scaled by stretch, plus the speed
+        // term), width faces the camera around that axis. Roll is meaningless
+        // here, so it's dropped.
         BillboardOrient::Velocity => {
             let vel = xf.transform_vector3(s.velocity);
+            let stretch = stretch + vel.length() * speed_stretch;
             let up = vel.normalize_or_zero();
             if up == Vec3::ZERO || view_dir == Vec3::ZERO {
                 return (cam_right, cam_up, 0.0);
@@ -436,8 +440,11 @@ pub fn collect_mesh_particles(inst: &EffectInstance, local_xf: Mat4, world_xf: M
             let rot = Quat::from_rotation_y(p.rotation.y)
                 * Quat::from_rotation_x(p.rotation.x)
                 * Quat::from_rotation_z(p.rotation.z);
+            // Squash keeps the volume: the two lateral axes take it, the local Y
+            // gives it back.
+            let sz = (p.size * scale).max(1e-4);
             let model = Mat4::from_scale_rotation_translation(
-                Vec3::splat((p.size * scale).max(1e-4)),
+                Vec3::new(sz * p.squash, sz / p.squash, sz * p.squash),
                 rot,
                 world,
             );
@@ -619,6 +626,7 @@ mod tests {
             velocity: Vec3::ZERO,
             frame: Quat::IDENTITY,
             size: 1.0,
+            squash: 1.0,
             rotation: Vec3::ZERO,
             color: [1.0; 4],
             age: 0.0,

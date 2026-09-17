@@ -112,6 +112,9 @@ pub enum EmitShape {
     Edge { length: f32 },
     /// A circle of `radius` in XZ; emit direction is radially outward.
     Ring { radius: f32 },
+    /// Born anywhere inside a box of these full extents, centred on the emitter —
+    /// rain over a field, dust through a room, snow. Emit direction +Y.
+    Box { size: Vec3 },
 }
 
 /// A steady force added to a track's particles' velocity each step. Directions and
@@ -305,6 +308,10 @@ pub struct Look {
     /// [`BillboardOrient::Velocity`] length multiplier: the quad's height is scaled
     /// by `stretch` along the motion axis. 1 = neutral; higher = longer speed lines.
     pub stretch: f32,
+    /// [`BillboardOrient::Velocity`] extra length per unit of speed: the quad grows
+    /// by `speed × speed_stretch` along its motion, so a fast spark draws a long
+    /// streak and a slow one stays a dot. 0 = the length ignores speed.
+    pub speed_stretch: f32,
     /// Sprite-sheet flipbook (`None` = a plain single-frame texture).
     pub flipbook: Option<Flipbook>,
     /// Full scene lighting per particle: sun + point lights + field shadow + AO.
@@ -325,6 +332,7 @@ impl Default for Look {
             orient: BillboardOrient::default(),
             aspect: 1.0,
             stretch: 1.0,
+            speed_stretch: 0.0,
             flipbook: None,
             lit: false,
             soft: DEFAULT_SOFT,
@@ -357,6 +365,13 @@ pub struct Track {
     /// [`EmitShape`]). A curve makes velocity kinematic over the particle's life.
     pub velocity: ValueOrCurve,
     pub size: ValueOrCurve,
+    /// Squash and stretch over the particle's life, volume-preserving: width is
+    /// multiplied by the value and height divided by it. 1 = the plain size; above
+    /// 1 flattens (a drop landing), below 1 lengthens (a drop falling). A curve
+    /// from 0.6 through 1.4 back to 1 is the classic pop; a `Range` gives every
+    /// particle its own proportions. Meshes squash the same way along their local
+    /// Y.
+    pub squash: ValueOrCurve,
     /// Euler rotation in radians `(x=pitch, y=yaw, z=roll)`. Billboards use only the
     /// roll (z, the screen-facing spin); meshes use all three.
     pub rotation: ValueOrCurve,
@@ -406,6 +421,7 @@ impl Default for Track {
             max_alive: None,
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 1.0, 0.0))),
             size: ValueOrCurve::constant(0.25),
+            squash: ValueOrCurve::constant(1.0),
             rotation: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             angular_velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             color: ValueOrCurve::Const(Value::Rgba([1.0; 4])),
@@ -476,6 +492,8 @@ pub struct CompiledTrack {
     /// True when `velocity` was authored as a curve (kinematic velocity-over-life).
     pub velocity_is_curve: bool,
     pub size: Prop1,
+    /// Width × / height ÷ over life (see [`Track::squash`]).
+    pub squash: Prop1,
     /// Euler rotation `(x=pitch, y=yaw, z=roll)`; billboards use z, meshes use all.
     pub rotation: Prop4,
     /// Angular velocity `(x,y,z)` rad/sec, integrated over age.
@@ -640,6 +658,7 @@ impl Track {
             velocity: bake4(&self.velocity, 1.0),
             velocity_is_curve: matches!(self.velocity, ValueOrCurve::Curve(_)),
             size: bake1(&self.size, 1.0),
+            squash: bake1(&self.squash, 1.0),
             rotation: bake4(&self.rotation, 1.0),
             angular_velocity: bake4(&self.angular_velocity, 1.0),
             color: bake4(&self.color, 1.0),
