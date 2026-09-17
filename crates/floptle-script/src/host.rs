@@ -291,6 +291,1732 @@ fn shader_nowhere(
     });
 }
 
+/// The current script's `(name, line)` taken from the Lua call stack, so a
+/// Console line can jump to where it was logged.
+fn caller(lua: &Lua) -> Option<(String, u32)> {
+        let d = lua.inspect_stack(1)?;
+        let src = d.source();
+        let name = src.source.as_ref().map(|c| c.trim_start_matches(['@', '=']).to_string())?;
+        Some((name, d.curr_line().max(0) as u32))
+}
+
+
+/// `log(...)` and Lua's own `print(...)`, both feeding the engine Console.
+fn install_console(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>, dropped_lines: &Rc<Cell<usize>>) {
+    // `log("...")` and Lua's stdlib `print(...)` both feed the engine Console.
+    {
+        let sink = logs.clone();
+        let dropped = dropped_lines.clone();
+        if let Ok(log) = lua.create_function(move |lua, msg: String| {
+            // Pushed, not printed. Whoever owns this host mirrors the drained
+            // feed to stderr itself (`Editor::drain_script_logs`), so an
+            // `eprintln!` here put every `log(...)` on the terminal twice
+            // while `print(...)` — which only pushes — appeared once. Two
+            // copies of one line reads as the code having run twice, which
+            // is a bad thing for a logging call to imply.
+            push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+            Ok(())
+        }) {
+            let _ = lua.globals().set("log", log);
+        }
+    }
+    {
+        let sink = logs.clone();
+        let dropped = dropped_lines.clone();
+        if let Ok(print) = lua.create_function(move |lua, args: Variadic<Value>| {
+            // Deep, Console-ready rendering of any value: nested tables,
+            // node/component/script handles, vec3s — see `pretty_value`.
+            let parts: Vec<String> = args
+                .iter()
+                .map(|v| pretty_value(v, 0, &mut Vec::new()))
+                .collect();
+            let msg = if parts.iter().any(|p| p.contains('\n')) {
+                parts.join("\n")
+            } else {
+                parts.join("\t")
+            };
+            // Pushed, not printed — see the note on `log` above.
+            push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+            Ok(())
+        }) {
+            let _ = lua.globals().set("print", print);
+        }
+    }
+}
+
+/// What [`install_input`] hands back to the host.
+struct InputCells {
+    input: Rc<RefCell<InputSnapshot>>,
+    input_sys: crate::input_api::SharedInput,
+    input_domain: crate::input_api::SharedDomain,
+    mouse_lock: Rc<RefCell<Option<bool>>>,
+    reserved_keys: crate::ReservedKeys,
+}
+
+/// The `input` global and the action layer behind it.
+fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
+    // The `input` global: a table of functions reading this frame's input
+    // snapshot (so games can poll the keyboard/mouse).
+    let input: Rc<RefCell<InputSnapshot>> = Rc::new(RefCell::new(InputSnapshot::default()));
+    // The action layer, shared with the driver: it resolves devices into
+    // this, scripts read named actions out of it.
+    let input_sys: crate::input_api::SharedInput =
+        Rc::new(RefCell::new(floptle_input::InputSystem::default()));
+    let input_domain: crate::input_api::SharedDomain =
+        Rc::new(std::cell::Cell::new(floptle_input::Domain::Frame));
+    // Mouse-lock request channel (drained by the editor each frame). See the field docs.
+    let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+    // Keys the host keeps for itself, and which of them a script has already
+    // been told about. The driver fills the list — the editor
+    // reserves Play/Pause/Step; a headless test reserves nothing — and the
+    // first poll of a reserved key writes one Console line naming it and what
+    // takes it. A key that is never going to arrive must not be
+    // indistinguishable from a key the player did not press: that is exactly
+    // how a game shipped a bag on Tab and heard about it from a player.
+    let reserved_keys: crate::ReservedKeys = Rc::new(RefCell::new(Vec::new()));
+    let reserved_warned: Rc<RefCell<std::collections::HashSet<String>>> =
+        Rc::new(RefCell::new(std::collections::HashSet::new()));
+    if let Ok(t) = lua.create_table() {
+        // One check behind all three raw pollers, so they cannot disagree
+        // about which keys are reachable.
+        let warn_reserved = {
+            let list = reserved_keys.clone();
+            let warned = reserved_warned.clone();
+            let sink = logs.clone();
+            move |lua: &Lua, name: &str| {
+                let Some(why) = list
+                    .borrow()
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, why)| why.clone())
+                else {
+                    return;
+                };
+                if !warned.borrow_mut().insert(name.to_string()) {
+                    return;
+                }
+                sink.borrow_mut().push(ScriptLog {
+                    level: LogLevel::Warn,
+                    msg: format!(
+                        "input: \"{name}\" is reserved by the editor for {why}, so this \
+                         script will never see it pressed — bind something else. (Every \
+                         other key reaches a focused Game view, Tab included.)"
+                    ),
+                    source: caller(lua),
+                });
+            }
+        };
+        let held = input.clone();
+        let wr = warn_reserved.clone();
+        let _ = t.set(
+            "key",
+            lua.create_function(move |lua, name: String| {
+                let name = name.to_lowercase();
+                wr(lua, &name);
+                Ok(held.borrow().keys_down.contains(&name))
+            })
+            .ok(),
+        );
+        let pressed = input.clone();
+        let wr = warn_reserved.clone();
+        let _ = t.set(
+            "pressed",
+            lua.create_function(move |lua, name: String| {
+                let name = name.to_lowercase();
+                wr(lua, &name);
+                Ok(pressed.borrow().keys_pressed.contains(&name))
+            })
+            .ok(),
+        );
+        let released = input.clone();
+        let wr = warn_reserved;
+        let _ = t.set(
+            "released",
+            lua.create_function(move |lua, name: String| {
+                let name = name.to_lowercase();
+                wr(lua, &name);
+                Ok(released.borrow().keys_released.contains(&name))
+            })
+            .ok(),
+        );
+        let ty = input.clone();
+        let _ = t.set(
+            "typed",
+            lua.create_function(move |_, ()| Ok(ty.borrow().typed.clone())).ok(),
+        );
+        let m = input.clone();
+        let _ = t.set(
+            "mouse",
+            lua.create_function(move |_, ()| {
+                let p = m.borrow().mouse;
+                Ok((p.0, p.1))
+            })
+            .ok(),
+        );
+        let md = input.clone();
+        let _ = t.set(
+            "mouse_delta",
+            lua.create_function(move |_, ()| {
+                let d = md.borrow().mouse_delta;
+                Ok((d.0, d.1))
+            })
+            .ok(),
+        );
+        let sc = input.clone();
+        let _ = t.set(
+            "scroll",
+            lua.create_function(move |_, ()| Ok(sc.borrow().scroll)).ok(),
+        );
+        // The active camera's view angles, captured with the input snapshot.
+        // the way to do camera-relative movement in multiplayer: the aim
+        // rides the input command, so the server + prediction replay see
+        // exactly the angle the player did (a camera node can't replicate
+        // that). nil when the scene has no active camera.
+        let ay = input.clone();
+        let _ = t.set(
+            "aimYaw",
+            lua.create_function(move |_, ()| Ok(ay.borrow().aim.map(|a| a[0]))).ok(),
+        );
+        let ap = input.clone();
+        let _ = t.set(
+            "aimPitch",
+            lua.create_function(move |_, ()| Ok(ap.borrow().aim.map(|a| a[1]))).ok(),
+        );
+        let bd = input.clone();
+        let _ = t.set(
+            "button",
+            lua.create_function(move |_, i: usize| {
+                Ok(bd.borrow().buttons_down.get(i).copied().unwrap_or(false))
+            })
+            .ok(),
+        );
+        let bp = input.clone();
+        let _ = t.set(
+            "clicked",
+            lua.create_function(move |_, i: usize| {
+                Ok(bp.borrow().buttons_pressed.get(i).copied().unwrap_or(false))
+            })
+            .ok(),
+        );
+        // A convenience -1..1 axis from a negative/positive key pair.
+        let ax = input.clone();
+        let _ = t.set(
+            "axis",
+            lua.create_function(move |_, (neg, pos): (String, String)| {
+                let d = ax.borrow();
+                let mut v = 0.0f32;
+                if d.keys_down.contains(&neg.to_lowercase()) {
+                    v -= 1.0;
+                }
+                if d.keys_down.contains(&pos.to_lowercase()) {
+                    v += 1.0;
+                }
+                Ok(v)
+            })
+            .ok(),
+        );
+        // Mouse capture: lock the cursor to the window and hide it (for FPS / free-look
+        // mouselook without holding a button), or release it back to the desktop.
+        let ml_lock = mouse_lock.clone();
+        let _ = t.set(
+            "lockMouse",
+            lua.create_function(move |_, ()| {
+                *ml_lock.borrow_mut() = Some(true);
+                Ok(())
+            })
+            .ok(),
+        );
+        let ml_unlock = mouse_lock.clone();
+        let _ = t.set(
+            "unlockMouse",
+            lua.create_function(move |_, ()| {
+                *ml_unlock.borrow_mut() = Some(false);
+                Ok(())
+            })
+            .ok(),
+        );
+        // Explicit form: `input.setMouseLocked(true/false)`.
+        let ml_set = mouse_lock.clone();
+        let _ = t.set(
+            "setMouseLocked",
+            lua.create_function(move |_, locked: bool| {
+                *ml_set.borrow_mut() = Some(locked);
+                Ok(())
+            })
+            .ok(),
+        );
+        // The ACTION layer sits on the same table, so a project can migrate
+        // one call at a time: `input.key("w")` and `input.action("Jump")`
+        // coexist for as long as a game wants them to.
+        crate::input_api::install(lua, &t, &input_sys, &input_domain);
+        let _ = lua.globals().set("input", t);
+    }
+    InputCells {
+        input,
+        input_sys,
+        input_domain,
+        mouse_lock,
+        reserved_keys,
+    }
+}
+
+/// What [`install_world_queries`] hands back to the host.
+struct WorldQueryCells {
+    net: crate::net_api::SharedNet,
+    colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
+    hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
+    sim_origin: Rc<RefCell<glam::DVec3>>,
+    layer_table: Rc<RefCell<floptle_core::Layers>>,
+}
+
+/// `raycast`, the shape queries and the layer table they filter by; the `net` bridge state the raycast closure shares.
+fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> WorldQueryCells {
+    // The `net.*` bridge state — created early so the raycast closure can
+    // read the current-instance marker (self-hit exclusion) and `net.rewind`
+    // can re-pose the hulls (the API itself installs further down).
+    let net = crate::net_api::SharedNet::new(logs.clone());
+
+    // `raycast(ox,oy,oz, dx,dy,dz, max)` against the world's colliders (terrain +
+    // mesh + static primitives) and every dynamic body's hull (players, crates):
+    // returns a hit table {x,y,z, nx,ny,nz, distance, node} or nil — `node` is the
+    // hit body's node handle (nil for static geometry), so combat code can do
+    // `hit.node:getscript("combat")`. The caster's own body is excluded (a ray from
+    // your center must not hit you). Use it for ground checks, line-of-sight,
+    // shooting. Scripts speak world coordinates; the sim runs origin-relative
+    // (ADR-0015), so convert in f64 on the way in and out.
+    let colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let sim_origin: Rc<RefCell<glam::DVec3>> = Rc::new(RefCell::new(glam::DVec3::ZERO));
+    // The project's layer table (names → bits + collision matrix), lent by
+    // the driver at Play start — shared with the raycast closure (named
+    // layer filters) and the node handles (`node.layer` validation).
+    let layer_table: Rc<RefCell<floptle_core::Layers>> =
+        Rc::new(RefCell::new(floptle_core::Layers::default()));
+    {
+        let cols = colliders.clone();
+        let hus = hulls.clone();
+        let so = sim_origin.clone();
+        let cur = net.current.clone();
+        let lt = layer_table.clone();
+        if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
+            // Two spellings, one ray: the vector form
+            // `raycast(origin, dir, max [, ignore])` — origin may be a node
+            // handle — and the original six-number form. The docs have
+            // taught the vector one since 0.17; it only became true here.
+            let a: Vec<Value> = args.into_iter().collect();
+            let num = |v: Option<&Value>| -> Option<f64> {
+                match v {
+                    Some(Value::Number(n)) => Some(*n),
+                    Some(Value::Integer(i)) => Some(*i as f64),
+                    _ => None,
+                }
+            };
+            // Which spelling this is, asked as "is the first argument a
+            // vector" rather than "is it one of these two Value variants".
+            // The variant test was right until a vec3 could also be the
+            // VM's own `vector` (ADR-0028 Phase 3) — a native one matched
+            // neither arm, fell through to the six-number form and failed
+            // there, which is how `raycast(node.pos, vec3(0,-1,0), n)`
+            // stopped working the moment a project chose `fast`. Asking
+            // the shared reader means the next backing needs no edit here.
+            let (ox, oy, oz, dx, dy, dz, max, ignore) = if a.len() >= 3
+                && crate::math_api::vec3_of(&a[0]).is_some()
+            {
+                let (Some(o), Some(d)) = (
+                    crate::math_api::vec3_of(&a[0]),
+                    crate::math_api::vec3_of(&a[1]),
+                ) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "raycast(origin, dir, max [, ignore]) — origin and dir are vec3s \
+                         (or a node, or anything with x/y/z)"
+                            .into(),
+                    ));
+                };
+                let Some(max) = num(a.get(2)) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "raycast(origin, dir, max) — max is a distance in metres".into(),
+                    ));
+                };
+                (o.x, o.y, o.z, d.x, d.y, d.z, max, a.get(3).cloned())
+            } else {
+                let n: Vec<f64> = a.iter().take(7).map(|v| num(Some(v)).unwrap_or(f64::NAN)).collect();
+                if n.len() < 7 || n.iter().any(|v| v.is_nan()) {
+                    return Err(mlua::Error::RuntimeError(
+                        "raycast(origin, dir, max [, ignore]) or \
+                         raycast(ox,oy,oz, dx,dy,dz, max [, ignore])"
+                            .into(),
+                    ));
+                }
+                (n[0], n[1], n[2], n[3], n[4], n[5], n[6], a.get(7).cloned())
+            };
+            let origin = *so.borrow();
+            let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
+            let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
+            // Bodies the ray passes through: the caster's own, plus an
+            // optional explicit ignore (a node handle or entity id) — e.g.
+            // an orbit camera skipping the character it follows. The 8th
+            // arg is either that ignore directly, or an OPTIONS table:
+            // `{ ignore = node, layers = "Ground" | {"Ground", "Props"} }`
+            // — `layers` filters both static geometry and body hulls by
+            // the project's named layers (a misspelled name is an error,
+            // not a silent everything-misses).
+            let mut exclude: Vec<u32> = Vec::with_capacity(2);
+            let mut mask = !0u32;
+            if let Some((eid, _)) = cur.borrow().as_ref() {
+                exclude.push(*eid);
+            }
+            match &ignore {
+                Some(Value::Table(t)) => {
+                    if let Ok(eid) = t.raw_get::<u32>("__id") {
+                        exclude.push(eid);
+                    } else {
+                        // No __id → an options table. Checked against the
+                        // same list `shape_api`'s queries use, because this
+                        // is a second copy of that parsing and the two lists
+                        // drifting is how `layers` ends up honoured by one
+                        // and ignored by the other.
+                        crate::opts::check_keys(
+                            t,
+                            crate::shape_api::QUERY_KEYS,
+                            "raycast",
+                        )?;
+                        if let Ok(ig) = t.get::<Table>("ignore")
+                            && let Ok(eid) = ig.raw_get::<u32>("__id")
+                        {
+                            exclude.push(eid);
+                        }
+                        let names: Vec<String> = match t.get::<Value>("layers") {
+                            Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
+                            Ok(Value::Table(list)) => {
+                                list.sequence_values::<String>().flatten().collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                        if !names.is_empty() {
+                            let lt = lt.borrow();
+                            mask = 0;
+                            for n in &names {
+                                match lt.index_of(n) {
+                                    Some(i) => mask |= 1u32 << i,
+                                    None => {
+                                        return Err(mlua::Error::RuntimeError(format!(
+                                            "raycast: no layer named '{n}' (project layers: {})",
+                                            lt.names.join(", ")
+                                        )))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Value::Integer(id)) => exclude.push(*id as u32),
+                Some(Value::Number(id)) => exclude.push(*id as u32),
+                _ => {}
+            }
+            let solid =
+                floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32, mask);
+            let body = floptle_physics::raycast_hulls(
+                &hus.borrow(),
+                o,
+                dir,
+                max as f32,
+                &exclude,
+                mask,
+            );
+            // Nearest surface wins between static geometry and body hulls.
+            //
+            // **`hit.node` is answered for both.** It used to be set only
+            // for a body hull, so a ray down at the floor of a level came
+            // back with no node at all while `spherecast` — documented as
+            // returning the same fields — named the map mesh. The march had
+            // the collider in hand the whole time; the field was dropped,
+            // not unavailable, and reading the docs it looked like the
+            // engine could not tell you.
+            let h = match (solid, body) {
+                (Some(s), Some((_, b))) if b.distance < s.distance => b,
+                (Some(s), _) => s,
+                (None, Some((_, b))) => b,
+                (None, None) => return Ok(Value::Nil),
+            };
+            // Built by the same function every shape query uses, so the two
+            // cannot drift apart again.
+            Ok(Value::Table(crate::shape_api::hit_table(
+                lua, h.point, h.normal, h.distance, h.eid, origin,
+            )?))
+        }) {
+            let _ = lua.globals().set("raycast", f);
+        }
+    }
+
+    // Shape queries — the volume half of the same question `raycast` asks,
+    // sharing its collider/hull loans (so they are rewound inside
+    // `net.rewind` for free) and its options table (roadmap B2).
+    crate::shape_api::install_shape_api(
+        lua,
+        crate::shape_api::QueryShared {
+            colliders: colliders.clone(),
+            hulls: hulls.clone(),
+            sim_origin: sim_origin.clone(),
+            current: net.current.clone(),
+            layers: layer_table.clone(),
+        },
+    );
+
+    WorldQueryCells {
+        net,
+        colliders,
+        hulls,
+        sim_origin,
+        layer_table,
+    }
+}
+
+/// `gizmo.*`: immediate-mode debug drawing.
+fn install_gizmos(lua: &Lua) -> Rc<RefCell<Vec<GizmoCmd>>> {
+    // `gizmo.*` — immediate-mode debug drawing: world-space lines, rays, spheres
+    // and points that show for one frame in the Scene view (never the Game view;
+    // the viewport's gizmo toggle hides them). Colors are optional 0–1 floats.
+    // Per-frame command count is capped so a runaway loop can't flood the renderer.
+    let gizmos: Rc<RefCell<Vec<GizmoCmd>>> = Rc::new(RefCell::new(Vec::new()));
+    const GIZMO_CAP: usize = 4096;
+    if let Ok(t) = lua.create_table() {
+        let q = gizmos.clone();
+        let _ = t.set(
+            "line",
+            lua.create_function(move |_, (x1, y1, z1, x2, y2, z2, r, g, b): GizmoLineArgs| {
+                let mut q = q.borrow_mut();
+                if q.len() < GIZMO_CAP {
+                    q.push(GizmoCmd::Line {
+                        a: [x1 as f32, y1 as f32, z1 as f32],
+                        b: [x2 as f32, y2 as f32, z2 as f32],
+                        color: gizmo_color(r, g, b),
+                    });
+                }
+                Ok(())
+            })
+            .ok(),
+        );
+        let q = gizmos.clone();
+        let _ = t.set(
+            "ray",
+            lua.create_function(move |_, (ox, oy, oz, dx, dy, dz, len, r, g, b): GizmoRayArgs| {
+                let mut q = q.borrow_mut();
+                if q.len() < GIZMO_CAP {
+                    let d = glam::DVec3::new(dx, dy, dz);
+                    // With a length the direction is normalized (matches raycast);
+                    // without one the vector is the ray.
+                    let end = match len {
+                        Some(l) if d.length_squared() > 1e-12 => {
+                            glam::DVec3::new(ox, oy, oz) + d.normalize() * l
+                        }
+                        _ => glam::DVec3::new(ox + dx, oy + dy, oz + dz),
+                    };
+                    q.push(GizmoCmd::Line {
+                        a: [ox as f32, oy as f32, oz as f32],
+                        b: [end.x as f32, end.y as f32, end.z as f32],
+                        color: gizmo_color(r, g, b),
+                    });
+                }
+                Ok(())
+            })
+            .ok(),
+        );
+        let q = gizmos.clone();
+        let _ = t.set(
+            "sphere",
+            lua.create_function(move |_, (x, y, z, radius, r, g, b): GizmoBallArgs| {
+                let mut q = q.borrow_mut();
+                if q.len() < GIZMO_CAP {
+                    q.push(GizmoCmd::Sphere {
+                        center: [x as f32, y as f32, z as f32],
+                        radius: radius.unwrap_or(0.5).max(0.001) as f32,
+                        color: gizmo_color(r, g, b),
+                    });
+                }
+                Ok(())
+            })
+            .ok(),
+        );
+        let q = gizmos.clone();
+        let _ = t.set(
+            "point",
+            lua.create_function(move |_, (x, y, z, size, r, g, b): GizmoBallArgs| {
+                let mut q = q.borrow_mut();
+                if q.len() < GIZMO_CAP {
+                    q.push(GizmoCmd::Point {
+                        pos: [x as f32, y as f32, z as f32],
+                        size: size.unwrap_or(0.25).max(0.001) as f32,
+                        color: gizmo_color(r, g, b),
+                    });
+                }
+                Ok(())
+            })
+            .ok(),
+        );
+        let _ = lua.globals().set("gizmo", t);
+    }
+
+    gizmos
+}
+
+/// `assets.*`: files under the project root, read and written from a script.
+fn install_assets(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> Rc<RefCell<PathBuf>> {
+    // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
+    // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
+    // getFile returns the full asset path (or nil if missing); getContents returns an
+    // array of every file's path under a directory (recursive), for building tables of
+    // assets. The returned strings are exactly what `node.model` / `node.material` accept.
+    //
+    // **Both stay inside the project.** The path is relative to the project
+    // root or it is nothing: an absolute path or a `..` answers `nil` / an
+    // empty list and one Console line naming the rule. A game runs on a
+    // machine that is not the developer's, and "list everything under
+    // `../../..`" is not a question about its assets.
+    let project_root: Rc<RefCell<PathBuf>> = Rc::new(RefCell::new(PathBuf::from("assets")));
+    if let Ok(t) = lua.create_table() {
+        let pr = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "getFile",
+            lua.create_function(move |lua, path: String| {
+                let Some(full) = floptle_vfs::contain(&pr.borrow(), &path) else {
+                    refuse_outside(&sink, "assets.getFile", &path);
+                    return Ok(Value::Nil);
+                };
+                Ok(if floptle_vfs::is_file(&full) {
+                    Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
+                } else {
+                    Value::Nil
+                })
+            })
+            .ok(),
+        );
+        let pr2 = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "getContents",
+            lua.create_function(move |lua, dir: String| {
+                let arr = lua.create_table()?;
+                let Some(base) = floptle_vfs::contain(&pr2.borrow(), &dir) else {
+                    refuse_outside(&sink, "assets.getContents", &dir);
+                    return Ok(arr);
+                };
+                let (files, stopped) = list_files_under(&base);
+                if stopped {
+                    sink.borrow_mut().push(ScriptLog {
+                        level: LogLevel::Warn,
+                        msg: format!(
+                            "assets.getContents(\"{dir}\"): stopped at {MAX_LISTED_FILES} \
+                             files — narrow the folder"
+                        ),
+                        source: None,
+                    });
+                }
+                for (i, f) in files.iter().enumerate() {
+                    arr.set(i + 1, lua.create_string(f.as_bytes())?)?;
+                }
+                Ok(arr)
+            })
+            .ok(),
+        );
+        // `assets.readText` / `writeText` / `readJson` / `writeJson`: a
+        // script's own data files. `getFile` answers a path, which is what
+        // a model or a material wants, and nothing a script can open — so
+        // a rhythm chart, a dialogue tree or a level table had to be
+        // written as a Lua table or pushed through `save.*` one 1 KB value
+        // at a time. These read and write the file itself, contained to
+        // the project the same way `getFile` is, so a chart editor built
+        // in the game writes straight into `assets/` and the level it
+        // wrote is a file the Asset Browser shows.
+        //
+        // Every one answers `value, err` rather than raising: a data file
+        // is content, and a missing or mangled one is a message in the
+        // Console, not a script that stops loading. They go through
+        // `floptle_vfs`, so the same script reads from the bundle in a
+        // browser and its writes land in the page's overlay.
+        let pr = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "readText",
+            lua.create_function(move |lua, path: String| {
+                match read_project_text(&pr.borrow(), &path, "assets.readText") {
+                    Ok(text) => Ok((Value::String(lua.create_string(text.as_bytes())?), Value::Nil)),
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                    }
+                }
+            })
+            .ok(),
+        );
+        let pr = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "readJson",
+            lua.create_function(move |lua, path: String| {
+                let text = match read_project_text(&pr.borrow(), &path, "assets.readJson") {
+                    Ok(text) => text,
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        return Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)));
+                    }
+                };
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(v) => Ok((crate::http_api::json_to_lua(lua, &v)?, Value::Nil)),
+                    Err(e) => {
+                        let why = format!("assets.readJson(\"{path}\"): not valid JSON — {e}");
+                        refuse_read(&sink, &why);
+                        Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                    }
+                }
+            })
+            .ok(),
+        );
+        let pr = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "writeText",
+            lua.create_function(move |lua, (path, text): (String, mlua::String)| {
+                match write_project_bytes(&pr.borrow(), &path, &text.as_bytes(), "assets.writeText") {
+                    Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                    }
+                }
+            })
+            .ok(),
+        );
+        let pr = project_root.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "writeJson",
+            lua.create_function(move |lua, (path, value, opts): (String, Value, Option<Table>)| {
+                // `{ pretty = true }` writes it indented — a chart a person
+                // will open in a text editor, or diff in git, wants that.
+                let pretty = match &opts {
+                    Some(o) => {
+                        crate::opts::check_keys(o, &["pretty"], "assets.writeJson")?;
+                        crate::opts::opt_bool(o, "assets.writeJson", "pretty")?.unwrap_or(false)
+                    }
+                    None => false,
+                };
+                // A table that cannot be JSON (nests forever, a mis-tagged
+                // list) is a bug in the script and raises, exactly as
+                // `json.encode` would.
+                let j = crate::http_api::lua_to_json(&value)?;
+                let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
+                    .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
+                match write_project_bytes(&pr.borrow(), &path, text.as_bytes(), "assets.writeJson") {
+                    Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                    }
+                }
+            })
+            .ok(),
+        );
+        let _ = lua.globals().set("assets", t);
+    }
+
+    project_root
+}
+
+/// What [`install_scene`] hands back to the host.
+struct SceneCells {
+    scene_request: crate::SceneQueue,
+    scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>>,
+    scene_name: Rc<RefCell<String>>,
+}
+
+/// `scene.*`: loading, additive loading and the scene a script is in.
+fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<RefCell<PathBuf>>) -> SceneCells {
+    // `scene.*` — scene management: `scene.load(name)` queues a transition
+    // the engine performs between frames (in multiplayer only the server
+    // may switch — clients follow automatically); `scene.current()` is the
+    // running scene's name; `scene.list()` enumerates the project's scenes.
+    let scene_request: crate::SceneQueue = Rc::new(RefCell::new(Vec::new()));
+    let scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let scene_name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    if let Ok(t) = lua.create_table() {
+        let q = scene_request.clone();
+        let _ = t.set(
+            "load",
+            lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
+                // `{ additive = true }` layers the scene on top of the
+                // running one instead of replacing it.
+                //
+                // This used to ignore anything else in the table, on the
+                // reasoning that the option set could then grow without
+                // breaking a script that passed one. That reasoning was
+                // wrong in the one direction that matters: a typo'd
+                // `addative = true` reads as `additive = false`, which
+                // DESTROYS the running scene instead of layering onto it.
+                // Every node it held is gone, the request queue is cleared,
+                // and nothing anywhere mentions a key.
+                //
+                // `{ environment = true }` additionally hands the world's
+                // environment to the layer: its sun, fog, skybox and post
+                // chain replace the base scene's for as long as it is
+                // loaded. Meaningless without `additive` (a full swap
+                // already brings its own), so it is read alongside it.
+                let (additive, environment) = match &opts {
+                    Some(o) => {
+                        crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
+                        (
+                            crate::opts::opt_bool(o, "scene.load", "additive")?
+                                .unwrap_or(false),
+                            crate::opts::opt_bool(o, "scene.load", "environment")?
+                                .unwrap_or(false),
+                        )
+                    }
+                    None => (false, false),
+                };
+                let req = if additive {
+                    crate::SceneRequest::Additive { name, environment }
+                } else {
+                    crate::SceneRequest::Load { name }
+                };
+                let mut q = q.borrow_mut();
+                // A full swap ends the frame's queue: everything already
+                // asked for named the world that is about to stop existing.
+                if req.is_swap() {
+                    q.clear();
+                }
+                q.push(req);
+                Ok(())
+            })
+            .ok(),
+        );
+        let q = scene_request.clone();
+        let _ = t.set(
+            "unload",
+            lua.create_function(move |_, name: String| {
+                q.borrow_mut().push(crate::SceneRequest::Unload { name });
+                Ok(())
+            })
+            .ok(),
+        );
+        let subs = scene_loaded.clone();
+        let cur = net.current.clone();
+        let _ = t.set(
+            "onLoaded",
+            lua.create_function(move |lua, f: mlua::Function| {
+                let owner = cur.borrow().as_ref().map(|(e, _)| *e).unwrap_or(0);
+                match lua.create_registry_value(f) {
+                    Ok(k) => subs.borrow_mut().push((owner, k)),
+                    Err(e) => return Err(e),
+                }
+                Ok(())
+            })
+            .ok(),
+        );
+        let sn = scene_name.clone();
+        let _ = t.set(
+            "current",
+            lua.create_function(move |lua, ()| {
+                lua.create_string(sn.borrow().as_bytes())
+            })
+            .ok(),
+        );
+        let pr = project_root.clone();
+        let _ = t.set(
+            "list",
+            lua.create_function(move |lua, ()| {
+                // Scene names relative to `scenes/`, extension dropped,
+                // subfolders kept ("arenas/desert") — exactly what
+                // `scene.load` accepts.
+                let base = pr.borrow().join("scenes");
+                let mut names: Vec<String> = Vec::new();
+                let mut stack = vec![base.clone()];
+                while let Some(d) = stack.pop() {
+                    if let Ok(rd) = floptle_vfs::read_dir(&d) {
+                        for entry in rd {
+                            let p = entry.path();
+                            if entry.is_dir() {
+                                stack.push(p);
+                            } else if p.extension().is_some_and(|x| x == "ron")
+                                && let Ok(rel) = p.strip_prefix(&base)
+                            {
+                                let mut s = rel.to_string_lossy().replace('\\', "/");
+                                s.truncate(s.len().saturating_sub(4));
+                                names.push(s);
+                            }
+                        }
+                    }
+                }
+                names.sort();
+                let arr = lua.create_table()?;
+                for (i, n) in names.iter().enumerate() {
+                    arr.set(i + 1, lua.create_string(n.as_bytes())?)?;
+                }
+                Ok(arr)
+            })
+            .ok(),
+        );
+        let _ = lua.globals().set("scene", t);
+    }
+
+    SceneCells {
+        scene_request,
+        scene_loaded,
+        scene_name,
+    }
+}
+
+/// What [`install_ui`] hands back to the host.
+struct UiCells {
+    ui_focus: Rc<RefCell<Option<u32>>>,
+    ui_focus_request: Rc<RefCell<Option<Option<u32>>>>,
+    ui_drag: crate::UiDragCell,
+    ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>>,
+    ui_makes: crate::UiMakes,
+    ui_handlers: crate::UiHandlers,
+    ui_listeners: crate::UiListeners,
+    ui_listener_checks: Rc<RefCell<Vec<(u32, String)>>>,
+    ui_frame_events: crate::UiFrameEvents,
+    ui_hover: Rc<RefCell<Option<u32>>>,
+    ui_active: Rc<RefCell<Option<u32>>>,
+}
+
+/// `ui.*`: the game-UI runtime surface.
+fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
+    // `ui.*` — the game-UI runtime surface. Focus is engine state rather
+    // than a component (a hover that survived into a saved scene would be a
+    // bug), so it travels through its own channels instead of the mirror.
+    let ui_focus: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let ui_focus_request: Rc<RefCell<Option<Option<u32>>>> = Rc::new(RefCell::new(None));
+    // (drag source, drop target under it) — live for the whole drag and
+    // for the frame the `dropped` hooks run on, which is the frame that
+    // actually needs to read it.
+    let ui_drag: crate::UiDragCell = Rc::new(RefCell::new(None));
+    let ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>> = Rc::new(RefCell::new(Vec::new()));
+    let ui_makes: crate::UiMakes = Rc::new(RefCell::new(Vec::new()));
+    let ui_handlers: crate::UiHandlers = Rc::new(RefCell::new(HashMap::new()));
+    let ui_listeners: crate::UiListeners = Rc::new(RefCell::new(Vec::new()));
+    let ui_listener_checks: Rc<RefCell<Vec<(u32, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let ui_frame_events: crate::UiFrameEvents = Rc::new(RefCell::new(Vec::new()));
+    let ui_hover: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let ui_active: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    if let Ok(t) = lua.create_table() {
+        let req = ui_focus_request.clone();
+        let cur = ui_focus.clone();
+        let _ = t.set(
+            "focus",
+            lua.create_function(move |_, node: mlua::Value| {
+                // `ui.focus(node)` moves the ring; `ui.focus(nil)` drops it
+                // (a screen that wants nothing focused until the player
+                // touches something).
+                let want = match &node {
+                    mlua::Value::Nil => None,
+                    v => Some(crate::env::node_id_of(v).ok_or_else(|| {
+                        mlua::Error::runtime("ui.focus expects a node or nil")
+                    })?),
+                };
+                // Read-your-writes within the frame, same as `node.style`.
+                *cur.borrow_mut() = want;
+                *req.borrow_mut() = Some(want);
+                Ok(())
+            })
+            .ok(),
+        );
+        let cur = ui_focus.clone();
+        let _ = t.set(
+            "focused",
+            // `ui.focused()` = which element; `ui.focused(el)` = is it that
+            // one. Same shape as `ui.hovered` / `ui.held`, so the three
+            // states a screen asks about answer the same way.
+            lua.create_function(move |lua, node: Option<mlua::Value>| {
+                let f = *cur.borrow();
+                match node.as_ref().and_then(crate::env::node_id_of) {
+                    Some(e) => Ok(mlua::Value::Boolean(f == Some(e))),
+                    None => match f {
+                        Some(id) => {
+                            crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
+                        }
+                        None => Ok(mlua::Value::Nil),
+                    },
+                }
+            })
+            .ok(),
+        );
+        // The drag in flight. There is no separate payload channel on
+        // purpose: the source is a node, and a node already carries params,
+        // a name, tags and its own scripts — everything an inventory row
+        // needs to say what it is. A second data path would only be a
+        // second thing to keep in sync.
+        let d = ui_drag.clone();
+        let _ = t.set(
+            "dragging",
+            lua.create_function(move |lua, ()| match d.borrow().map(|(s, _)| s) {
+                Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
+                None => Ok(mlua::Value::Nil),
+            })
+            .ok(),
+        );
+        let d = ui_drag.clone();
+        let _ = t.set(
+            "dropTarget",
+            lua.create_function(move |lua, ()| match d.borrow().and_then(|(_, t)| t) {
+                Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
+                None => Ok(mlua::Value::Nil),
+            })
+            .ok(),
+        );
+        // `ui.bind(node, prop, fn)` — say the relationship once instead of
+        // writing an `update` that keeps it true. The engine calls `fn`
+        // once a frame and writes what comes back; a binding on a node
+        // that goes away goes away with it.
+        let binds = ui_bindings.clone();
+        let _ = t.set(
+            "bind",
+            lua.create_function(
+                move |lua, (node, prop, f): (mlua::Value, String, mlua::Function)| {
+                    let e = crate::env::node_id_of(&node).ok_or_else(|| {
+                        mlua::Error::runtime("ui.bind expects (node, property, function)")
+                    })?;
+                    let key = lua.create_registry_value(f)?;
+                    let mut b = binds.borrow_mut();
+                    // Re-binding the same property replaces rather than
+                    // stacks: two functions fighting over one label every
+                    // frame is never what was meant.
+                    b.retain(|x| !(x.e == e && x.prop == prop));
+                    b.push(crate::UiBinding { e, prop, f: key });
+                    Ok(())
+                },
+            )
+            .ok(),
+        );
+        let binds = ui_bindings.clone();
+        let _ = t.set(
+            "unbind",
+            lua.create_function(move |_, (node, prop): (mlua::Value, Option<String>)| {
+                let e = crate::env::node_id_of(&node)
+                    .ok_or_else(|| mlua::Error::runtime("ui.unbind expects a node"))?;
+                binds
+                    .borrow_mut()
+                    .retain(|x| x.e != e || prop.as_ref().is_some_and(|p| *p != x.prop));
+                Ok(())
+            })
+            .ok(),
+        );
+        // `ui.make(container, tree)` — a screen described as data, and
+        // reconciled against the one already there. The counterpart to
+        // `ui.bind`: bind keeps a value true, make keeps a TREE true.
+        let makes = ui_makes.clone();
+        let _ = t.set(
+            "make",
+            lua.create_function(move |lua, (node, tree): (mlua::Value, mlua::Value)| {
+                let container = crate::env::node_id_of(&node).ok_or_else(|| {
+                    mlua::Error::runtime("ui.make expects (node, table)")
+                })?;
+                // Parsing raises rather than logs: a mistyped property is a
+                // mistake in the description, and a screen that quietly
+                // builds without it is harder to debug than one that stops
+                // with a line number.
+                let (roots, hooks) = crate::ui_make::parse_tree(lua, &tree)?;
+                makes.borrow_mut().push(crate::ui_make::MakeRequest {
+                    container,
+                    roots,
+                    hooks,
+                });
+                Ok(())
+            })
+            .ok(),
+        );
+        // `ui.on(element, hook, fn)` — listen to an element from a script
+        // that does not live on it.
+        //
+        // A `clicked` function in a script file answers for the node that
+        // script is on, which means one script file per button: eight
+        // three-line files whose only real content is "tell the menu".
+        // A listener puts all eight in the menu's own script, where the
+        // state they change already lives.
+        let listeners = ui_listeners.clone();
+        let checks = ui_listener_checks.clone();
+        let n = net.clone();
+        let _ = t.set(
+            "on",
+            lua.create_function(
+                move |lua, (node, hook, f): (mlua::Value, String, mlua::Function)| {
+                    let e = crate::env::node_id_of(&node).ok_or_else(|| {
+                        mlua::Error::runtime("ui.on expects (element, hook, function)")
+                    })?;
+                    // A mistyped hook is the failure mode here — the
+                    // listener registers, nothing ever calls it, and there
+                    // is nothing to see. Naming the hooks is cheap.
+                    if !crate::ui_make::HOOKS.contains(&hook.as_str()) {
+                        return Err(mlua::Error::runtime(format!(
+                            "ui.on: \"{hook}\" is not a UI hook (one of: {})",
+                            crate::ui_make::HOOKS.join(", ")
+                        )));
+                    }
+                    // Registered outside a script (a bare `ui.on` in a made
+                    // element's closure, say) — still legal, but it belongs
+                    // to nobody, so nothing reloads or destroys it early.
+                    let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
+                    let key = lua.create_registry_value(f)?;
+                    let mut ls = listeners.borrow_mut();
+                    // Same owner, same element, same hook REPLACES — like
+                    // `ui.bind`. That makes `ui.on` safe to call from
+                    // `update`, and makes the classic mistake (registering
+                    // every frame) cost one closure instead of thousands.
+                    if let Some(old) = ls
+                        .iter_mut()
+                        .find(|l| l.e == e && l.hook == hook && l.owner == owner)
+                    {
+                        let stale = std::mem::replace(&mut old.f, key);
+                        let _ = lua.remove_registry_value(stale);
+                        return Ok(());
+                    }
+                    checks.borrow_mut().push((e, hook.clone()));
+                    ls.push(crate::UiListener { e, hook, owner, f: key });
+                    Ok(())
+                },
+            )
+            .ok(),
+        );
+        // `ui.off(element)` / `ui.off(element, hook)` — stop listening.
+        // Only the CALLER's listeners go: two managers on one element must
+        // not be able to unregister each other.
+        let listeners = ui_listeners.clone();
+        let n = net.clone();
+        let _ = t.set(
+            "off",
+            lua.create_function(move |_, (node, hook): (mlua::Value, Option<String>)| {
+                let e = crate::env::node_id_of(&node)
+                    .ok_or_else(|| mlua::Error::runtime("ui.off expects an element"))?;
+                let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
+                listeners.borrow_mut().retain(|l| {
+                    !(l.e == e
+                        && l.owner == owner
+                        && hook.as_ref().is_none_or(|h| *h == l.hook))
+                });
+                Ok(())
+            })
+            .ok(),
+        );
+        // The other half: asking, instead of being called back. Both read
+        // the same list of events the hooks fire from, published before the
+        // scripts run — so a poll in `update` and a `clicked` hook can
+        // never disagree about what happened this frame.
+        let ev = ui_frame_events.clone();
+        let _ = t.set(
+            "event",
+            lua.create_function(move |_, (node, hook): (mlua::Value, String)| {
+                let Some(e) = crate::env::node_id_of(&node) else {
+                    return Ok(false);
+                };
+                Ok(ev.borrow().iter().any(|(x, h)| *x == e && *h == hook))
+            })
+            .ok(),
+        );
+        for (name, hook) in [
+            ("clicked", "clicked"),
+            ("pressed", "pressed"),
+            ("released", "released"),
+            ("changed", "changed"),
+            ("submitted", "submitted"),
+        ] {
+            let ev = ui_frame_events.clone();
+            let _ = t.set(
+                name,
+                lua.create_function(move |_, node: mlua::Value| {
+                    let Some(e) = crate::env::node_id_of(&node) else {
+                        return Ok(false);
+                    };
+                    Ok(ev.borrow().iter().any(|(x, h)| *x == e && h == hook))
+                })
+                .ok(),
+            );
+        }
+        // `ui.events()` — everything that happened this frame, so a manager
+        // can handle a whole screen without naming a single element:
+        // `for _, ev in ipairs(ui.events("clicked")) do ... end`.
+        let ev = ui_frame_events.clone();
+        let _ = t.set(
+            "events",
+            lua.create_function(move |lua, hook: Option<String>| {
+                let out = lua.create_table()?;
+                let mut i = 1;
+                for (e, h) in ev.borrow().iter() {
+                    if hook.as_ref().is_some_and(|w| w != h) {
+                        continue;
+                    }
+                    let row = lua.create_table()?;
+                    row.set("node", crate::env::new_node_handle(lua, *e)?)?;
+                    row.set("event", h.as_str())?;
+                    out.set(i, row)?;
+                    i += 1;
+                }
+                Ok(out)
+            })
+            .ok(),
+        );
+        // Live states, not events: what the pointer is over, and what it is
+        // holding down. With an element they answer yes/no; with nothing
+        // they answer *which* — the shape `ui.focused()` already has.
+        for (name, cell) in [("hovered", &ui_hover), ("held", &ui_active)] {
+            let c = cell.clone();
+            let _ = t.set(
+                name,
+                lua.create_function(move |lua, node: Option<mlua::Value>| {
+                    let cur = *c.borrow();
+                    match node.as_ref().and_then(crate::env::node_id_of) {
+                        Some(e) => Ok(mlua::Value::Boolean(cur == Some(e))),
+                        None => match cur {
+                            Some(id) => {
+                                crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
+                            }
+                            None => Ok(mlua::Value::Nil),
+                        },
+                    }
+                })
+                .ok(),
+            );
+        }
+        let _ = lua.globals().set("ui", t);
+    }
+
+    UiCells {
+        ui_focus,
+        ui_focus_request,
+        ui_drag,
+        ui_bindings,
+        ui_makes,
+        ui_handlers,
+        ui_listeners,
+        ui_listener_checks,
+        ui_frame_events,
+        ui_hover,
+        ui_active,
+    }
+}
+
+/// `spawnEffect(...)`: a one-shot particle effect at a point.
+fn install_spawn_effect(lua: &Lua) -> Rc<RefCell<Vec<crate::SpawnedEffect>>> {
+    // `spawnEffect(key, x, y, z [, vx, vy, vz])` — fire a one-shot particle effect at
+    // a world point, no node required. The editor spawns a detached instance that
+    // plays once and auto-despawns (the fire-and-forget path for hits, pickups,
+    // poofs). The optional velocity is the emitter's world velocity: inherit-velocity
+    // tracks (smoke/dust off a fast vessel) ride it so they aren't stranded in space.
+    let spawn_effects: Rc<RefCell<Vec<crate::SpawnedEffect>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    {
+        let q = spawn_effects.clone();
+        type Args = (String, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
+        if let Ok(f) = lua.create_function(move |_, (key, x, y, z, vx, vy, vz): Args| {
+            q.borrow_mut().push((
+                key,
+                [x, y, z],
+                [vx.unwrap_or(0.0), vy.unwrap_or(0.0), vz.unwrap_or(0.0)],
+            ));
+            Ok(())
+        }) {
+            let _ = lua.globals().set("spawnEffect", f);
+        }
+    }
+
+    spawn_effects
+}
+
+/// What [`install_draw`] hands back to the host.
+struct DrawCells {
+    draw_lines: Rc<RefCell<Vec<crate::DrawLine>>>,
+    draw_tris: Rc<RefCell<Vec<crate::DrawTri>>>,
+    draw_rects: Rc<RefCell<Vec<crate::DrawRect>>>,
+    draw_texts: Rc<RefCell<Vec<crate::DrawText>>>,
+}
+
+/// `draw.*`: world-space and screen-space debug drawing that lasts one frame.
+fn install_draw(lua: &Lua) -> DrawCells {
+    // `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a])` — queue one world-space
+    // 3D line segment for this tick. Immediate mode: segments live for one
+    // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
+    // screen draws its orbit conics this way). Depth-tested in the scene.
+    let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
+    let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
+    let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
+    let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let q = draw_lines.clone();
+        if let (Ok(f), Ok(t)) = (
+            lua.create_function(
+                move |_,
+                      (x1, y1, z1, x2, y2, z2, r, g, b, a): (
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f32,
+                    f32,
+                    f32,
+                    Option<f32>,
+                )| {
+                    q.borrow_mut().push(crate::DrawLine {
+                        a: [x1, y1, z1],
+                        b: [x2, y2, z2],
+                        color: [r, g, b, a.unwrap_or(1.0)],
+                    });
+                    Ok(())
+                },
+            ),
+            lua.create_table(),
+        ) {
+            let _ = t.set("line", f);
+            // `draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a])` — a circle
+            // around `n` at `c`. `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` —
+            // three rings. `draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a])` —
+            // a yaw-rotated wireframe box. All build on the same always-on
+            // line pass: draw.* is the game's visual telegraph layer
+            // (attach markers, selection outlines, range rings), rendered
+            // unconditionally in the game view — unlike `gizmo.*`, the
+            // DEBUG layer the editor's gizmos toggle gates.
+            let ring_segs = |q: &mut Vec<crate::DrawLine>,
+                             c: glam::DVec3,
+                             n: glam::DVec3,
+                             radius: f64,
+                             color: [f32; 4]| {
+                let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
+                let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
+                let u = (u - n * u.dot(n)).normalize();
+                let v = n.cross(u);
+                const N: usize = 28;
+                let mut prev = c + u * radius;
+                for k in 1..=N {
+                    let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                    let p = c + u * (radius * t.cos()) + v * (radius * t.sin());
+                    q.push(crate::DrawLine { a: prev.into(), b: p.into(), color });
+                    prev = p;
+                }
+            };
+            {
+                let q = draw_lines.clone();
+                type RingArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (cx, cy, cz, nx, ny, nz, radius, r, g, b, a): RingArgs| {
+                        ring_segs(
+                            &mut q.borrow_mut(),
+                            glam::DVec3::new(cx, cy, cz),
+                            glam::DVec3::new(nx, ny, nz),
+                            radius.max(1e-4),
+                            [r, g, b, a.unwrap_or(1.0)],
+                        );
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("ring", f);
+                }
+            }
+            {
+                let q = draw_lines.clone();
+                type BallArgs = (f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (cx, cy, cz, radius, r, g, b, a): BallArgs| {
+                        let c = glam::DVec3::new(cx, cy, cz);
+                        let col = [r, g, b, a.unwrap_or(1.0)];
+                        let mut q = q.borrow_mut();
+                        for n in [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z] {
+                            ring_segs(&mut q, c, n, radius.max(1e-4), col);
+                        }
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("sphere", f);
+                }
+            }
+            {
+                let q = draw_lines.clone();
+                type BoxArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (cx, cy, cz, hx, hy, hz, yaw, r, g, b, a): BoxArgs| {
+                        let c = glam::DVec3::new(cx, cy, cz);
+                        let (cy_, sy_) = (yaw.cos(), yaw.sin());
+                        let rot = |p: glam::DVec3| {
+                            glam::DVec3::new(p.x * cy_ + p.z * sy_, p.y, -p.x * sy_ + p.z * cy_)
+                        };
+                        let col = [r, g, b, a.unwrap_or(1.0)];
+                        let corner = |i: usize| {
+                            let sx = if i & 1 == 0 { -hx } else { hx };
+                            let sy = if i & 2 == 0 { -hy } else { hy };
+                            let sz = if i & 4 == 0 { -hz } else { hz };
+                            c + rot(glam::DVec3::new(sx, sy, sz))
+                        };
+                        let mut q = q.borrow_mut();
+                        for (i, j) in [
+                            (0, 1), (2, 3), (4, 5), (6, 7), // x edges
+                            (0, 2), (1, 3), (4, 6), (5, 7), // y edges
+                            (0, 4), (1, 5), (2, 6), (3, 7), // z edges
+                        ] {
+                            q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col });
+                        }
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("box", f);
+                }
+            }
+            // ── FILLED triangle layer: solid gizmos & world markers ──
+            // `draw.tri(x1..z3, r,g,b[,a])` — one raw triangle.
+            {
+                let q = draw_tris.clone();
+                type TriArgs =
+                    (f64, f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_,
+                          (x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b, a): TriArgs| {
+                        q.borrow_mut().push(crate::DrawTri {
+                            a: [x1, y1, z1],
+                            b: [x2, y2, z2],
+                            c: [x3, y3, z3],
+                            color: [r, g, b, a.unwrap_or(1.0)],
+                        });
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("tri", f);
+                }
+            }
+            // A basis ⊥ to a direction, for fan-tessellating cones/discs.
+            let basis = |n: glam::DVec3| {
+                let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
+                let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
+                let u = (u - n * u.dot(n)).normalize();
+                (u, n.cross(u), n)
+            };
+            // `draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b[,a])` — a
+            // solid cone: base disc at (bx,by,bz), apex `height` along the
+            // unit dir. Gizmo arrowheads, thruster nozzles, markers.
+            {
+                let q = draw_tris.clone();
+                type ConeArgs =
+                    (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_,
+                          (bx, by, bz, dx, dy, dz, radius, height, r, g, b, a): ConeArgs| {
+                        let base = glam::DVec3::new(bx, by, bz);
+                        let (u, v, n) = basis(glam::DVec3::new(dx, dy, dz));
+                        let apex = base + n * height;
+                        let col = [r, g, b, a.unwrap_or(1.0)];
+                        const N: usize = 20;
+                        let mut q = q.borrow_mut();
+                        let rim = |k: usize| {
+                            let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                            base + u * (radius * t.cos()) + v * (radius * t.sin())
+                        };
+                        for k in 0..N {
+                            let p0 = rim(k);
+                            let p1 = rim(k + 1);
+                            // side
+                            q.push(crate::DrawTri {
+                                a: p0.into(),
+                                b: p1.into(),
+                                c: apex.into(),
+                                color: col,
+                            });
+                            // base cap
+                            q.push(crate::DrawTri {
+                                a: p1.into(),
+                                b: p0.into(),
+                                c: base.into(),
+                                color: col,
+                            });
+                        }
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("cone", f);
+                }
+            }
+            // `draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b[,a])` — a filled
+            // annulus (r0=inner, r1=outer) around normal n: solid rotation
+            // gizmo bands, ring markers. r0=0 gives a full disc.
+            {
+                let q = draw_tris.clone();
+                type DiscArgs =
+                    (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_,
+                          (cx, cy, cz, nx, ny, nz, r0, r1, r, g, b, a): DiscArgs| {
+                        let c = glam::DVec3::new(cx, cy, cz);
+                        let (u, v, _) = basis(glam::DVec3::new(nx, ny, nz));
+                        let col = [r, g, b, a.unwrap_or(1.0)];
+                        const N: usize = 36;
+                        let mut q = q.borrow_mut();
+                        let at = |rad: f64, k: usize| {
+                            let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                            c + u * (rad * t.cos()) + v * (rad * t.sin())
+                        };
+                        for k in 0..N {
+                            let o0 = at(r1, k);
+                            let o1 = at(r1, k + 1);
+                            let i0 = at(r0, k);
+                            let i1 = at(r0, k + 1);
+                            q.push(crate::DrawTri {
+                                a: i0.into(),
+                                b: o0.into(),
+                                c: o1.into(),
+                                color: col,
+                            });
+                            q.push(crate::DrawTri {
+                                a: i0.into(),
+                                b: o1.into(),
+                                c: i1.into(),
+                                color: col,
+                            });
+                        }
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("disc", f);
+                }
+            }
+            // ---- screen space -------------------------------------
+            // `draw.rect(x, y, w, h, r,g,b[,a][,radius])` — a filled
+            // rectangle in PIXELS, and `draw.rectOutline(..., [thickness])`
+            // its hollow twin. The pixels are `input.mouse()`'s, so an RTS
+            // marquee is the two corners you dragged between — the 3D line
+            // version of the same box has to be projected onto a ground
+            // plane, which fights the camera angle and misses anything the
+            // plane doesn't pass through.
+            for (name, outline_default) in [("rect", 0.0f32), ("rectOutline", 2.0f32)] {
+                let q = draw_rects.clone();
+                type RectArgs =
+                    (f32, f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (x, y, w, h, r, g, b, a, extra): RectArgs| {
+                        // `extra` is the corner radius on a fill, the border
+                        // thickness on an outline — the one number each wants.
+                        let (outline, radius) = if outline_default > 0.0 {
+                            (extra.unwrap_or(outline_default).max(0.0), 0.0)
+                        } else {
+                            (0.0, extra.unwrap_or(0.0).max(0.0))
+                        };
+                        q.borrow_mut().push(crate::DrawRect {
+                            rect: [x, y, w, h],
+                            color: [r, g, b, a.unwrap_or(1.0)],
+                            outline,
+                            radius,
+                        });
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set(name, f);
+                }
+            }
+            // `draw.circle(x, y, radius, r,g,b[,a])` and its outline twin —
+            // a rect with a corner radius of half its side is a circle to
+            // the UI quad shader, so a debug ring, a minimap blip or a
+            // reticle costs nothing new. `x, y` is the CENTRE, which is what
+            // anyone drawing a circle has in hand.
+            for (name, outline_default) in [("circle", 0.0f32), ("circleOutline", 2.0f32)] {
+                let q = draw_rects.clone();
+                type CircleArgs = (f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (x, y, rad, r, g, b, a, extra): CircleArgs| {
+                        let rad = rad.max(0.0);
+                        let outline = if outline_default > 0.0 {
+                            extra.unwrap_or(outline_default).max(0.0)
+                        } else {
+                            0.0
+                        };
+                        q.borrow_mut().push(crate::DrawRect {
+                            rect: [x - rad, y - rad, rad * 2.0, rad * 2.0],
+                            color: [r, g, b, a.unwrap_or(1.0)],
+                            outline,
+                            radius: rad,
+                        });
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set(name, f);
+                }
+            }
+            // `draw.text(x, y, s, size, r,g,b[,a][,align])` — a string on
+            // the screen without building a UI tree: a damage number, a
+            // frame-time readout, the count under a selection box. The
+            // renderer measures and lays out the glyphs (the same font
+            // stack `ui.make` uses), so a script never has to know how wide
+            // an 'm' is. `align` is "left" (default) | "center" | "right",
+            // and x is that edge.
+            {
+                let q = draw_texts.clone();
+                type TextArgs = (
+                    f32,
+                    f32,
+                    String,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<f32>,
+                    Option<String>,
+                    Option<String>,
+                );
+                if let Ok(f) = lua.create_function(
+                    move |_, (x, y, s, size, r, g, b, a, align, font): TextArgs| {
+                        q.borrow_mut().push(crate::DrawText {
+                            pos: [x, y],
+                            text: s,
+                            size: size.unwrap_or(16.0).max(1.0),
+                            color: [
+                                r.unwrap_or(1.0),
+                                g.unwrap_or(1.0),
+                                b.unwrap_or(1.0),
+                                a.unwrap_or(1.0),
+                            ],
+                            align: match align.as_deref() {
+                                Some("center") | Some("centre") => 1,
+                                Some("right") => 2,
+                                _ => 0,
+                            },
+                            // Absent = the project's UI font, which is the
+                            // answer a game wants often enough that naming
+                            // it here should be the exception.
+                            font: font.unwrap_or_default(),
+                        });
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("text", f);
+                }
+            }
+            let _ = lua.globals().set("draw", t);
+        }
+    }
+
+    DrawCells {
+        draw_lines,
+        draw_tris,
+        draw_rects,
+        draw_texts,
+    }
+}
+
+/// What [`install_node_queues`] hands back to the host.
+struct NodeQueueCells {
+    spawn_requests: Rc<RefCell<Vec<crate::SpawnRequest>>>,
+    create_requests: Rc<RefCell<Vec<crate::CreateRequest>>>,
+    destroy_queue: Rc<RefCell<Vec<u32>>>,
+}
+
+/// `spawn`, `createNode` and `destroy`: the node requests the driver applies after the pass.
+fn install_node_queues(lua: &Lua) -> NodeQueueCells {
+    // `spawn(prefab [, pos [, fn]])` — queue a prefab instance. The driver
+    // spawns the subtree after this pass (physics/animators/scripts wire up
+    // automatically); the optional callback receives the new root's handle
+    // right after it exists — the "configure what I just spawned" hook:
+    //   spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end)
+    let spawn_requests: Rc<RefCell<Vec<crate::SpawnRequest>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    {
+        let q = spawn_requests.clone();
+        if let Ok(f) = lua.create_function(
+            move |lua, (name, a, b, c): (String, Value, Value, Value)| {
+                let (mut pos, mut cb) = (None, None);
+                for v in [a, b] {
+                    match v {
+                        Value::Nil => {}
+                        Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
+                        other => match crate::math_api::vec3_of(&other) {
+                            Some(p) => pos = Some([p.x, p.y, p.z]),
+                            None => {
+                                return Err(mlua::Error::runtime(
+                                    "spawn(prefab [, pos [, fn]]): pos must be a vec3/node and fn a function",
+                                ))
+                            }
+                        },
+                    }
+                }
+                // Optional 4th arg: a parent node — the spawned subtree
+                // lands under it (still at the world `pos`).
+                let parent = match &c {
+                    Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                    _ => None,
+                };
+                let handle = crate::api::deferred_handle(lua, "spawn", &name)?;
+                q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent });
+                Ok(handle)
+            },
+        ) {
+            let _ = lua.globals().set("spawn", f);
+        }
+    }
+    // `createNode(name [, parentNode] [, fn])` — queue a PLAIN node (Empty
+    // matter, identity transform). The driver creates it after this pass;
+    // the callback receives its handle — combine with `setTerrain`/
+    // `setCelestial`/`setPrimitive`/`setMaterial` to build content from
+    // script (the editor-action construction kit):
+    //   createNode("Oria", function(n) n:setTerrain(2); n.x = 500 end)
+    let create_requests: Rc<RefCell<Vec<crate::CreateRequest>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    {
+        let q = create_requests.clone();
+        if let Ok(f) = lua.create_function(
+            move |lua, (name, a, b): (String, Value, Value)| {
+                let (mut parent, mut cb) = (None, None);
+                for v in [a, b] {
+                    match v {
+                        Value::Nil => {}
+                        Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
+                        Value::Table(t) => match t.raw_get::<Option<u32>>("__id")? {
+                            Some(id) => parent = Some(id),
+                            None => {
+                                return Err(mlua::Error::runtime(
+                                    "createNode(name [, parent] [, fn]): parent must be a node handle",
+                                ))
+                            }
+                        },
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "createNode(name [, parent] [, fn]): bad argument",
+                            ))
+                        }
+                    }
+                }
+                let handle = crate::api::deferred_handle(lua, "createNode", &name)?;
+                q.borrow_mut().push(crate::CreateRequest { name, parent, cb });
+                Ok(handle)
+            },
+        ) {
+            let _ = lua.globals().set("createNode", f);
+        }
+    }
+    // `destroy(node)` — queue a node (and its whole subtree) for removal.
+    // Also available as `node:destroy()` (installed with the handle API).
+    let destroy_queue: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let q = destroy_queue.clone();
+        if let Ok(f) = lua.create_function(move |_, v: Value| {
+            let eid = match &v {
+                Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                _ => None,
+            };
+            match eid {
+                Some(id) => {
+                    q.borrow_mut().push(id);
+                    Ok(())
+                }
+                None => Err(mlua::Error::runtime("destroy(node): pass a node or node handle")),
+            }
+        }) {
+            let _ = lua.globals().set("destroy", f);
+        }
+    }
+
+    NodeQueueCells {
+        spawn_requests,
+        create_requests,
+        destroy_queue,
+    }
+}
+
 impl ScriptHost {
     pub fn new() -> Self {
         let lua = Lua::new();
@@ -312,442 +2038,21 @@ impl ScriptHost {
         // Lines `print`/`log` were refused this frame past the cap — see
         // `MAX_CONSOLE_LINES_PER_FRAME`; reported as one line at the drain.
         let dropped_lines: Rc<Cell<usize>> = Rc::new(Cell::new(0));
-        // The current script's `(name, line)` taken from the Lua call stack, so a
-        // Console line can jump to where it was logged.
-        let caller = |lua: &Lua| -> Option<(String, u32)> {
-            let d = lua.inspect_stack(1)?;
-            let src = d.source();
-            let name = src.source.as_ref().map(|c| c.trim_start_matches(['@', '=']).to_string())?;
-            Some((name, d.curr_line().max(0) as u32))
-        };
-        // `log("...")` and Lua's stdlib `print(...)` both feed the engine Console.
-        {
-            let sink = logs.clone();
-            let dropped = dropped_lines.clone();
-            if let Ok(log) = lua.create_function(move |lua, msg: String| {
-                // Pushed, not printed. Whoever owns this host mirrors the drained
-                // feed to stderr itself (`Editor::drain_script_logs`), so an
-                // `eprintln!` here put every `log(...)` on the terminal twice
-                // while `print(...)` — which only pushes — appeared once. Two
-                // copies of one line reads as the code having run twice, which
-                // is a bad thing for a logging call to imply.
-                push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
-                Ok(())
-            }) {
-                let _ = lua.globals().set("log", log);
-            }
-        }
-        {
-            let sink = logs.clone();
-            let dropped = dropped_lines.clone();
-            if let Ok(print) = lua.create_function(move |lua, args: Variadic<Value>| {
-                // Deep, Console-ready rendering of any value: nested tables,
-                // node/component/script handles, vec3s — see `pretty_value`.
-                let parts: Vec<String> = args
-                    .iter()
-                    .map(|v| pretty_value(v, 0, &mut Vec::new()))
-                    .collect();
-                let msg = if parts.iter().any(|p| p.contains('\n')) {
-                    parts.join("\n")
-                } else {
-                    parts.join("\t")
-                };
-                // Pushed, not printed — see the note on `log` above.
-                push_capped(&sink, &dropped, ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
-                Ok(())
-            }) {
-                let _ = lua.globals().set("print", print);
-            }
-        }
-        // The `input` global: a table of functions reading this frame's input
-        // snapshot (so games can poll the keyboard/mouse).
-        let input: Rc<RefCell<InputSnapshot>> = Rc::new(RefCell::new(InputSnapshot::default()));
-        // The action layer, shared with the driver: it resolves devices into
-        // this, scripts read named actions out of it.
-        let input_sys: crate::input_api::SharedInput =
-            Rc::new(RefCell::new(floptle_input::InputSystem::default()));
-        let input_domain: crate::input_api::SharedDomain =
-            Rc::new(std::cell::Cell::new(floptle_input::Domain::Frame));
-        // Mouse-lock request channel (drained by the editor each frame). See the field docs.
-        let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
-        // Keys the host keeps for itself, and which of them a script has already
-        // been told about. The driver fills the list — the editor
-        // reserves Play/Pause/Step; a headless test reserves nothing — and the
-        // first poll of a reserved key writes one Console line naming it and what
-        // takes it. A key that is never going to arrive must not be
-        // indistinguishable from a key the player did not press: that is exactly
-        // how a game shipped a bag on Tab and heard about it from a player.
-        let reserved_keys: crate::ReservedKeys = Rc::new(RefCell::new(Vec::new()));
-        let reserved_warned: Rc<RefCell<std::collections::HashSet<String>>> =
-            Rc::new(RefCell::new(std::collections::HashSet::new()));
-        if let Ok(t) = lua.create_table() {
-            // One check behind all three raw pollers, so they cannot disagree
-            // about which keys are reachable.
-            let warn_reserved = {
-                let list = reserved_keys.clone();
-                let warned = reserved_warned.clone();
-                let sink = logs.clone();
-                move |lua: &Lua, name: &str| {
-                    let Some(why) = list
-                        .borrow()
-                        .iter()
-                        .find(|(k, _)| k == name)
-                        .map(|(_, why)| why.clone())
-                    else {
-                        return;
-                    };
-                    if !warned.borrow_mut().insert(name.to_string()) {
-                        return;
-                    }
-                    sink.borrow_mut().push(ScriptLog {
-                        level: LogLevel::Warn,
-                        msg: format!(
-                            "input: \"{name}\" is reserved by the editor for {why}, so this \
-                             script will never see it pressed — bind something else. (Every \
-                             other key reaches a focused Game view, Tab included.)"
-                        ),
-                        source: caller(lua),
-                    });
-                }
-            };
-            let held = input.clone();
-            let wr = warn_reserved.clone();
-            let _ = t.set(
-                "key",
-                lua.create_function(move |lua, name: String| {
-                    let name = name.to_lowercase();
-                    wr(lua, &name);
-                    Ok(held.borrow().keys_down.contains(&name))
-                })
-                .ok(),
-            );
-            let pressed = input.clone();
-            let wr = warn_reserved.clone();
-            let _ = t.set(
-                "pressed",
-                lua.create_function(move |lua, name: String| {
-                    let name = name.to_lowercase();
-                    wr(lua, &name);
-                    Ok(pressed.borrow().keys_pressed.contains(&name))
-                })
-                .ok(),
-            );
-            let released = input.clone();
-            let wr = warn_reserved;
-            let _ = t.set(
-                "released",
-                lua.create_function(move |lua, name: String| {
-                    let name = name.to_lowercase();
-                    wr(lua, &name);
-                    Ok(released.borrow().keys_released.contains(&name))
-                })
-                .ok(),
-            );
-            let ty = input.clone();
-            let _ = t.set(
-                "typed",
-                lua.create_function(move |_, ()| Ok(ty.borrow().typed.clone())).ok(),
-            );
-            let m = input.clone();
-            let _ = t.set(
-                "mouse",
-                lua.create_function(move |_, ()| {
-                    let p = m.borrow().mouse;
-                    Ok((p.0, p.1))
-                })
-                .ok(),
-            );
-            let md = input.clone();
-            let _ = t.set(
-                "mouse_delta",
-                lua.create_function(move |_, ()| {
-                    let d = md.borrow().mouse_delta;
-                    Ok((d.0, d.1))
-                })
-                .ok(),
-            );
-            let sc = input.clone();
-            let _ = t.set(
-                "scroll",
-                lua.create_function(move |_, ()| Ok(sc.borrow().scroll)).ok(),
-            );
-            // The active camera's view angles, captured with the input snapshot.
-            // the way to do camera-relative movement in multiplayer: the aim
-            // rides the input command, so the server + prediction replay see
-            // exactly the angle the player did (a camera node can't replicate
-            // that). nil when the scene has no active camera.
-            let ay = input.clone();
-            let _ = t.set(
-                "aimYaw",
-                lua.create_function(move |_, ()| Ok(ay.borrow().aim.map(|a| a[0]))).ok(),
-            );
-            let ap = input.clone();
-            let _ = t.set(
-                "aimPitch",
-                lua.create_function(move |_, ()| Ok(ap.borrow().aim.map(|a| a[1]))).ok(),
-            );
-            let bd = input.clone();
-            let _ = t.set(
-                "button",
-                lua.create_function(move |_, i: usize| {
-                    Ok(bd.borrow().buttons_down.get(i).copied().unwrap_or(false))
-                })
-                .ok(),
-            );
-            let bp = input.clone();
-            let _ = t.set(
-                "clicked",
-                lua.create_function(move |_, i: usize| {
-                    Ok(bp.borrow().buttons_pressed.get(i).copied().unwrap_or(false))
-                })
-                .ok(),
-            );
-            // A convenience -1..1 axis from a negative/positive key pair.
-            let ax = input.clone();
-            let _ = t.set(
-                "axis",
-                lua.create_function(move |_, (neg, pos): (String, String)| {
-                    let d = ax.borrow();
-                    let mut v = 0.0f32;
-                    if d.keys_down.contains(&neg.to_lowercase()) {
-                        v -= 1.0;
-                    }
-                    if d.keys_down.contains(&pos.to_lowercase()) {
-                        v += 1.0;
-                    }
-                    Ok(v)
-                })
-                .ok(),
-            );
-            // Mouse capture: lock the cursor to the window and hide it (for FPS / free-look
-            // mouselook without holding a button), or release it back to the desktop.
-            let ml_lock = mouse_lock.clone();
-            let _ = t.set(
-                "lockMouse",
-                lua.create_function(move |_, ()| {
-                    *ml_lock.borrow_mut() = Some(true);
-                    Ok(())
-                })
-                .ok(),
-            );
-            let ml_unlock = mouse_lock.clone();
-            let _ = t.set(
-                "unlockMouse",
-                lua.create_function(move |_, ()| {
-                    *ml_unlock.borrow_mut() = Some(false);
-                    Ok(())
-                })
-                .ok(),
-            );
-            // Explicit form: `input.setMouseLocked(true/false)`.
-            let ml_set = mouse_lock.clone();
-            let _ = t.set(
-                "setMouseLocked",
-                lua.create_function(move |_, locked: bool| {
-                    *ml_set.borrow_mut() = Some(locked);
-                    Ok(())
-                })
-                .ok(),
-            );
-            // The ACTION layer sits on the same table, so a project can migrate
-            // one call at a time: `input.key("w")` and `input.action("Jump")`
-            // coexist for as long as a game wants them to.
-            crate::input_api::install(&lua, &t, &input_sys, &input_domain);
-            let _ = lua.globals().set("input", t);
-        }
-        // The `net.*` bridge state — created early so the raycast closure can
-        // read the current-instance marker (self-hit exclusion) and `net.rewind`
-        // can re-pose the hulls (the API itself installs further down).
-        let net = crate::net_api::SharedNet::new(logs.clone());
-
-        // `raycast(ox,oy,oz, dx,dy,dz, max)` against the world's colliders (terrain +
-        // mesh + static primitives) and every dynamic body's hull (players, crates):
-        // returns a hit table {x,y,z, nx,ny,nz, distance, node} or nil — `node` is the
-        // hit body's node handle (nil for static geometry), so combat code can do
-        // `hit.node:getscript("combat")`. The caster's own body is excluded (a ray from
-        // your center must not hit you). Use it for ground checks, line-of-sight,
-        // shooting. Scripts speak world coordinates; the sim runs origin-relative
-        // (ADR-0015), so convert in f64 on the way in and out.
-        let colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        let hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        let sim_origin: Rc<RefCell<glam::DVec3>> = Rc::new(RefCell::new(glam::DVec3::ZERO));
-        // The project's layer table (names → bits + collision matrix), lent by
-        // the driver at Play start — shared with the raycast closure (named
-        // layer filters) and the node handles (`node.layer` validation).
-        let layer_table: Rc<RefCell<floptle_core::Layers>> =
-            Rc::new(RefCell::new(floptle_core::Layers::default()));
-        {
-            let cols = colliders.clone();
-            let hus = hulls.clone();
-            let so = sim_origin.clone();
-            let cur = net.current.clone();
-            let lt = layer_table.clone();
-            if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
-                // Two spellings, one ray: the vector form
-                // `raycast(origin, dir, max [, ignore])` — origin may be a node
-                // handle — and the original six-number form. The docs have
-                // taught the vector one since 0.17; it only became true here.
-                let a: Vec<Value> = args.into_iter().collect();
-                let num = |v: Option<&Value>| -> Option<f64> {
-                    match v {
-                        Some(Value::Number(n)) => Some(*n),
-                        Some(Value::Integer(i)) => Some(*i as f64),
-                        _ => None,
-                    }
-                };
-                // Which spelling this is, asked as "is the first argument a
-                // vector" rather than "is it one of these two Value variants".
-                // The variant test was right until a vec3 could also be the
-                // VM's own `vector` (ADR-0028 Phase 3) — a native one matched
-                // neither arm, fell through to the six-number form and failed
-                // there, which is how `raycast(node.pos, vec3(0,-1,0), n)`
-                // stopped working the moment a project chose `fast`. Asking
-                // the shared reader means the next backing needs no edit here.
-                let (ox, oy, oz, dx, dy, dz, max, ignore) = if a.len() >= 3
-                    && crate::math_api::vec3_of(&a[0]).is_some()
-                {
-                    let (Some(o), Some(d)) = (
-                        crate::math_api::vec3_of(&a[0]),
-                        crate::math_api::vec3_of(&a[1]),
-                    ) else {
-                        return Err(mlua::Error::RuntimeError(
-                            "raycast(origin, dir, max [, ignore]) — origin and dir are vec3s \
-                             (or a node, or anything with x/y/z)"
-                                .into(),
-                        ));
-                    };
-                    let Some(max) = num(a.get(2)) else {
-                        return Err(mlua::Error::RuntimeError(
-                            "raycast(origin, dir, max) — max is a distance in metres".into(),
-                        ));
-                    };
-                    (o.x, o.y, o.z, d.x, d.y, d.z, max, a.get(3).cloned())
-                } else {
-                    let n: Vec<f64> = a.iter().take(7).map(|v| num(Some(v)).unwrap_or(f64::NAN)).collect();
-                    if n.len() < 7 || n.iter().any(|v| v.is_nan()) {
-                        return Err(mlua::Error::RuntimeError(
-                            "raycast(origin, dir, max [, ignore]) or \
-                             raycast(ox,oy,oz, dx,dy,dz, max [, ignore])"
-                                .into(),
-                        ));
-                    }
-                    (n[0], n[1], n[2], n[3], n[4], n[5], n[6], a.get(7).cloned())
-                };
-                let origin = *so.borrow();
-                let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
-                let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
-                // Bodies the ray passes through: the caster's own, plus an
-                // optional explicit ignore (a node handle or entity id) — e.g.
-                // an orbit camera skipping the character it follows. The 8th
-                // arg is either that ignore directly, or an OPTIONS table:
-                // `{ ignore = node, layers = "Ground" | {"Ground", "Props"} }`
-                // — `layers` filters both static geometry and body hulls by
-                // the project's named layers (a misspelled name is an error,
-                // not a silent everything-misses).
-                let mut exclude: Vec<u32> = Vec::with_capacity(2);
-                let mut mask = !0u32;
-                if let Some((eid, _)) = cur.borrow().as_ref() {
-                    exclude.push(*eid);
-                }
-                match &ignore {
-                    Some(Value::Table(t)) => {
-                        if let Ok(eid) = t.raw_get::<u32>("__id") {
-                            exclude.push(eid);
-                        } else {
-                            // No __id → an options table. Checked against the
-                            // same list `shape_api`'s queries use, because this
-                            // is a second copy of that parsing and the two lists
-                            // drifting is how `layers` ends up honoured by one
-                            // and ignored by the other.
-                            crate::opts::check_keys(
-                                t,
-                                crate::shape_api::QUERY_KEYS,
-                                "raycast",
-                            )?;
-                            if let Ok(ig) = t.get::<Table>("ignore")
-                                && let Ok(eid) = ig.raw_get::<u32>("__id")
-                            {
-                                exclude.push(eid);
-                            }
-                            let names: Vec<String> = match t.get::<Value>("layers") {
-                                Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
-                                Ok(Value::Table(list)) => {
-                                    list.sequence_values::<String>().flatten().collect()
-                                }
-                                _ => Vec::new(),
-                            };
-                            if !names.is_empty() {
-                                let lt = lt.borrow();
-                                mask = 0;
-                                for n in &names {
-                                    match lt.index_of(n) {
-                                        Some(i) => mask |= 1u32 << i,
-                                        None => {
-                                            return Err(mlua::Error::RuntimeError(format!(
-                                                "raycast: no layer named '{n}' (project layers: {})",
-                                                lt.names.join(", ")
-                                            )))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Value::Integer(id)) => exclude.push(*id as u32),
-                    Some(Value::Number(id)) => exclude.push(*id as u32),
-                    _ => {}
-                }
-                let solid =
-                    floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32, mask);
-                let body = floptle_physics::raycast_hulls(
-                    &hus.borrow(),
-                    o,
-                    dir,
-                    max as f32,
-                    &exclude,
-                    mask,
-                );
-                // Nearest surface wins between static geometry and body hulls.
-                //
-                // **`hit.node` is answered for both.** It used to be set only
-                // for a body hull, so a ray down at the floor of a level came
-                // back with no node at all while `spherecast` — documented as
-                // returning the same fields — named the map mesh. The march had
-                // the collider in hand the whole time; the field was dropped,
-                // not unavailable, and reading the docs it looked like the
-                // engine could not tell you.
-                let h = match (solid, body) {
-                    (Some(s), Some((_, b))) if b.distance < s.distance => b,
-                    (Some(s), _) => s,
-                    (None, Some((_, b))) => b,
-                    (None, None) => return Ok(Value::Nil),
-                };
-                // Built by the same function every shape query uses, so the two
-                // cannot drift apart again.
-                Ok(Value::Table(crate::shape_api::hit_table(
-                    lua, h.point, h.normal, h.distance, h.eid, origin,
-                )?))
-            }) {
-                let _ = lua.globals().set("raycast", f);
-            }
-        }
-
-        // Shape queries — the volume half of the same question `raycast` asks,
-        // sharing its collider/hull loans (so they are rewound inside
-        // `net.rewind` for free) and its options table (roadmap B2).
-        crate::shape_api::install_shape_api(
-            &lua,
-            crate::shape_api::QueryShared {
-                colliders: colliders.clone(),
-                hulls: hulls.clone(),
-                sim_origin: sim_origin.clone(),
-                current: net.current.clone(),
-                layers: layer_table.clone(),
-            },
-        );
-
+        install_console(&lua, &logs, &dropped_lines);
+        let InputCells {
+            input,
+            input_sys,
+            input_domain,
+            mouse_lock,
+            reserved_keys,
+        } = install_input(&lua, &logs);
+        let WorldQueryCells {
+            net,
+            colliders,
+            hulls,
+            sim_origin,
+            layer_table,
+        } = install_world_queries(&lua, &logs);
         // `water.*` — the volume half of an earlier task. The engine floats
         // things; a game still decides what being wet means, and every one of
         // those decisions is the same question with a different answer.
@@ -773,1153 +2078,38 @@ impl ScriptHost {
             logs.clone(),
         );
 
-        // `gizmo.*` — immediate-mode debug drawing: world-space lines, rays, spheres
-        // and points that show for one frame in the Scene view (never the Game view;
-        // the viewport's gizmo toggle hides them). Colors are optional 0–1 floats.
-        // Per-frame command count is capped so a runaway loop can't flood the renderer.
-        let gizmos: Rc<RefCell<Vec<GizmoCmd>>> = Rc::new(RefCell::new(Vec::new()));
-        const GIZMO_CAP: usize = 4096;
-        if let Ok(t) = lua.create_table() {
-            let q = gizmos.clone();
-            let _ = t.set(
-                "line",
-                lua.create_function(move |_, (x1, y1, z1, x2, y2, z2, r, g, b): GizmoLineArgs| {
-                    let mut q = q.borrow_mut();
-                    if q.len() < GIZMO_CAP {
-                        q.push(GizmoCmd::Line {
-                            a: [x1 as f32, y1 as f32, z1 as f32],
-                            b: [x2 as f32, y2 as f32, z2 as f32],
-                            color: gizmo_color(r, g, b),
-                        });
-                    }
-                    Ok(())
-                })
-                .ok(),
-            );
-            let q = gizmos.clone();
-            let _ = t.set(
-                "ray",
-                lua.create_function(move |_, (ox, oy, oz, dx, dy, dz, len, r, g, b): GizmoRayArgs| {
-                    let mut q = q.borrow_mut();
-                    if q.len() < GIZMO_CAP {
-                        let d = glam::DVec3::new(dx, dy, dz);
-                        // With a length the direction is normalized (matches raycast);
-                        // without one the vector is the ray.
-                        let end = match len {
-                            Some(l) if d.length_squared() > 1e-12 => {
-                                glam::DVec3::new(ox, oy, oz) + d.normalize() * l
-                            }
-                            _ => glam::DVec3::new(ox + dx, oy + dy, oz + dz),
-                        };
-                        q.push(GizmoCmd::Line {
-                            a: [ox as f32, oy as f32, oz as f32],
-                            b: [end.x as f32, end.y as f32, end.z as f32],
-                            color: gizmo_color(r, g, b),
-                        });
-                    }
-                    Ok(())
-                })
-                .ok(),
-            );
-            let q = gizmos.clone();
-            let _ = t.set(
-                "sphere",
-                lua.create_function(move |_, (x, y, z, radius, r, g, b): GizmoBallArgs| {
-                    let mut q = q.borrow_mut();
-                    if q.len() < GIZMO_CAP {
-                        q.push(GizmoCmd::Sphere {
-                            center: [x as f32, y as f32, z as f32],
-                            radius: radius.unwrap_or(0.5).max(0.001) as f32,
-                            color: gizmo_color(r, g, b),
-                        });
-                    }
-                    Ok(())
-                })
-                .ok(),
-            );
-            let q = gizmos.clone();
-            let _ = t.set(
-                "point",
-                lua.create_function(move |_, (x, y, z, size, r, g, b): GizmoBallArgs| {
-                    let mut q = q.borrow_mut();
-                    if q.len() < GIZMO_CAP {
-                        q.push(GizmoCmd::Point {
-                            pos: [x as f32, y as f32, z as f32],
-                            size: size.unwrap_or(0.25).max(0.001) as f32,
-                            color: gizmo_color(r, g, b),
-                        });
-                    }
-                    Ok(())
-                })
-                .ok(),
-            );
-            let _ = lua.globals().set("gizmo", t);
-        }
-
-        // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
-        // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
-        // getFile returns the full asset path (or nil if missing); getContents returns an
-        // array of every file's path under a directory (recursive), for building tables of
-        // assets. The returned strings are exactly what `node.model` / `node.material` accept.
-        //
-        // **Both stay inside the project.** The path is relative to the project
-        // root or it is nothing: an absolute path or a `..` answers `nil` / an
-        // empty list and one Console line naming the rule. A game runs on a
-        // machine that is not the developer's, and "list everything under
-        // `../../..`" is not a question about its assets.
-        let project_root: Rc<RefCell<PathBuf>> = Rc::new(RefCell::new(PathBuf::from("assets")));
-        if let Ok(t) = lua.create_table() {
-            let pr = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "getFile",
-                lua.create_function(move |lua, path: String| {
-                    let Some(full) = floptle_vfs::contain(&pr.borrow(), &path) else {
-                        refuse_outside(&sink, "assets.getFile", &path);
-                        return Ok(Value::Nil);
-                    };
-                    Ok(if floptle_vfs::is_file(&full) {
-                        Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
-                    } else {
-                        Value::Nil
-                    })
-                })
-                .ok(),
-            );
-            let pr2 = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "getContents",
-                lua.create_function(move |lua, dir: String| {
-                    let arr = lua.create_table()?;
-                    let Some(base) = floptle_vfs::contain(&pr2.borrow(), &dir) else {
-                        refuse_outside(&sink, "assets.getContents", &dir);
-                        return Ok(arr);
-                    };
-                    let (files, stopped) = list_files_under(&base);
-                    if stopped {
-                        sink.borrow_mut().push(ScriptLog {
-                            level: LogLevel::Warn,
-                            msg: format!(
-                                "assets.getContents(\"{dir}\"): stopped at {MAX_LISTED_FILES} \
-                                 files — narrow the folder"
-                            ),
-                            source: None,
-                        });
-                    }
-                    for (i, f) in files.iter().enumerate() {
-                        arr.set(i + 1, lua.create_string(f.as_bytes())?)?;
-                    }
-                    Ok(arr)
-                })
-                .ok(),
-            );
-            // `assets.readText` / `writeText` / `readJson` / `writeJson`: a
-            // script's own data files. `getFile` answers a path, which is what
-            // a model or a material wants, and nothing a script can open — so
-            // a rhythm chart, a dialogue tree or a level table had to be
-            // written as a Lua table or pushed through `save.*` one 1 KB value
-            // at a time. These read and write the file itself, contained to
-            // the project the same way `getFile` is, so a chart editor built
-            // in the game writes straight into `assets/` and the level it
-            // wrote is a file the Asset Browser shows.
-            //
-            // Every one answers `value, err` rather than raising: a data file
-            // is content, and a missing or mangled one is a message in the
-            // Console, not a script that stops loading. They go through
-            // `floptle_vfs`, so the same script reads from the bundle in a
-            // browser and its writes land in the page's overlay.
-            let pr = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "readText",
-                lua.create_function(move |lua, path: String| {
-                    match read_project_text(&pr.borrow(), &path, "assets.readText") {
-                        Ok(text) => Ok((Value::String(lua.create_string(text.as_bytes())?), Value::Nil)),
-                        Err(why) => {
-                            refuse_read(&sink, &why);
-                            Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
-                        }
-                    }
-                })
-                .ok(),
-            );
-            let pr = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "readJson",
-                lua.create_function(move |lua, path: String| {
-                    let text = match read_project_text(&pr.borrow(), &path, "assets.readJson") {
-                        Ok(text) => text,
-                        Err(why) => {
-                            refuse_read(&sink, &why);
-                            return Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)));
-                        }
-                    };
-                    match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(v) => Ok((crate::http_api::json_to_lua(lua, &v)?, Value::Nil)),
-                        Err(e) => {
-                            let why = format!("assets.readJson(\"{path}\"): not valid JSON — {e}");
-                            refuse_read(&sink, &why);
-                            Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
-                        }
-                    }
-                })
-                .ok(),
-            );
-            let pr = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "writeText",
-                lua.create_function(move |lua, (path, text): (String, mlua::String)| {
-                    match write_project_bytes(&pr.borrow(), &path, &text.as_bytes(), "assets.writeText") {
-                        Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
-                        Err(why) => {
-                            refuse_read(&sink, &why);
-                            Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
-                        }
-                    }
-                })
-                .ok(),
-            );
-            let pr = project_root.clone();
-            let sink = logs.clone();
-            let _ = t.set(
-                "writeJson",
-                lua.create_function(move |lua, (path, value, opts): (String, Value, Option<Table>)| {
-                    // `{ pretty = true }` writes it indented — a chart a person
-                    // will open in a text editor, or diff in git, wants that.
-                    let pretty = match &opts {
-                        Some(o) => {
-                            crate::opts::check_keys(o, &["pretty"], "assets.writeJson")?;
-                            crate::opts::opt_bool(o, "assets.writeJson", "pretty")?.unwrap_or(false)
-                        }
-                        None => false,
-                    };
-                    // A table that cannot be JSON (nests forever, a mis-tagged
-                    // list) is a bug in the script and raises, exactly as
-                    // `json.encode` would.
-                    let j = crate::http_api::lua_to_json(&value)?;
-                    let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
-                        .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
-                    match write_project_bytes(&pr.borrow(), &path, text.as_bytes(), "assets.writeJson") {
-                        Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
-                        Err(why) => {
-                            refuse_read(&sink, &why);
-                            Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
-                        }
-                    }
-                })
-                .ok(),
-            );
-            let _ = lua.globals().set("assets", t);
-        }
-
-        // `scene.*` — scene management: `scene.load(name)` queues a transition
-        // the engine performs between frames (in multiplayer only the server
-        // may switch — clients follow automatically); `scene.current()` is the
-        // running scene's name; `scene.list()` enumerates the project's scenes.
-        let scene_request: crate::SceneQueue = Rc::new(RefCell::new(Vec::new()));
-        let scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        let scene_name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        if let Ok(t) = lua.create_table() {
-            let q = scene_request.clone();
-            let _ = t.set(
-                "load",
-                lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
-                    // `{ additive = true }` layers the scene on top of the
-                    // running one instead of replacing it.
-                    //
-                    // This used to ignore anything else in the table, on the
-                    // reasoning that the option set could then grow without
-                    // breaking a script that passed one. That reasoning was
-                    // wrong in the one direction that matters: a typo'd
-                    // `addative = true` reads as `additive = false`, which
-                    // DESTROYS the running scene instead of layering onto it.
-                    // Every node it held is gone, the request queue is cleared,
-                    // and nothing anywhere mentions a key.
-                    //
-                    // `{ environment = true }` additionally hands the world's
-                    // environment to the layer: its sun, fog, skybox and post
-                    // chain replace the base scene's for as long as it is
-                    // loaded. Meaningless without `additive` (a full swap
-                    // already brings its own), so it is read alongside it.
-                    let (additive, environment) = match &opts {
-                        Some(o) => {
-                            crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
-                            (
-                                crate::opts::opt_bool(o, "scene.load", "additive")?
-                                    .unwrap_or(false),
-                                crate::opts::opt_bool(o, "scene.load", "environment")?
-                                    .unwrap_or(false),
-                            )
-                        }
-                        None => (false, false),
-                    };
-                    let req = if additive {
-                        crate::SceneRequest::Additive { name, environment }
-                    } else {
-                        crate::SceneRequest::Load { name }
-                    };
-                    let mut q = q.borrow_mut();
-                    // A full swap ends the frame's queue: everything already
-                    // asked for named the world that is about to stop existing.
-                    if req.is_swap() {
-                        q.clear();
-                    }
-                    q.push(req);
-                    Ok(())
-                })
-                .ok(),
-            );
-            let q = scene_request.clone();
-            let _ = t.set(
-                "unload",
-                lua.create_function(move |_, name: String| {
-                    q.borrow_mut().push(crate::SceneRequest::Unload { name });
-                    Ok(())
-                })
-                .ok(),
-            );
-            let subs = scene_loaded.clone();
-            let cur = net.current.clone();
-            let _ = t.set(
-                "onLoaded",
-                lua.create_function(move |lua, f: mlua::Function| {
-                    let owner = cur.borrow().as_ref().map(|(e, _)| *e).unwrap_or(0);
-                    match lua.create_registry_value(f) {
-                        Ok(k) => subs.borrow_mut().push((owner, k)),
-                        Err(e) => return Err(e),
-                    }
-                    Ok(())
-                })
-                .ok(),
-            );
-            let sn = scene_name.clone();
-            let _ = t.set(
-                "current",
-                lua.create_function(move |lua, ()| {
-                    lua.create_string(sn.borrow().as_bytes())
-                })
-                .ok(),
-            );
-            let pr = project_root.clone();
-            let _ = t.set(
-                "list",
-                lua.create_function(move |lua, ()| {
-                    // Scene names relative to `scenes/`, extension dropped,
-                    // subfolders kept ("arenas/desert") — exactly what
-                    // `scene.load` accepts.
-                    let base = pr.borrow().join("scenes");
-                    let mut names: Vec<String> = Vec::new();
-                    let mut stack = vec![base.clone()];
-                    while let Some(d) = stack.pop() {
-                        if let Ok(rd) = floptle_vfs::read_dir(&d) {
-                            for entry in rd {
-                                let p = entry.path();
-                                if entry.is_dir() {
-                                    stack.push(p);
-                                } else if p.extension().is_some_and(|x| x == "ron")
-                                    && let Ok(rel) = p.strip_prefix(&base)
-                                {
-                                    let mut s = rel.to_string_lossy().replace('\\', "/");
-                                    s.truncate(s.len().saturating_sub(4));
-                                    names.push(s);
-                                }
-                            }
-                        }
-                    }
-                    names.sort();
-                    let arr = lua.create_table()?;
-                    for (i, n) in names.iter().enumerate() {
-                        arr.set(i + 1, lua.create_string(n.as_bytes())?)?;
-                    }
-                    Ok(arr)
-                })
-                .ok(),
-            );
-            let _ = lua.globals().set("scene", t);
-        }
-
-        // `ui.*` — the game-UI runtime surface. Focus is engine state rather
-        // than a component (a hover that survived into a saved scene would be a
-        // bug), so it travels through its own channels instead of the mirror.
-        let ui_focus: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
-        let ui_focus_request: Rc<RefCell<Option<Option<u32>>>> = Rc::new(RefCell::new(None));
-        // (drag source, drop target under it) — live for the whole drag and
-        // for the frame the `dropped` hooks run on, which is the frame that
-        // actually needs to read it.
-        let ui_drag: crate::UiDragCell = Rc::new(RefCell::new(None));
-        let ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>> = Rc::new(RefCell::new(Vec::new()));
-        let ui_makes: crate::UiMakes = Rc::new(RefCell::new(Vec::new()));
-        let ui_handlers: crate::UiHandlers = Rc::new(RefCell::new(HashMap::new()));
-        let ui_listeners: crate::UiListeners = Rc::new(RefCell::new(Vec::new()));
-        let ui_listener_checks: Rc<RefCell<Vec<(u32, String)>>> = Rc::new(RefCell::new(Vec::new()));
-        let ui_frame_events: crate::UiFrameEvents = Rc::new(RefCell::new(Vec::new()));
-        let ui_hover: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
-        let ui_active: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
-        if let Ok(t) = lua.create_table() {
-            let req = ui_focus_request.clone();
-            let cur = ui_focus.clone();
-            let _ = t.set(
-                "focus",
-                lua.create_function(move |_, node: mlua::Value| {
-                    // `ui.focus(node)` moves the ring; `ui.focus(nil)` drops it
-                    // (a screen that wants nothing focused until the player
-                    // touches something).
-                    let want = match &node {
-                        mlua::Value::Nil => None,
-                        v => Some(crate::env::node_id_of(v).ok_or_else(|| {
-                            mlua::Error::runtime("ui.focus expects a node or nil")
-                        })?),
-                    };
-                    // Read-your-writes within the frame, same as `node.style`.
-                    *cur.borrow_mut() = want;
-                    *req.borrow_mut() = Some(want);
-                    Ok(())
-                })
-                .ok(),
-            );
-            let cur = ui_focus.clone();
-            let _ = t.set(
-                "focused",
-                // `ui.focused()` = which element; `ui.focused(el)` = is it that
-                // one. Same shape as `ui.hovered` / `ui.held`, so the three
-                // states a screen asks about answer the same way.
-                lua.create_function(move |lua, node: Option<mlua::Value>| {
-                    let f = *cur.borrow();
-                    match node.as_ref().and_then(crate::env::node_id_of) {
-                        Some(e) => Ok(mlua::Value::Boolean(f == Some(e))),
-                        None => match f {
-                            Some(id) => {
-                                crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
-                            }
-                            None => Ok(mlua::Value::Nil),
-                        },
-                    }
-                })
-                .ok(),
-            );
-            // The drag in flight. There is no separate payload channel on
-            // purpose: the source is a node, and a node already carries params,
-            // a name, tags and its own scripts — everything an inventory row
-            // needs to say what it is. A second data path would only be a
-            // second thing to keep in sync.
-            let d = ui_drag.clone();
-            let _ = t.set(
-                "dragging",
-                lua.create_function(move |lua, ()| match d.borrow().map(|(s, _)| s) {
-                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
-                    None => Ok(mlua::Value::Nil),
-                })
-                .ok(),
-            );
-            let d = ui_drag.clone();
-            let _ = t.set(
-                "dropTarget",
-                lua.create_function(move |lua, ()| match d.borrow().and_then(|(_, t)| t) {
-                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
-                    None => Ok(mlua::Value::Nil),
-                })
-                .ok(),
-            );
-            // `ui.bind(node, prop, fn)` — say the relationship once instead of
-            // writing an `update` that keeps it true. The engine calls `fn`
-            // once a frame and writes what comes back; a binding on a node
-            // that goes away goes away with it.
-            let binds = ui_bindings.clone();
-            let _ = t.set(
-                "bind",
-                lua.create_function(
-                    move |lua, (node, prop, f): (mlua::Value, String, mlua::Function)| {
-                        let e = crate::env::node_id_of(&node).ok_or_else(|| {
-                            mlua::Error::runtime("ui.bind expects (node, property, function)")
-                        })?;
-                        let key = lua.create_registry_value(f)?;
-                        let mut b = binds.borrow_mut();
-                        // Re-binding the same property replaces rather than
-                        // stacks: two functions fighting over one label every
-                        // frame is never what was meant.
-                        b.retain(|x| !(x.e == e && x.prop == prop));
-                        b.push(crate::UiBinding { e, prop, f: key });
-                        Ok(())
-                    },
-                )
-                .ok(),
-            );
-            let binds = ui_bindings.clone();
-            let _ = t.set(
-                "unbind",
-                lua.create_function(move |_, (node, prop): (mlua::Value, Option<String>)| {
-                    let e = crate::env::node_id_of(&node)
-                        .ok_or_else(|| mlua::Error::runtime("ui.unbind expects a node"))?;
-                    binds
-                        .borrow_mut()
-                        .retain(|x| x.e != e || prop.as_ref().is_some_and(|p| *p != x.prop));
-                    Ok(())
-                })
-                .ok(),
-            );
-            // `ui.make(container, tree)` — a screen described as data, and
-            // reconciled against the one already there. The counterpart to
-            // `ui.bind`: bind keeps a value true, make keeps a TREE true.
-            let makes = ui_makes.clone();
-            let _ = t.set(
-                "make",
-                lua.create_function(move |lua, (node, tree): (mlua::Value, mlua::Value)| {
-                    let container = crate::env::node_id_of(&node).ok_or_else(|| {
-                        mlua::Error::runtime("ui.make expects (node, table)")
-                    })?;
-                    // Parsing raises rather than logs: a mistyped property is a
-                    // mistake in the description, and a screen that quietly
-                    // builds without it is harder to debug than one that stops
-                    // with a line number.
-                    let (roots, hooks) = crate::ui_make::parse_tree(lua, &tree)?;
-                    makes.borrow_mut().push(crate::ui_make::MakeRequest {
-                        container,
-                        roots,
-                        hooks,
-                    });
-                    Ok(())
-                })
-                .ok(),
-            );
-            // `ui.on(element, hook, fn)` — listen to an element from a script
-            // that does not live on it.
-            //
-            // A `clicked` function in a script file answers for the node that
-            // script is on, which means one script file per button: eight
-            // three-line files whose only real content is "tell the menu".
-            // A listener puts all eight in the menu's own script, where the
-            // state they change already lives.
-            let listeners = ui_listeners.clone();
-            let checks = ui_listener_checks.clone();
-            let n = net.clone();
-            let _ = t.set(
-                "on",
-                lua.create_function(
-                    move |lua, (node, hook, f): (mlua::Value, String, mlua::Function)| {
-                        let e = crate::env::node_id_of(&node).ok_or_else(|| {
-                            mlua::Error::runtime("ui.on expects (element, hook, function)")
-                        })?;
-                        // A mistyped hook is the failure mode here — the
-                        // listener registers, nothing ever calls it, and there
-                        // is nothing to see. Naming the hooks is cheap.
-                        if !crate::ui_make::HOOKS.contains(&hook.as_str()) {
-                            return Err(mlua::Error::runtime(format!(
-                                "ui.on: \"{hook}\" is not a UI hook (one of: {})",
-                                crate::ui_make::HOOKS.join(", ")
-                            )));
-                        }
-                        // Registered outside a script (a bare `ui.on` in a made
-                        // element's closure, say) — still legal, but it belongs
-                        // to nobody, so nothing reloads or destroys it early.
-                        let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
-                        let key = lua.create_registry_value(f)?;
-                        let mut ls = listeners.borrow_mut();
-                        // Same owner, same element, same hook REPLACES — like
-                        // `ui.bind`. That makes `ui.on` safe to call from
-                        // `update`, and makes the classic mistake (registering
-                        // every frame) cost one closure instead of thousands.
-                        if let Some(old) = ls
-                            .iter_mut()
-                            .find(|l| l.e == e && l.hook == hook && l.owner == owner)
-                        {
-                            let stale = std::mem::replace(&mut old.f, key);
-                            let _ = lua.remove_registry_value(stale);
-                            return Ok(());
-                        }
-                        checks.borrow_mut().push((e, hook.clone()));
-                        ls.push(crate::UiListener { e, hook, owner, f: key });
-                        Ok(())
-                    },
-                )
-                .ok(),
-            );
-            // `ui.off(element)` / `ui.off(element, hook)` — stop listening.
-            // Only the CALLER's listeners go: two managers on one element must
-            // not be able to unregister each other.
-            let listeners = ui_listeners.clone();
-            let n = net.clone();
-            let _ = t.set(
-                "off",
-                lua.create_function(move |_, (node, hook): (mlua::Value, Option<String>)| {
-                    let e = crate::env::node_id_of(&node)
-                        .ok_or_else(|| mlua::Error::runtime("ui.off expects an element"))?;
-                    let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
-                    listeners.borrow_mut().retain(|l| {
-                        !(l.e == e
-                            && l.owner == owner
-                            && hook.as_ref().is_none_or(|h| *h == l.hook))
-                    });
-                    Ok(())
-                })
-                .ok(),
-            );
-            // The other half: asking, instead of being called back. Both read
-            // the same list of events the hooks fire from, published before the
-            // scripts run — so a poll in `update` and a `clicked` hook can
-            // never disagree about what happened this frame.
-            let ev = ui_frame_events.clone();
-            let _ = t.set(
-                "event",
-                lua.create_function(move |_, (node, hook): (mlua::Value, String)| {
-                    let Some(e) = crate::env::node_id_of(&node) else {
-                        return Ok(false);
-                    };
-                    Ok(ev.borrow().iter().any(|(x, h)| *x == e && *h == hook))
-                })
-                .ok(),
-            );
-            for (name, hook) in [
-                ("clicked", "clicked"),
-                ("pressed", "pressed"),
-                ("released", "released"),
-                ("changed", "changed"),
-                ("submitted", "submitted"),
-            ] {
-                let ev = ui_frame_events.clone();
-                let _ = t.set(
-                    name,
-                    lua.create_function(move |_, node: mlua::Value| {
-                        let Some(e) = crate::env::node_id_of(&node) else {
-                            return Ok(false);
-                        };
-                        Ok(ev.borrow().iter().any(|(x, h)| *x == e && h == hook))
-                    })
-                    .ok(),
-                );
-            }
-            // `ui.events()` — everything that happened this frame, so a manager
-            // can handle a whole screen without naming a single element:
-            // `for _, ev in ipairs(ui.events("clicked")) do ... end`.
-            let ev = ui_frame_events.clone();
-            let _ = t.set(
-                "events",
-                lua.create_function(move |lua, hook: Option<String>| {
-                    let out = lua.create_table()?;
-                    let mut i = 1;
-                    for (e, h) in ev.borrow().iter() {
-                        if hook.as_ref().is_some_and(|w| w != h) {
-                            continue;
-                        }
-                        let row = lua.create_table()?;
-                        row.set("node", crate::env::new_node_handle(lua, *e)?)?;
-                        row.set("event", h.as_str())?;
-                        out.set(i, row)?;
-                        i += 1;
-                    }
-                    Ok(out)
-                })
-                .ok(),
-            );
-            // Live states, not events: what the pointer is over, and what it is
-            // holding down. With an element they answer yes/no; with nothing
-            // they answer *which* — the shape `ui.focused()` already has.
-            for (name, cell) in [("hovered", &ui_hover), ("held", &ui_active)] {
-                let c = cell.clone();
-                let _ = t.set(
-                    name,
-                    lua.create_function(move |lua, node: Option<mlua::Value>| {
-                        let cur = *c.borrow();
-                        match node.as_ref().and_then(crate::env::node_id_of) {
-                            Some(e) => Ok(mlua::Value::Boolean(cur == Some(e))),
-                            None => match cur {
-                                Some(id) => {
-                                    crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
-                                }
-                                None => Ok(mlua::Value::Nil),
-                            },
-                        }
-                    })
-                    .ok(),
-                );
-            }
-            let _ = lua.globals().set("ui", t);
-        }
-
-        // `spawnEffect(key, x, y, z [, vx, vy, vz])` — fire a one-shot particle effect at
-        // a world point, no node required. The editor spawns a detached instance that
-        // plays once and auto-despawns (the fire-and-forget path for hits, pickups,
-        // poofs). The optional velocity is the emitter's world velocity: inherit-velocity
-        // tracks (smoke/dust off a fast vessel) ride it so they aren't stranded in space.
-        let spawn_effects: Rc<RefCell<Vec<crate::SpawnedEffect>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        {
-            let q = spawn_effects.clone();
-            type Args = (String, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
-            if let Ok(f) = lua.create_function(move |_, (key, x, y, z, vx, vy, vz): Args| {
-                q.borrow_mut().push((
-                    key,
-                    [x, y, z],
-                    [vx.unwrap_or(0.0), vy.unwrap_or(0.0), vz.unwrap_or(0.0)],
-                ));
-                Ok(())
-            }) {
-                let _ = lua.globals().set("spawnEffect", f);
-            }
-        }
-
-        // `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a])` — queue one world-space
-        // 3D line segment for this tick. Immediate mode: segments live for one
-        // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
-        // screen draws its orbit conics this way). Depth-tested in the scene.
-        let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
-        let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
-        let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
-        let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
-        {
-            let q = draw_lines.clone();
-            if let (Ok(f), Ok(t)) = (
-                lua.create_function(
-                    move |_,
-                          (x1, y1, z1, x2, y2, z2, r, g, b, a): (
-                        f64,
-                        f64,
-                        f64,
-                        f64,
-                        f64,
-                        f64,
-                        f32,
-                        f32,
-                        f32,
-                        Option<f32>,
-                    )| {
-                        q.borrow_mut().push(crate::DrawLine {
-                            a: [x1, y1, z1],
-                            b: [x2, y2, z2],
-                            color: [r, g, b, a.unwrap_or(1.0)],
-                        });
-                        Ok(())
-                    },
-                ),
-                lua.create_table(),
-            ) {
-                let _ = t.set("line", f);
-                // `draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a])` — a circle
-                // around `n` at `c`. `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` —
-                // three rings. `draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a])` —
-                // a yaw-rotated wireframe box. All build on the same always-on
-                // line pass: draw.* is the game's visual telegraph layer
-                // (attach markers, selection outlines, range rings), rendered
-                // unconditionally in the game view — unlike `gizmo.*`, the
-                // DEBUG layer the editor's gizmos toggle gates.
-                let ring_segs = |q: &mut Vec<crate::DrawLine>,
-                                 c: glam::DVec3,
-                                 n: glam::DVec3,
-                                 radius: f64,
-                                 color: [f32; 4]| {
-                    let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
-                    let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
-                    let u = (u - n * u.dot(n)).normalize();
-                    let v = n.cross(u);
-                    const N: usize = 28;
-                    let mut prev = c + u * radius;
-                    for k in 1..=N {
-                        let t = k as f64 / N as f64 * std::f64::consts::TAU;
-                        let p = c + u * (radius * t.cos()) + v * (radius * t.sin());
-                        q.push(crate::DrawLine { a: prev.into(), b: p.into(), color });
-                        prev = p;
-                    }
-                };
-                {
-                    let q = draw_lines.clone();
-                    type RingArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_, (cx, cy, cz, nx, ny, nz, radius, r, g, b, a): RingArgs| {
-                            ring_segs(
-                                &mut q.borrow_mut(),
-                                glam::DVec3::new(cx, cy, cz),
-                                glam::DVec3::new(nx, ny, nz),
-                                radius.max(1e-4),
-                                [r, g, b, a.unwrap_or(1.0)],
-                            );
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("ring", f);
-                    }
-                }
-                {
-                    let q = draw_lines.clone();
-                    type BallArgs = (f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_, (cx, cy, cz, radius, r, g, b, a): BallArgs| {
-                            let c = glam::DVec3::new(cx, cy, cz);
-                            let col = [r, g, b, a.unwrap_or(1.0)];
-                            let mut q = q.borrow_mut();
-                            for n in [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z] {
-                                ring_segs(&mut q, c, n, radius.max(1e-4), col);
-                            }
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("sphere", f);
-                    }
-                }
-                {
-                    let q = draw_lines.clone();
-                    type BoxArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_, (cx, cy, cz, hx, hy, hz, yaw, r, g, b, a): BoxArgs| {
-                            let c = glam::DVec3::new(cx, cy, cz);
-                            let (cy_, sy_) = (yaw.cos(), yaw.sin());
-                            let rot = |p: glam::DVec3| {
-                                glam::DVec3::new(p.x * cy_ + p.z * sy_, p.y, -p.x * sy_ + p.z * cy_)
-                            };
-                            let col = [r, g, b, a.unwrap_or(1.0)];
-                            let corner = |i: usize| {
-                                let sx = if i & 1 == 0 { -hx } else { hx };
-                                let sy = if i & 2 == 0 { -hy } else { hy };
-                                let sz = if i & 4 == 0 { -hz } else { hz };
-                                c + rot(glam::DVec3::new(sx, sy, sz))
-                            };
-                            let mut q = q.borrow_mut();
-                            for (i, j) in [
-                                (0, 1), (2, 3), (4, 5), (6, 7), // x edges
-                                (0, 2), (1, 3), (4, 6), (5, 7), // y edges
-                                (0, 4), (1, 5), (2, 6), (3, 7), // z edges
-                            ] {
-                                q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col });
-                            }
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("box", f);
-                    }
-                }
-                // ── FILLED triangle layer: solid gizmos & world markers ──
-                // `draw.tri(x1..z3, r,g,b[,a])` — one raw triangle.
-                {
-                    let q = draw_tris.clone();
-                    type TriArgs =
-                        (f64, f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_,
-                              (x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b, a): TriArgs| {
-                            q.borrow_mut().push(crate::DrawTri {
-                                a: [x1, y1, z1],
-                                b: [x2, y2, z2],
-                                c: [x3, y3, z3],
-                                color: [r, g, b, a.unwrap_or(1.0)],
-                            });
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("tri", f);
-                    }
-                }
-                // A basis ⊥ to a direction, for fan-tessellating cones/discs.
-                let basis = |n: glam::DVec3| {
-                    let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
-                    let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
-                    let u = (u - n * u.dot(n)).normalize();
-                    (u, n.cross(u), n)
-                };
-                // `draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b[,a])` — a
-                // solid cone: base disc at (bx,by,bz), apex `height` along the
-                // unit dir. Gizmo arrowheads, thruster nozzles, markers.
-                {
-                    let q = draw_tris.clone();
-                    type ConeArgs =
-                        (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_,
-                              (bx, by, bz, dx, dy, dz, radius, height, r, g, b, a): ConeArgs| {
-                            let base = glam::DVec3::new(bx, by, bz);
-                            let (u, v, n) = basis(glam::DVec3::new(dx, dy, dz));
-                            let apex = base + n * height;
-                            let col = [r, g, b, a.unwrap_or(1.0)];
-                            const N: usize = 20;
-                            let mut q = q.borrow_mut();
-                            let rim = |k: usize| {
-                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
-                                base + u * (radius * t.cos()) + v * (radius * t.sin())
-                            };
-                            for k in 0..N {
-                                let p0 = rim(k);
-                                let p1 = rim(k + 1);
-                                // side
-                                q.push(crate::DrawTri {
-                                    a: p0.into(),
-                                    b: p1.into(),
-                                    c: apex.into(),
-                                    color: col,
-                                });
-                                // base cap
-                                q.push(crate::DrawTri {
-                                    a: p1.into(),
-                                    b: p0.into(),
-                                    c: base.into(),
-                                    color: col,
-                                });
-                            }
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("cone", f);
-                    }
-                }
-                // `draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b[,a])` — a filled
-                // annulus (r0=inner, r1=outer) around normal n: solid rotation
-                // gizmo bands, ring markers. r0=0 gives a full disc.
-                {
-                    let q = draw_tris.clone();
-                    type DiscArgs =
-                        (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_,
-                              (cx, cy, cz, nx, ny, nz, r0, r1, r, g, b, a): DiscArgs| {
-                            let c = glam::DVec3::new(cx, cy, cz);
-                            let (u, v, _) = basis(glam::DVec3::new(nx, ny, nz));
-                            let col = [r, g, b, a.unwrap_or(1.0)];
-                            const N: usize = 36;
-                            let mut q = q.borrow_mut();
-                            let at = |rad: f64, k: usize| {
-                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
-                                c + u * (rad * t.cos()) + v * (rad * t.sin())
-                            };
-                            for k in 0..N {
-                                let o0 = at(r1, k);
-                                let o1 = at(r1, k + 1);
-                                let i0 = at(r0, k);
-                                let i1 = at(r0, k + 1);
-                                q.push(crate::DrawTri {
-                                    a: i0.into(),
-                                    b: o0.into(),
-                                    c: o1.into(),
-                                    color: col,
-                                });
-                                q.push(crate::DrawTri {
-                                    a: i0.into(),
-                                    b: o1.into(),
-                                    c: i1.into(),
-                                    color: col,
-                                });
-                            }
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("disc", f);
-                    }
-                }
-                // ---- screen space -------------------------------------
-                // `draw.rect(x, y, w, h, r,g,b[,a][,radius])` — a filled
-                // rectangle in PIXELS, and `draw.rectOutline(..., [thickness])`
-                // its hollow twin. The pixels are `input.mouse()`'s, so an RTS
-                // marquee is the two corners you dragged between — the 3D line
-                // version of the same box has to be projected onto a ground
-                // plane, which fights the camera angle and misses anything the
-                // plane doesn't pass through.
-                for (name, outline_default) in [("rect", 0.0f32), ("rectOutline", 2.0f32)] {
-                    let q = draw_rects.clone();
-                    type RectArgs =
-                        (f32, f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_, (x, y, w, h, r, g, b, a, extra): RectArgs| {
-                            // `extra` is the corner radius on a fill, the border
-                            // thickness on an outline — the one number each wants.
-                            let (outline, radius) = if outline_default > 0.0 {
-                                (extra.unwrap_or(outline_default).max(0.0), 0.0)
-                            } else {
-                                (0.0, extra.unwrap_or(0.0).max(0.0))
-                            };
-                            q.borrow_mut().push(crate::DrawRect {
-                                rect: [x, y, w, h],
-                                color: [r, g, b, a.unwrap_or(1.0)],
-                                outline,
-                                radius,
-                            });
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set(name, f);
-                    }
-                }
-                // `draw.circle(x, y, radius, r,g,b[,a])` and its outline twin —
-                // a rect with a corner radius of half its side is a circle to
-                // the UI quad shader, so a debug ring, a minimap blip or a
-                // reticle costs nothing new. `x, y` is the CENTRE, which is what
-                // anyone drawing a circle has in hand.
-                for (name, outline_default) in [("circle", 0.0f32), ("circleOutline", 2.0f32)] {
-                    let q = draw_rects.clone();
-                    type CircleArgs = (f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
-                    if let Ok(f) = lua.create_function(
-                        move |_, (x, y, rad, r, g, b, a, extra): CircleArgs| {
-                            let rad = rad.max(0.0);
-                            let outline = if outline_default > 0.0 {
-                                extra.unwrap_or(outline_default).max(0.0)
-                            } else {
-                                0.0
-                            };
-                            q.borrow_mut().push(crate::DrawRect {
-                                rect: [x - rad, y - rad, rad * 2.0, rad * 2.0],
-                                color: [r, g, b, a.unwrap_or(1.0)],
-                                outline,
-                                radius: rad,
-                            });
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set(name, f);
-                    }
-                }
-                // `draw.text(x, y, s, size, r,g,b[,a][,align])` — a string on
-                // the screen without building a UI tree: a damage number, a
-                // frame-time readout, the count under a selection box. The
-                // renderer measures and lays out the glyphs (the same font
-                // stack `ui.make` uses), so a script never has to know how wide
-                // an 'm' is. `align` is "left" (default) | "center" | "right",
-                // and x is that edge.
-                {
-                    let q = draw_texts.clone();
-                    type TextArgs = (
-                        f32,
-                        f32,
-                        String,
-                        Option<f32>,
-                        Option<f32>,
-                        Option<f32>,
-                        Option<f32>,
-                        Option<f32>,
-                        Option<String>,
-                        Option<String>,
-                    );
-                    if let Ok(f) = lua.create_function(
-                        move |_, (x, y, s, size, r, g, b, a, align, font): TextArgs| {
-                            q.borrow_mut().push(crate::DrawText {
-                                pos: [x, y],
-                                text: s,
-                                size: size.unwrap_or(16.0).max(1.0),
-                                color: [
-                                    r.unwrap_or(1.0),
-                                    g.unwrap_or(1.0),
-                                    b.unwrap_or(1.0),
-                                    a.unwrap_or(1.0),
-                                ],
-                                align: match align.as_deref() {
-                                    Some("center") | Some("centre") => 1,
-                                    Some("right") => 2,
-                                    _ => 0,
-                                },
-                                // Absent = the project's UI font, which is the
-                                // answer a game wants often enough that naming
-                                // it here should be the exception.
-                                font: font.unwrap_or_default(),
-                            });
-                            Ok(())
-                        },
-                    ) {
-                        let _ = t.set("text", f);
-                    }
-                }
-                let _ = lua.globals().set("draw", t);
-            }
-        }
-
-        // `spawn(prefab [, pos [, fn]])` — queue a prefab instance. The driver
-        // spawns the subtree after this pass (physics/animators/scripts wire up
-        // automatically); the optional callback receives the new root's handle
-        // right after it exists — the "configure what I just spawned" hook:
-        //   spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end)
-        let spawn_requests: Rc<RefCell<Vec<crate::SpawnRequest>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        {
-            let q = spawn_requests.clone();
-            if let Ok(f) = lua.create_function(
-                move |lua, (name, a, b, c): (String, Value, Value, Value)| {
-                    let (mut pos, mut cb) = (None, None);
-                    for v in [a, b] {
-                        match v {
-                            Value::Nil => {}
-                            Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
-                            other => match crate::math_api::vec3_of(&other) {
-                                Some(p) => pos = Some([p.x, p.y, p.z]),
-                                None => {
-                                    return Err(mlua::Error::runtime(
-                                        "spawn(prefab [, pos [, fn]]): pos must be a vec3/node and fn a function",
-                                    ))
-                                }
-                            },
-                        }
-                    }
-                    // Optional 4th arg: a parent node — the spawned subtree
-                    // lands under it (still at the world `pos`).
-                    let parent = match &c {
-                        Value::Table(t) => t.raw_get::<u32>("__id").ok(),
-                        _ => None,
-                    };
-                    let handle = crate::api::deferred_handle(lua, "spawn", &name)?;
-                    q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent });
-                    Ok(handle)
-                },
-            ) {
-                let _ = lua.globals().set("spawn", f);
-            }
-        }
-        // `createNode(name [, parentNode] [, fn])` — queue a PLAIN node (Empty
-        // matter, identity transform). The driver creates it after this pass;
-        // the callback receives its handle — combine with `setTerrain`/
-        // `setCelestial`/`setPrimitive`/`setMaterial` to build content from
-        // script (the editor-action construction kit):
-        //   createNode("Oria", function(n) n:setTerrain(2); n.x = 500 end)
-        let create_requests: Rc<RefCell<Vec<crate::CreateRequest>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        {
-            let q = create_requests.clone();
-            if let Ok(f) = lua.create_function(
-                move |lua, (name, a, b): (String, Value, Value)| {
-                    let (mut parent, mut cb) = (None, None);
-                    for v in [a, b] {
-                        match v {
-                            Value::Nil => {}
-                            Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
-                            Value::Table(t) => match t.raw_get::<Option<u32>>("__id")? {
-                                Some(id) => parent = Some(id),
-                                None => {
-                                    return Err(mlua::Error::runtime(
-                                        "createNode(name [, parent] [, fn]): parent must be a node handle",
-                                    ))
-                                }
-                            },
-                            _ => {
-                                return Err(mlua::Error::runtime(
-                                    "createNode(name [, parent] [, fn]): bad argument",
-                                ))
-                            }
-                        }
-                    }
-                    let handle = crate::api::deferred_handle(lua, "createNode", &name)?;
-                    q.borrow_mut().push(crate::CreateRequest { name, parent, cb });
-                    Ok(handle)
-                },
-            ) {
-                let _ = lua.globals().set("createNode", f);
-            }
-        }
-        // `destroy(node)` — queue a node (and its whole subtree) for removal.
-        // Also available as `node:destroy()` (installed with the handle API).
-        let destroy_queue: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
-        {
-            let q = destroy_queue.clone();
-            if let Ok(f) = lua.create_function(move |_, v: Value| {
-                let eid = match &v {
-                    Value::Table(t) => t.raw_get::<u32>("__id").ok(),
-                    _ => None,
-                };
-                match eid {
-                    Some(id) => {
-                        q.borrow_mut().push(id);
-                        Ok(())
-                    }
-                    None => Err(mlua::Error::runtime("destroy(node): pass a node or node handle")),
-                }
-            }) {
-                let _ = lua.globals().set("destroy", f);
-            }
-        }
-
+        let gizmos = install_gizmos(&lua);
+        let project_root = install_assets(&lua, &logs);
+        let SceneCells {
+            scene_request,
+            scene_loaded,
+            scene_name,
+        } = install_scene(&lua, &net, &project_root);
+        let UiCells {
+            ui_focus,
+            ui_focus_request,
+            ui_drag,
+            ui_bindings,
+            ui_makes,
+            ui_handlers,
+            ui_listeners,
+            ui_listener_checks,
+            ui_frame_events,
+            ui_hover,
+            ui_active,
+        } = install_ui(&lua, &net);
+        let spawn_effects = install_spawn_effect(&lua);
+        let DrawCells {
+            draw_lines,
+            draw_tris,
+            draw_rects,
+            draw_texts,
+        } = install_draw(&lua);
+        let NodeQueueCells {
+            spawn_requests,
+            create_requests,
+            destroy_queue,
+        } = install_node_queues(&lua);
         // The cross-node / cross-script reference layer: a scene-graph mirror plus Lua
         // `node`/`script` handles and the `find`/`findScript` globals (see
         // `install_handle_api`). Shared (interior-mutable) with the handle closures.
