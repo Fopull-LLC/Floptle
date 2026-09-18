@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.95.0 — "Room For A Friend"** (stable). The multiplayer tutorial ends
+with a friend playing: a second slot, a camera that follows the player each
+machine steers, the host call behind a key, and the join form the engine
+accepts. The 🌐 panel and a build's F1 menu take a Floptle Cloud code as
+typed. A rig spawned for a joiner has its body from its first tick;
+`net.host` while already in a session is refused with words; the reference
+says what a Predicted node's owner sees and that effects and sounds never
+cross the wire. In the editor, a click into the viewport takes the keyboard
+off the field you were typing in.
+
 **v0.94.0 — "Leaves A Trail"** (stable). The two betas, promoted: particles
 that squash and stretch and leave trails behind anything that moves — a
 sword trail is one still particle whose trail follows the emitter, or a
