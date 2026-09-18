@@ -4093,6 +4093,9 @@ impl ApplicationHandler for Editor {
             WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(2, pressed);
+                if pressed {
+                    self.viewport_press_ends_typing();
+                }
                 // MMB drag over the Scene viewport pans the fly camera. Grab the cursor
                 // (raw delta, so panning never freezes at a window edge) and restore it
                 // to the press point on release. Editor Scene view only.
@@ -4125,6 +4128,9 @@ impl ApplicationHandler for Editor {
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(1, pressed);
+                if pressed {
+                    self.viewport_press_ends_typing();
+                }
                 let over_scene = self.cursor_over_scene();
                 // In the Game view, RMB still grabs the cursor for mouse-look (the game
                 // reads the button + raw delta), but it drives no editor camera and opens
@@ -4677,6 +4683,9 @@ impl Editor {
         // viewport, so a press on a panel/toolbar falls through to egui untouched.
         self.track_mouse_button(0, pressed);
         if pressed {
+            // Before the Game-view trap below, which nulls the cursor the
+            // over-viewport test reads.
+            self.viewport_press_ends_typing();
             // Clicking into the Game view while playing traps the cursor there
             // (Escape or Stop releases it) so playing doesn't let the mouse
             // wander onto editor panels. `cursor_over_game()` gates it to the
@@ -4703,13 +4712,6 @@ impl Editor {
                     self.cursor = None;
                 }
             }
-            // Clicking anywhere outside a text field ends text editing —
-            // a click into the viewport (which egui never sees) included.
-            if let Some(eg) = self.egui.as_ref()
-                && !eg.ctx.is_pointer_over_egui()
-                    && let Some(f) = eg.ctx.memory(|m| m.focused()) {
-                        eg.ctx.memory_mut(|m| m.surrender_focus(f));
-                    }
             // In the Game view a left click is a game input only — never an editor
             // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
             // over the scene for editor purposes.

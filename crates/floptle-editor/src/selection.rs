@@ -226,6 +226,23 @@ impl Editor {
         false
     }
 
+    /// A mouse button went down over the Scene view, the Game view, or the
+    /// bare window: whatever text field was being typed into is done, and
+    /// the keys that follow reach the viewport.
+    ///
+    /// The viewports take their presses straight from the window, so egui
+    /// never sees one and keeps the Inspector field focused; the fly keys
+    /// and shortcuts typed after a right-click into the scene land in the
+    /// field. Every button counts: a right-click to look around is the
+    /// usual first move, and the intent is the same.
+    pub(crate) fn viewport_press_ends_typing(&self) {
+        #[cfg(feature = "editor-ui")]
+        if let Some(eg) = self.egui.as_ref() {
+            let over_viewport = self.cursor_over_scene() || self.cursor_over_game();
+            end_typing_on_press(&eg.ctx, over_viewport);
+        }
+    }
+
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
     /// or ~6 units in front of the camera if the ray doesn't meet the ground. Used to
     /// place a dropped asset where the cursor is.
@@ -934,10 +951,26 @@ impl Editor {
     }
 }
 
-/// The object's local bounds half-extents (pre-`Transform.scale`) for the Rect
-/// tool's face handles — mirrors [`Editor::pick`]'s primitive sizes. `None` =
-/// the Rect tool has no box for this matter (Empty, lights, UI elements — the
-/// Scene tab gives those their own 2D handles).
+/// Surrender egui's focused widget for a press it never sees.
+///
+/// Fires when the press is over a viewport, or outside egui altogether.
+/// `is_pointer_over_egui` alone cannot decide: the docked Scene tab is
+/// egui's own central area, so over the viewport it answers true. Returns
+/// whether a widget lost focus.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn end_typing_on_press(ctx: &egui::Context, over_viewport: bool) -> bool {
+    if !over_viewport && ctx.is_pointer_over_egui() {
+        return false;
+    }
+    match ctx.memory(|m| m.focused()) {
+        Some(id) => {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+            true
+        }
+        None => false,
+    }
+}
+
 /// [`Editor::select_bone`]'s rule, as a free function — the Hierarchy tree draws
 /// from borrowed field references rather than from `&mut Editor`, and the rule
 /// has to be the same one in both places or a bone would be clickable from one
@@ -962,6 +995,10 @@ pub(crate) fn select_bone_into(
     true
 }
 
+/// The object's local bounds half-extents (pre-`Transform.scale`) for the Rect
+/// tool's face handles — mirrors [`Editor::pick`]'s primitive sizes. `None` =
+/// the Rect tool has no box for this matter (Empty, lights, UI elements — the
+/// Scene tab gives those their own 2D handles).
 pub(crate) fn rect_base_half(
     world: &floptle_core::World,
     mesh_registry: &std::collections::HashMap<String, crate::MeshAsset>,
@@ -1186,5 +1223,75 @@ mod focus_tests {
         assert_eq!(ed.selection, vec![b], "history and scene paths still write directly");
         ed.enforce_selection_lock();
         assert!(ed.selection_locked, "and a non-empty result keeps the lock");
+    }
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod press_tests {
+    use super::end_typing_on_press;
+
+    /// One frame of a full-window panel holding a focused text field, with
+    /// the pointer parked over it (so egui counts the pointer as over
+    /// itself, exactly as it does over the docked Scene tab) and `typed`
+    /// delivered as keyboard text.
+    fn frame(ctx: &egui::Context, text: &mut String, typed: &str, focus: bool) {
+        let mut input = crate::icons::test_input();
+        input.events.push(egui::Event::PointerMoved(egui::pos2(400.0, 300.0)));
+        if !typed.is_empty() {
+            input.events.push(egui::Event::Text(typed.to_string()));
+        }
+        let _ = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let resp = ui.add(egui::TextEdit::singleline(text).id_salt("field"));
+                if focus {
+                    resp.request_focus();
+                }
+            });
+        });
+    }
+
+    /// The report: a number typed into the Inspector, a right-click into the
+    /// Scene view, and the fly keys typed next still land in the field. Over
+    /// the viewport egui says the pointer is over egui — the Scene tab is
+    /// its central area — so the press must be trusted over that answer.
+    #[test]
+    fn a_press_over_the_viewport_takes_the_keyboard_off_the_field() {
+        let ctx = crate::icons::test_context();
+        let mut text = String::from("12");
+        frame(&ctx, &mut text, "", true);
+        frame(&ctx, &mut text, "", false);
+        assert!(ctx.text_edit_focused(), "the field never took focus, so nothing is under test");
+        assert!(ctx.is_pointer_over_egui(), "the pointer must read as over egui, as it does over the docked Scene tab");
+
+        assert!(end_typing_on_press(&ctx, true));
+        assert!(ctx.memory(|m| m.focused()).is_none());
+        frame(&ctx, &mut text, "w", false);
+        assert_eq!(text, "12", "a fly key typed after the press still went into the field");
+        assert!(!ctx.text_edit_focused());
+    }
+
+    /// The same press over a panel is egui's to handle: the field keeps
+    /// focus and keeps taking the letters. A control for the test above.
+    #[test]
+    fn a_press_over_a_panel_leaves_the_field_alone() {
+        let ctx = crate::icons::test_context();
+        let mut text = String::from("12");
+        frame(&ctx, &mut text, "", true);
+        frame(&ctx, &mut text, "", false);
+        assert!(ctx.text_edit_focused());
+
+        assert!(!end_typing_on_press(&ctx, false));
+        frame(&ctx, &mut text, "3", false);
+        assert_eq!(text, "123");
+        assert!(ctx.text_edit_focused());
+    }
+
+    /// Nothing focused: nothing to surrender, and no panic.
+    #[test]
+    fn a_press_with_nothing_focused_is_a_no_op() {
+        let ctx = crate::icons::test_context();
+        let mut text = String::new();
+        frame(&ctx, &mut text, "", false);
+        assert!(!end_typing_on_press(&ctx, true));
     }
 }
