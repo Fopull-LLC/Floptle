@@ -126,6 +126,50 @@ pub(crate) fn second_session_reason(hosting: bool, is_client: bool) -> Option<&'
     }
 }
 
+/// What a joiner is told when no Predicted node is theirs at the Welcome.
+///
+/// A scene with no authored slot is a game that spawns avatars, and one round
+/// trip of spectating is its normal state — so that reads as information. A
+/// scene that has slots and none for this peer is the tutorial's one-`Player`
+/// platformer with a friend in it, and that is a warning: nothing else will
+/// ever say the friend has nothing to control.
+pub(crate) fn spectating_notice(any_slot: bool) -> (floptle_script::LogLevel, &'static str) {
+    if any_slot {
+        (
+            floptle_script::LogLevel::Warn,
+            "no Predicted node is yours — spectating. The scene's Predicted slots are taken \
+             (node #1 = host, #2+ = joiners in arrival order): add a slot per player, or spawn \
+             an avatar per joiner (net.spawn in a playerJoined handler)",
+        )
+    } else {
+        (
+            floptle_script::LogLevel::Debug,
+            "no Predicted node is yours yet — spectating until the game spawns one \
+             (net.spawn with owner = peer in a playerJoined handler)",
+        )
+    }
+}
+
+/// `cloud`, `cloud:us-east`: a relay field that names Floptle Cloud rather
+/// than a host. Empty means the same — the managed service is the default.
+pub(crate) fn is_cloud_relay(field: &str) -> bool {
+    let f = field.trim();
+    f.is_empty() || f == "cloud" || f.starts_with("cloud:")
+}
+
+/// The address the 🌐 panel's "Join by code" sends for what its two fields
+/// hold. A managed code is routed by its first letter (`cloud://CODE`), so a
+/// second region works the day it opens; a `host:port` in the relay field
+/// is somebody's own `floptle-relay` and the code goes through it.
+pub(crate) fn lobby_join_target(relay_field: &str, code: &str) -> String {
+    let code = code.trim();
+    if is_cloud_relay(relay_field) {
+        format!("cloud://{code}")
+    } else {
+        format!("relay://{}/{code}", relay_field.trim())
+    }
+}
+
 /// The address half of `net.join`, with the scheme off if it was spelled.
 ///
 /// **`quic://host:port` and `host:port`, because both are spelled in public.**
@@ -250,31 +294,7 @@ impl Editor {
                     // runs inside the host call and reads it.
                     self.net_input_delay = input_delay;
                     match (relay, port) {
-                        // `relay = "cloud"` is not an address, it is an ask:
-                        // put me on Floptle Cloud's nearest managed relay.
-                        // Resolved here rather than in the transport so the
-                        // Console carries the reason when it cannot be.
-                        (Some(addr), _) if addr.trim_start().starts_with("cloud") => {
-                            // **A missing game key is answered here, before a
-                            // packet leaves**. A managed relay
-                            // refuses a keyless host with good words, but only
-                            // if it can be reached — so on a plane, behind a
-                            // firewall, or in a headless harness the developer
-                            // got a connection error about a project that was
-                            // simply never connected. The engine already knows.
-                            match self.cloud_key_or_reason() {
-                                Err(why) => {
-                                    self.console.push(floptle_script::LogLevel::Warn, why, None)
-                                }
-                                Ok(()) => match self.cloud_relay_addr(&addr) {
-                                    Ok(real) => self.net_host_relay(&real),
-                                    Err(why) => {
-                                        self.console.push(floptle_script::LogLevel::Warn, why, None)
-                                    }
-                                },
-                            }
-                        }
-                        (Some(addr), _) => self.net_host_relay(&addr),
+                        (Some(addr), _) => self.net_host_relay_addr(&addr),
                         (None, Some(p)) => self.net_host_quic(p),
                         (None, None) => self.net_start_hosting(),
                     }
@@ -403,52 +423,7 @@ impl Editor {
                         );
                     }
                 }
-                NetCmd::Join { addr, timeout_s } if addr.starts_with("local") => {
-                    self.net_join_timeout = timeout_s;
-                    self.net_join_local()
-                }
-                // `net.join("cloud://UABCDE")` — the code's first letter names
-                // the region, and the region list is already on disk, so this
-                // resolves without asking fopull.com anything. That is the
-                // whole reason the join path never depends on the control
-                // plane: a player typing a friend's code gets in during an
-                // outage exactly as they would on a good day.
-                NetCmd::Join { addr, timeout_s } if addr.starts_with("cloud://") => {
-                    self.net_join_timeout = timeout_s;
-                    let code = addr.trim_start_matches("cloud://").trim().to_string();
-                    match Self::cloud_relay_for_code(&code) {
-                        Ok(raddr) => self.net_join_relay(&raddr, &code),
-                        Err(why) => {
-                            self.console.push(floptle_script::LogLevel::Warn, why, None)
-                        }
-                    }
-                }
-                NetCmd::Join { addr, timeout_s } if addr.starts_with("relay://") => {
-                    self.net_join_timeout = timeout_s;
-                    let rest = addr.trim_start_matches("relay://").to_string();
-                    match rest.rsplit_once('/') {
-                        Some((raddr, code)) => self.net_join_relay(raddr, code),
-                        None => self.console.push(
-                            floptle_script::LogLevel::Warn,
-                            format!("net.join(\"{addr}\"): expected relay://host:port/CODE"),
-                            None,
-                        ),
-                    }
-                }
-                NetCmd::Join { addr, timeout_s } if addr.starts_with("quic://") => {
-                    self.net_join_timeout = timeout_s;
-                    let a = addr.trim_start_matches("quic://").to_string();
-                    self.net_join_quic(&a);
-                }
-                NetCmd::Join { addr, timeout_s: _ } => self.console.push(
-                    floptle_script::LogLevel::Warn,
-                    format!(
-                        "net.join(\"{addr}\"): use relay://relayaddr/CODE (a lobby code), \
-                         quic://host:port (a server directly), or local:// (the in-editor \
-                         harness)"
-                    ),
-                    None,
-                ),
+                NetCmd::Join { addr, timeout_s } => self.net_join_addr(&addr, timeout_s),
                 NetCmd::Leave => self.net_stop("left the session"),
                 NetCmd::Rpc { name, args, to, with_input } => {
                     if let Some(s) = self.net_server.as_mut() {
@@ -839,6 +814,77 @@ impl Editor {
         self.script_host.set_net_state(state);
     }
 
+    /// `net.host{ relay = … }` and the 🌐 panel's host button, one door.
+    ///
+    /// `relay = "cloud"` is not an address, it is an ask: put me on Floptle
+    /// Cloud's nearest managed relay. Resolved here rather than in the
+    /// transport so the Console carries the reason when it cannot be.
+    pub(crate) fn net_host_relay_addr(&mut self, addr: &str) {
+        if is_cloud_relay(addr) {
+            // A missing game key is answered here, before a packet leaves. A
+            // managed relay refuses a keyless host with good words, but only
+            // if it can be reached — on a plane, behind a firewall, or in a
+            // headless harness the developer got a connection error about a
+            // project that was simply never connected. The engine already
+            // knows.
+            match self.cloud_key_or_reason() {
+                Err(why) => self.console.push(floptle_script::LogLevel::Warn, why, None),
+                Ok(()) => match self.cloud_relay_addr(addr) {
+                    Ok(real) => self.net_host_relay(&real),
+                    Err(why) => self.console.push(floptle_script::LogLevel::Warn, why, None),
+                },
+            }
+        } else {
+            self.net_host_relay(addr);
+        }
+    }
+
+    /// `net.join(addr)` and the 🌐 panel's join buttons, one door: every
+    /// address form the docs name, and one line naming them all for anything
+    /// else.
+    pub(crate) fn net_join_addr(&mut self, addr: &str, timeout_s: Option<f32>) {
+        if addr.starts_with("local") {
+            self.net_join_timeout = timeout_s;
+            self.net_join_local();
+        } else if let Some(code) = addr.strip_prefix("cloud://") {
+            // The code's first letter names the region, and the region list
+            // is already on disk, so this resolves without asking fopull.com
+            // anything. That is the whole reason the join path never depends
+            // on the control plane: a player typing a friend's code gets in
+            // during an outage exactly as they would on a good day.
+            self.net_join_timeout = timeout_s;
+            let code = code.trim().to_string();
+            match Self::cloud_relay_for_code(&code) {
+                Ok(raddr) => self.net_join_relay(&raddr, &code),
+                Err(why) => self.console.push(floptle_script::LogLevel::Warn, why, None),
+            }
+        } else if let Some(rest) = addr.strip_prefix("relay://") {
+            self.net_join_timeout = timeout_s;
+            match rest.rsplit_once('/') {
+                Some((raddr, code)) => self.net_join_relay(raddr, code),
+                None => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.join(\"{addr}\"): expected relay://host:port/CODE"),
+                    None,
+                ),
+            }
+        } else if let Some(a) = addr.strip_prefix("quic://") {
+            self.net_join_timeout = timeout_s;
+            self.net_join_quic(a);
+        } else {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "net.join(\"{addr}\"): use cloud://CODE (a Floptle Cloud lobby code), \
+                     relay://relayaddr/CODE (a code through your own relay), \
+                     quic://host:port (a server directly), or local:// (the in-editor \
+                     harness)"
+                ),
+                None,
+            );
+        }
+    }
+
     /// Become the authoritative host of an in-editor session (Lua `net.host{}`
     /// or the harness panel). Captures the scene doc at this moment — it's the
     /// baseline a ghost client loads, exactly like a remote client loading the
@@ -852,7 +898,11 @@ impl Editor {
             );
             return;
         }
-        if self.net_server.is_some() {
+        // The same door the real transports have: a client that calls
+        // `net.host{}` mid-session would otherwise get a loopback hub beside
+        // its live session, and from then on predict whichever avatar peer 1
+        // owns — somebody else's — while its own never runs.
+        if self.refuse_second_session("net.host{}") {
             return;
         }
         let hub = floptle_net::MemoryHub::new();
@@ -1038,14 +1088,9 @@ impl Editor {
             self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
         }
         if predicted.is_none() && warn_if_none {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                "no Predicted node is yours (yet) — spectating. Either the scene needs a \
-                 Predicted slot per player (node #1 = host, #2+ = joiners), or the game spawns \
-                 avatars on join (net.spawn in a playerJoined handler) and yours is on its way"
-                    .into(),
-                None,
-            );
+            let any_slot = reps.iter().any(|(_, r)| r.mode == ReplicationMode::Predicted);
+            let (level, line) = spectating_notice(any_slot);
+            self.console.push(level, line.into(), None);
         }
         predicted
     }
@@ -1854,7 +1899,7 @@ impl Editor {
     }
 
     /// The transport-agnostic tail of joining a real session.
-    fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
+    pub(crate) fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
         let transport = Self::net_impair_wrap(transport);
         self.net_impair_note();
         Self::net_assign_scene_owners(&mut self.world, self.dedicated);
@@ -2271,6 +2316,35 @@ impl Editor {
         }
     }
 
+    /// Replicated spawns and despawns materialize live on a client: bodies
+    /// register or go, and a spawned mesh gets its GPU import. Runs before
+    /// the ownership pass, so a rig this client is about to predict has its
+    /// body from the first tick its scripts run.
+    fn net_client_materialize(
+        &mut self,
+        spawned: &[(u64, Entity, Option<floptle_net::PeerId>)],
+        despawned: &[u32],
+    ) {
+        for eid in despawned {
+            if let Some(sim) = self.sim.as_mut() {
+                sim.remove_body(*eid);
+            }
+        }
+        let mut mesh = false;
+        for (_, e, _) in spawned {
+            if let Some(sim) = self.sim.as_mut() {
+                sim.add_body_for(*e, &self.world);
+            }
+            mesh |= matches!(
+                self.world.get::<floptle_core::Matter>(*e),
+                Some(floptle_core::Matter::Mesh { .. })
+            );
+        }
+        if mesh {
+            self.load_script_swapped_models();
+        }
+    }
+
     /// The play world's client tick: ship input, record the prediction, apply
     /// snapshots (others interpolate; our node reconciles + rewind-replays).
     fn net_client_tick(&mut self, tick: u64) {
@@ -2362,24 +2436,7 @@ impl Editor {
         // evaluation: being handed a node mid-session is the reconnecting
         // player getting their slot back, and it has to start predicting.
         if !spawned.is_empty() || !despawned.is_empty() || !reowned.is_empty() {
-            for eid in &despawned {
-                if let Some(sim) = self.sim.as_mut() {
-                    sim.remove_body(*eid);
-                }
-            }
-            let mut mesh = false;
-            for (_, e, _) in &spawned {
-                if let Some(sim) = self.sim.as_mut() {
-                    sim.add_body_for(*e, &self.world);
-                }
-                mesh |= matches!(
-                    self.world.get::<floptle_core::Matter>(*e),
-                    Some(floptle_core::Matter::Mesh { .. })
-                );
-            }
-            if mesh {
-                self.load_script_swapped_models();
-            }
+            self.net_client_materialize(&spawned, &despawned);
             let was = self.net_predictor.as_ref().map(|(e, _)| *e);
             let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
             self.net_client_side_setup(owner, false);
@@ -2645,9 +2702,38 @@ impl Editor {
                 if let Some(cs) = self.net_play_client.as_mut() {
                     cs.rebind_scene(&mut self.world);
                 }
+                // What the server sent during the swap landed in the rebind —
+                // the avatar it spawned for us, typically. Its body registers
+                // now, ahead of the bind below: the next tick runs its scripts,
+                // and a Predicted rig whose body is a tick behind reads
+                // `node.vel` as nil on its owner's first tick.
+                let (spawned, despawned) = self
+                    .net_play_client
+                    .as_mut()
+                    .map(|cs| (cs.take_spawned(), cs.take_despawned()))
+                    .unwrap_or_default();
+                self.net_client_materialize(&spawned, &despawned);
                 self.voice_rebind_scene();
                 let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
+                let was = self.net_predictor.as_ref().map(|(e, _)| *e);
                 self.net_client_side_setup(owner, false);
+                // The Welcome bound a slot by the hosted convention; what the
+                // server sent during the swap (a dedicated server's slot
+                // handout, an avatar spawned for us) can name another node.
+                // Said out loud, or the earlier line stands as the answer.
+                let now = self.net_predictor.as_ref().map(|(e, _)| *e);
+                if now != was && let Some(pe) = now {
+                    let name = self
+                        .world
+                        .get::<floptle_core::Name>(pe)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|| "?".into());
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!("🎮 the server's scene binds you to \"{name}\" — predicting it locally"),
+                        None,
+                    );
+                }
             } else {
                 // We can't load what the server is playing — leaving is the
                 // only honest option (staying = a frozen desynced world).
@@ -3021,6 +3107,68 @@ mod tests {
         // Hosting wins the description when somehow both are set: it is the one
         // that owns the world.
         assert_eq!(second_session_reason(true, true), Some(hosting));
+    }
+
+    /// **`net.host{}` on a joined client is refused, and the session it has
+    /// is kept.** The loopback hub had no door: the call stood the hub up
+    /// beside the live client, and from then on the client predicted whichever
+    /// avatar peer 1 owns — somebody else's — while its own never ran. A
+    /// `mode = "host"` param left set on the joining machine's Game node was
+    /// the whole bug, and nothing named it.
+    #[test]
+    fn hosting_while_joined_is_refused_and_the_session_is_kept() {
+        let mut ed = crate::Editor { playing: true, ..Default::default() };
+        let hub = floptle_net::MemoryHub::new();
+        ed.net_play_client = Some(floptle_net::NetSession::client(
+            Box::new(hub.connect()),
+            ed.input_map_hash(),
+        ));
+        ed.net_start_hosting();
+        assert!(ed.net_hub.is_none(), "a loopback hub was created beside the live session");
+        assert!(ed.net_server.is_none());
+        assert!(ed.net_play_client.is_some(), "the refusal tore down the session it was protecting");
+        let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).collect();
+        assert!(
+            said.iter().any(|m| m.starts_with("net.host{}") && m.contains("CLIENT") && m.contains("net.leave()")),
+            "the refusal did not say which session this is or the way out: {said:?}"
+        );
+        // The same door for the ghost-client button, which hosts first.
+        ed.net_join_local();
+        assert!(ed.net_hub.is_none() && ed.net_client.is_none());
+    }
+
+    /// **The joiner's spectating line is a warning only when there is
+    /// something to fix.** A scene with no authored slot spawns its avatars,
+    /// and one round trip of spectating is its normal state — as a warning it
+    /// counted against every joiner in `floptle run`'s tally. A scene whose
+    /// slots are all taken is the one-`Player` platformer with a friend in
+    /// it, and nothing else will ever say the friend has nothing to control.
+    #[test]
+    fn spectating_is_a_warning_only_when_a_slot_is_missing() {
+        let (level, line) = spectating_notice(true);
+        assert_eq!(level, floptle_script::LogLevel::Warn);
+        assert!(line.contains("net.spawn") && line.contains("slot"), "{line}");
+        let (level, line) = spectating_notice(false);
+        assert_eq!(level, floptle_script::LogLevel::Debug);
+        assert!(line.contains("net.spawn"), "{line}");
+    }
+
+    /// **The 🌐 panel routes a Floptle Cloud code by its region letter.** It
+    /// sent every code to the one host in its relay field, which worked only
+    /// while that host and `us-east.relay.fopull.com` shared an address; the
+    /// day a second region opens, every join to it through the panel fails
+    /// with "no lobby". `cloud://` is the form the engine already routes; a
+    /// `host:port` is somebody's own relay and keeps the old form.
+    #[test]
+    fn the_panel_joins_a_cloud_code_through_its_region() {
+        assert_eq!(lobby_join_target("cloud", "UABCDE"), "cloud://UABCDE");
+        assert_eq!(lobby_join_target("", " uabcde "), "cloud://uabcde");
+        assert_eq!(lobby_join_target("cloud:us-east", "UABCDE"), "cloud://UABCDE");
+        assert_eq!(lobby_join_target("10.0.0.5:7788", "ABCDE"), "relay://10.0.0.5:7788/ABCDE");
+        assert_eq!(lobby_join_target(" relay.example:7788 ", "ABCDE"), "relay://relay.example:7788/ABCDE");
+        // `cloud` typed as a hostname was `relay://cloud/CODE`, which the
+        // engine rejects as a host called "cloud".
+        assert!(!lobby_join_target("cloud", "UABCDE").starts_with("relay://"));
     }
 
     /// **`net.join` and `floptle run --join` spell an address the same way.**

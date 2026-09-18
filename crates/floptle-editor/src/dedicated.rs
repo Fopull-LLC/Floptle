@@ -1487,6 +1487,85 @@ mod server_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A rig spawned for a joiner has its body on the joiner's first tick.**
+    ///
+    /// The Welcome names the scene, so the spawn the server sends right behind
+    /// it is held until the client's rebind. The rebind then bound the rig as
+    /// the avatar a tick before its body registered, and its `fixedUpdate`
+    /// read `node.vel` as nil once — a red line on every friend's console, in
+    /// a controller that is right on every other tick. The server is pumped
+    /// twice per client tick so both messages arrive in one poll, which is
+    /// what a real link does.
+    #[test]
+    fn a_rig_spawned_for_a_joiner_has_its_body_on_its_first_tick() {
+        let root = temp("firsttick");
+        write(
+            &root,
+            "prefabs/Survivor.prefab.ron",
+            "[(name: \"Survivor\", matter: Primitive(shape: Capsule, color: (1.0, 1.0, 1.0)),\n\
+               rigidbody: Some((capsule: true, radius: 0.5, height: 2.0)),\n\
+               net: Some((predicted: true)), scripts: [(kind: \"probe\")])]",
+        );
+        write(
+            &root,
+            "scripts/probe.lua",
+            "local ticks = 0\n\
+             function fixedUpdate(dt)\n\
+               ticks = ticks + 1\n\
+               if node.vel == nil then print(\"VEL_NIL at tick \" .. ticks)\n\
+               else print(\"VEL_OK at tick \" .. ticks) end\n\
+             end\n",
+        );
+        write(
+            &root,
+            "scripts/rules.lua",
+            "net.on(\"playerJoined\", function(peer)\n\
+               net.spawn(\"Survivor\", { y = 2, owner = peer })\n\
+             end)\n",
+        );
+        write(
+            &root,
+            "scenes/arena.ron",
+            "(nodes: [(name: \"Rules\", scripts: [(kind: \"rules\")], net: Some((transform: false)))])",
+        );
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+
+        let mut s = serve(&root, "scenes/arena.ron");
+        // The friend's machine: a second engine on the same project.
+        let mut c = super::open(&root, &root.join("scenes/arena.ron"), 1.0 / STEP);
+        c.dedicated = false;
+        c.toggle_play();
+        c.net_join_with(Box::new(s.hub.connect()), "the test hub");
+        for _ in 0..SETTLE {
+            for _ in 0..2 {
+                s.tick += 1;
+                s.hub.set_now(s.tick);
+                s.ed.play_step(STEP, false);
+                s.ed.adopt_script_logs(false);
+            }
+            c.play_step(STEP, false);
+            c.adopt_script_logs(false);
+        }
+        let said: Vec<String> = c.console.entries.iter().map(|e| e.msg.clone()).collect();
+        assert!(
+            c.net_predictor.is_some(),
+            "the joiner never got its avatar. Client said:\n{}\nServer said:\n{}",
+            said.join("\n"),
+            s.console()
+        );
+        assert!(
+            said.iter().any(|m| m.contains("VEL_OK at tick 1")),
+            "the rig's first tick never ran with a body. Client said:\n{}",
+            said.join("\n")
+        );
+        assert!(
+            !said.iter().any(|m| m.contains("VEL_NIL")),
+            "the rig read node.vel as nil on its owner. Client said:\n{}",
+            said.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A server script can remove a player, and they are told why.** `net.kick`
     /// was one of the six commands the old server never drained: the peer stayed
     /// connected and the script's decision evaporated.

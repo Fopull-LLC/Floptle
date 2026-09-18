@@ -963,6 +963,10 @@ snapshots instead of stepping, and you'll want it on for the last step.
 Do the same for `Platform` and `Lift`, minus sync physics: they're kinematic, so
 the transform alone says everything.
 
+**sync animator** covers the Animation Controller on this node only. A rig whose
+animator sits on a Model child is not covered, and an animator a script drives
+from `synced` wants it off. The capsule has none; leave it.
+
 Leave `Ground`, `Camera`, the coins and the `Goal` alone for now. The ground
 never moves. The camera is *yours* — the other machine has its own, following
 its own player. The coins are the next lesson.
@@ -1019,8 +1023,10 @@ says which one you're looking at is worth more than any amount of reasoning.",
 Press Play. The HUD reads `server · 0 client(s)` — your script is hosting.
 
 Click the **🌐** button in the toolbar. The panel says *hosting · 0 ghost
-clients*; click **➕ Join a local ghost client**. A real client has joined your
-real server, inside this one process, over a simulated link.
+clients*; click **➕ Join a local ghost client**. (With nothing hosting yet, the
+panel offers **⏵ Host + join a local client** instead — your script is already
+hosting, so you see the join button alone.) A real client has joined your real
+server, inside this one process, over a simulated link.
 
 **Cyan spheres** appear: one per networked node, each drawn where the *client*
 believes that node is. Walk around. Yours trails a beat behind you. The lift's
@@ -1197,28 +1203,101 @@ Input settings list every such call site.",
             title: "Let a friend join, from their machine",
             body: "\
 Everything so far ran on your desk. This is the step that makes it a multiplayer
-game, and it takes about two minutes.
+game: a body for your friend, a camera that follows it, and a relay between you.
+
+## A body for your friend
+
+The scene has one `Player`, and it is yours. The scene's Predicted nodes are the
+player slots, in node order — #1 the host, #2 the first joiner, #3 the next. A
+friend who joins a one-slot scene spectates, and their Console says so.
+
+Select `Player`, duplicate it (**Ctrl+D**), name the copy `Player2`, and move it
+a couple of metres along X so the two don't spawn inside each other. The copy
+keeps its Networked component, mode **Predicted (owner)** — that is the whole
+slot.
+
+The other way, for a game where players come and go, is to spawn one avatar
+per joiner: `net.spawn(\"Player\", { owner = peer })` in a `playerJoined`
+handler, from a prefab. *Per-player avatars* in `docs/scripting/networking.md`
+shows it. Two slots is enough here.
+
+## Each camera follows its own player
+
+Both machines run the same scene, so your friend's camera would follow *your*
+`Player` by name. In `platformerCamera.lua`, pick the player this machine
+steers instead:
+
+```lua
+-- The player this machine steers: yours on the host, theirs on a friend's.
+-- Offline every node is yours, so the wired reference stands.
+local function mine()
+  if net.role() == \"offline\" then return params.target end
+  for _, p in ipairs(findTagged(\"player\")) do
+    if net.isMine(p) then return p end
+  end
+  return params.target
+end
+
+function lateUpdate(node, dt)
+  local target = mine()
+  if not target or not target.valid then return end
+
+  local want = target.pos + vec3(0, params.height, params.distance)
+  node.pos = ease(node.pos, want, params.smoothing, dt)
+  node:lookAt(target.pos)
+end
+```
+
+And the respawn in `platformerGame.lua` catches both players:
+
+```lua
+  if net.isServer() then
+    for _, p in ipairs(findTagged(\"player\")) do
+      if p.valid and p.y < params.fallY then
+        p.pos = vec3(0, params.spawnY, 0)
+        p.vel = vec3(0, 0, 0)
+      end
+    end
+  end
+```
+
+## A relay between you
 
 You need a **relay** — a rendezvous both machines can reach, so neither of you
 forwards a port. You can run your own (`cargo run -p floptle-relay` on any box
-you both can reach), or use Floptle Cloud, which is free for twenty players at a
-time and is what the rest of this step uses.
+you both can reach), or use Floptle Cloud, whose free plan seats a small
+session — fopull.com/cloud says how many — and is what the rest of this step
+uses.
 
 1. **Register the game** at fopull.com/cloud, under a name. You get a game key.
 2. **Paste the key in:** ⚙ Settings ⏵ **Networked** ⏵ **Game key**. That writes
    it into your project, so every build carries it.
-3. **Host on it** — one word changes from step 4:
+3. **Host on it — from a key, not from `start`.** Both of you run the same
+   script, so a `net.host` in `start` would have your friend hosting a lobby
+   of their own before they could join yours (the engine refuses the join:
+   *already HOSTING*). In `platformerGame.lua`, take the call out of `start`
+   and put it behind a key at the top of `update`:
 
 ```lua
-net.host{ relay = \"cloud\" }
+  -- H hosts. Your friend never presses it: they join with the code instead.
+  if net.role() == \"offline\" and input.pressed(\"h\") then
+    net.host{ relay = \"cloud\", maxPlayers = params.maxPlayers }
+  end
 ```
 
-4. **Read them the code.** `net.lobbyCode()` gives you six characters. Your
-   friend types them into **🌐 → code → ⏵ Join by code**, or your game calls
-   `net.join(\"relay://cloud/\" .. code)`.
+4. **Read them the code.** `net.lobbyCode()` gives you six characters; the
+   first one names the region, so the code is the whole address. Your friend
+   types it into **🌐 → code → ⏵ Join by code** (the relay field reads
+   `cloud`), or your game calls:
 
-That is the whole difference between a game you can test and a game somebody
-else can play.
+```lua
+net.join(\"cloud://\" .. code)
+```
+
+Their capsule drops in beside yours and walks when they press their keys — on
+your screen from the server's word, on theirs predicted, exactly as step 10
+felt on your desk. That is the whole difference between a game you can test
+and a game somebody else can play.
 
 **Without a key**, `net.host{ relay = \"cloud\" }` says so and points at the page
 — it does not fail as a connection error, and it never needs the network to tell
@@ -1227,9 +1306,12 @@ you. Hosting on your own machine or your own relay needs no key at all.
 **If more people turn up than your plan seats**, nobody playing is disconnected:
 the next arrival is asked to try again shortly, and you are told once, with the
 number and where to raise it. `net.notice()` hands you that sentence if you want
-it on your own lobby screen.",
+it on your own lobby screen.
+
+You are done when your friend's `Player2` moves on your screen, and your
+`Player` on theirs.",
             code: None,
-            check: Check::Read,
+            check: Check::Networked("Player2"),
         },
         Step {
             title: "Where to go next",
@@ -1240,9 +1322,9 @@ your desk. The things you'd reach for next, in the order you'll want them:
 - **A lobby screen that handles a wrong code.** `net.join` doesn't block; wait
   on `net.joinState()` and show its reason. Mistyping the code is the most
   common thing that will ever go wrong in an online session.
-- **One avatar per player.** Instead of an authored `Player`, spawn one for
-  each joiner with `net.spawn` on `playerJoined` — see *Per-player avatars* in
-  `docs/scripting.md` §16.
+- **One avatar per player.** Instead of authored slots, spawn one for each
+  joiner with `net.spawn` on `playerJoined` — see *Per-player avatars* in
+  `docs/scripting/networking.md`.
 - **Hits that respect latency.** `net.rewind` judges a swing against the world
   the attacker was actually seeing.
 - **Rollback**, if you're making a fighting game — and only then.

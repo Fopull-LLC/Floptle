@@ -304,10 +304,10 @@ impl Editor {
             self.net_join_addr = "quic://127.0.0.1:7777".into();
         }
         if self.net_relay_addr.is_empty() {
-            // The Floptle Cloud rendezvous relay: a DNS-only
-            // record straight to the host — the name is the stable contract
-            // even if the box moves. Self-hosters just type their own.
-            self.net_relay_addr = "relay.fopull.com:7788".into();
+            // Floptle Cloud: a managed code carries its region in its first
+            // letter, so `cloud` is the whole address. Self-hosters type
+            // their own `host:port`.
+            self.net_relay_addr = "cloud".into();
         }
         out.perf_snapshot.pacing = Pacing {
             mean_ms: self.frame_ms,
@@ -1083,13 +1083,14 @@ impl Editor {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.net_relay_addr)
                                 .desired_width(150.0)
-                                .hint_text("relay host:port"),
-                        );
+                                .hint_text("cloud, or host:port"),
+                        )
+                        .on_hover_text("`cloud` = Floptle Cloud (the code says which region). A host:port = your own floptle-relay.");
                     });
                     ui.horizontal(|ui| {
                         if ui
                             .button("⏵ Host — get a lobby code")
-                            .on_hover_text("registers a lobby on the relay above and shows a five-letter CODE for friends. Nobody port-forwards; run `floptle-relay` anywhere both machines can reach.")
+                            .on_hover_text("registers a lobby on the relay above and shows a CODE for friends: six characters on Floptle Cloud, five on your own floptle-relay. Nobody port-forwards.")
                             .clicked()
                         {
                             out.cmd.net_host_relay = Some(self.net_relay_addr.clone());
@@ -1100,7 +1101,7 @@ impl Editor {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.net_join_code)
                                 .desired_width(70.0)
-                                .hint_text("ABCDE"),
+                                .hint_text("UABCDE"),
                         );
                         if r.changed() {
                             self.net_join_code = self.net_join_code.to_uppercase();
@@ -1108,13 +1109,12 @@ impl Editor {
                         let ok = !self.net_join_code.trim().is_empty();
                         if ui
                             .add_enabled(ok, egui::Button::new("⏵ Join by code"))
-                            .on_hover_text("joins the lobby with this code, through the relay above")
+                            .on_hover_text("joins the lobby with this code — a Floptle Cloud code finds its relay by its first letter; with a host:port above, through that relay")
                             .clicked()
                         {
-                            out.cmd.net_join_quic = Some(format!(
-                                "relay://{}/{}",
-                                self.net_relay_addr.trim(),
-                                self.net_join_code.trim()
+                            out.cmd.net_join_quic = Some(crate::net::lobby_join_target(
+                                &self.net_relay_addr,
+                                &self.net_join_code,
                             ));
                         }
                     });
@@ -1145,7 +1145,7 @@ impl Editor {
                         "both machines run THIS project. Player slots = the \
                          scene's Predicted nodes in order (#1 the host, #2+ \
                          joiners) — or spawn one per joiner (player_spawner.lua). \
-                         Scripts: net.host{relay=\"…\"} / net.join(\"relay://…/CODE\")",
+                         Scripts: net.host{relay=\"cloud\"} / net.join(\"cloud://CODE\")",
                     );
                 }
                 (true, false) if !net_is_real => {

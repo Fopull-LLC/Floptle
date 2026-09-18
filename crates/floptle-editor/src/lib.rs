@@ -2833,7 +2833,8 @@ struct Editor {
     net_host_port: String,
     net_join_addr: String,
     net_relay_addr: String,
-    /// The join-by-code buffer (a five-letter lobby code).
+    /// The join-by-code buffer (a lobby code: six characters on Floptle
+    /// Cloud, five on a self-hosted relay).
     net_join_code: String,
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,

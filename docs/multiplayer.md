@@ -5,7 +5,7 @@ machines playing together, then to shipping. For *why* any of it works the way i
 does, the reasoning is recorded in the decision records —
 networking and cloud (ADR-0022) and
 rollback netcode (ADR-0025). For the full API
-reference, [scripting.md §16–16b](scripting.md).
+reference, [scripting/networking.md](scripting/networking.md).
 
 Everything here is one netcode with three replication modes. You pick the mode
 per node, in the Inspector, and a project that doesn't use a mode never pays
@@ -47,8 +47,10 @@ camera.
 1. Select the node that should exist on every machine.
 2. **Add Component ▸ 🌐 Networked**.
 3. Leave `mode` on **Server authority**. Check `sync transform`. Check
-   `sync physics` if it has a Rigidbody, `sync animator` if it has an Animation
-   Controller.
+   `sync physics` if it has a Rigidbody, `sync animator` if the Animation
+   Controller is on **this node** — the checkbox covers this node's animator
+   only, not one on a Model child, and an animator a script drives from
+   `synced` wants it off.
 
 Nodes *without* this component stay local — that's the default, and it's the
 right one for particles, cameras, UI and scenery.
@@ -100,7 +102,49 @@ mode to **Predicted (owner)** and check `sync physics`.
 
 Nothing else changes: the same `fixedUpdate` runs on the owner's client *and* on
 the server, the server's result wins, and when they disagree the client is
-smoothly corrected. Your script does not need to know which machine it is on.
+smoothly corrected. Your movement code does not need to know which machine it
+is on.
+
+### What the owner's script sees
+
+On the owning client the script has two copies of its state. Its **locals** are
+the prediction — its own input, re-run. **`synced`** is the server's word.
+Anything only the server does to the node — damage from a bot, a knockdown, a
+respawn — lands in the server's copy and reaches the owner through `synced`
+alone: the body is corrected, the locals are not. A HUD drawn from a local `hp`
+never sees its player get hit; a controller gating movement on a local `state`
+keeps walking while the server has it on the floor.
+
+So the authoritative side publishes its state into `synced` at the end of its
+tick, and every watcher reads one function:
+
+```lua
+local S = { hp = 100, state = "idle" }            -- the simulation's own table
+replicated = { hp = 100, state = "idle" }
+
+local function authoritative()
+  return net.role() == "offline" or net.isServer()
+end
+
+function view()                                   -- what to draw, on any machine
+  if authoritative() then return S end
+  return synced
+end
+
+function fixedUpdate(node, dt)
+  -- …simulate into S…
+  if authoritative() then synced.hp, synced.state = S.hp, S.state end
+end
+```
+
+Which copy each watcher reads: a **HUD** and an **animator** read `view()` — on
+the owner that is the server's `hp` and `state`, so a hit lands on screen; a
+**camera** follows the node's transform, which prediction already keeps
+responsive. Effects and sounds follow the same rule the other way round: they
+never cross the wire, so the server's `spawnEffect` stays on the server. Drive
+them from a synced counter — the pattern is in
+[scripting/networking.md](scripting/networking.md) under *Which scripts run
+where*.
 
 Test it with **🎮 Test as remote player (predicted)** in the 🌐 panel. Your play
 world becomes a client predicting against a hidden authoritative server, and the
@@ -298,16 +342,24 @@ Two tools narrow it down:
 Two machines, both running the same project.
 
 **Via relay (recommended — nobody port-forwards).** The host clicks **⏵ Host —
-get a lobby code** and reads out the five letters; the joiner types them into
-**code** and clicks **⏵ Join by code**. From a script:
+get a lobby code** and reads out the code; the joiner types it into **code**
+and clicks **⏵ Join by code**. With the relay field on `cloud` (the default)
+that is Floptle Cloud: a six-character code whose first letter names the
+region, so the code is the whole address (§6c). From a script:
 
 ```lua
-net.host{ relay = "relay.fopull.com:7788" }
-net.join("relay://relay.fopull.com:7788/ABCDE")
+net.host{ relay = "cloud" }
+net.join("cloud://UABCDE")
 ```
 
-Run your own with `cargo run -p floptle-relay` on any box both machines can
-reach; it is stateless and forwards opaque bytes.
+Run your own relay with `cargo run -p floptle-relay` on any box both machines
+can reach — it is stateless and forwards opaque bytes — and type its
+`host:port` into the relay field; its codes are five letters:
+
+```lua
+net.host{ relay = "relay.example:7788" }
+net.join("relay://relay.example:7788/ABCDE")
+```
 
 **Direct (LAN or a self-hosted box).** Host on a UDP port, joiner uses
 `quic://ip:port`. Needs the port reachable.
@@ -780,6 +832,15 @@ only form that tests the wire itself, and the project's **own** scripts run as
 the client — `net.isServer()` answers false, and your game does its own
 asserting. The two flags are mutually exclusive: one hosts, the other joins.
 
+**`serve` changes who owns the authored slot.** A dedicated server has nobody
+at its keyboard, so it hands the scene's Predicted slots out from **#1** as
+players arrive (§5, *On a dedicated server* in the reference) — where a hosted
+session keeps #1 for the host. A `serve` + `run --join` test of a peer-hosted
+layout therefore gives the first client the host's avatar, and its spawned one
+too if the game also spawns on join. To test that layout under `serve`, author
+the host's node as **Server authority** for the run, or spawn every avatar and
+author no slots.
+
 `FLOPTLE_NET_IMPAIR` (§7) reaches all of it, the loopback harness included, so
 "does this hold up at 100 ms and 2% loss" is a question one machine can answer.
 
@@ -816,7 +877,8 @@ failures the field can't produce.
 
 | Where | What |
 |---|---|
-| [scripting.md §16](scripting.md) | `net.*`, `synced`, `onRpc`, `net.rewind` — the full API |
+| [scripting/networking.md](scripting/networking.md) | `net.*`, `synced`, `onRpc`, `net.rewind` — the full API; *Which scripts run where* has the effects rule and the synced-counter pattern |
+| §3 above | *What the owner's script sees* — locals vs `synced` on a Predicted node, and which copy a HUD, animator and camera read |
 | [scripting.md §16b](scripting.md) | `snapshot`/`restore`, `net.random`, the rollback rules |
 | §6b above | `net.kick`, `net.identity`, allow/deny — running a server anyone can reach |
 | [scripting.md §16c](scripting.md) | `voice.*` — proximity voice chat, and why range gating is the server's job |

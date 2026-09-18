@@ -20,12 +20,19 @@ the assets folder, and it boots straight into the game filling the window. `Esc`
 **F1 opens the multiplayer menu** — in a build it's the game-facing version
 (host → lobby code, join by code, direct address; the editor's simulated-link
 test tools don't ship), and a "F1 — multiplayer" hint shows for the first few
-seconds. Close the window to quit.
+seconds. Its relay field reads `cloud` by default: **Host** puts the game on
+Floptle Cloud (the build carries the project's game key) and shows a
+six-character code, and **Join by code** takes one as typed — the first letter
+names the region, so the code is the whole address. A `host:port` in that
+field is your own `floptle-relay`, with five-letter codes. Close the window
+to quit.
 
 Games can also drive sessions from Lua instead of the F1 menu —
-`net.host{relay="…"}` / `net.join("relay://…/CODE")` from any script (say, a
-main-menu controller). A proper in-game UI system for real menus is on the
-roadmap; until then F1 is the built-in fallback.
+`net.host{ relay = "cloud" }` / `net.join("cloud://" .. code)` from any script
+(say, a main-menu controller), or `net.host{ relay = "host:port" }` /
+`net.join("relay://host:port/CODE")` through your own relay. A proper in-game
+UI system for real menus is on the roadmap; until then F1 is the built-in
+fallback.
 
 Player mode is also a CLI flag for quick playtests of a project without an
 export: `floptle-editor --play [PROJECT_DIR]`.
@@ -283,9 +290,9 @@ frame, so it is for a minute of reproducing something, not for playing.
 1. Export (or copy the repo and use `--play`).
 2. Copy the build folder to each device — same build/commit everywhere: the
    wire protocol refuses mismatched versions at connect.
-3. On the host device: F1 → host via relay (lobby code) or direct
-   (`quic://ip:port` needs the host's port reachable; the relay path needs no
-   port-forwarding anywhere).
+3. On the host device: F1 → host via relay (a lobby code, on Floptle Cloud or
+   your own relay) or direct (`quic://ip:port` needs the host's port reachable;
+   the relay path needs no port-forwarding anywhere).
 4. On the others: F1 → enter the code (or the address) → join.
 
 ## Hosting on a server instead of a player's machine

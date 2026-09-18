@@ -804,7 +804,7 @@ Body up (−gravity) Z (read-only).
 
 ### `node.vel`
 
-The body's velocity as a vec3 (read/write). `node.vel = node.vel + node.up * jump` replaces three vx/vy/vz lines, and it accepts anything with x/y/z.
+The body's velocity as a vec3 (read/write). `node.vel = node.vel + node.up * jump` replaces three vx/vy/vz lines, and it accepts anything with x/y/z. A body's fields are there from the first tick its scripts run — a rig that net.spawn just handed you included; nil only on a node with no RigidBody.
 
 ```lua
 -- one write instead of vx/vy/vz, and it reads as physics
@@ -2126,7 +2126,7 @@ SERVER ONLY: net.despawn(node) — remove a replicated runtime object, and the w
 
 ### `net.host`
 
-net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards), or "cloud" for Floptle Cloud's managed relay — which needs the project connected to a game at fopull.com/cloud, and refuses a keyless host by telling you where to get one. "cloud:us-east" pins a region instead of picking the nearest. port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client; inputDelay = rollback input delay in TICKS (clamped to 6) — omit it and the host derives one from the worst peer's measured RTT (2 on a LAN, 5 across a country).
+net.host{ maxPlayers = 16, port = 7777, relay = "addr", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards), or "cloud" for Floptle Cloud's managed relay — which needs the project connected to a game at fopull.com/cloud, and refuses a keyless host by telling you where to get one. "cloud:us-east" pins a region instead of picking the nearest. port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. Refused while this peer is in a session (joined, joining, or already hosting) — net.leave() first; the session you have is kept. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client; inputDelay = rollback input delay in TICKS (clamped to 6) — omit it and the host derives one from the worst peer's measured RTT (2 on a LAN, 5 across a country).
 
 ### `net.identity`
 
@@ -2174,7 +2174,7 @@ net.leave() — end the session.
 
 ### `net.lobbyCode`
 
-net.lobbyCode() — the code friends type in to join, on a host that used net.host{ relay = "…" }. Put it on your own lobby screen. nil until the relay answers (POLL it, don't read it once), and nil for good on a client or a direct/LAN host — there is no code there, joiners use the address.
+net.lobbyCode() — the code friends type in to join, on a host that used net.host{ relay = "…" }: six characters on Floptle Cloud (they join with net.join("cloud://" .. code)), five on your own floptle-relay. Put it on your own lobby screen. nil until the relay answers (POLL it, don't read it once), and nil for good on a client or a direct/LAN host — there is no code there, joiners use the address.
 
 ### `net.mispredictRate`
 
@@ -2244,7 +2244,7 @@ SERVER ONLY: net.setRelevant(node, peer, true|false) — decide per client wheth
 
 ### `net.spawn`
 
-SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a replicated runtime object on every client (available next tick).
+SERVER ONLY: net.spawn(what, { x, y, z, owner }) — spawn a replicated runtime object on every client (available next tick). `what` is a prefab by name ("Knight" finds prefabs/Knight.prefab.ron), a prefab path, or a scene path ("scenes/thing.ron", whose first root node and its children are spawned). The table is optional: x, y, z are three numbers (not a vec3); owner = a peer id makes a Predicted rig that player's avatar. Offline, spawn(what) does the same thing without a session.
 
 ### `net.stalled`
 
@@ -3545,7 +3545,7 @@ particles:stop() — stop + despawn the effect; its live particles vanish.
 
 ### `spawnEffect`
 
-spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", h.x, h.y, h.z) end.
+spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", h.x, h.y, h.z) end.
 
 ## audio — sounds & the mixer
 
@@ -3555,7 +3555,7 @@ Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, nod
 
 ### `audio.play`
 
-audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
+audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
 
 ```lua
 audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 4 })

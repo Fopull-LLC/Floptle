@@ -159,7 +159,7 @@ the same way.
 | `node:children()` | an array (`{1,2,…}`) of child handles |
 | `node:getchild("Gun")` | the first child named `Gun`, or `nil` |
 | `node:find("Muzzle")` | the first **descendant** (any depth) with that name, or `nil` |
-| `node:getscript("health")` | a **script handle** for that script on this node, or `nil` |
+| `node:getscript("health")` | a **script handle** for that script on this node, or `nil` (`getScript` is the same call) |
 
 Scene-wide lookups are globals:
 

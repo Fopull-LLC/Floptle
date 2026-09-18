@@ -492,23 +492,18 @@ impl Editor {
         if let Some(p) = cmd.net_play_replay.take() {
             self.net_play_replay(&p);
         }
+        // The panel's addresses go through the same door as `net.join` and
+        // `net.host`, so a cloud code routes by its region letter here too.
         if let Some(addr) = cmd.net_join_quic.take() {
             let a = addr.trim().to_string();
-            if let Some(rest) = a.strip_prefix("relay://") {
-                match rest.rsplit_once('/') {
-                    Some((raddr, code)) => self.net_join_relay(raddr, code),
-                    None => self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        format!("join \"{a}\": expected relay://host:port/CODE"),
-                        None,
-                    ),
-                }
+            if a.contains("://") {
+                self.net_join_addr(&a, None);
             } else {
-                self.net_join_quic(a.trim_start_matches("quic://"));
+                self.net_join_quic(&a);
             }
         }
         if let Some(addr) = cmd.net_host_relay.take() {
-            self.net_host_relay(addr.trim());
+            self.net_host_relay_addr(addr.trim());
         }
         if let Some((dir, target)) = cmd.export_game.take() {
             self.begin_export(dir, target);

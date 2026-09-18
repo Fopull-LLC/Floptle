@@ -41,10 +41,10 @@ end
 
 | Call | What it does |
 |---|---|
-| `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards); `port` = direct UDP (QUIC); neither = the in-editor harness |
+| `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards): `"cloud"` is Floptle Cloud's managed relay (six-character codes; needs the project's game key), `"host:port"` is your own `floptle-relay` (five-letter codes); `port` = direct UDP (QUIC); neither = the in-editor harness. Refused while this peer is in a session — `net.leave()` first |
 | `net.host{ interest = 150, interestBudget = 16384 }` | **interest management** — each client is told about its own neighbourhood (metres) within a per-client byte budget, instead of everything. Absent = broadcast to everyone, which is cheaper below a few dozen players. Tick ⬦ *always relevant* on a node's Networked component to exempt it (the match clock, the objective, the boss) |
-| `net.lobbyCode()` | the five letters friends type in, on a relay host — so your own lobby screen can show them. **Poll it**: `nil` until the relay answers (a round trip after `net.host`), and `nil` for good on a client or a direct/LAN host, where there is no code and joiners use the address |
-| `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness). **Does not block** — see `net.joinState()` |
+| `net.lobbyCode()` | the code friends type in, on a relay host — six characters on Floptle Cloud (the first names the region), five on your own relay — so your own lobby screen can show it. **Poll it**: `nil` until the relay answers (a round trip after `net.host`), and `nil` for good on a client or a direct/LAN host, where there is no code and joiners use the address |
+| `net.join(addr)` | join a session (`"cloud://CODE"` = a Floptle Cloud lobby code, routed to its region by the first letter with no call to fopull.com; `"relay://relayaddr/CODE"` = a code through your own relay; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness). **Does not block** — see `net.joinState()` |
 | `net.joinState()` | `"offline"` / `"connecting"` / `"joined"` / `"refused"` / `"starting"`, plus the reason as a second return when refused. `"starting"` means the lobby is real and its dedicated server is waking up — not a refusal, and unlike `"connecting"` it can last tens of seconds, so show the second return rather than a spinner. **Wait on this, not on `net.role()`** — joining doesn't block, so role reads `"client"` from the frame you called `net.join`, whether or not that code matched any lobby |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
@@ -54,7 +54,7 @@ end
 | `net.identity(peer)` | `{ id, name, tier, verified }` — who that peer is. **Check `verified`**: it is `false` for everyone today (see below) |
 | `net.kick(peer, reason)` | SERVER: remove a player, with words that reach them |
 | `net.host{ requireIdentity = true, allow = {ids}, deny = {ids} }` | who this server will admit, consulted **before** a join is accepted |
-| `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene or prefab's first root **and everything under it**, replicated everywhere |
+| `net.spawn(what, {x,y,z,owner})` | SERVER: spawn a replicated object everywhere — `what` is a prefab by name (`"Knight"` finds `prefabs/Knight.prefab.ron`), a prefab path, or a scene path (`"scenes/player.ron"`); its first root **and everything under it** spawn. `x, y, z` are three numbers, not a vec3; `owner = peer` makes a Predicted rig that player's avatar |
 | `net.despawn(node)` | SERVER: remove it — and its subtree — everywhere |
 | `net.setOwner(node, peer)` | SERVER: hand a replicated node to `peer`, or `nil` to release it. What gives a reconnecting player their slot back |
 | `net.host{ interestOcclusion = "Level" }` | also require **line of sight**, tested against that collision layer. On top of `interest`, never instead of it |
@@ -167,6 +167,7 @@ disconnects:
 function start(node)
   net.on("playerJoined", function(peer)
     if net.isServer() then
+      -- a scene path; a prefab by name ("Player") or path works the same way
       net.spawn("scenes/player.ron", { x = peer * 2, y = 2.5, z = 8, owner = peer })
     end
   end)
@@ -207,13 +208,19 @@ A slot your own script assigns is never reassigned behind your back.
 
 ### Lobby codes: play without port-forwarding
 
-Run the open relay anywhere both machines can reach (`floptle-relay`, one
-binary, default port 7788 — or use a managed one), then:
+Two relays to choose from, and the code says which one a friend is joining:
 
-- **Host:** 🌐 → *Host via relay* (or `net.host{ relay = "relay.host:7788" }`)
-  → you get a five-letter **lobby code**.
-- **Friends:** 🌐 → Join with `relay://relay.host:7788/CODE`
-  (or `net.join("relay://…/CODE")`).
+- **Floptle Cloud** — `net.host{ relay = "cloud" }` (the project needs its game
+  key from fopull.com/cloud, pasted in ⚙ Settings ⏵ Networked). The code is
+  **six characters**, and its first letter names the region, so
+  `net.join("cloud://CODE")` finds the relay from the code alone — no call to
+  fopull.com, and it works during an outage. The 🌐 panel does the same with
+  `cloud` in its relay field, which is the default.
+- **Your own relay** — run `floptle-relay` anywhere both machines can reach (one
+  binary, default port 7788), `net.host{ relay = "relay.host:7788" }`, and you
+  get a **five-letter** code; friends join with
+  `net.join("relay://relay.host:7788/CODE")`, or type the `host:port` into the
+  🌐 panel's relay field.
 
 Show the code on your own lobby screen rather than sending players to the 🌐
 panel — `net.lobbyCode()` returns it:
@@ -227,8 +234,8 @@ end
 Poll it rather than reading it once: the relay has to answer first, so it is
 `nil` for a round trip after `net.host`. It stays `nil` on a client and on a
 direct/LAN host — there is no code in either case — and it clears the moment a
-session ends or a host attempt fails, so five stale letters can never sit on
-screen looking live.
+session ends or a host attempt fails, so a stale code can never sit on screen
+looking live.
 
 **Joining does not block, and the code is usually wrong.** `net.join` returns
 immediately and `net.role()` reads `"client"` from that frame — before the relay
@@ -275,6 +282,73 @@ runs its scripts everywhere: that's the door above — `update` eases toward
 `net.isServer()`. Rule of thumb: sync the transform for things physics moves;
 sync only vars for things scripts animate.
 
+**Effects, sounds and drawing stay on the machine that made them.**
+`spawnEffect`, `audio.play`, `draw.*`, a hitstop in a local — none of it
+crosses the wire. Code that runs only on the server (a `hurt()` a bot's script
+calls, anything behind `net.isServer()`) spawns its sparks on the server alone:
+a joiner sees the health bar drop and nothing else. Drive presentation from
+state that travels — bump a synced counter with the facts needed to draw the
+moment, and let a script that runs everywhere (a var-only Networked node, or a
+child of the rig) spawn the effect when the counter moves:
+
+```lua
+-- hits.lua — on the fighter. The server records the hit; every machine draws it.
+replicated = { hp = 100, hitSeq = 0, hitKind = "", hitX = 0, hitY = 0, hitZ = 0 }
+local seen = 0
+
+function hurt(amount, kind, at)                   -- server only, by contract
+  synced.hp = synced.hp - amount
+  synced.hitKind, synced.hitX, synced.hitY, synced.hitZ = kind, at.x, at.y, at.z
+  synced.hitSeq = synced.hitSeq + 1               -- the fact that travels
+end
+
+function update(node, dt)                         -- runs everywhere
+  if synced.hitSeq ~= seen then
+    seen = synced.hitSeq
+    spawnEffect("vfx/" .. synced.hitKind, synced.hitX, synced.hitY, synced.hitZ)
+    audio.play("audio/hit.ogg", synced.hitX, synced.hitY, synced.hitZ)
+  end
+end
+```
+
+**What a Predicted node's owner sees.** On the owning client that script has
+two copies of its state: its **locals** are the prediction (its own input,
+re-run), and **`synced`** is the server's word. Anything only the server does
+to the node — damage from a bot, a knockdown, a respawn — lands in the server's
+copy and reaches the owner through `synced` alone; the body is corrected, the
+locals are not. So a HUD drawn from a local `hp` never sees its player get hit,
+and a controller gating movement on a local `state` keeps walking while the
+server has it on the floor. The pattern: the authoritative side publishes its
+state table into `synced` at the end of its tick, and every watcher — HUD,
+animator, camera — reads one `view()`:
+
+```lua
+local S = { hp = 100, state = "idle" }            -- the simulation's own table
+replicated = { hp = 100, state = "idle" }
+
+local function authoritative()                    -- whose copy is the truth here
+  return net.role() == "offline" or net.isServer()
+end
+
+local function publish()                          -- server: S → synced, once a tick
+  synced.hp, synced.state = S.hp, S.state
+end
+
+function view()                                   -- what to draw, on any machine
+  if authoritative() then return S end
+  return synced
+end
+
+function fixedUpdate(node, dt)
+  -- …simulate into S…
+  if authoritative() then publish() end
+end
+```
+
+A HUD reads `view().hp`, an animator picks its clip from `view().state`, and a
+camera shake keys off `view()`. Offline and on the server `view()` is the
+locals; on the owner and on everyone else it is the server's word.
+
 ### Lag-compensated combat: `withInput` + `net.rewind`
 
 On your screen, every *other* player is rendered a beat in the past (the
@@ -288,9 +362,10 @@ Two pieces. The client stamps the intent with the tick it was seeing; the
 server wraps its hit-check in `net.rewind`:
 
 ```lua
--- sword.lua — on the attacker (a Predicted node)
+-- sword.lua — on the attacker (a Predicted node). A named action, bound in
+-- Settings ▸ Input: raw keys and buttons read neutral on a networked node.
 function update(node, dt)
-  if net.isClient() and input.clicked(0) then
+  if net.isClient() and input.justPressed("Attack") then
     local yaw = input.aimYaw() or node.yaw
     net.rpc("swing", { dx = math.sin(yaw), dz = math.cos(yaw) },
             { withInput = true })                 -- ← stamp what I was seeing
@@ -302,7 +377,7 @@ function onRpc.swing(args, peer)                  -- runs on the SERVER
   net.rewind(peer, function()                     -- ← the world as PEER saw it
     local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)
     if hit and hit.node then
-      local combat = hit.node:getscript("combat")
+      local combat = hit.node:getScript("combat")  -- getscript works too
       if combat and combat.synced.parrying then   -- their flag AT THAT TICK
         net.rpc("parried", { by = hit.node.id }, { to = peer })
       elseif combat then
