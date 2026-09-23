@@ -1492,6 +1492,8 @@ pub fn run() {
         .filter(|v| !v.starts_with('-'))
         .cloned()
         .unwrap_or_else(|| templates::EMPTY.to_string());
+    // Whether `--new` seeds the example scripts; position-independent too.
+    let examples = !args.iter().any(|a| a == "--no-examples");
     if !templates::known(&template) {
         floptle_say::say_err!(
             "unknown template \"{template}\" — try one of: {}",
@@ -1524,11 +1526,16 @@ pub fn run() {
                     floptle_say::say_err!("--new needs a <dir>");
                     std::process::exit(2);
                 };
-                std::process::exit(new_project(Path::new(p), &stamp, &template));
+                std::process::exit(new_project(Path::new(p), &stamp, &template, examples));
             }
             // Consumed by the pre-scan above; skip the flag and its value.
             "--template" => {
                 i += 2;
+                continue;
+            }
+            // Consumed by the pre-scan above; a flag with no value.
+            "--no-examples" => {
+                i += 1;
                 continue;
             }
             "--list-templates" => {
@@ -1733,9 +1740,10 @@ fn extract_clips_cmd(project: &Path, model: &str) -> i32 {
 /// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
 /// scene, a `project.ron` pinned to `stamp`) without a window/GPU. `stamp` is the engine
 /// version to record — the Hub's chosen install label, or this build's distribution version.
+/// `examples` false leaves the example scripts out, and `project.ron` keeps them out.
 /// Returns the process exit code.
 #[cfg(feature = "editor-ui")]
-fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
+fn new_project(path: &Path, stamp: &str, template: &str, examples: bool) -> i32 {
     // Refuse to scaffold over an existing project — that would clobber its project.ron.
     if path.join("project.ron").exists() {
         floptle_say::say_err!("{} already contains a project (project.ron); refusing to overwrite", path.display());
@@ -1748,7 +1756,7 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     // seed_project_dirs / project_cfg_path only touch the filesystem via project_root, so a
     // Default editor (no GPU) is a valid headless context for them.
     let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
-    ed.seed_project_dirs();
+    ed.seed_project_dirs_with(examples);
     // The template goes down first, so its own `scenes/first.ron` is already
     // there and the blank starter scene below leaves it alone. Everything else
     // seeding wrote (default scripts, materials, the input map the templates'
@@ -1770,6 +1778,7 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     let cfg = floptle_scene::ProjectConfigDoc {
         engine_version: Some(stamp.to_string()),
         title: chosen.map(|t| t.title.to_string()),
+        example_scripts: examples,
         // `for_new_project`, not `default`: a project being created now starts
         // at the fast vec3. An existing one is pinned to exact on load instead.
         ..floptle_scene::ProjectConfigDoc::for_new_project()

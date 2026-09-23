@@ -136,7 +136,7 @@ mod readout_tests {
         let dir = std::env::temp_dir()
             .join(format!("floptle-perf-accounted-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(crate::new_project(&dir, "0.0.0-test", "empty"), 0, "scaffold failed");
+        assert_eq!(crate::new_project(&dir, "0.0.0-test", "empty", true), 0, "scaffold failed");
 
         let mut ed = crate::Editor { show_gizmos: false, ..Default::default() };
         ed.open_project(dir.clone());

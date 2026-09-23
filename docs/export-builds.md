@@ -235,7 +235,7 @@ optional `PROJECT` (defaulting to the current directory) and most accept
 the screen. `floptle help <VERB>` explains any one of them.
 
 ```
-[x] floptle new <DIR> [--template NAME] [--engine-version V]
+[x] floptle new <DIR> [--template NAME] [--engine-version V] [--no-examples]
 [x] floptle templates
 [x] floptle open [PROJECT]                     # the bare invocation, said out loud
 [x] floptle play [PROJECT]

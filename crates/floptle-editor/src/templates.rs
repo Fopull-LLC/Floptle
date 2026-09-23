@@ -136,10 +136,15 @@ mod tests {
     /// which fails as "script not found" and looks exactly like a broken
     /// template.
     fn scaffold(tag: &str, name: &str) -> PathBuf {
+        scaffold_with(tag, name, true)
+    }
+
+    /// [`scaffold`], choosing whether the example scripts come along.
+    fn scaffold_with(tag: &str, name: &str, examples: bool) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("floptle-tpl-{}-{tag}-{name}", std::process::id()));
+            .join(format!("floptle-tpl-{}-{tag}-{name}-{examples}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let code = crate::new_project(&dir, "0.0.0-test", name);
+        let code = crate::new_project(&dir, "0.0.0-test", name, examples);
         assert_eq!(code, 0, "--new --template {name} failed");
         dir
     }
@@ -219,20 +224,53 @@ mod tests {
     /// A scene that names a script the project doesn't have is a node that
     /// silently does nothing — the exact failure a starter project must not
     /// ship, because the reader has no way to tell it from "I broke it".
+    ///
+    /// With and without the example scripts: a scene that leans on one breaks
+    /// the day somebody unticks the box.
     #[test]
     fn every_script_a_template_asks_for_is_there() {
         for t in TEMPLATES {
-            let dir = scaffold("asks-for", t.name);
-            for (kind, whence) in kinds_used(&dir) {
-                let path = dir.join("scripts").join(format!("{kind}.lua"));
-                assert!(
-                    path.is_file(),
-                    "{}: {whence} runs {kind}.lua, which the project doesn't have",
-                    t.name
-                );
+            for examples in [true, false] {
+                let dir = scaffold_with("asks-for", t.name, examples);
+                for (kind, whence) in kinds_used(&dir) {
+                    let path = dir.join("scripts").join(format!("{kind}.lua"));
+                    assert!(
+                        path.is_file(),
+                        "{} (examples: {examples}): {whence} runs {kind}.lua, which the project \
+                         doesn't have",
+                        t.name
+                    );
+                }
+                let _ = std::fs::remove_dir_all(&dir);
             }
-            let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// `--no-examples` leaves the example scripts out, and opening the project
+    /// again does not put them back — seeding runs on every open.
+    #[test]
+    fn a_project_without_examples_stays_without_them() {
+        let dir = scaffold_with("no-examples", EMPTY, false);
+        let scripts = dir.join("scripts");
+        let check = |when: &str| {
+            for (name, _) in crate::lua_support::DEFAULT_SCRIPTS {
+                let required = crate::lua_support::REQUIRED_SCRIPTS.contains(name);
+                assert_eq!(scripts.join(name).is_file(), required, "{name} {when}");
+            }
+        };
+        check("after scaffolding");
+        assert!(!floptle_scene::load_project(&dir.join("project.ron")).example_scripts);
+        let ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        ed.seed_project_dirs();
+        check("after reopening");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The default still ships them all.
+        let dir = scaffold_with("no-examples", EMPTY, true);
+        for (name, _) in crate::lua_support::DEFAULT_SCRIPTS {
+            assert!(dir.join("scripts").join(name).is_file(), "{name} missing by default");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// …and the other direction: a template shipping a script nothing uses is

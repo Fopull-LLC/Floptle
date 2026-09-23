@@ -2012,10 +2012,18 @@ pub(crate) fn write_lua_support(project_root: &Path) {
     }
 }
 
-/// Write the default scripts into `scripts_dir` (each only if absent).
-pub(crate) fn seed_default_scripts(scripts_dir: &Path) {
+/// The default scripts a new scene runs, so a project without the examples
+/// still has them: the starter camera's flycam.
+pub(crate) const REQUIRED_SCRIPTS: &[&str] = &["freelook.lua"];
+
+/// Write the default scripts into `scripts_dir` (each only if absent). Without
+/// `examples`, only [`REQUIRED_SCRIPTS`] are written.
+pub(crate) fn seed_default_scripts(scripts_dir: &Path, examples: bool) {
     let _ = floptle_vfs::create_dir_all(scripts_dir);
     for (name, body) in DEFAULT_SCRIPTS {
+        if !examples && !REQUIRED_SCRIPTS.contains(name) {
+            continue;
+        }
         let p = scripts_dir.join(name);
         if !floptle_vfs::exists(&p) {
             let _ = floptle_vfs::write(&p, body);

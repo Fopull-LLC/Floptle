@@ -98,7 +98,9 @@ struct InstallJob {
 /// --new / --migrate, which can be slow on a big project — so it must not block repaint).
 enum ProcOutcome {
     Created(Project),
-    Upgraded(usize),
+    /// The upgraded project's path — not its index, which an open during the
+    /// upgrade moves.
+    Upgraded(PathBuf),
     Failed(String),
 }
 struct ProcJob {
@@ -146,6 +148,11 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Now, as a project's `last_opened` stamp.
+fn now_iso8601() -> String {
+    registry::iso8601_utc(now_unix())
+}
+
 /// A pending "create project" form.
 #[derive(Default)]
 struct NewProjectForm {
@@ -155,6 +162,24 @@ struct NewProjectForm {
     /// Which starter project to scaffold — a name the chosen engine reported,
     /// or empty for a blank one.
     template: String,
+    /// Seed the engine's example scripts. Passed on only to an engine that
+    /// offers the choice.
+    examples: bool,
+}
+
+/// Whether an engine bundle's `new` can leave the example scripts out.
+///
+/// Asked of the binary for the same reason as [`probe_templates`]: an engine
+/// that predates `--no-examples` would refuse the flag, and one that ignored
+/// it would seed the scripts anyway on every open. Either way there is no
+/// choice to offer, so the checkbox does not appear.
+fn probe_no_examples(bin: &std::path::Path) -> bool {
+    std::process::Command::new(bin)
+        .args(["help", "--json", "new"])
+        .output()
+        .is_ok_and(|out| {
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("\"--no-examples\"")
+        })
 }
 
 /// The starter projects an engine bundle offers: `(name, one-line blurb)`.
@@ -203,6 +228,8 @@ pub struct HubApp {
     /// the bundle that will actually do the scaffolding.
     templates: Vec<(String, String)>,
     templates_for: Option<String>,
+    /// The engine in `templates_for` can leave the example scripts out.
+    examples_optional: bool,
     add_path: String,
     proc: Option<ProcJob>,
     toast: Option<(String, bool)>,
@@ -298,6 +325,7 @@ impl HubApp {
             new_project: None,
             templates: Vec::new(),
             templates_for: None,
+            examples_optional: false,
             add_path: String::new(),
             proc: None,
             toast: None,
@@ -924,11 +952,13 @@ impl HubApp {
         match outcome {
             ProcOutcome::Created(p) => {
                 self.toast = Some((format!("created {}", p.name), false));
+                let path = p.path.clone();
                 self.config.upsert_project(p);
+                self.config.mark_opened(&path, now_iso8601());
                 self.save();
             }
-            ProcOutcome::Upgraded(idx) => {
-                if let Some(p) = self.config.projects.get_mut(idx) {
+            ProcOutcome::Upgraded(path) => {
+                if let Some(p) = self.config.projects.iter_mut().find(|p| p.path == path) {
                     p.refresh();
                 }
                 self.save();
@@ -976,6 +1006,7 @@ impl HubApp {
         let pin = install.version.clone();
         let label = format!("creating {name}…");
         let template = form.template.trim().to_string();
+        let no_examples = !form.examples && self.examples_optional;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut cmd = std::process::Command::new(&bin);
@@ -984,6 +1015,9 @@ impl HubApp {
             // template list must not be handed a flag it doesn't know.
             if !template.is_empty() {
                 cmd.arg("--template").arg(&template);
+            }
+            if no_examples {
+                cmd.arg("--no-examples");
             }
             let out = match cmd.status() {
                 Ok(s) if s.success() => {
@@ -1068,7 +1102,7 @@ impl HubApp {
                     // The Hub is the authority: re-point the pin even if the target binary
                     // is old and re-stamped its own version.
                     pin_engine_version(&path, &pin);
-                    ProcOutcome::Upgraded(idx)
+                    ProcOutcome::Upgraded(path)
                 }
                 Ok(_) => ProcOutcome::Failed("migration exited with an error".into()),
                 Err(e) => ProcOutcome::Failed(format!("upgrade failed: {e}")),
@@ -1083,7 +1117,11 @@ impl HubApp {
         let install = self.install_for(project.engine_version.as_deref()).cloned();
         match install {
             Some(install) => match launch::launch(&install, &project, &self.paths.logs_dir()) {
-                Ok(()) => self.toast = Some((format!("launched {}", project.name), false)),
+                Ok(()) => {
+                    self.toast = Some((format!("launched {}", project.name), false));
+                    self.config.mark_opened(&project.path, now_iso8601());
+                    self.save();
+                }
                 Err(e) => self.toast = Some((e, true)),
             },
             None => {
@@ -1378,7 +1416,8 @@ impl HubApp {
                     .unwrap_or_default();
                 // Prefill the location with the remembered/default projects folder.
                 let location = self.config.settings.projects_dir.clone().unwrap_or_default();
-                self.new_project = Some(NewProjectForm { version, location, ..Default::default() });
+                self.new_project =
+                    Some(NewProjectForm { version, location, examples: true, ..Default::default() });
             }
             ui.separator();
             ui.label("or add existing:");
@@ -1386,7 +1425,9 @@ impl HubApp {
             if ui.button(format!("{} Add", ico::NEW)).clicked() {
                 match self.add_existing(&self.add_path.clone()) {
                     Ok(p) => {
+                        let path = p.path.clone();
                         self.config.upsert_project(p);
+                        self.config.mark_opened(&path, now_iso8601());
                         self.save();
                         self.add_path.clear();
                     }
@@ -1427,10 +1468,9 @@ impl HubApp {
                     // Ask the chosen bundle what it can scaffold, and re-ask
                     // whenever that choice changes.
                     if self.templates_for.as_deref() != Some(form.version.as_str()) {
-                        self.templates = self
-                            .install_for(Some(&form.version))
-                            .map(|i| probe_templates(&i.editor_bin()))
-                            .unwrap_or_default();
+                        let bin = self.install_for(Some(&form.version)).map(|i| i.editor_bin());
+                        self.templates = bin.as_deref().map(probe_templates).unwrap_or_default();
+                        self.examples_optional = bin.as_deref().is_some_and(probe_no_examples);
                         self.templates_for = Some(form.version.clone());
                         // Always hold a name that is actually in the list, so
                         // what the box says and what gets scaffolded can never
@@ -1454,6 +1494,14 @@ impl HubApp {
                                         .on_hover_text(blurb);
                                 }
                             });
+                        ui.end_row();
+                    }
+                    if self.examples_optional {
+                        ui.label("Scripts");
+                        ui.checkbox(&mut form.examples, "Include example scripts").on_hover_text(
+                            "ready-made Lua to read and reuse: character controllers, cameras, an \
+                             RTS kit, a fighter. The starter camera's script is always included",
+                        );
                         ui.end_row();
                     }
                 });

@@ -13,10 +13,33 @@ pub struct Project {
     pub path: PathBuf,
     #[serde(default)]
     pub engine_version: Option<String>,
-    /// Iso-8601 stamp of the last launch (the Hub never computes dates itself — the
-    /// caller supplies "now" so the core stays testable/deterministic).
+    /// UTC ISO-8601 stamp (`2026-09-23T14:05:09Z`) of the last time the Hub opened,
+    /// created or added it. Fixed width, so the strings sort in time order. The caller
+    /// supplies "now" (see [`iso8601_utc`]) so the core stays deterministic.
     #[serde(default)]
     pub last_opened: Option<String>,
+}
+
+/// `unix_secs` as a UTC ISO-8601 stamp, `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn iso8601_utc(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    // Days since the epoch to a civil date (Howard Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 impl Project {

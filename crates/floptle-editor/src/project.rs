@@ -1174,6 +1174,13 @@ impl Editor {
     /// Create the standard project subfolders + seed default materials (no-op if
     /// they already exist).
     pub(crate) fn seed_project_dirs(&self) {
+        let examples = floptle_scene::load_project(&self.project_cfg_path()).example_scripts;
+        self.seed_project_dirs_with(examples);
+    }
+
+    /// [`Self::seed_project_dirs`] with the example-scripts choice given rather
+    /// than read from `project.ron` — for scaffolding, where it is not written yet.
+    pub(crate) fn seed_project_dirs_with(&self, example_scripts: bool) {
         for d in ["scenes", "textures", "models", "materials", "audio", "scripts"] {
             let _ = floptle_vfs::create_dir_all(self.project_root.join(d));
         }
@@ -1190,7 +1197,7 @@ impl Editor {
                     floptle_scene::save_material(n, &MaterialDoc { color: c, ..Default::default() }, &mat_dir);
             }
         }
-        seed_default_scripts(&self.scripts_dir());
+        seed_default_scripts(&self.scripts_dir(), example_scripts);
         // The action map those scripts are written against — every entry bound
         // on both keyboard and gamepad. Seeded here rather than in `new_project`
         // so the headless `--new` path (what the Hub uses) gets it too:
@@ -1545,7 +1552,7 @@ impl Editor {
         // Ship the default Lua scripts so the IDE/docs have something to show.
         // (`input.ron`, the action map they're written against, is seeded by
         // `seed_project_dirs` — shared with the headless `--new` path.)
-        seed_default_scripts(&root.join("scripts"));
+        seed_default_scripts(&root.join("scripts"), true);
         seed_example_shaders(&root);
         crate::ui_shader_lib::seed_ui_effects(&root);
         self.open_project(root);

@@ -175,6 +175,13 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: ENGINE_VERSION_HELP,
             },
+            Arg {
+                name: "--no-examples",
+                value: Value::Flag,
+                required: false,
+                help: "leave out the example scripts; the project keeps only the scripts its \
+                       starter scene runs",
+            },
         ],
         needs_gpu: false,
         writes_project: true,
@@ -1349,7 +1356,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 );
                 return Outcome::Exit(2);
             }
-            Outcome::Exit(crate::new_project(&dir, &stamp, &template))
+            Outcome::Exit(crate::new_project(&dir, &stamp, &template, !a.get_flag("no-examples")))
         }
         Some(("templates", _)) => {
             crate::print_templates();

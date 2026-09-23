@@ -143,6 +143,7 @@ impl HubConfig {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        cfg.sort_projects();
         // Distribution moved to the public releases repo: configs saved before
         // that carry the old private-repo URL — migrate them (a URL the user
         // customized to anything else is respected).
@@ -181,12 +182,29 @@ impl HubConfig {
         if let Some(existing) = self.projects.iter_mut().find(|p| p.path == project.path) {
             *existing = project;
         } else {
-            self.projects.push(project);
+            self.projects.insert(0, project);
         }
     }
 
     pub fn remove_project(&mut self, path: &Path) {
         self.projects.retain(|p| p.path != path);
+    }
+
+    /// Stamp the project at `path` as opened at `stamp` (see
+    /// [`crate::registry::iso8601_utc`]) and move it to the top of the list.
+    pub fn mark_opened(&mut self, path: &Path, stamp: String) {
+        let Some(idx) = self.projects.iter().position(|p| p.path == path) else { return };
+        let mut project = self.projects.remove(idx);
+        project.last_opened = Some(stamp);
+        // Front first, then the stable sort: two opens in the same second keep
+        // the later one on top.
+        self.projects.insert(0, project);
+        self.sort_projects();
+    }
+
+    /// Most recently opened first; never-opened projects keep their order at the end.
+    pub fn sort_projects(&mut self) {
+        self.projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
     }
 }
 
@@ -239,6 +257,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(HubConfig::load(&paths).settings.auth_base_url, "http://localhost:8000");
+    }
+
+    #[test]
+    fn stamps_are_utc_iso8601() {
+        use crate::registry::iso8601_utc;
+        assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(iso8601_utc(1_789_999_999), "2026-09-21T14:13:19Z");
+    }
+
+    #[test]
+    fn the_most_recently_opened_project_is_listed_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::at(tmp.path());
+        let mut cfg = HubConfig::default();
+        for name in ["a", "b", "c", "d"] {
+            cfg.upsert_project(Project { name: name.into(), path: PathBuf::from(name), engine_version: None, last_opened: None });
+        }
+        let order = |cfg: &HubConfig| cfg.projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("");
+        cfg.mark_opened(Path::new("c"), "2026-09-01T00:00:00Z".into());
+        assert_eq!(order(&cfg), "cabd", "never-opened projects keep their order after the opened ones");
+        cfg.mark_opened(Path::new("b"), "2026-09-02T00:00:00Z".into());
+        assert_eq!(order(&cfg), "bcad");
+        // Same second: the later open wins.
+        cfg.mark_opened(Path::new("c"), "2026-09-02T00:00:00Z".into());
+        assert_eq!(order(&cfg), "cbad");
+        // A hub.json written in another order is read back sorted; the
+        // never-opened ones keep the file's order.
+        cfg.mark_opened(Path::new("c"), "2026-09-03T00:00:00Z".into());
+        cfg.projects.reverse();
+        assert_eq!(order(&cfg), "dabc");
+        cfg.save(&paths).unwrap();
+        assert_eq!(order(&HubConfig::load(&paths)), "cbda");
     }
 
     #[test]

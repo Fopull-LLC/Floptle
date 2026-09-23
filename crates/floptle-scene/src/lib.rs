@@ -2636,6 +2636,12 @@ pub struct ProjectConfigDoc {
     /// `unwrap_or_default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_vec3: Option<ScriptVec3Doc>,
+    /// Whether opening the project seeds the engine's example scripts into
+    /// `scripts/`. Off leaves only the scripts a new scene needs to run (the
+    /// starter camera's `freelook.lua`), and a deleted example stays deleted.
+    /// Chosen when the project is created; an older engine ignores the field.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub example_scripts: bool,
     /// The project-wide audio mixer graph (tracks, effects, routing). Edited
     /// in the Mixer tab; every scene plays through it.
     #[serde(default)]
@@ -2699,6 +2705,7 @@ impl ProjectConfigDoc {
             sorting_layers: Vec::new(),
             ui_font: String::new(),
             script_vec3: None,
+            example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
