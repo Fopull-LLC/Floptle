@@ -60,7 +60,7 @@ pub(crate) fn material_chip(
 ) -> egui::Response {
     // As wide as the panel allows, up to a comfortable row — never wider
     // than the panel, however thin it gets.
-    let width = ui.available_width().min(420.0).max(1.0);
+    let width = ui.available_width().clamp(1.0, 420.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 40.0), egui::Sense::click());
     let p = ui.painter_at(rect);
     let v = ui.visuals();

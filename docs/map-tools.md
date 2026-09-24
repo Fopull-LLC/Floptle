@@ -68,10 +68,17 @@ the far side of a wall.
   walls out of a floor. With grid snap on, it steps by the grid. Selecting
   *every* face of a closed shape has no direction to go, so it declines rather
   than guessing one.
+- **⬆ As object** (`'`, or hold **Shift** and drag a selected face's move
+  handle) grows a separate block out of the selected faces and leaves the mesh
+  they belong to as it was. The block is closed, wears the same materials, keeps
+  the source's collision setting, and arrives selected with its outer face ready
+  to pull again — so a level can be many pieces instead of one mesh pulled into
+  the whole map. A Shift+press you don't drag takes the block back.
 - **⊡ Inset** (`I`) shrinks a copy of each face inside its own border. Inset then
   extrude carves a recess (a window, a doorway).
 - **⊞ Subdivide**, **⇌ Bridge** (join two faces with a tube of walls),
-  **🗑 Delete**, **✂ Split off** (the selection becomes its own node),
+  **🗑 Delete**, **✂ Split off** (the selection becomes its own node, keeping
+  its materials),
   **⇄ Flip** / **Flip all**, **⊙ Weld**, **⌗ Snap to grid**.
 - The gizmo does **move / rotate / scale** (`X` cycles) with handles aligned to
   the **selection's own normal**, its node, or the world (`V` cycles). Normal is
@@ -131,12 +138,20 @@ itself, so what it shows and what the click does can never disagree.
 ## 4. Materials, per face
 
 The whole mesh takes an ordinary **Material** in the Inspector. To make *some*
-faces different: select them and press **◑ New material for selected faces**.
-That makes a **slot**, assigns your faces to it, and gives it its own material in
-one step.
+faces different, there are two ways, both in the Model tab's **FACE MATERIALS**:
 
-Each slot then has its own colour / texture / shader block, and a **Select**
-button that selects every face wearing it. UVs are a box projection at 1 unit =
+- **Project materials** — the swatches along the top are the project's
+  materials (the files under `materials/`). Select faces and click one: the
+  faces wear it, and they change whenever it does. Build forty pieces of wall
+  from one "Brick" and a single edit restyles all of them.
+- **◑ New material for selected faces** makes a material just for this mesh:
+  a **slot**, your faces assigned to it, and a material of its own, in one step.
+
+Under **On this mesh**, every slot is a chip — its swatch and name — with the
+count of faces on it, **Select** (every face wearing it) and **Assign
+selection**. Click the chip to edit the material in the Inspector (see
+[materials & textures](subsystems/materials-and-textures.md) §6c): there you
+can save a mesh's own material as a project material, or switch a slot to one. UVs are a box projection at 1 unit =
 1 tile, so textures land at a consistent scale across a whole level with no
 unwrapping — and **SIZE** resizes the *geometry* rather than the node, so a
 resized wall keeps its texture scale instead of stretching it.
@@ -220,6 +235,30 @@ scene of that name is found, the shapes still import — each at its own origin 
 and the Inspector says so rather than quietly stacking them. Geometry belonging
 to nodes the owning scene has since deleted is left behind: a save keeps it so
 an undo can resurrect the node, and an import must not resurrect it instead.
+
+## 9. Placing and snapping pieces
+
+Three tools for putting things where they go without typing coordinates:
+
+- **Place** (key `0`) — click anything and drag it over the scene. It rests on
+  the surface under the cursor, whichever way the surface faces: a crate on a
+  floor, a painting on a wall, a lamp under a ceiling, or on terrain. The rest
+  of the selection comes along. **align** in the Tools strip turns it so its up
+  follows the surface; with grid snap on it slides along the surface in grid
+  steps. Models, prefabs and maps dragged in from the Assets tab land the same
+  way, and a ring marks where they will land before you let go.
+- **Vertex snap** — with the Move or Place tool, hold **V**: the corner of the
+  selection nearest the cursor is marked. Press and drag, and that corner lands
+  exactly on the nearest corner of any model, primitive or map mesh under the
+  cursor. Modular kit pieces meet corner to corner, which is how they go
+  together without measuring.
+- **The Move knob** — the round knob at the centre of the Move gizmo drags
+  freely in the plane facing the camera, keeping the point you grabbed under
+  the cursor.
+
+Clicking in the viewport selects what is drawn under the cursor — the crate on
+the floor, not the floor — and the Hierarchy unfolds to show whatever you
+select.
 
 See also: [materials & textures](subsystems/materials-and-textures.md), which
 is also where vertex paint is documented.

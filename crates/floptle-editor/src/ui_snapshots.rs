@@ -55,7 +55,7 @@ fn snapshot_asset_tiles() {
     let out = out_path("asset-tiles");
     h.run();
     h.render().expect("no GPU?").save(&out).unwrap();
-    println!("wrote {}", out.display());
+    floptle_say::say!("wrote {}", out.display());
 }
 
 /// The Move gizmo, at rest and with its centre knob hovered.
@@ -82,7 +82,7 @@ fn snapshot_move_gizmo() {
     let out = out_path("move-gizmo");
     h.run();
     h.render().expect("no GPU?").save(&out).unwrap();
-    println!("wrote {}", out.display());
+    floptle_say::say!("wrote {}", out.display());
 }
 
 /// Material chips as the Inspector and the Model tab show them: a material of
@@ -103,5 +103,5 @@ fn snapshot_material_chips() {
     let out = out_path("material-chips");
     h.run();
     h.render().expect("no GPU?").save(&out).unwrap();
-    println!("wrote {}", out.display());
+    floptle_say::say!("wrote {}", out.display());
 }

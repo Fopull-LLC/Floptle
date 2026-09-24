@@ -255,6 +255,33 @@ texture from the Asset Browser straight onto a surface in the Scene View. Floptl
 
 No dialog hunting, no shader writing — drop, see it tile, tweak.
 
+## 6c. Where materials are edited, and project materials (v0.97)
+
+Every material in the editor — a node's **Material**, a model part's override,
+a map mesh's face slot — shows in the Inspector (and in the Model tab) as a
+**chip**: a swatch of the material and its name. Clicking a chip turns the
+Inspector into that material's editor. **⬅ Back** returns to what the Inspector
+was showing, and selecting something else closes the view by itself.
+Window ▸ Material opens it on the selected node's material.
+
+The files under `materials/` are **project materials**, and anything can follow
+one:
+
+- **Use a project material** (in the material view) makes this material follow
+  it. The chip then reads *↔ project material · Brick*.
+- **Save as project material** adds this material to `materials/` under the
+  name you give, and follows it from here.
+- **Make it this one's own** keeps the look and stops following.
+
+Editing a followed material — in the material view, or with its file selected
+in the Assets tab — saves the file as you go and restyles everything that
+follows it. The material records what it follows in `source`
+(`materials/Brick.ron`) and keeps a copy of it; the copy is refreshed from the
+file whenever a project or scene loads, in the editor and in a built game, so
+nothing can fall out of step. If the file is deleted, followers keep the last
+look they had. Undo reverts a node's own materials, but not an edit already
+saved to a project material's file.
+
 ## 6b. Surface maps, two lighting models, and the retro flags (v0.43)
 
 > **STATUS (2026-08-09): shipped.** Fields on `Material` /`MaterialDoc`, rows in

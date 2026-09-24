@@ -16,6 +16,9 @@ full reference on each piece see [scripting.md](./scripting.md) and
 ## 1. The editor at a glance
 
 - **Scene tab** — the editor view: tools, gizmos, click-to-select, sculpting.
+  The **place** tool (key `0`) drags things over the scene so they rest on what
+  is under the cursor; hold **V** while moving to snap corner to corner (see
+  [building levels](map-tools.md) §9).
 - **Game tab** — the "as a build" view from the active camera. Editor input is
   suppressed here (clicks don't select, editor shortcuts don't fire); only your game's
   input runs. Press **F1** to Play / Stop, **F2** to pause.
