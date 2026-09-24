@@ -60,6 +60,7 @@ pub(crate) enum MapCmd {
     OrientCycle,
     // Modify
     Extrude,
+    ExtrudeNew,
     Inset,
     Subdivide,
     Bridge,
@@ -78,7 +79,7 @@ pub(crate) enum MapCmd {
 }
 
 impl MapCmd {
-    pub(crate) const ALL: [MapCmd; 46] = [
+    pub(crate) const ALL: [MapCmd; 47] = [
         MapCmd::DrawBox,
         MapCmd::DrawPlane,
         MapCmd::DrawWedge,
@@ -110,6 +111,7 @@ impl MapCmd {
         MapCmd::GizmoScale,
         MapCmd::OrientCycle,
         MapCmd::Extrude,
+        MapCmd::ExtrudeNew,
         MapCmd::Inset,
         MapCmd::Subdivide,
         MapCmd::Bridge,
@@ -179,6 +181,7 @@ impl MapCmd {
             GizmoScale => "Gizmo: scale",
             OrientCycle => "Cycle handle orientation",
             Extrude => "Extrude",
+            ExtrudeNew => "Extrude as new object",
             Inset => "Inset",
             Subdivide => "Subdivide",
             Bridge => "Bridge",
@@ -232,6 +235,7 @@ impl MapCmd {
             GizmoScale => "gizmo_scale",
             OrientCycle => "orient_cycle",
             Extrude => "extrude",
+            ExtrudeNew => "extrude_new",
             Inset => "inset",
             Subdivide => "subdivide",
             Bridge => "bridge",
@@ -401,7 +405,8 @@ pub(crate) fn reserved(key: KeyCode) -> Option<&'static str> {
         | K::Digit6
         | K::Digit7
         | K::Digit8
-        | K::Digit9 => "the tool switcher",
+        | K::Digit9
+        | K::Digit0 => "the tool switcher",
         _ => return None,
     })
 }
@@ -456,6 +461,8 @@ impl Default for MapKeys {
                 b(OrientCycle, Chord::new(K::KeyV)),
                 // Modify.
                 b(Extrude, Chord::new(K::KeyE)),
+                // ' — the plain key under Bevel's Shift+', among the shaping verbs.
+                b(ExtrudeNew, Chord::new(K::Quote)),
                 b(Inset, Chord::new(K::KeyI)),
                 b(Subdivide, Chord::shifted(K::KeyI)),
                 b(Bridge, Chord::shifted(K::KeyB)),
@@ -617,7 +624,7 @@ mod tests {
     #[test]
     fn every_command_is_bound() {
         let keys = MapKeys::default();
-        assert_eq!(MapCmd::ALL.len(), 46);
+        assert_eq!(MapCmd::ALL.len(), 47);
         assert!(MapCmd::ALL.into_iter().all(|c| keys.chord(c).is_some()));
     }
 

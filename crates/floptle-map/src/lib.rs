@@ -32,7 +32,8 @@ mod triangulate;
 
 pub use knife::{face_plane_hit, knife, knife_refusal, nearest_cut_point, CutPoint, KnifeCut};
 pub use ops::{
-    bevel_edges, bridge_faces, delete_faces, detach_faces, extrude_faces, flip_faces, inset_faces,
+    bevel_edges, bridge_faces, delete_faces, detach_faces, extrude_faces, extrude_to_new, flip_faces,
+    inset_faces,
     loop_cut, merge_into, recenter, recenter_on, resize, set_face_slot, snap_verts,
     subdivide_faces, transform_verts, translate_verts, weld,
 };

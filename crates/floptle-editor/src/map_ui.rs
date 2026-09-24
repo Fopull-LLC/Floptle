@@ -483,6 +483,15 @@ impl MapCtx<'_> {
             if action(
                 ui,
                 faces > 0,
+                "⬆ As object",
+                "grow a separate block out of the selected faces, leaving this mesh as it is  (') \
+                 — or hold Shift and drag a face's move handle",
+            ) {
+                self.cmd.map_extrude_new = true;
+            }
+            if action(
+                ui,
+                faces > 0,
                 "⊡ Inset",
                 "shrink a copy of each face inside its own border — inset then extrude \
                  carves a recess  (I)",

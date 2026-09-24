@@ -2238,6 +2238,7 @@ impl Editor {
                             // borrowed by the outer menu.
                             let mut pick: Option<crate::map_edit::MapOp> = None;
                             let mut detach = false;
+                            let mut extrude_new = false;
                             let mut mode_pick: Option<crate::map_edit::MapSubMode> = None;
                             ui.label(
                                 egui::RichText::new(match map_mode {
@@ -2261,6 +2262,9 @@ impl Editor {
                             };
                             if map_mode == crate::map_edit::MapSubMode::Face {
                                 op(ui, "Extrude  (E)", "push the selected faces out along their average normal", nf > 0, crate::map_edit::MapOp::Extrude, &mut pick);
+                                if ui.add_enabled(nf > 0, egui::Button::new("Extrude as new object  (')")).on_hover_text("grow a separate block out of the selected faces, leaving this mesh as it is").clicked() {
+                                    extrude_new = true;
+                                }
                                 op(ui, "Inset  (I)", "a smaller copy of each face inside itself", nf > 0, crate::map_edit::MapOp::Inset, &mut pick);
                                 op(ui, "Subdivide", "split each face into four", nf > 0, crate::map_edit::MapOp::Subdivide, &mut pick);
                                 op(ui, "Bridge", "join two face outlines with a tube", nf == 2, crate::map_edit::MapOp::Bridge, &mut pick);
@@ -2304,6 +2308,10 @@ impl Editor {
                             }
                             if detach {
                                 out.cmd.map_detach = true;
+                                out.cmd.close_menu = true;
+                            }
+                            if extrude_new {
+                                out.cmd.map_extrude_new = true;
                                 out.cmd.close_menu = true;
                             }
                             if let Some(m) = mode_pick {

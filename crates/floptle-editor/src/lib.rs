@@ -599,6 +599,8 @@ struct EditorCmd {
     set_map_knife: Option<bool>,
     /// Detach the selected faces into their own map node.
     map_detach: bool,
+    /// Extrude the selected faces as a new map node.
+    map_extrude_new: bool,
     /// Turn the selected map node by N * 90 degrees about its up axis.
     map_turn: Option<i32>,
     /// Drop stored map geometry no node references any more.
@@ -3014,6 +3016,9 @@ struct Editor {
     place_drag: Option<place::PlaceDrag>,
     /// The Place tool turns what it places to follow the surface's normal.
     place_align: bool,
+    /// The Model tool's drag is pulling a block it grew with Shift (see
+    /// `map_extrude_to_new`): released without moving, the block is undone.
+    map_extrude_drag: bool,
     /// A vertex-snap drag in progress (see `vertex_snap.rs`).
     vertex_drag: Option<vertex_snap::VertexDrag>,
     /// V is held over the viewport with the Move or Place tool: a press grabs
@@ -4839,6 +4844,18 @@ impl Editor {
                     // confine box-select to empty space — and a blockout that
                     // fills the screen has none, which is what made picking a
                     // row of faces a click-at-a-time job.
+                    //
+                    // Shift on a face's move handle grows a new block out of
+                    // the faces first, and the drag pulls that instead.
+                    if hovered.is_some()
+                        && self.shift
+                        && self.map_xform == map_edit::MapXform::Move
+                        && self.map_mode == map_edit::MapSubMode::Face
+                        && self.map_sel.as_ref().is_some_and(|s| !s.faces.is_empty())
+                        && self.map_extrude_to_new(0.0).is_some()
+                    {
+                        self.map_extrude_drag = true;
+                    }
                     if let (Some(h), Some(e), Some(start_xf)) =
                         (hovered, self.primary(), self.map_gizmo_xf())
                     {
@@ -4971,11 +4988,17 @@ impl Editor {
             // End of a Map-tool gesture: a sub-object drag banks its
             // pre-drag mesh as one step (only if it actually moved);
             // a box-select applies its rect to the selection.
+            let extruded = std::mem::take(&mut self.map_extrude_drag);
             if self.map_drag.take().is_some()
                 && let Some((id, pre)) = self.map_stroke.take()
-                && self.maps.meshes.get(&id) != Some(&pre)
             {
-                self.push_map_history(id, pre);
+                if self.maps.meshes.get(&id) != Some(&pre) {
+                    self.push_map_history(id, pre);
+                } else if extruded {
+                    // A Shift+press that never moved grew a block of no
+                    // thickness: take it back rather than leave it lying there.
+                    self.undo();
+                }
             }
             self.map_stroke = None;
             if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)

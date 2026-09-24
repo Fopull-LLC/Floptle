@@ -3352,6 +3352,10 @@ impl Editor {
                 self.apply_map_op(MapOp::DeleteFaces);
             }
             C::SplitOff => self.map_detach_selection(),
+            C::ExtrudeNew => {
+                let d = self.map_extrude_distance();
+                self.map_extrude_to_new(d);
+            }
             C::Flip => self.apply_map_op(MapOp::FlipFaces),
             C::FlipAll => self.apply_map_op(MapOp::FlipAll),
             C::Weld => self.apply_map_op(MapOp::WeldSelected),
@@ -3452,6 +3456,71 @@ impl Editor {
         self.apply_map_op(MapOp::Reshape(spec));
     }
 
+    /// How far a keyed or clicked extrude pushes: one grid step when snapping,
+    /// else the Model tab's extrude amount.
+    pub(crate) fn map_extrude_distance(&self) -> f32 {
+        if self.grid.snap { self.grid.size.max(0.01) } else { self.map_opts.extrude }
+    }
+
+    /// Extrude the selected faces as a new map node: a solid block grown out
+    /// of the surface, wearing the same materials, with the mesh it came from
+    /// left as it was. The new node is selected with its pushed-out faces, so
+    /// the next drag keeps pulling it. Returns the new node.
+    pub(crate) fn map_extrude_to_new(&mut self, distance: f32) -> Option<floptle_core::Entity> {
+        if self.playing {
+            self.map_note(floptle_script::LogLevel::Warn, "map editing is disabled during Play");
+            return None;
+        }
+        let (entity, id) = self.map_sync_sel()?;
+        let faces: Vec<u32> =
+            self.map_sel.as_ref().map(|s| s.faces.iter().copied().collect()).unwrap_or_default();
+        if faces.is_empty() {
+            self.map_note(floptle_script::LogLevel::Warn, "select the faces to extrude first");
+            return None;
+        }
+        let mesh = self.maps.meshes.get(&id)?;
+        let Some((part, top)) = floptle_map::extrude_to_new(mesh, &faces, distance) else {
+            self.map_note(
+                floptle_script::LogLevel::Warn,
+                "those faces point every way at once — there is no direction to extrude them in",
+            );
+            return None;
+        };
+        let name = self
+            .world
+            .get::<floptle_core::Name>(entity)
+            .map(|n| format!("{} block", n.0))
+            .unwrap_or_else(|| "Map block".into());
+        let at = floptle_core::world_transform(&self.world, entity);
+        // The source's look and collision, not a new blockout's defaults: the
+        // block is part of the same build.
+        let material = self.world.get::<floptle_core::Material>(entity).cloned();
+        let slots = self.world.get::<floptle_core::ObjectMaterials>(entity).cloned();
+        let collidable = self.world.get::<floptle_core::Collidable>(entity).is_some();
+        let e = self.spawn_map_node(&name, part, Some(at))?;
+        match material {
+            Some(m) => self.world.insert(e, m),
+            None => {
+                self.world.remove::<floptle_core::Material>(e);
+            }
+        }
+        if let Some(s) = slots {
+            self.world.insert(e, s);
+        }
+        if !collidable {
+            self.world.remove::<floptle_core::Collidable>(e);
+        }
+        let new_id = match self.world.get::<floptle_core::Matter>(e) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            _ => return Some(e),
+        };
+        let mut sel = MapSel::new(e, new_id);
+        sel.faces.extend(top);
+        self.map_sel = Some(sel);
+        self.set_map_mode(MapSubMode::Face);
+        Some(e)
+    }
+
     /// Split the selected faces into their own map node (same transform, so
     /// nothing moves), selecting the new node.
     pub(crate) fn map_detach_selection(&mut self) {
@@ -3484,7 +3553,17 @@ impl Editor {
             .unwrap_or_else(|| "Map part".into());
         let at = floptle_core::world_transform(&self.world, entity);
         let count = part.faces.len();
-        self.spawn_map_node(&name, part, Some(at));
+        // The part keeps the look it had: its slots' materials, and the node's.
+        let material = self.world.get::<floptle_core::Material>(entity).cloned();
+        let slots = self.world.get::<floptle_core::ObjectMaterials>(entity).cloned();
+        if let Some(e) = self.spawn_map_node(&name, part, Some(at)) {
+            if let Some(m) = material {
+                self.world.insert(e, m);
+            }
+            if let Some(s) = slots {
+                self.world.insert(e, s);
+            }
+        }
         if let Some(sel) = self.map_sel.as_mut() {
             sel.clear();
         }
@@ -4027,6 +4106,52 @@ mod tests {
         // Right-handed: X cross Y == Z.
         let (x, y, z) = (t.rotation * Vec3::X, t.rotation * Vec3::Y, t.rotation * Vec3::Z);
         assert!((x.cross(y) - z).length() < 1e-5);
+    }
+
+    /// **Extrude as new object grows a separate block and leaves the source
+    /// alone.** The block wears the source's materials and keeps its
+    /// collision choice, arrives selected with the pushed faces ready to drag,
+    /// and one undo takes it away again.
+    #[test]
+    fn extruding_as_a_new_object_makes_a_block_of_its_own() {
+        let mut ed = Editor::default();
+        let src = ed.spawn_map_node("Wall", MapShape::Box.mesh(MapOpts::default()), None).unwrap();
+        ed.world.remove::<floptle_core::Collidable>(src);
+        let red = floptle_core::Material { color: [1.0, 0.0, 0.0], ..Default::default() };
+        ed.world.insert(src, red.clone());
+        let slots = floptle_core::ObjectMaterials([("Default".to_string(), red.clone())].into());
+        ed.world.insert(src, slots.clone());
+        ed.selection = vec![src];
+        let id = match ed.world.get::<floptle_core::Matter>(src) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            _ => panic!("not a map node"),
+        };
+        let before = ed.maps.meshes[&id].clone();
+        let top = before
+            .faces
+            .iter()
+            .position(|f| floptle_map::face_normal(&before, f).y > 0.9)
+            .expect("a top face") as u32;
+        ed.map_sync_sel();
+        ed.map_sel.as_mut().unwrap().faces.insert(top);
+
+        let block = ed.map_extrude_to_new(1.5).expect("a block");
+        assert_ne!(block, src);
+        assert_eq!(ed.maps.meshes[&id], before, "the source mesh is untouched");
+        assert_eq!(ed.primary(), Some(block), "the block arrives selected");
+        let sel = ed.map_sel.as_ref().unwrap();
+        assert_eq!((sel.entity, sel.faces.len()), (block, 1), "with its pushed-out face");
+        assert_eq!(ed.world.get::<floptle_core::Material>(block), Some(&red));
+        assert_eq!(ed.world.get::<floptle_core::ObjectMaterials>(block), Some(&slots));
+        assert!(ed.world.get::<floptle_core::Collidable>(block).is_none(), "the source's choice");
+
+        // Undo rebuilds the world, so count nodes rather than trust handles.
+        let map_nodes = |ed: &Editor| {
+            ed.world.query::<floptle_core::Matter>().filter(|(_, m)| matches!(m, floptle_core::Matter::MapMesh { .. })).count()
+        };
+        assert_eq!(map_nodes(&ed), 2);
+        ed.undo();
+        assert_eq!(map_nodes(&ed), 1, "one undo takes the block away");
     }
 
     /// "Select every face" has to mean the mode you are in, and inverting has

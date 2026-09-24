@@ -226,6 +226,10 @@ impl Editor {
         if cmd.map_detach {
             self.map_detach_selection();
         }
+        if cmd.map_extrude_new {
+            let d = self.map_extrude_distance();
+            self.map_extrude_to_new(d);
+        }
         if let Some(q) = cmd.map_turn.take() {
             self.map_turn(q);
         }

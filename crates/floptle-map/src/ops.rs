@@ -251,6 +251,51 @@ pub fn detach_faces(mesh: &mut MapMesh, faces: &[u32]) -> Option<MapMesh> {
     Some(out)
 }
 
+/// Extrude the selected faces into a mesh of their own, leaving `mesh`
+/// untouched: the faces are copied, pushed out along their shared normal by
+/// `distance` with walls round their border, and the place they started from
+/// is closed with a cap facing the other way — a solid block grown out of the
+/// surface. Returns the new mesh (same local frame and slot names) and the
+/// indices of its pushed-out faces, so the caller can keep dragging them.
+/// `None` when the selection is empty or has no net facing (a closed shell).
+pub fn extrude_to_new(mesh: &MapMesh, faces: &[u32], distance: f32) -> Option<(MapMesh, Vec<u32>)> {
+    let sel = valid_faces(mesh, faces);
+    if sel.is_empty() {
+        return None;
+    }
+    let mut out =
+        MapMesh { verts: Vec::new(), faces: Vec::new(), slots: mesh.slots.clone(), spec: None };
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    for &fi in &sel {
+        let f = &mesh.faces[fi];
+        let verts = f
+            .verts
+            .iter()
+            .map(|&v| {
+                *remap.entry(v).or_insert_with(|| {
+                    out.verts.push(mesh.verts[v as usize]);
+                    out.verts.len() as u32 - 1
+                })
+            })
+            .collect();
+        out.faces.push(Face { verts, slot: f.slot });
+    }
+    // The base, before the extrude moves the faces off it: the same corners,
+    // wound the other way so the cap faces back into the surface it grew from.
+    let base: Vec<Face> = out
+        .faces
+        .iter()
+        .map(|f| Face { verts: f.verts.iter().rev().copied().collect(), slot: f.slot })
+        .collect();
+    let all: Vec<u32> = (0..out.faces.len() as u32).collect();
+    let top = extrude_faces(&mut out, &all, distance);
+    if top.is_empty() {
+        return None;
+    }
+    out.faces.extend(base);
+    Some((out, top))
+}
+
 /// Bridge two faces with a tube of quads: both faces are removed and their
 /// borders joined wall-by-wall. The faces must have the same corner count.
 /// Returns the new wall face indices (empty when the bridge isn't possible).
@@ -746,6 +791,54 @@ pub fn bevel_edges(mesh: &mut MapMesh, edges: &[(u32, u32)], amount: f32) -> usi
 /// Canonical undirected edge key (mirrors `select::key`).
 fn key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
+}
+
+#[cfg(test)]
+mod extrude_to_new_tests {
+    use super::*;
+    use crate::box_mesh;
+    use std::collections::HashMap;
+
+    /// **A face extruded as a new object is a closed solid, and the mesh it
+    /// came from is not touched.** Every edge of the new mesh is shared by
+    /// exactly two faces, the pushed-out face sits `distance` off the one it
+    /// grew from, and the base cap faces back into the surface.
+    #[test]
+    fn a_face_extruded_to_a_new_object_is_a_closed_block() {
+        let src = box_mesh(Vec3::splat(1.0));
+        let before = src.clone();
+        let top = src
+            .faces
+            .iter()
+            .position(|f| crate::face_normal(&src, f).y > 0.9)
+            .expect("the box has a top") as u32;
+        let (out, moved) = extrude_to_new(&src, &[top], 2.0).expect("a face extrudes");
+        assert_eq!(src, before, "the source mesh is untouched");
+        assert_eq!(out.faces.len(), 6, "top, four walls, base");
+        assert_eq!(moved.len(), 1);
+
+        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+        for f in &out.faces {
+            for i in 0..f.verts.len() {
+                let (a, b) = (f.verts[i], f.verts[(i + 1) % f.verts.len()]);
+                *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|&n| n == 2), "not closed: {edges:?}");
+
+        let y = |f: &Face| f.verts.iter().map(|&v| out.verts[v as usize].y).sum::<f32>() / f.verts.len() as f32;
+        let pushed = &out.faces[moved[0] as usize];
+        assert!((y(pushed) - 3.0).abs() < 1e-5, "pushed 2 up from y = 1");
+        assert!(crate::face_normal(&out, pushed).y > 0.99);
+        let base = out.faces.last().expect("the cap");
+        assert!((y(base) - 1.0).abs() < 1e-5 && crate::face_normal(&out, base).y < -0.99);
+
+        // The whole mesh can be extruded as a copy of itself — nothing is left
+        // behind to refuse over — but a closed shell has no way to face.
+        let all: Vec<u32> = (0..src.faces.len() as u32).collect();
+        assert!(extrude_to_new(&src, &all, 1.0).is_none());
+        assert!(extrude_to_new(&src, &[], 1.0).is_none());
+    }
 }
 
 #[cfg(test)]
