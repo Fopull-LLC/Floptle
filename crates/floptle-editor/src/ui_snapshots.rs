@@ -105,3 +105,31 @@ fn snapshot_material_chips() {
     h.render().expect("no GPU?").save(&out).unwrap();
     floptle_say::say!("wrote {}", out.display());
 }
+
+/// The Docs tab's two-pane layout with a real guide page in it.
+#[test]
+#[ignore]
+fn snapshot_docs_layout() {
+    use crate::ide::{DOC_SECTIONS, docs_two_pane};
+    let mut h = harness(egui::vec2(900.0, 420.0), move |ui| {
+        docs_two_pane(
+            ui,
+            "snap",
+            |ui, _| {
+                for (i, (_, title, _)) in DOC_SECTIONS.iter().take(14).enumerate() {
+                    let _ = ui.selectable_label(i == 10, *title);
+                }
+            },
+            |ui| {
+                let (chapter, title, body) = DOC_SECTIONS[10];
+                ui.small(chapter);
+                ui.heading(title);
+                ui.label(body);
+            },
+        );
+    });
+    let out = out_path("docs-layout");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    floptle_say::say!("wrote {}", out.display());
+}

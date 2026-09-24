@@ -80,7 +80,16 @@ pub(crate) struct IdeState {
     pub(crate) docs_page: DocsPage,
     /// Which guide page the Docs tab has open — an index into `DOC_SECTIONS`.
     pub(crate) docs_guide: usize,
+    /// Which API group the Docs tab has open — an index into `API_CATEGORIES`,
+    /// or `DOCS_BEST_MATCHES` for the ranked search results.
+    pub(crate) docs_api: usize,
+    /// Which shader page the Docs tab has open: 0 is the overview, then one
+    /// per stdlib category.
+    pub(crate) docs_shader: usize,
 }
+
+/// The API page's "best matches" entry, above the groups while searching.
+pub(crate) const DOCS_BEST_MATCHES: usize = usize::MAX;
 
 /// The three things the Docs tab is: a guide, a reference, a shader reference.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -1337,95 +1346,70 @@ impl EditorTabViewer<'_> {
         // The open page, clamped to something that exists: the list is a
         // compile-time constant, but the stored index outlives a build in which
         // a page was removed.
-        let mut open = self.ide.docs_guide.min(DOC_SECTIONS.len().saturating_sub(1));
+        let open = std::cell::Cell::new(self.ide.docs_guide.min(DOC_SECTIONS.len().saturating_sub(1)));
 
-        // Two columns need room for both of them. A dock panel is whatever width
-        // it was dragged to, and at 200 px a contents column at its own minimum
-        // leaves the page fifty pixels — which is the overflow this layout would
-        // otherwise introduce, in the tab whose whole job is reading. Narrow, the
-        // contents go above the page instead: shrink, then wrap, then stack.
-        let side = docs_contents_width(ui.available_width());
-        let render = |ui: &mut egui::Ui, this: &mut Self, open: &mut usize| {
-            // ---- contents ----
-            let w = side.unwrap_or_else(|| ui.available_width());
-            ui.allocate_ui_with_layout(
-                egui::vec2(w, if side.is_some() { ui.available_height() } else { 150.0 }),
-                egui::Layout::top_down_justified(egui::Align::LEFT),
-                |ui| {
-                    egui::ScrollArea::vertical().id_salt("docs-contents").show(ui, |ui| {
-                        for chapter in DOC_CHAPTERS {
-                            let pages: Vec<usize> = shown
-                                .iter()
-                                .copied()
-                                .filter(|&i| DOC_SECTIONS[i].0 == *chapter)
-                                .collect();
-                            if pages.is_empty() {
-                                continue;
-                            }
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(*chapter).strong().size(12.0));
-                            for i in pages {
-                                let title = DOC_SECTIONS[i].1;
-                                // The chapter already says the subject, so the
-                                // part of the title before the dash is usually
-                                // repeating it. Show the whole thing on hover.
-                                let short = crate::responsive::elide(ui, title, w - 18.0);
-                                if ui
-                                    .selectable_label(i == *open, short)
-                                    .on_hover_text(title)
-                                    .clicked()
-                                {
-                                    *open = i;
-                                }
-                            }
+        docs_two_pane(
+            ui,
+            "guides",
+            |ui, w| {
+                for chapter in DOC_CHAPTERS {
+                    let pages: Vec<usize> =
+                        shown.iter().copied().filter(|&i| DOC_SECTIONS[i].0 == *chapter).collect();
+                    if pages.is_empty() {
+                        continue;
+                    }
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(*chapter).strong().size(12.0));
+                    for i in pages {
+                        let title = DOC_SECTIONS[i].1;
+                        // The chapter already says the subject, so the part of
+                        // the title before the dash is usually repeating it.
+                        // Show the whole thing on hover.
+                        let short = crate::responsive::elide(ui, title, w - 18.0);
+                        if ui.selectable_label(i == open.get(), short).on_hover_text(title).clicked() {
+                            open.set(i);
                         }
-                        if shown.is_empty() {
-                            ui.add_space(6.0);
-                            ui.small("no page matches that");
-                        }
-                    });
-                },
-            );
-            ui.separator();
-            // ---- the page ----
-            egui::ScrollArea::vertical().id_salt("docs-page").show(ui, |ui| {
-                let (chapter, title, body) = DOC_SECTIONS[*open];
+                    }
+                }
+                if shown.is_empty() {
+                    ui.add_space(6.0);
+                    ui.small("no page matches that");
+                }
+            },
+            |ui| {
+                let open_now = open.get();
+                let (chapter, title, body) = DOC_SECTIONS[open_now];
                 ui.small(chapter);
                 ui.heading(title);
                 ui.add_space(2.0);
-                this.doc_body_ui(ui, body);
-                // Where to go next, so the guide reads as a sequence rather
-                // than as a pile. A page with nothing after it says so instead
-                // of showing a dead button.
+                self.doc_body_ui(ui, body);
+                // Where to go next, so the guide reads as a sequence rather than
+                // as a pile. A page with nothing after it says so instead of
+                // showing a dead button.
                 ui.add_space(10.0);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     // Elided, because a chapter title is as long as it needs to
                     // be and these two sit side by side on one line.
                     let w = ui.available_width() * 0.45;
-                    if *open > 0 {
-                        let t = DOC_SECTIONS[*open - 1].1;
+                    if open_now > 0 {
+                        let t = DOC_SECTIONS[open_now - 1].1;
                         let label = format!("◀ {}", crate::responsive::elide(ui, t, w));
                         if ui.button(label).on_hover_text(t).clicked() {
-                            *open -= 1;
+                            open.set(open_now - 1);
                         }
                     }
-                    if *open + 1 < DOC_SECTIONS.len() {
-                        let t = DOC_SECTIONS[*open + 1].1;
+                    if open_now + 1 < DOC_SECTIONS.len() {
+                        let t = DOC_SECTIONS[open_now + 1].1;
                         let label = format!("{} ▶", crate::responsive::elide(ui, t, w));
                         if ui.button(label).on_hover_text(t).clicked() {
-                            *open += 1;
+                            open.set(open_now + 1);
                         }
                     }
                 });
-            });
-        };
-        if side.is_some() {
-            ui.horizontal_top(|ui| render(ui, self, &mut open));
-        } else {
-            ui.vertical(|ui| render(ui, self, &mut open));
-        }
-        self.ide.docs_guide = open;
+            },
+        );
+        self.ide.docs_guide = open.get();
         shown.len()
     }
 }
@@ -1445,6 +1429,75 @@ fn docs_contents_width(avail: f32) -> Option<f32> {
         return None;
     }
     Some((avail * 0.34).clamp(MIN_CONTENTS, 260.0))
+}
+
+/// The Docs tab's layout: a contents column on the left and the open page on
+/// the right, each scrolling on its own — or, too narrow for two columns, the
+/// contents stacked above the page (see [`docs_contents_width`]).
+///
+/// The page is always laid out top to bottom at the width left to it. Laying
+/// the two columns out in a row must not hand that row's direction down to
+/// the page, or its heading and every paragraph line up side by side and run
+/// off the panel.
+pub(crate) fn docs_two_pane(
+    ui: &mut egui::Ui,
+    salt: &str,
+    contents: impl FnOnce(&mut egui::Ui, f32),
+    page: impl FnOnce(&mut egui::Ui),
+) {
+    let avail = ui.available_size();
+    let column = |ui: &mut egui::Ui, id: &str, size: egui::Vec2, justified: bool, body: &mut dyn FnMut(&mut egui::Ui)| {
+        let layout = if justified {
+            egui::Layout::top_down_justified(egui::Align::LEFT)
+        } else {
+            egui::Layout::top_down(egui::Align::LEFT)
+        };
+        ui.allocate_ui_with_layout(size, layout, |ui| {
+            ui.set_min_size(size);
+            egui::ScrollArea::vertical()
+                .id_salt((salt, id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_max_width(size.x);
+                    body(ui);
+                });
+        });
+    };
+    let mut contents = Some(contents);
+    let mut page = Some(page);
+    match docs_contents_width(avail.x) {
+        Some(w) => {
+            ui.horizontal_top(|ui| {
+                column(ui, "contents", egui::vec2(w, avail.y), true, &mut |ui| {
+                    if let Some(f) = contents.take() {
+                        f(ui, w)
+                    }
+                });
+                ui.separator();
+                let rest = (ui.available_width()).max(1.0);
+                column(ui, "page", egui::vec2(rest, avail.y), false, &mut |ui| {
+                    if let Some(f) = page.take() {
+                        f(ui)
+                    }
+                });
+            });
+        }
+        None => {
+            let top = (avail.y * 0.3).clamp(90.0, 180.0);
+            column(ui, "contents", egui::vec2(avail.x, top), true, &mut |ui| {
+                if let Some(f) = contents.take() {
+                    f(ui, avail.x)
+                }
+            });
+            ui.separator();
+            let rest = ui.available_height().max(1.0);
+            column(ui, "page", egui::vec2(avail.x, rest), false, &mut |ui| {
+                if let Some(f) = page.take() {
+                    f(ui)
+                }
+            });
+        }
+    }
 }
 
 impl EditorTabViewer<'_> {
@@ -1477,148 +1530,199 @@ impl EditorTabViewer<'_> {
                         DocsPage::Shaders => "search the shader stdlib",
                         DocsPage::Guides => "search the guides — \"friction\", \"crossfade\", \"mouse\"",
                     })
-                    .desired_width(300.0),
+                    .desired_width(crate::responsive::fit_here(ui, 300.0)),
             );
             if !self.ide.docs_search.is_empty() && ui.small_button("✖").clicked() {
                 self.ide.docs_search.clear();
             }
+            ui.menu_button("⌨", |ui| {
+                ui.monospace(IDE_SHORTCUTS);
+            })
+            .response
+            .on_hover_text("the editor's keyboard shortcuts");
         });
         ui.add_space(4.0);
         let q = self.ide.docs_search.trim().to_ascii_lowercase();
+        match self.ide.docs_page {
+            DocsPage::Guides => {
+                self.docs_guides_ui(ui, &q);
+            }
+            DocsPage::Api => self.docs_api_ui(ui, &q),
+            DocsPage::Shaders => self.docs_shaders_ui(ui, &q),
+        }
+    }
+
+    /// The API reference: its groups down the left, one group's names on the
+    /// right. While searching, a "best matches" entry heads the list — every
+    /// match across the groups, ranked, each labelled with the group it lives
+    /// in — and the groups show only the names that match.
+    fn docs_api_ui(&mut self, ui: &mut egui::Ui, q: &str) {
         let searching = !q.is_empty();
-        let mut hits = 0usize;
-        let page = self.ide.docs_page;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-          if page == DocsPage::Guides {
-            hits += self.docs_guides_ui(ui, &q);
-          }
-          if page == DocsPage::Api {
-            ui.small(
-                "Every name the engine provides. The same table drives autocomplete as you \
-                 type (Tab accepts, ↑↓ chooses) and the hover docs in the editor — click a \
-                 name or an example to copy it.",
-            );
-            ui.add_space(6.0);
-            // Searching is a different job from browsing. Grouped results make
-            // you scan every category for the one row you wanted, and with 500+
-            // entries a doc-text match in the first group buries an exact name
-            // match in the last. So while there's a query, rank everything into
-            // one flat list, best first, and label each row with the group it
-            // came from — you still learn where it lives, you just don't have
-            // to go looking.
-            if searching {
-                let mut ranked: Vec<(u8, &ApiEntry)> =
-                    LUA_API.iter().filter_map(|e| api_rank(e, &q).map(|r| (r, e))).collect();
-                ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
-                hits += ranked.len();
-                if !ranked.is_empty() {
+        let in_cat = |cat: &str| -> Vec<&'static ApiEntry> {
+            LUA_API
+                .iter()
+                .filter(|e| api_category(e.label) == cat)
+                .filter(|e| !searching || api_rank(e, q).is_some())
+                .collect()
+        };
+        let counts: Vec<usize> = API_CATEGORIES.iter().map(|c| in_cat(c).len()).collect();
+        let mut ranked: Vec<(u8, &'static ApiEntry)> = if searching {
+            LUA_API.iter().filter_map(|e| api_rank(e, q).map(|r| (r, e))).collect()
+        } else {
+            Vec::new()
+        };
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
+
+        // A search opens its results; clearing it goes back to a group.
+        let mut open = self.ide.docs_api;
+        if searching && open != DOCS_BEST_MATCHES && counts.get(open).is_none_or(|&n| n == 0) {
+            open = DOCS_BEST_MATCHES;
+        }
+        if !searching && open == DOCS_BEST_MATCHES {
+            open = 0;
+        }
+        if open != DOCS_BEST_MATCHES {
+            open = open.min(API_CATEGORIES.len().saturating_sub(1));
+        }
+        let open = std::cell::Cell::new(open);
+        docs_two_pane(
+            ui,
+            "api",
+            |ui, w| {
+                if searching {
+                    let label = format!("★ Best matches ({})", ranked.len());
+                    if ui.selectable_label(open.get() == DOCS_BEST_MATCHES, label).clicked() {
+                        open.set(DOCS_BEST_MATCHES);
+                    }
+                    ui.add_space(4.0);
+                }
+                for (i, cat) in API_CATEGORIES.iter().enumerate() {
+                    if counts[i] == 0 {
+                        continue;
+                    }
+                    let label = crate::responsive::elide(ui, &format!("{cat}  ({})", counts[i]), w - 18.0);
+                    if ui.selectable_label(open.get() == i, label).clicked() {
+                        open.set(i);
+                    }
+                }
+                if searching && ranked.is_empty() {
+                    ui.add_space(6.0);
+                    ui.small("nothing matches that");
+                }
+            },
+            |ui| {
+                if open.get() == DOCS_BEST_MATCHES {
+                    ui.heading("Best matches");
                     ui.small(format!(
-                        "{} match{} — best first",
+                        "{} match{} for \"{q}\", best first",
                         ranked.len(),
                         if ranked.len() == 1 { "" } else { "es" }
                     ));
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
+                    for (_, e) in &ranked {
+                        self.api_entry_ui(ui, e, true);
+                    }
+                    return;
                 }
-                for (_, e) in ranked {
-                    self.api_entry_ui(ui, e, true);
+                let cat = API_CATEGORIES[open.get()];
+                ui.heading(cat);
+                ui.small(
+                    "Every name the engine provides. The same table drives autocomplete as you \
+                     type (Tab accepts, ↑↓ chooses) and the hover docs in the editor — click a \
+                     name or an example to copy it.",
+                );
+                ui.add_space(6.0);
+                for e in in_cat(cat) {
+                    self.api_entry_ui(ui, e, false);
                 }
-            }
-            // …and with no query, the grouped browse. Groups open by default:
-            // this is a browser, and a wall of closed headers is a table of
-            // contents, not a reference.
-            if !searching {
-                for cat in API_CATEGORIES {
-                    let entries: Vec<&ApiEntry> =
-                        LUA_API.iter().filter(|e| api_category(e.label) == *cat).collect();
-                    if entries.is_empty() {
+            },
+        );
+        self.ide.docs_api = open.get();
+    }
+
+    /// The shader reference: an overview, then one page per stdlib category.
+    fn docs_shaders_ui(&mut self, ui: &mut egui::Ui, q: &str) {
+        let searching = !q.is_empty();
+        let cats: Vec<&'static str> = floptle_shader::stdlib::CATEGORIES.to_vec();
+        let ops_in = |cat: &str| -> Vec<&'static floptle_shader::stdlib::OpSpec> {
+            floptle_shader::stdlib::OPS
+                .iter()
+                .filter(|o| o.category == cat)
+                .filter(|o| {
+                    !searching || o.name.to_ascii_lowercase().contains(q) || o.doc.to_ascii_lowercase().contains(q)
+                })
+                .collect()
+        };
+        let counts: Vec<usize> = cats.iter().map(|c| ops_in(c).len()).collect();
+        // Page 0 is the overview; page i + 1 is category i. A search that
+        // leaves the open category empty moves to the first one it matches.
+        let mut open = self.ide.docs_shader.min(cats.len());
+        if searching && (open == 0 || counts[open - 1] == 0)
+            && let Some(first) = counts.iter().position(|&n| n > 0)
+        {
+            open = first + 1;
+        }
+        let open = std::cell::Cell::new(open);
+        docs_two_pane(
+            ui,
+            "shaders",
+            |ui, w| {
+                if ui.selectable_label(open.get() == 0, "Overview").clicked() {
+                    open.set(0);
+                }
+                ui.add_space(4.0);
+                for (i, cat) in cats.iter().enumerate() {
+                    if searching && counts[i] == 0 {
                         continue;
                     }
-                    egui::CollapsingHeader::new(
-                        egui::RichText::new(format!("{cat}  ({})", entries.len())).strong(),
-                    )
-                    .id_salt(("api_cat", cat))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for e in entries {
-                            self.api_entry_ui(ui, e, false);
-                        }
-                    });
-                }
-            }
-          }
-          if page == DocsPage::Shaders {
-            ui.strong("Shader stdlib (.flsl)");
-            ui.small(
-                "Custom material looks: Assets → right-click → ◈ New Shader, then \
-                 Inspector → Material → Shader to assign. `uniform`s become Inspector knobs, \
-                 `texture` slots take drag-and-drop textures, and every op below can be wired \
-                 by name — also editable in VSCode.",
-            );
-            ui.add_space(4.0);
-            {
-                let inputs: Vec<String> = floptle_shader::ir::Input::all()
-                    .iter()
-                    .map(|i| format!("{}: {}", i.name(), i.ty().flsl()))
-                    .collect();
-                let inputs_line = format!("inputs — {}", inputs.join(", "));
-                if !searching || inputs_line.to_ascii_lowercase().contains(&q) {
-                    hits += 1;
-                    ui.monospace(
-                        egui::RichText::new(inputs_line)
-                            .color(egui::Color32::from_rgb(190, 140, 255)),
-                    );
-                    ui.add_space(2.0);
-                }
-            }
-            for cat in floptle_shader::stdlib::CATEGORIES.iter().copied() {
-                let ops: Vec<&floptle_shader::stdlib::OpSpec> = floptle_shader::stdlib::OPS
-                    .iter()
-                    .filter(|o| o.category == cat)
-                    .filter(|o| {
-                        !searching
-                            || o.name.to_ascii_lowercase().contains(&q)
-                            || o.doc.to_ascii_lowercase().contains(&q)
-                    })
-                    .collect();
-                if ops.is_empty() {
-                    continue;
-                }
-                hits += ops.len();
-                let hdr = egui::CollapsingHeader::new(format!("◈ {cat}  ({})", ops.len()))
-                    .id_salt(("flsl_cat", cat));
-                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(false) };
-                hdr.show(ui, |ui| {
-                    for o in ops {
-                        let args: Vec<String> = o
-                            .inputs
-                            .iter()
-                            .map(|i| match i.default {
-                                Some(d) => format!("{}: {d}", i.name),
-                                None => i.name.to_string(),
-                            })
-                            .collect();
-                        ui.monospace(
-                            egui::RichText::new(format!("{}({})", o.name, args.join(", ")))
-                                .color(egui::Color32::from_rgb(190, 140, 255)),
-                        );
-                        ui.indent(("flsl_doc", o.name), |ui| ui.small(o.doc));
-                        ui.add_space(2.0);
+                    let label = crate::responsive::elide(ui, &format!("◈ {cat}  ({})", counts[i]), w - 18.0);
+                    if ui.selectable_label(open.get() == i + 1, label).clicked() {
+                        open.set(i + 1);
                     }
-                });
-            }
-          }
-            if searching && hits == 0 {
-                ui.add_space(8.0);
-                ui.label(format!(
-                    "No matches for \"{}\" on this page — try a broader word, or another tab.",
-                    self.ide.docs_search.trim()
-                ));
-            }
-            ui.add_space(10.0);
-            egui::CollapsingHeader::new("⌨ Editor shortcuts").default_open(false).show(ui, |ui| {
-                ui.monospace(IDE_SHORTCUTS);
-            });
-        });
+                }
+                if searching && counts.iter().all(|&n| n == 0) {
+                    ui.add_space(6.0);
+                    ui.small("nothing matches that");
+                }
+            },
+            |ui| {
+                let purple = egui::Color32::from_rgb(190, 140, 255);
+                if open.get() == 0 {
+                    ui.heading("Shader stdlib (.flsl)");
+                    ui.label(
+                        "Custom material looks: Assets → right-click → ◈ New Shader, then open the \
+                         material and pick it under Shader. `uniform`s become material knobs, \
+                         `texture` slots take drag-and-drop textures, and every op on these pages \
+                         can be wired by name — also editable in VSCode.",
+                    );
+                    ui.add_space(6.0);
+                    ui.strong("Inputs");
+                    for i in floptle_shader::ir::Input::all() {
+                        ui.monospace(
+                            egui::RichText::new(format!("{}: {}", i.name(), i.ty().flsl())).color(purple),
+                        );
+                    }
+                    return;
+                }
+                let cat = cats[open.get() - 1];
+                ui.heading(format!("◈ {cat}"));
+                ui.add_space(4.0);
+                for o in ops_in(cat) {
+                    let args: Vec<String> = o
+                        .inputs
+                        .iter()
+                        .map(|i| match i.default {
+                            Some(d) => format!("{}: {d}", i.name),
+                            None => i.name.to_string(),
+                        })
+                        .collect();
+                    ui.monospace(egui::RichText::new(format!("{}({})", o.name, args.join(", "))).color(purple));
+                    ui.indent(("flsl_doc", o.name), |ui| ui.label(egui::RichText::new(o.doc).small()));
+                    ui.add_space(4.0);
+                }
+            },
+        );
+        self.ide.docs_shader = open.get();
     }
 
     /// One API entry: the name (click to copy), its description, and its worked
@@ -4769,7 +4873,7 @@ const DOC_CHAPTERS: &[&str] = &[
 ///
 /// Chapter order comes from [`DOC_CHAPTERS`], not from this list, so a new page
 /// can be filed next to its relatives without moving anything.
-const DOC_SECTIONS: &[(&str, &str, &str)] = &[
+pub(crate) const DOC_SECTIONS: &[(&str, &str, &str)] = &[
     (
         "Working in the editor",
         "Inspector tunables — headers, tooltips, dropdowns, sliders",
@@ -5987,6 +6091,48 @@ Prose with `inline code` in it.
         assert!(api_entry_for("myLocalVariable").is_none());
         assert!(api_entry_for("").is_none());
         assert!(api_entry_for("foo.").is_none());
+    }
+
+    /// **A Docs page reads top to bottom, inside the panel.** Laying the two
+    /// columns out in a row handed the row's direction to the page, so its
+    /// heading and every paragraph sat side by side and ran off the right edge.
+    #[test]
+    fn a_docs_page_stacks_its_lines_inside_the_panel() {
+        for width in [900.0f32, 300.0] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 500.0))),
+                ..Default::default()
+            };
+            let mut rects: Vec<egui::Rect> = Vec::new();
+            let mut panel = egui::Rect::NOTHING;
+            let _ = ctx.run_ui(input, |ui| {
+                panel = ui.max_rect();
+                docs_two_pane(
+                    ui,
+                    "test",
+                    |ui, _| {
+                        ui.label("contents");
+                    },
+                    |ui| {
+                        rects.push(ui.heading("A page title").rect);
+                        rects.push(
+                            ui.label("A paragraph long enough that it has to wrap to fit the page column. ".repeat(4))
+                                .rect,
+                        );
+                        rects.push(ui.label("the next paragraph").rect);
+                    },
+                );
+            });
+            assert_eq!(rects.len(), 3, "{width}px: the page was not drawn");
+            for pair in rects.windows(2) {
+                assert!(pair[1].top() >= pair[0].bottom() - 0.5, "{width}px: lines side by side: {pair:?}");
+            }
+            for r in &rects {
+                assert!(r.right() <= panel.right() + 0.5, "{width}px: {r:?} runs past the panel {panel:?}");
+            }
+            assert!(rects[1].height() > rects[0].height(), "{width}px: the paragraph did not wrap");
+        }
     }
 
     /// **The Guides layout does not put two columns where one fits.**
