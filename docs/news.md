@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.97.1 — "Square On"** (stable). Rays that hit map meshes and models
+report the face they struck, facing back at the ray, head-on or at an angle.
+A ray straight down onto a map floor could come back with a sideways normal
+before, so wall checks, ledge tops and ground checks on map geometry now read
+the same as they do on primitives. Capsules also stand on their feet on map
+floors instead of their rounded bottoms.
+
 **v0.97.0 — "Put It There"** (stable). The beta, promoted, with two
 fixes: holding **V** snaps in the Model tool too — whole shapes, or just the
 selected vertices, onto any corner — and every page of the Docs tab has a
