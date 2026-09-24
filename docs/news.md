@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.96.0 — "Where You Left It"** (stable). The Hub lists your projects by
+**v0.96.1 — "Where You Left It"** (stable). The Hub lists your projects by
 when you last opened them, newest first, and **New project** has an
 **Include example scripts** checkbox: untick it and the project starts with
 only the starter camera's script, and reopening it does not bring the rest
