@@ -287,6 +287,12 @@ impl EditorTabViewer<'_> {
                             self.cmd.set_tool = Some(t);
                         }
                     }
+                    if self.tool == Tool::Place {
+                        ui.separator();
+                        ui.checkbox(self.place_align, "align").on_hover_text(
+                            "turn what you place so its up follows the surface it lands on",
+                        );
+                    }
                     ui.separator();
                     egui::ComboBox::from_id_salt("aspect_mode")
                         .selected_text(self.aspect.label())

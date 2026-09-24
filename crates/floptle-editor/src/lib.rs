@@ -173,6 +173,7 @@ mod packages_ui;
 mod paint_ui;
 #[cfg(feature = "editor-ui")]
 mod pkg_thumbs;
+mod place;
 mod play;
 mod prefab;
 // The standalone player — public, because the `floptle-player` binary is a
@@ -795,6 +796,7 @@ fn digit_of(code: KeyCode) -> Option<u32> {
         KeyCode::Digit7 => Some(7),
         KeyCode::Digit8 => Some(8),
         KeyCode::Digit9 => Some(9),
+        KeyCode::Digit0 => Some(0),
         _ => None,
     }
 }
@@ -1000,6 +1002,8 @@ struct EditorTabViewer<'a> {
     hier_scrolled: &'a mut Option<Entity>,
     /// See `Editor::hier_revealed`.
     hier_revealed: &'a mut Option<(Entity, bool)>,
+    /// See `Editor::place_align`.
+    place_align: &'a mut bool,
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
@@ -3005,6 +3009,10 @@ struct Editor {
     /// drag (primary excluded; so is any node whose ancestor is also selected —
     /// the parent's move already carries it). The whole selection moves together.
     drag_group: Vec<(Entity, Transform)>,
+    /// A Place-tool drag in progress (see `place.rs`).
+    place_drag: Option<place::PlaceDrag>,
+    /// The Place tool turns what it places to follow the surface's normal.
+    place_align: bool,
     /// Seconds since editor start, sampled each frame — drifts the volumetric
     /// fog's noise in every view (main + offscreen share one clock).
     fog_time: f32,
@@ -4255,6 +4263,8 @@ impl ApplicationHandler for Editor {
                 self.camera.pan(delta.0 as f32, delta.1 as f32);
             } else if self.grabbed.is_some() {
                 self.gizmo_drag();
+            } else if self.place_drag.is_some() {
+                self.place_drag_update();
             }
         }
     }
@@ -4751,6 +4761,19 @@ impl Editor {
                 if let Some(cursor) = self.cursor {
                     self.tile_press(cursor);
                 }
+            } else if over_scene && self.tool == Tool::Place && !self.playing {
+                // Place tool: pick up what is under the cursor; the drag sets it
+                // down on the surface under the cursor (see `place.rs`). A held
+                // selection can still be placed, but nothing else is taken.
+                self.context_menu = None;
+                if let Some(cursor) = self.cursor {
+                    let held_elsewhere = self.selection_locked
+                        && self.pick(cursor).is_none_or(|e| !self.selection.contains(&e));
+                    if !held_elsewhere && !self.place_press(cursor) && !self.shift && !self.ctrl {
+                        self.clear_selection();
+                        self.bone_selection = None;
+                    }
+                }
             } else if over_scene && self.tool == Tool::Sculpt {
                 // Sculpt tool: start a brush stroke on the terrain (applied
                 // next frame in terrain_frame_update).
@@ -4910,6 +4933,7 @@ impl Editor {
         } else {
             self.grabbed = None;
             self.drag = None;
+            self.place_drag = None;
             self.drag_group.clear();
             // End of a tile gesture: a rubber-band tool commits here (the
             // rectangle is not known until the release), and a stroke's

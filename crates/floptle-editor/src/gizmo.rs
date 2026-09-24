@@ -30,7 +30,7 @@ pub(crate) const CENTER_RING_PX: f32 = 52.0;
 /// Trackball free-rotate sensitivity (radians per pixel).
 pub(crate) const TRACKBALL_SENS: f32 = 0.01;
 
-/// The active editing tool. Bound to number keys 1-8 (9 reserved).
+/// The active editing tool. Bound to the number keys: see [`Tool::ALL`].
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Tool {
     #[default]
@@ -55,14 +55,17 @@ pub(crate) enum Tool {
     /// own `TileTool` — this is only "the pointer paints tiles now", the same
     /// relationship `Sculpt` has to the terrain brush.
     Tiles,
+    /// Click and drag a node over the scene: it is set down resting on the
+    /// surface under the cursor (see `place.rs`).
+    Place,
 }
 
 impl Tool {
-    /// Every tool, in keybind order. This is the single source of truth: `from_digit`,
-    /// `digit`, and the viewport toolbar all read it, so the toolbar cannot
-    /// disagree with the number keys. Add a tool here and it appears, in order,
-    /// everywhere.
-    pub(crate) const ALL: [Tool; 9] = [
+    /// Every tool, in keybind order: 1–9, then 0. This is the single source of
+    /// truth: `from_digit`, `digit`, and the viewport toolbar all read it, so the
+    /// toolbar cannot disagree with the number keys. Add a tool here and it
+    /// appears, in order, everywhere.
+    pub(crate) const ALL: [Tool; 10] = [
         Tool::Select,
         Tool::Move,
         Tool::Rotate,
@@ -72,16 +75,18 @@ impl Tool {
         Tool::Paint,
         Tool::MapEdit,
         Tool::Tiles,
+        Tool::Place,
     ];
 
+    /// The tool on number key `n` — the keyboard's order, so 0 comes after 9.
     pub(crate) fn from_digit(n: u32) -> Option<Tool> {
-        // 9 reserved for future tools.
-        Self::ALL.get((n as usize).checked_sub(1)?).copied()
+        let i = if n == 0 { 9 } else { n as usize - 1 };
+        Self::ALL.get(i).copied()
     }
 
-    /// The number key that selects this tool (1-based).
+    /// The number key that selects this tool.
     pub(crate) fn digit(self) -> usize {
-        Self::ALL.iter().position(|t| *t == self).map_or(0, |i| i + 1)
+        Self::ALL.iter().position(|t| *t == self).map_or(0, |i| (i + 1) % 10)
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -92,6 +97,7 @@ impl Tool {
             Tool::Scale => "scale",
             Tool::Sculpt => "sculpt",
             Tool::Tiles => "tiles",
+            Tool::Place => "place",
             Tool::Rect => "rect",
             Tool::Paint => "paint",
             // "model", to agree with the ▦ Model tab. `MapEdit` and the
@@ -461,7 +467,7 @@ pub(crate) fn hit_test(
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
         }
-        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles | Tool::Rect => {} // Rect hit-tests in build_gizmo
+        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles | Tool::Place | Tool::Rect => {} // Rect hit-tests in build_gizmo
     }
     cands
         .into_iter()
@@ -644,7 +650,7 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                 }
             }
         }
-        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles => {}
+        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles | Tool::Place => {}
     }
 }
 

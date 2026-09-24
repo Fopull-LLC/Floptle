@@ -626,15 +626,20 @@ impl Editor {
         self.select_single(e);
     }
 
-    /// Drop of an asset from the browser: spawn a model or a prefab instance at
-    /// the cursor, or attach a script to the selection.
+    /// Drop of an asset from the browser: spawn a model or a prefab instance
+    /// resting on the surface under the cursor, or attach a script to the
+    /// selection.
     pub(crate) fn drop_asset(&mut self, path: &str) {
         if crate::assets::is_prefab(path) {
             let at = self.cursor_world();
             self.instantiate_prefab(path, Some(at), None);
+            let roots = self.selection.clone();
+            self.rest_under_cursor(&roots);
         } else if crate::assets::is_map_sidecar(path) {
             let at = self.cursor_world();
             self.import_map_file(path, Some(at));
+            let roots = self.selection.clone();
+            self.rest_under_cursor(&roots);
         // **A texture becomes a Sprite.** Dropping a model makes a Mesh node, so
         // dropping a sprite doing nothing at all — no node, no toast, no Console
         // line — is the least expected outcome available, and in a 2D project it
@@ -736,6 +741,7 @@ impl Editor {
             };
             let e = self.spawn_node(&node);
             self.select_single(e);
+            self.rest_under_cursor(&[e]);
         } else if is_script(path) {
             self.attach_script_file(path, self.primary());
         }

@@ -1515,6 +1515,7 @@ impl Editor {
             tag_edit: &mut self.tag_edit,
             hier_scrolled: &mut self.hier_scrolled,
             hier_revealed: &mut self.hier_revealed,
+            place_align: &mut self.place_align,
             show_material_editor: &mut self.show_material_editor,
             asset_tree: &self.asset_tree,
             texture_settings: &self.texture_settings,
@@ -1772,6 +1773,18 @@ impl Editor {
             if let Some(p) = pressed {
                 out.ext_shortcut_click = self.ext.shortcuts.iter().position(|s| s.keys == p);
             }
+        }
+
+        // While a model, prefab or map is dragged over the Scene tab, mark where
+        // it will land: a ring lying on the surface under the cursor.
+        if let Some(p) = egui::DragAndDrop::payload::<AssetPayload>(ui.ctx())
+            && (crate::assets::is_model(&p.path)
+                || crate::assets::is_prefab(&p.path)
+                || crate::assets::is_map_sidecar(&p.path))
+            && let (Some(pos), Some(r)) = (ui.input(|i| i.pointer.hover_pos()), self.scene_rect)
+            && r.contains(pos)
+        {
+            self.paint_landing_marker(ui.ctx());
         }
 
         // Viewport drop: spawn a model when an asset is released over the Scene

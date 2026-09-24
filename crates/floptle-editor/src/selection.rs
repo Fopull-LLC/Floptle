@@ -797,7 +797,7 @@ impl Editor {
                 self.set_world_transform(e, xf);
                 self.apply_group_transform(start, xf);
             }
-            Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles => {}
+            Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles | Tool::Place => {}
         }
     }
 
