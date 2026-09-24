@@ -4442,13 +4442,13 @@ impl Editor {
             // V is also hold-to-snap in the Model tool, so a map command on
             // plain V runs when V comes back up — and only if it was a tap,
             // not a hold that snapped something.
-            if !pressed && code == KeyCode::KeyV {
-                if let Some(cmd) = self.map_v_deferred.take()
-                    && !self.vsnap_used
-                    && self.tool == Tool::MapEdit
-                {
-                    self.run_map_command(cmd);
-                }
+            if !pressed
+                && code == KeyCode::KeyV
+                && let Some(cmd) = self.map_v_deferred.take()
+                && !self.vsnap_used
+                && self.tool == Tool::MapEdit
+            {
+                self.run_map_command(cmd);
             }
             if pressed
                 && !typing
