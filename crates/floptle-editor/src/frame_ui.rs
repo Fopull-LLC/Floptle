@@ -1775,6 +1775,23 @@ impl Editor {
             }
         }
 
+        // Vertex snapping: V held with the Move or Place tool, over the Scene.
+        // Read from egui's key state, which also sees the release that lands
+        // while a panel has the pointer.
+        let over_scene = matches!(
+            (ui.input(|i| i.pointer.hover_pos()), self.scene_rect),
+            (Some(p), Some(r)) if r.contains(p)
+        );
+        self.vsnap_held = over_scene
+            && !self.playing
+            && !self.ctrl
+            && matches!(self.tool, Tool::Move | Tool::Place)
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_down(egui::Key::V));
+        if self.vsnap_held || self.vertex_drag.is_some() {
+            self.paint_vertex_snap(ui.ctx());
+        }
+
         // While a model, prefab or map is dragged over the Scene tab, mark where
         // it will land: a ring lying on the surface under the cursor.
         if let Some(p) = egui::DragAndDrop::payload::<AssetPayload>(ui.ctx())

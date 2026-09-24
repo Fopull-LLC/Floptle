@@ -174,6 +174,7 @@ mod paint_ui;
 #[cfg(feature = "editor-ui")]
 mod pkg_thumbs;
 mod place;
+mod vertex_snap;
 mod play;
 mod prefab;
 // The standalone player — public, because the `floptle-player` binary is a
@@ -3013,6 +3014,11 @@ struct Editor {
     place_drag: Option<place::PlaceDrag>,
     /// The Place tool turns what it places to follow the surface's normal.
     place_align: bool,
+    /// A vertex-snap drag in progress (see `vertex_snap.rs`).
+    vertex_drag: Option<vertex_snap::VertexDrag>,
+    /// V is held over the viewport with the Move or Place tool: a press grabs
+    /// the selection by a corner.
+    vsnap_held: bool,
     /// Seconds since editor start, sampled each frame — drifts the volumetric
     /// fog's noise in every view (main + offscreen share one clock).
     fog_time: f32,
@@ -4263,6 +4269,8 @@ impl ApplicationHandler for Editor {
                 self.camera.pan(delta.0 as f32, delta.1 as f32);
             } else if self.grabbed.is_some() {
                 self.gizmo_drag();
+            } else if self.vertex_drag.is_some() {
+                self.vertex_drag_update();
             } else if self.place_drag.is_some() {
                 self.place_drag_update();
             }
@@ -4743,7 +4751,11 @@ impl Editor {
             // over the scene for editor purposes.
             let over_scene = self.cursor_over_scene() && !self.game_view();
             let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-            if over_scene && self.tool == Tool::Paint && !self.playing {
+            if over_scene && self.vsnap_held && !self.playing && self.vertex_snap_press() {
+                // V held: the selection was grabbed by the corner under the
+                // cursor; the drag snaps it onto another's (vertex_snap.rs).
+                self.context_menu = None;
+            } else if over_scene && self.tool == Tool::Paint && !self.playing {
                 // Paint tool takes the whole click — no pick, no gizmo grab.
                 // The dab lands next frame in vertex_paint_frame_update, once
                 // the cursor ray has told us which node is under it.
@@ -4934,6 +4946,7 @@ impl Editor {
             self.grabbed = None;
             self.drag = None;
             self.place_drag = None;
+            self.vertex_drag = None;
             self.drag_group.clear();
             // End of a tile gesture: a rubber-band tool commits here (the
             // rectangle is not known until the release), and a stroke's
