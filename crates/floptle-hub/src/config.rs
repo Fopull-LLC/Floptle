@@ -182,7 +182,7 @@ impl HubConfig {
         if let Some(existing) = self.projects.iter_mut().find(|p| p.path == project.path) {
             *existing = project;
         } else {
-            self.projects.insert(0, project);
+            self.projects.push(project);
         }
     }
 
