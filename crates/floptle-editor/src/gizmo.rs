@@ -20,6 +20,11 @@ pub(crate) const GIZMO_PX: f32 = 90.0;
 pub(crate) const HANDLE_PX: f32 = 12.0;
 /// Axis-scale drag sensitivity (scale factor per pixel along the axis).
 pub(crate) const SCALE_SENS: f32 = 0.01;
+/// Screen radius (physical px) of the Move/Scale centre knob. Inside it the
+/// knob wins outright: the axes start at the centre, so by distance alone an
+/// axis is always at least as close as the knob, and the knob could not be
+/// grabbed.
+pub(crate) const KNOB_PX: f32 = 16.0;
 /// Screen radius (px) of the Rotate tool's center trackball ring.
 pub(crate) const CENTER_RING_PX: f32 = 52.0;
 /// Trackball free-rotate sensitivity (radians per pixel).
@@ -439,6 +444,9 @@ pub(crate) fn hit_test(
     };
     match tool {
         Tool::Move | Tool::Scale | Tool::MapEdit => {
+            if (cursor - center).length() <= KNOB_PX {
+                return Some(Handle::Center);
+            }
             for (i, tip) in tips.iter().enumerate() {
                 if let Some(tip) = *tip {
                     cands.push((handle_for_axis(i), seg_dist(cursor, center, tip)));
@@ -512,12 +520,14 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                     arrow_head(painter, center, tp, col);
                 }
             }
+            // The knob: grab it to move freely in the view's plane.
             let on = active(Handle::Center);
-            painter.rect_filled(
-                egui::Rect::from_center_size(center, egui::vec2(9.0, 9.0)),
-                0.0,
-                brighten(Color32::from_gray(210), on),
-            );
+            let r = KNOB_PX / ppp * 0.55;
+            painter.circle_filled(center, r + 1.5, Color32::from_black_alpha(140));
+            painter.circle_filled(center, r, brighten(Color32::from_rgb(235, 225, 150), on));
+            if on {
+                painter.circle_stroke(center, r + 4.0, Stroke::new(1.5, Color32::from_white_alpha(170)));
+            }
         }
         Tool::Scale => {
             for (i, (tip, col)) in g.tips.iter().zip(axis_col).enumerate() {
@@ -690,5 +700,22 @@ mod tests {
             g.ring_front[2].iter().all(|f| *f),
             "the face-on ring draws solid, not as a ghost"
         );
+    }
+
+    /// **The Move knob can be grabbed.** Every axis starts at the centre, so a
+    /// cursor on the knob is as near an axis as it is to the knob, and ranking
+    /// by distance alone handed it to an axis every time.
+    #[test]
+    fn the_centre_knob_wins_near_the_centre() {
+        let c = Vec2::new(400.0, 300.0);
+        let tips = [Some(c + Vec2::new(90.0, 0.0)), Some(c + Vec2::new(0.0, -90.0)), Some(c + Vec2::new(-60.0, 60.0))];
+        let none: [Vec<Vec2>; 3] = Default::default();
+        for tool in [Tool::Move, Tool::Scale, Tool::MapEdit] {
+            for off in [Vec2::ZERO, Vec2::new(6.0, 1.0), Vec2::new(-3.0, -10.0), Vec2::new(0.0, -14.0)] {
+                assert!(hit_test(tool, c + off, c, &tips, &none, &[]) == Some(Handle::Center), "{off}");
+            }
+            // Out along an axis, past the knob, the axis still answers.
+            assert!(hit_test(tool, c + Vec2::new(50.0, 2.0), c, &tips, &none, &[]) == Some(Handle::AxisX));
+        }
     }
 }

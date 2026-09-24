@@ -662,13 +662,20 @@ impl Editor {
                     self.set_world_transform(e, xf);
                     self.apply_group_transform(start, xf);
                 } else {
-                    // Center handle: free move in the camera plane.
-                    let rot = cam.rotation;
-                    let right = rot * Vec3::X;
-                    let up = rot * Vec3::Y;
-                    let dist = (start.translation - cam_world).length().max(0.1) as f32;
-                    let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
-                    let mut mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
+                    // Centre knob: free move in the plane through the object that
+                    // faces the camera. Both cursors are cast onto that plane, so
+                    // the point under the cursor stays under it at any zoom.
+                    let origin = (start.translation - cam_world).as_vec3();
+                    let facing = cam.rotation * Vec3::NEG_Z;
+                    let on_plane = |c: Vec2| {
+                        let (ro, rd) = self.cursor_ray(c)?;
+                        let denom = rd.dot(facing);
+                        (denom.abs() > 1e-6).then(|| ro + rd * ((origin - ro).dot(facing) / denom))
+                    };
+                    let (Some(a), Some(b)) = (on_plane(drag.cursor_start), on_plane(cursor)) else {
+                        return;
+                    };
+                    let mut mv = b - a;
                     if snap && sub_object {
                         let s = step as f32;
                         mv = (mv / s).round() * s;
