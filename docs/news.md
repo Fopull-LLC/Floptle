@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.97.0 — "Put It There"** (stable). The beta, promoted, with two
+fixes: holding **V** snaps in the Model tool too — whole shapes, or just the
+selected vertices, onto any corner — and every page of the Docs tab has a
+contents column, with guide pages reading top to bottom again instead of
+running off the side of the panel. Clicks select what is drawn under the
+cursor, the **place** tool sets things down on surfaces, faces extrude into
+new objects, and project materials restyle everything that uses them.
+
 **v0.97.0-rc1 — "Put It There"** (beta). Level building without the fuss:
 clicks select what is drawn under the cursor, the new **place** tool (key 0)
 drags things onto the surface under the cursor, holding **V** snaps a corner
