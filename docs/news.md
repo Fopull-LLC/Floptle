@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.96.0 — "Where You Left It"** (stable). The Hub lists your projects by
+when you last opened them, newest first, and **New project** has an
+**Include example scripts** checkbox: untick it and the project starts with
+only the starter camera's script, and reopening it does not bring the rest
+back. From a terminal, `floptle new <DIR> --no-examples`.
+
 **v0.95.0 — "Room For A Friend"** (stable). The multiplayer tutorial ends
 with a friend playing: a second slot, a camera that follows the player each
 machine steers, the host call behind a key, and the join form the engine
