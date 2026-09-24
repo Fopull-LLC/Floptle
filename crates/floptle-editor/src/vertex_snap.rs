@@ -1,7 +1,9 @@
-//! Vertex snapping: hold **V** with the Move or Place tool, hover a corner of
-//! the selection, and drag — the corner lands exactly on the nearest corner of
-//! whatever is under the cursor. Modular kits are built so their pieces meet
-//! corner to corner; this is how they are put together without measuring.
+//! Vertex snapping: hold **V** with the Move, Place or Model tool, hover a
+//! corner of the selection, and drag — the corner lands exactly on the nearest
+//! corner of whatever is under the cursor. Modular kits are built so their
+//! pieces meet corner to corner; this is how they are put together without
+//! measuring. In the Model tool with vertices, edges or faces selected, it is
+//! those that move, onto any corner — another mesh's or the same one's.
 //!
 //! Everything is picked on screen, in pixels, because that is what the eye is
 //! aiming at: the vertex nearest the cursor is the one being pointed at, at
@@ -28,6 +30,11 @@ pub(crate) struct VertexDrag {
     pub(crate) skip: HashSet<Entity>,
     /// The corner the source is on now, when it is on one.
     pub(crate) target: Option<DVec3>,
+    /// Where the grabbed corner is now.
+    pub(crate) now: DVec3,
+    /// A Model-tool drag of sub-objects: the map node and the vertices that
+    /// move, which are never targets themselves. `None` moves whole nodes.
+    pub(crate) sub: Option<(Entity, HashSet<u32>)>,
 }
 
 /// The vertex among `verts` (world space) that lands nearest `cursor` on
@@ -51,9 +58,13 @@ pub(crate) fn nearest_on_screen(
 
 impl Editor {
     /// World → physical-pixel projection for this frame's camera.
+    /// Without a window (a test) it projects onto a 1280 × 720 view.
     fn screen_projector(&self) -> Option<impl Fn(DVec3) -> Option<Vec2> + use<>> {
-        let gpu = self.gpu.as_ref()?;
-        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let (w, h) = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.config.width as f32, g.config.height.max(1) as f32))
+            .unwrap_or((1280.0, 720.0));
         let cam = self.camera.render_camera();
         let vp: Mat4 = cam.view_proj(w / h);
         let at = cam.world_position;
@@ -79,12 +90,23 @@ impl Editor {
         local.into_iter().map(|v| m.transform_point3(v.as_dvec3())).collect()
     }
 
-    /// The vertex of `nodes` nearest `cursor` on screen, within [`SNAP_PX`].
-    pub(crate) fn nearest_vertex_of(&mut self, nodes: &HashSet<Entity>, cursor: Vec2) -> Option<DVec3> {
+    /// The vertex of `nodes` nearest `cursor` on screen, within [`SNAP_PX`],
+    /// leaving out `exclude`'s vertices (by index) on its node.
+    pub(crate) fn nearest_vertex_of(
+        &mut self,
+        nodes: &HashSet<Entity>,
+        cursor: Vec2,
+        exclude: Option<&(Entity, HashSet<u32>)>,
+    ) -> Option<DVec3> {
         let project = self.screen_projector()?;
         let mut best: Option<(DVec3, f32)> = None;
         for &e in nodes {
-            let verts = self.node_world_verts(e);
+            let mut verts = self.node_world_verts(e);
+            if let Some((xe, gone)) = exclude
+                && *xe == e
+            {
+                verts = verts.into_iter().enumerate().filter(|(i, _)| !gone.contains(&(*i as u32))).map(|(_, v)| v).collect();
+            }
             if let Some(hit) = nearest_on_screen(verts, cursor, SNAP_PX, &project)
                 && best.is_none_or(|b| hit.1 < b.1)
             {
@@ -96,7 +118,12 @@ impl Editor {
 
     /// The vertex of any node but `skip` nearest `cursor` on screen. Only the
     /// nodes whose on-screen bounds reach the cursor have their vertices read.
-    pub(crate) fn snap_target(&mut self, cursor: Vec2, skip: &HashSet<Entity>) -> Option<DVec3> {
+    pub(crate) fn snap_target(
+        &mut self,
+        cursor: Vec2,
+        skip: &HashSet<Entity>,
+        exclude: Option<&(Entity, HashSet<u32>)>,
+    ) -> Option<DVec3> {
         let project = self.screen_projector()?;
         let candidates: Vec<Entity> = self
             .world
@@ -122,7 +149,18 @@ impl Editor {
                 near.insert(e);
             }
         }
-        self.nearest_vertex_of(&near, cursor)
+        self.nearest_vertex_of(&near, cursor, exclude)
+    }
+
+    /// The Model tool's sub-object selection, as the node and the vertices it
+    /// would move — when the Model tool is up and something is selected.
+    fn map_sub_selection(&self) -> Option<(Entity, HashSet<u32>)> {
+        if self.tool != crate::gizmo::Tool::MapEdit {
+            return None;
+        }
+        let sel = self.map_sel.as_ref().filter(|s| !s.is_empty())?;
+        let mesh = self.maps.meshes.get(&sel.id)?;
+        Some((sel.entity, sel.drag_verts(mesh).into_iter().collect()))
     }
 
     /// The selection's roots and everything under them.
@@ -141,13 +179,39 @@ impl Editor {
     /// which a press would grab.
     pub(crate) fn vertex_snap_hover(&mut self) -> Option<DVec3> {
         let cursor = self.cursor?;
+        if let Some((e, verts)) = self.map_sub_selection() {
+            let project = self.screen_projector()?;
+            let all = self.node_world_verts(e);
+            let mine = verts.iter().filter_map(|&i| all.get(i as usize).copied());
+            return nearest_on_screen(mine, cursor, SNAP_PX, project).map(|(v, _)| v);
+        }
         let (_, all) = self.moving_set();
-        self.nearest_vertex_of(&all, cursor)
+        self.nearest_vertex_of(&all, cursor, None)
     }
 
     /// A press with V held: grab the hovered corner. False when there is none.
     pub(crate) fn vertex_snap_press(&mut self) -> bool {
-        let (Some(source), Some(e)) = (self.vertex_snap_hover(), self.primary()) else { return false };
+        let Some(source) = self.vertex_snap_hover() else { return false };
+        self.vsnap_used = true;
+        if let Some(sub) = self.map_sub_selection() {
+            // The Model tool's own drag: it snapshots the vertices and banks
+            // the whole move as one undo step on release.
+            if !self.map_begin_drag() {
+                return false;
+            }
+            self.drag_group.clear();
+            self.vertex_drag = Some(VertexDrag {
+                entity: sub.0,
+                start_xf: Transform::from_translation(source),
+                source,
+                skip: HashSet::new(),
+                target: None,
+                now: source,
+                sub: Some(sub),
+            });
+            return true;
+        }
+        let Some(e) = self.primary() else { return false };
         let (roots, skip) = self.moving_set();
         self.begin_edit();
         self.drag_group = roots
@@ -162,6 +226,8 @@ impl Editor {
             source,
             skip,
             target: None,
+            now: source,
+            sub: None,
         });
         true
     }
@@ -171,7 +237,7 @@ impl Editor {
     /// the corner that faces the camera.
     pub(crate) fn vertex_drag_update(&mut self) {
         let (Some(mut drag), Some(cursor)) = (self.vertex_drag.take(), self.cursor) else { return };
-        drag.target = self.snap_target(cursor, &drag.skip);
+        drag.target = self.snap_target(cursor, &drag.skip, drag.sub.as_ref());
         let to = drag.target.or_else(|| {
             let cam = self.camera.render_camera();
             let (ro, rd) = self.cursor_ray(cursor)?;
@@ -182,9 +248,14 @@ impl Editor {
                 .then(|| cam.world_position + (ro + rd * ((origin - ro).dot(facing) / denom)).as_dvec3())
         });
         if let Some(to) = to {
-            let xf = Transform { translation: drag.start_xf.translation + (to - drag.source), ..drag.start_xf };
-            self.set_world_transform(drag.entity, xf);
-            self.apply_group_transform(drag.start_xf, xf);
+            drag.now = to;
+            if drag.sub.is_some() {
+                self.map_apply_drag(drag.start_xf, Transform::from_translation(to));
+            } else {
+                let xf = Transform { translation: drag.start_xf.translation + (to - drag.source), ..drag.start_xf };
+                self.set_world_transform(drag.entity, xf);
+                self.apply_group_transform(drag.start_xf, xf);
+            }
         }
         self.vertex_drag = Some(drag);
     }
@@ -195,10 +266,7 @@ impl Editor {
     pub(crate) fn paint_vertex_snap(&mut self, ctx: &egui::Context) {
         let Some(project) = self.screen_projector() else { return };
         let (from, to) = match &self.vertex_drag {
-            Some(d) => {
-                let now = floptle_core::world_transform(&self.world, d.entity).translation;
-                (Some(d.source + (now - d.start_xf.translation)), d.target)
-            }
+            Some(d) => (Some(d.now), d.target),
             None => (self.vertex_snap_hover(), None),
         };
         let ppp = ctx.pixels_per_point();
@@ -256,5 +324,64 @@ mod tests {
         let want = DVec3::new(5.0 + h, h, h);
         assert!(verts.iter().any(|v| (*v - want).length() < 1e-4), "no corner at {want}");
         assert!(verts.iter().all(|v| (v.x - 5.0).abs() <= h + 1e-4), "every corner is around the node");
+    }
+
+    /// **V snaps map meshes, whole and in part.** With the Move tool a map
+    /// node is carried so its grabbed corner sits on another node's corner;
+    /// with the Model tool the selected vertex itself moves onto a corner —
+    /// here another corner of its own mesh — and nothing else moves.
+    #[test]
+    fn v_snaps_map_meshes_whole_and_by_their_vertices() {
+        use crate::gizmo::Tool;
+        use crate::map_edit::{MapOpts, MapShape};
+        let mut ed = Editor::default();
+        let box_at = |ed: &mut Editor, x: f64| {
+            let at = Transform::from_translation(DVec3::new(x, 0.0, 0.0));
+            ed.spawn_map_node("Box", MapShape::Box.mesh(MapOpts::default()), Some(at)).unwrap()
+        };
+        let a = box_at(&mut ed, -1.5);
+        let b = box_at(&mut ed, 1.5);
+        let corner = |ed: &mut Editor, e: Entity, sx: f64, sz: f64| -> (usize, DVec3) {
+            let vs = ed.node_world_verts(e);
+            vs.iter()
+                .copied()
+                .enumerate()
+                .max_by(|x, y| (x.1.x * sx + x.1.y + x.1.z * sz).total_cmp(&(y.1.x * sx + y.1.y + y.1.z * sz)))
+                .unwrap()
+        };
+        let screen = |ed: &Editor, p: DVec3| ed.screen_projector().unwrap()(p).expect("on screen");
+
+        // Move tool: A's right-top-front corner onto B's left-top-front one.
+        ed.tool = Tool::Move;
+        ed.selection = vec![a];
+        let (_, src) = corner(&mut ed, a, 1.0, 1.0);
+        let (_, dst) = corner(&mut ed, b, -1.0, 1.0);
+        ed.cursor = Some(screen(&ed, src));
+        assert!(ed.vertex_snap_press(), "the corner under the cursor is grabbed");
+        ed.cursor = Some(screen(&ed, dst));
+        ed.vertex_drag_update();
+        let moved = floptle_core::world_transform(&ed.world, a).translation;
+        assert!((moved - (DVec3::new(-1.5, 0.0, 0.0) + (dst - src))).length() < 1e-4, "{moved}");
+        ed.vertex_drag = None;
+
+        // Model tool: one of B's vertices onto another of B's corners.
+        ed.tool = Tool::MapEdit;
+        ed.selection = vec![b];
+        ed.map_sync_sel();
+        let (vi, src) = corner(&mut ed, b, 1.0, 1.0);
+        let (_, dst) = corner(&mut ed, b, -1.0, 1.0);
+        ed.map_sel.as_mut().unwrap().verts.insert(vi as u32);
+        let before = ed.node_world_verts(b);
+        ed.cursor = Some(screen(&ed, src));
+        assert!(ed.vertex_snap_press(), "the selected vertex is grabbed");
+        ed.cursor = Some(screen(&ed, dst));
+        ed.vertex_drag_update();
+        let after = ed.node_world_verts(b);
+        assert!((after[vi] - dst).length() < 1e-4, "{} should be on {dst}", after[vi]);
+        for (i, (p, q)) in before.iter().zip(&after).enumerate() {
+            if i != vi {
+                assert!((*p - *q).length() < 1e-9, "vertex {i} moved too");
+            }
+        }
     }
 }

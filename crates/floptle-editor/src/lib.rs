@@ -3030,9 +3030,13 @@ struct Editor {
     map_extrude_drag: bool,
     /// A vertex-snap drag in progress (see `vertex_snap.rs`).
     vertex_drag: Option<vertex_snap::VertexDrag>,
-    /// V is held over the viewport with the Move or Place tool: a press grabs
-    /// the selection by a corner.
+    /// V is held over the viewport with the Move, Place or Model tool: a press
+    /// grabs the selection by a corner.
     vsnap_held: bool,
+    /// This V hold has snapped something, so it is not a tap.
+    vsnap_used: bool,
+    /// The Model tool's command on plain V, held until V is released.
+    map_v_deferred: Option<map_keys::MapCmd>,
     /// Seconds since editor start, sampled each frame — drifts the volumetric
     /// fog's noise in every view (main + offscreen share one clock).
     fog_time: f32,
@@ -4435,6 +4439,31 @@ impl Editor {
             // anything the editor answers in that same context — so
             // this can shadow nothing. A command that declines (delete
             // with no faces selected) falls through untouched.
+            // V is also hold-to-snap in the Model tool, so a map command on
+            // plain V runs when V comes back up — and only if it was a tap,
+            // not a hold that snapped something.
+            if !pressed && code == KeyCode::KeyV {
+                if let Some(cmd) = self.map_v_deferred.take()
+                    && !self.vsnap_used
+                    && self.tool == Tool::MapEdit
+                {
+                    self.run_map_command(cmd);
+                }
+            }
+            if pressed
+                && !typing
+                && !game_view
+                && !self.ctrl
+                && !self.shift
+                && code == KeyCode::KeyV
+                && self.tool == Tool::MapEdit
+                && !self.playing
+                && let Some(cmd) = self.map_keys.command(code, false)
+            {
+                self.map_v_deferred = Some(cmd);
+                self.vsnap_used = false;
+                return;
+            }
             if pressed
                 && !typing
                 && !game_view

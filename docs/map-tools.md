@@ -81,7 +81,8 @@ the far side of a wall.
   its materials),
   **⇄ Flip** / **Flip all**, **⊙ Weld**, **⌗ Snap to grid**.
 - The gizmo does **move / rotate / scale** (`X` cycles) with handles aligned to
-  the **selection's own normal**, its node, or the world (`V` cycles). Normal is
+  the **selection's own normal**, its node, or the world (tap `V` to cycle;
+  holding it snaps instead — see §9). Normal is
   the default: a diagonal wall pushes straight out of itself in one drag.
 
 ### Reading the wireframe: what's near, what's behind
@@ -247,11 +248,13 @@ Three tools for putting things where they go without typing coordinates:
   follows the surface; with grid snap on it slides along the surface in grid
   steps. Models, prefabs and maps dragged in from the Assets tab land the same
   way, and a ring marks where they will land before you let go.
-- **Vertex snap** — with the Move or Place tool, hold **V**: the corner of the
-  selection nearest the cursor is marked. Press and drag, and that corner lands
-  exactly on the nearest corner of any model, primitive or map mesh under the
-  cursor. Modular kit pieces meet corner to corner, which is how they go
-  together without measuring.
+- **Vertex snap** — with the Move, Place or Model tool, hold **V**: the corner
+  of the selection nearest the cursor is marked. Press and drag, and that
+  corner lands exactly on the nearest corner of any model, primitive or map
+  mesh under the cursor. Modular kit pieces meet corner to corner, which is how
+  they go together without measuring. In the Model tool with vertices, edges or
+  faces selected, those are what move — onto a corner of another mesh or of
+  the same one — and a quick tap of V still cycles the handle orientation.
 - **The Move knob** — the round knob at the centre of the Move gizmo drags
   freely in the plane facing the camera, keeping the point you grabbed under
   the cursor.

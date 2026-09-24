@@ -1795,11 +1795,15 @@ impl Editor {
             (ui.input(|i| i.pointer.hover_pos()), self.scene_rect),
             (Some(p), Some(r)) if r.contains(p)
         );
+        // "Typing" is a focused text field — not any focused widget, which
+        // is every button once clicked (see `keyboard_input`): a tool picked
+        // from the strip would otherwise switch snapping off until something
+        // unfocused it.
         self.vsnap_held = over_scene
             && !self.playing
             && !self.ctrl
-            && matches!(self.tool, Tool::Move | Tool::Place)
-            && !ui.ctx().egui_wants_keyboard_input()
+            && matches!(self.tool, Tool::Move | Tool::Place | Tool::MapEdit)
+            && !ui.ctx().text_edit_focused()
             && ui.input(|i| i.key_down(egui::Key::V));
         if self.vsnap_held || self.vertex_drag.is_some() {
             self.paint_vertex_snap(ui.ctx());
