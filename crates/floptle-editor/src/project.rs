@@ -475,6 +475,7 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.report_scene_wiring(&doc);
+        self.sync_linked_materials();
         self.migrate_legacy_post(&doc);
         self.set_scene_file(p);
         self.adopt_terrain();
@@ -1483,6 +1484,8 @@ impl Editor {
         self.check_autosave(); // offer crash recovery if an autosave is newer
         self.warn_about_shadowed_scenes();
         self.materials = self.load_materials();
+        // Materials that follow a project material wear its current look.
+        self.sync_linked_materials();
         // Packages last: an extension's first line may read the project's
         // settings, its scenes or its assets, and all of those have to be
         // loaded before it does.

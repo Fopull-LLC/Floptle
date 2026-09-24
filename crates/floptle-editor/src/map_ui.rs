@@ -13,7 +13,6 @@
 //! records intents on `EditorCmd` — geometry ops need `&mut Editor` (undo
 //! snapshots + the store), so they apply after the frame.
 
-use crate::inspector;
 use crate::gizmo::Tool;
 use crate::map_edit::{MapOp, MapOrient, MapShape, MapSubMode, MapXform};
 use crate::map_keys::{MapCmd, reserved, save_map_keys};
@@ -88,15 +87,12 @@ pub(crate) struct MapCtx<'a> {
     pub(crate) map_keys: &'a mut map_keys::MapKeys,
     pub(crate) map_rebind: &'a mut Option<map_keys::MapCmd>,
     pub(crate) map_rebind_err: &'a mut Option<String>,
-    // The face materials section drives the ordinary material inspector, which
-    // wants the project's asset and shader caches.
+    // The face materials section lists the project's materials and each
+    // slot's own.
     pub(crate) materials: &'a [(String, floptle_scene::MaterialDoc)],
-    pub(crate) mat_name_buf: &'a mut String,
-    pub(crate) flsl_cache: &'a crate::shaders::FlslCache,
-    pub(crate) sdf_cache: &'a crate::shaders::SdfCache,
-    pub(crate) asset_tree: &'a [crate::assets::AssetEntry],
-    pub(crate) texture_settings: &'a std::collections::HashMap<String, crate::assets::TexSetting>,
     pub(crate) project_root: &'a std::path::Path,
+    /// Texture thumbnails, for the material swatches.
+    pub(crate) asset_thumbs: &'a mut crate::asset_thumbs::AssetThumbs,
     pub(crate) cmd: &'a mut crate::EditorCmd,
 }
 
@@ -881,108 +877,127 @@ impl MapCtx<'_> {
         });
         ui.add_space(4.0);
 
+        // The project's materials: select faces, click one, and they wear it
+        // — and change whenever it does.
+        ui.label(RichText::new("Project materials").strong()).on_hover_text(
+            "the materials under materials/ — any node, model part or map face can use \
+             one, and editing it restyles all of them",
+        );
+        let bank: Vec<(String, floptle_core::Material)> =
+            self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect();
+        if bank.is_empty() {
+            ui.weak("none yet — open a slot's material and use \"Save as project material\"");
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (name, m) in &bank {
+                let tex = m
+                    .texture
+                    .as_deref()
+                    .and_then(|t| self.asset_thumbs.get(ui.ctx(), &self.project_root.join(t)));
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(58.0, 54.0), egui::Sense::click());
+                let p = ui.painter_at(rect);
+                if resp.hovered() && faces > 0 {
+                    p.rect_filled(rect, 5.0, ui.visuals().widgets.hovered.bg_fill);
+                }
+                crate::assets_ui::paint_swatch(
+                    &p,
+                    egui::pos2(rect.center().x, rect.top() + 19.0),
+                    14.0,
+                    m.color,
+                    tex.as_ref(),
+                );
+                let mut job = egui::text::LayoutJob::single_section(
+                    name.clone(),
+                    egui::TextFormat {
+                        font_id: egui::FontId::proportional(10.0),
+                        color: ui.visuals().text_color(),
+                        ..Default::default()
+                    },
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 4.0);
+                job.halign = egui::Align::Center;
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                p.galley(egui::pos2(rect.center().x, rect.bottom() - 14.0), galley, ui.visuals().text_color());
+                let hover = if faces > 0 {
+                    format!("paint the selected faces with {name}")
+                } else {
+                    format!("{name} — select faces first, then click to paint them with it")
+                };
+                if resp.on_hover_text(hover).clicked() && faces > 0 {
+                    self.cmd.map_bank_assign = Some(name.clone());
+                }
+            }
+        });
+        ui.add_space(6.0);
+
         let Some(mesh) = self.maps.meshes.get(&id) else { return };
         let slot_names: Vec<String> = mesh.slots.clone();
         let counts: Vec<usize> = (0..slot_names.len())
             .map(|i| mesh.faces.iter().filter(|f| f.slot as usize == i).count())
             .collect();
+        ui.label(RichText::new("On this mesh").strong());
         for (i, name) in slot_names.iter().enumerate() {
-            let has = self
+            let material = self
                 .world
                 .get::<floptle_core::ObjectMaterials>(entity)
-                .is_some_and(|om| om.0.contains_key(name));
+                .and_then(|om| om.0.get(name))
+                .cloned();
             crate::responsive::group(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(name).strong());
-                        ui.label(
-                            RichText::new(format!("{} of this mesh's faces", counts[i]))
-                                .weak()
-                                .small(),
-                        )
-                        .on_hover_text("how many faces draw with this slot — not your selection");
-                        // Plain flow, not `right_to_left`. A right-aligned run
-                        // pins itself to the region's right edge and grows
-                        // leftwards from there, so in a narrow panel it walks off
-                        // the left side instead of the right — same bug, harder
-                        // to recognise. These two buttons read fine in order.
-                        {
-                            if ui
-                                .small_button("Select")
-                                .on_hover_text("select every face drawing with this slot")
-                                .clicked()
-                            {
-                                self.cmd.map_op = Some(MapOp::SelectSlot(i as u16));
-                            }
-                            if ui
-                                .add_enabled(
-                                    faces > 0,
-                                    egui::Button::new("Assign selection").small(),
-                                )
-                                .on_hover_text("move the selected faces onto this slot")
-                                .clicked()
-                            {
-                                self.cmd.map_op = Some(MapOp::AssignSlot(i as u16));
-                            }
-                        }
-                    });
-                    // Per-node material override for this slot (the same
-                    // ObjectMaterials machinery imported models use).
-                    if has {
-                        egui::CollapsingHeader::new(RichText::new("material").small())
-                            .id_salt(("map_slot_mat", id, i))
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                let (materials, asset_tree, project_root, flsl, sdf, tex_set) = (
-                                    &*self.materials,
-                                    &*self.asset_tree,
-                                    &*self.project_root,
-                                    &*self.flsl_cache,
-                                    &*self.sdf_cache,
-                                    &*self.texture_settings,
-                                );
-                                if let Some(om) =
-                                    self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
-                                    && let Some(mat) = om.0.get_mut(name)
-                                {
-                                    let res = inspector::material_props_ui(
-                                        ui,
-                                        mat,
-                                        materials,
-                                        asset_tree,
-                                        project_root,
-                                        self.mat_name_buf,
-                                        flsl,
-                                        sdf,
-                                        tex_set,
-                                    );
-                                    self.cmd.inspector_changed |= res.changed;
-                                    self.cmd.open_shader_graph =
-                                        res.open_shader.or(self.cmd.open_shader_graph.take());
-                                }
-                                if ui.small_button("✖ clear override").clicked()
-                                    && let Some(om) =
-                                        self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
-                                {
-                                    om.0.remove(name);
-                                    self.cmd.inspector_changed = true;
-                                }
-                            });
-                    } else if ui
-                        .small_button("✚ give this slot its own material")
-                        .on_hover_text("colour / texture / shader for every face on this slot")
-                        .clicked()
-                    {
-                        if self.world.get::<floptle_core::ObjectMaterials>(entity).is_none() {
-                            self.world.insert(entity, floptle_core::ObjectMaterials::default());
-                        }
-                        if let Some(om) =
-                            self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
-                        {
-                            om.0.insert(name.clone(), floptle_core::Material::default());
-                            self.cmd.inspector_changed = true;
+                match &material {
+                    // The slot's material, as a chip that opens it in the
+                    // Inspector's material view.
+                    Some(m) => {
+                        let tex = m
+                            .texture
+                            .as_deref()
+                            .and_then(|t| self.asset_thumbs.get(ui.ctx(), &self.project_root.join(t)));
+                        let sub = crate::material_view::chip_subtitle(m);
+                        if crate::material_view::material_chip(ui, m, tex.as_ref(), name, &sub, false).clicked() {
+                            self.cmd.open_material =
+                                Some(crate::material_bank::MaterialTarget::Part(entity, name.clone()));
                         }
                     }
+                    None => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(name).strong());
+                            ui.weak("wears the node's material");
+                            if ui
+                                .small_button("✚ its own material")
+                                .on_hover_text("colour / texture / shader for every face on this slot")
+                                .clicked()
+                            {
+                                if self.world.get::<floptle_core::ObjectMaterials>(entity).is_none() {
+                                    self.world.insert(entity, floptle_core::ObjectMaterials::default());
+                                }
+                                if let Some(om) = self.world.get_mut::<floptle_core::ObjectMaterials>(entity) {
+                                    om.0.insert(name.clone(), floptle_core::Material::default());
+                                    self.cmd.inspector_changed = true;
+                                }
+                                self.cmd.open_material =
+                                    Some(crate::material_bank::MaterialTarget::Part(entity, name.clone()));
+                            }
+                        });
+                    }
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{} faces", counts[i])).weak().small())
+                        .on_hover_text("how many faces draw with this slot — not your selection");
+                    if ui
+                        .small_button("Select")
+                        .on_hover_text("select every face drawing with this slot")
+                        .clicked()
+                    {
+                        self.cmd.map_op = Some(MapOp::SelectSlot(i as u16));
+                    }
+                    if ui
+                        .add_enabled(faces > 0, egui::Button::new("Assign selection").small())
+                        .on_hover_text("move the selected faces onto this slot")
+                        .clicked()
+                    {
+                        self.cmd.map_op = Some(MapOp::AssignSlot(i as u16));
+                    }
                 });
+            });
         }
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
@@ -1225,10 +1240,7 @@ mod tests {
         let mut keys = map_keys::MapKeys::default();
         let mut rebind = None;
         let mut rebind_err = None;
-        let mut mat_name = String::new();
-        let flsl = crate::shaders::FlslCache::default();
-        let sdf = crate::shaders::SdfCache::default();
-        let tex = std::collections::HashMap::new();
+        let mut thumbs = crate::asset_thumbs::AssetThumbs::default();
         let root = std::path::PathBuf::from(".");
         let mut cmd = crate::EditorCmd::default();
 
@@ -1257,12 +1269,8 @@ mod tests {
                 map_rebind: &mut rebind,
                 map_rebind_err: &mut rebind_err,
                 materials: &[],
-                mat_name_buf: &mut mat_name,
-                flsl_cache: &flsl,
-                sdf_cache: &sdf,
-                asset_tree: &[],
-                texture_settings: &tex,
                 project_root: &root,
+                asset_thumbs: &mut thumbs,
                 cmd: &mut cmd,
             }
             .ui(ui);

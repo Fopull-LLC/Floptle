@@ -40,7 +40,7 @@ use floptle_render::{
     FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
 };
 use floptle_scene::{
-    MaterialDoc, MatterDoc, ProjectConfigDoc, SceneDoc,
+    MatterDoc, ProjectConfigDoc, SceneDoc,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -79,6 +79,8 @@ mod audio;
 mod assets_ui;
 #[cfg(feature = "editor-ui")]
 mod asset_thumbs;
+#[cfg(feature = "editor-ui")]
+mod material_view;
 #[cfg(all(test, feature = "editor-ui"))]
 mod ui_snapshots;
 #[cfg(feature = "editor-ui")]
@@ -178,6 +180,7 @@ mod paint_ui;
 #[cfg(feature = "editor-ui")]
 mod pkg_thumbs;
 mod place;
+mod material_bank;
 mod vertex_snap;
 mod play;
 mod prefab;
@@ -384,8 +387,6 @@ struct EditorCmd {
     project_trust: Option<ext::trust::Answer>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
-    /// Save a material as a named preset under assets/materials/.
-    save_material: Option<(String, MaterialDoc)>,
     /// Give an entity a default Material component (start customizing its look).
     add_material: Option<Entity>,
     /// Put a node's Transform back to the identity (⊕ Transform ▸ … ▸ Reset).
@@ -603,6 +604,12 @@ struct EditorCmd {
     set_map_knife: Option<bool>,
     /// Detach the selected faces into their own map node.
     map_detach: bool,
+    /// Paint the selected map faces with this project material.
+    map_bank_assign: Option<String>,
+    /// Open the Inspector's material view on this material.
+    open_material: Option<material_bank::MaterialTarget>,
+    /// Write this project material and restyle everything following it.
+    bank_store: Option<(String, floptle_scene::MaterialDoc)>,
     /// Extrude the selected faces as a new map node.
     map_extrude_new: bool,
     /// Turn the selected map node by N * 90 degrees about its up axis.
@@ -1011,8 +1018,6 @@ struct EditorTabViewer<'a> {
     hier_revealed: &'a mut Option<(Entity, bool)>,
     /// See `Editor::place_align`.
     place_align: &'a mut bool,
-    /// Whether the floating Material Editor window is open.
-    show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
     /// Per-texture sampling settings (read-only here; changes go via `cmd`).
     texture_settings: &'a HashMap<String, TexSetting>,
@@ -1040,6 +1045,8 @@ struct EditorTabViewer<'a> {
     assets_grid_dir: &'a mut PathBuf,
     /// Thumbnails of the project's images (see `asset_thumbs.rs`).
     asset_thumbs: &'a mut crate::asset_thumbs::AssetThumbs,
+    /// The Inspector's material view, when one is open (`material_view.rs`).
+    material_view: &'a mut Option<crate::material_view::MaterialView>,
     /// The project root — the directory the asset browser is rooted at.
     project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
@@ -1314,12 +1321,8 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                     map_rebind: self.map_rebind,
                     map_rebind_err: self.map_rebind_err,
                     materials: self.materials,
-                    mat_name_buf: self.mat_name_buf,
-                    flsl_cache: self.flsl_cache,
-                    sdf_cache: self.sdf_cache,
-                    asset_tree: self.asset_tree,
-                    texture_settings: self.texture_settings,
                     project_root: self.project_root,
+                    asset_thumbs: self.asset_thumbs,
                     cmd: self.cmd,
                 };
                 cx.ui(ui);
@@ -3089,6 +3092,9 @@ struct Editor {
     /// Thumbnails of the project's images, for the Assets tab and swatches.
     #[cfg(feature = "editor-ui")]
     asset_thumbs: crate::asset_thumbs::AssetThumbs,
+    /// The Inspector's material view, when one is open (`material_view.rs`).
+    #[cfg(feature = "editor-ui")]
+    material_view: Option<crate::material_view::MaterialView>,
     /// In-flight native "Import files…" dialog: the picked files arrive on the
     /// channel, paired here with the destination folder chosen when it opened.
     /// `Some` while a dialog is open (button disabled). Works on Wayland via the
@@ -3108,8 +3114,6 @@ struct Editor {
     )>,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
-    /// Whether the floating Material Editor window is open.
-    show_material_editor: bool,
     /// Scratch buffer for the "save material" name field.
     mat_name_buf: String,
     /// The component clipboard — values copied from one component, pasteable onto
@@ -3942,6 +3946,8 @@ impl ApplicationHandler for Editor {
         self.migrate_legacy_post(&doc);
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
+        // Materials that follow a project material wear its current look.
+        self.sync_linked_materials();
         self.anim.rescan(&self.project_root);
         self.vfx.rescan(&self.project_root);
         self.load_texture_settings();

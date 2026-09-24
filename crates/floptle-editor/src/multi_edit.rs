@@ -133,6 +133,7 @@ field_diff!(Material {
     sheet_rows,
     cell,
     shader_tiling,
+    source,
 });
 
 field_diff!(RigidBody {

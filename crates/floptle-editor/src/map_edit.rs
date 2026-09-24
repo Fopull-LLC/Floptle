@@ -3456,6 +3456,41 @@ impl Editor {
         self.apply_map_op(MapOp::Reshape(spec));
     }
 
+    /// Paint the selected faces with the project material `name`: onto the
+    /// slot already following it, or a new slot that does. The faces then
+    /// change whenever the project material does.
+    pub(crate) fn map_assign_bank_material(&mut self, name: &str) {
+        if self.playing {
+            self.map_note(floptle_script::LogLevel::Warn, "map editing is disabled during Play");
+            return;
+        }
+        let Some((entity, id)) = self.map_sync_sel() else { return };
+        if self.map_sel.as_ref().is_none_or(|s| s.faces.is_empty()) {
+            self.map_note(floptle_script::LogLevel::Warn, "select the faces to paint first (face mode)");
+            return;
+        }
+        let Some(material) = self.bank_material(name) else { return };
+        let Some(mesh) = self.maps.meshes.get(&id) else { return };
+        let om = self.world.get::<floptle_core::ObjectMaterials>(entity);
+        let follows = |slot: &String| om.and_then(|om| om.0.get(slot)).is_some_and(|m| m.source == material.source);
+        let existing = mesh.slots.iter().position(follows);
+        let slot_name = match existing {
+            Some(i) => mesh.slots[i].clone(),
+            None => crate::material_bank::unique_name(name, |n| mesh.slots.iter().any(|s| s == n)),
+        };
+        // The material is a component, not geometry: bank it in the scene's
+        // undo before the geometry op banks the faces' move.
+        self.record();
+        match existing {
+            Some(i) => self.apply_map_op(MapOp::AssignSlot(i as u16)),
+            None => self.apply_map_op(MapOp::AddSlot(slot_name.clone())),
+        }
+        let mut om = self.world.get::<floptle_core::ObjectMaterials>(entity).cloned().unwrap_or_default();
+        om.0.insert(slot_name, material);
+        self.world.insert(entity, om);
+        self.scene_dirty = true;
+    }
+
     /// How far a keyed or clicked extrude pushes: one grid step when snapping,
     /// else the Model tab's extrude amount.
     pub(crate) fn map_extrude_distance(&self) -> f32 {
@@ -4152,6 +4187,46 @@ mod tests {
         assert_eq!(map_nodes(&ed), 2);
         ed.undo();
         assert_eq!(map_nodes(&ed), 1, "one undo takes the block away");
+    }
+
+    /// **Faces painted with a project material follow it.** Painting creates
+    /// one slot that follows the project material, painting more faces reuses
+    /// it, and an edit to the project material restyles them all.
+    #[test]
+    fn faces_painted_with_a_project_material_follow_it() {
+        let dir = std::env::temp_dir().join(format!("floptle-map-bank-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let brick = floptle_scene::MaterialDoc { color: [0.8, 0.3, 0.2], ..Default::default() };
+        ed.store_bank_material("Brick", &brick);
+        let e = ed.spawn_map_node("Wall", MapShape::Box.mesh(MapOpts::default()), None).unwrap();
+        ed.selection = vec![e];
+        let id = match ed.world.get::<floptle_core::Matter>(e) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            _ => panic!("not a map node"),
+        };
+        ed.map_sync_sel();
+        let paint = |ed: &mut Editor, faces: &[u32]| {
+            let sel = ed.map_sel.as_mut().unwrap();
+            sel.clear();
+            sel.faces.extend(faces.iter().copied());
+            ed.map_assign_bank_material("Brick");
+        };
+        paint(&mut ed, &[0]);
+        paint(&mut ed, &[1, 2]);
+        let mesh = &ed.maps.meshes[&id];
+        let slots: Vec<&String> = mesh.slots.iter().filter(|s| s.starts_with("Brick")).collect();
+        assert_eq!(slots, vec!["Brick"], "one slot, reused");
+        let brick_slot = mesh.slots.iter().position(|s| s == "Brick").unwrap() as u16;
+        assert_eq!(mesh.faces.iter().filter(|f| f.slot == brick_slot).count(), 3);
+        let om = ed.world.get::<floptle_core::ObjectMaterials>(e).unwrap();
+        assert_eq!(om.0["Brick"].source.as_deref(), Some("materials/Brick.ron"));
+
+        ed.store_bank_material("Brick", &floptle_scene::MaterialDoc { color: [0.1, 0.1, 0.9], ..brick });
+        let om = ed.world.get::<floptle_core::ObjectMaterials>(e).unwrap();
+        assert_eq!(om.0["Brick"].color, [0.1, 0.1, 0.9], "restyled by the project material");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// "Select every face" has to mean the mode you are in, and inverting has

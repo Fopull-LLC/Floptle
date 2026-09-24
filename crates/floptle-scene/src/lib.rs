@@ -3114,6 +3114,11 @@ pub struct MaterialDoc {
     pub shading: ShadingDoc,
     #[serde(default, skip_serializing_if = "RetroDoc::is_off")]
     pub retro: RetroDoc,
+    /// The project material this one follows — see
+    /// [`floptle_core::Material::source`]. Absent for a material of its own,
+    /// so a scene that links nothing keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -3356,6 +3361,7 @@ impl MaterialDoc {
             thickness: self.thickness.clamp(0.0, 100.0),
             shading: self.shading.to_shading(),
             retro: self.retro.to_retro(),
+            source: self.source.clone(),
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -3399,6 +3405,7 @@ impl MaterialDoc {
             thickness: m.thickness,
             shading: ShadingDoc::from_shading(m.shading),
             retro: RetroDoc::from_retro(m.retro),
+            source: m.source.clone(),
         }
     }
 }
@@ -4099,6 +4106,20 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
+
+    /// A material's link to a project material survives a save — through the
+    /// runtime component and back — and a material of its own writes nothing
+    /// new, so scenes that link nothing keep their bytes.
+    #[test]
+    fn a_material_link_round_trips_and_costs_nothing_unused() {
+        let linked = MaterialDoc { source: Some("materials/Brick.ron".into()), ..Default::default() };
+        let text = ron::to_string(&linked).unwrap();
+        let back: MaterialDoc = ron::from_str(&text).unwrap();
+        assert_eq!(back.source.as_deref(), Some("materials/Brick.ron"));
+        assert_eq!(MaterialDoc::from_material(&back.to_material()), back);
+        let own = ron::to_string(&MaterialDoc::default()).unwrap();
+        assert!(!own.contains("source"), "{own}");
+    }
     /// A subtree lifted out of a document carries its own wiring, not the
     /// document's.
     ///

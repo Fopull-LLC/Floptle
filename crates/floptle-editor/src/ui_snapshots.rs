@@ -57,3 +57,51 @@ fn snapshot_asset_tiles() {
     h.render().expect("no GPU?").save(&out).unwrap();
     println!("wrote {}", out.display());
 }
+
+/// The Move gizmo, at rest and with its centre knob hovered.
+#[test]
+#[ignore]
+fn snapshot_move_gizmo() {
+    use crate::gizmo::{GizmoFrame, Handle, Tool, paint_gizmo};
+    use floptle_core::math::Vec2;
+    let frame = |c: Vec2, hovered| GizmoFrame {
+        center: c,
+        tips: [Some(c + Vec2::new(90.0, 20.0)), Some(c + Vec2::new(0.0, -90.0)), Some(c + Vec2::new(-55.0, 50.0))],
+        neg_tips: [None; 3],
+        box_edges: Vec::new(),
+        ring_pts: Default::default(),
+        ring_front: Default::default(),
+        center_ring: Vec::new(),
+        hovered,
+    };
+    let mut h = harness(egui::vec2(400.0, 200.0), move |ui| {
+        ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(60, 66, 74));
+        paint_gizmo(ui.painter(), &frame(Vec2::new(110.0, 120.0), None), Tool::Move, None, 1.0);
+        paint_gizmo(ui.painter(), &frame(Vec2::new(290.0, 120.0), Some(Handle::Center)), Tool::Move, None, 1.0);
+    });
+    let out = out_path("move-gizmo");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    println!("wrote {}", out.display());
+}
+
+/// Material chips as the Inspector and the Model tab show them: a material of
+/// its own, one following a project material, and a selected part.
+#[test]
+#[ignore]
+fn snapshot_material_chips() {
+    use crate::material_view::{chip_subtitle, material_chip};
+    use floptle_core::Material;
+    let own = Material { color: [0.3, 0.55, 0.9], ..Default::default() };
+    let linked = Material { color: [0.8, 0.35, 0.25], source: Some("materials/Brick.ron".into()), ..Default::default() };
+    let mut h = harness(egui::vec2(360.0, 170.0), move |ui| {
+        ui.add_space(4.0);
+        material_chip(ui, &own, None, "Material", &chip_subtitle(&own), false);
+        material_chip(ui, &linked, None, "Brick", &chip_subtitle(&linked), false);
+        material_chip(ui, &linked, None, "Roof", &chip_subtitle(&linked), true);
+    });
+    let out = out_path("material-chips");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    println!("wrote {}", out.display());
+}

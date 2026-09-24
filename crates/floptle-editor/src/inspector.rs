@@ -675,8 +675,6 @@ fn ref_param_row(
 #[derive(Default)]
 pub(crate) struct MatEditResult {
     pub(crate) changed: bool,
-    pub(crate) remove: bool,
-    pub(crate) save_as: Option<String>,
     /// The ◈ button was pressed: open this `.flsl` in the Shaders graph. An
     /// intent rather than a direct call for the same reason the others are —
     /// this runs with the material borrowed.
@@ -687,10 +685,8 @@ pub(crate) struct MatEditResult {
 /// project's presets and asset tree, the shader caches, and the id salt every
 /// picker hangs off.
 struct MatCtx<'a> {
-    presets: &'a [(String, floptle_scene::MaterialDoc)],
     asset_tree: &'a [crate::assets::AssetEntry],
     project_root: &'a Path,
-    name_buf: &'a mut String,
     flsl: &'a crate::shaders::FlslCache,
     sdf: &'a crate::shaders::SdfCache,
     texture_settings: &'a std::collections::HashMap<String, crate::assets::TexSetting>,
@@ -712,51 +708,39 @@ impl MatCtx<'_> {
     }
 }
 
-/// In-depth material property editors — shared by the Inspector's Material section
-/// and the floating Material Editor window. Edits `m` in place (so undo coalesces
-/// via `inspector_changed`); preset apply/save/remove come back as intents.
-#[allow(clippy::too_many_arguments)] // one widget, one call shape — a param struct would just rename the args
-pub(crate) fn material_props_ui(
+/// Every property a material has: what the Inspector's material view and a
+/// selected material file draw. Edits `m` in place (so undo coalesces via
+/// `inspector_changed`).
+pub(crate) fn material_core_ui(
     ui: &mut egui::Ui,
     m: &mut Material,
-    presets: &[(String, floptle_scene::MaterialDoc)],
     asset_tree: &[crate::assets::AssetEntry],
     project_root: &Path,
-    name_buf: &mut String,
     flsl: &crate::shaders::FlslCache,
     sdf: &crate::shaders::SdfCache,
     texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
     // Every picker in here is identified relative to the Ui it was drawn in.
-    // Absolute ids (`Id::new("mat_tex")`) made two material editors on screen at
-    // once — the Inspector's and the Map tab's per-slot one, which live in
-    // different dock panels and so are both visible — share one popup: opening
-    // either one drew two popups under the same id, and each counted the click
-    // that opened it as a click outside the other, so the dropdown shut on the
-    // frame it opened and the texture could never be picked. One salt per call
-    // site is what makes them independent.
+    // Absolute ids (`Id::new("mat_tex")`) made two material editors on screen
+    // at once share one popup: opening either drew two popups under the same
+    // id, each counted the click that opened it as a click outside the other,
+    // and the dropdown shut on the frame it opened.
     let salt = ui.id();
-    let mut ctx = MatCtx {
-        presets,
-        asset_tree,
-        project_root,
-        name_buf,
-        flsl,
-        sdf,
-        texture_settings,
-        salt,
-    };
-    mat_base_ui(ui, &mut ctx, m, &mut r);
-    mat_cell_ui(ui, &mut ctx, m, &mut r);
-    mat_shader_ui(ui, &mut ctx, m, &mut r);
-    mat_maps_ui(ui, &mut ctx, m, &mut r);
-    mat_shading_ui(ui, &mut ctx, m, &mut r);
-    mat_retro_ui(ui, &mut ctx, m, &mut r);
-    mat_classic_ui(ui, m, &mut r);
-    mat_rim_ui(ui, m, &mut r);
-    mat_presets_ui(ui, &mut ctx, m, &mut r);
+    let mut ctx = MatCtx { asset_tree, project_root, flsl, sdf, texture_settings, salt };
+    mat_core_ui(ui, &mut ctx, m, &mut r);
     r
+}
+
+fn mat_core_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
+    mat_base_ui(ui, ctx, m, r);
+    mat_cell_ui(ui, ctx, m, r);
+    mat_shader_ui(ui, ctx, m, r);
+    mat_maps_ui(ui, ctx, m, r);
+    mat_shading_ui(ui, ctx, m, r);
+    mat_retro_ui(ui, ctx, m, r);
+    mat_classic_ui(ui, m, r);
+    mat_rim_ui(ui, m, r);
 }
 
 fn mat_base_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
@@ -1362,32 +1346,6 @@ fn mat_rim_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
             ui.end_row();
         });
     });
-}
-
-fn mat_presets_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut MatEditResult) {
-    let presets = ctx.presets;
-    let name_buf = &mut *ctx.name_buf;
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        if !presets.is_empty() {
-            ui.menu_button("Apply preset", |ui| {
-                for (name, doc) in presets {
-                    if ui.button(name).clicked() {
-                        *m = doc.to_material();
-                        r.changed = true;
-                        ui.close();
-                    }
-                }
-            });
-        }
-        ui.add(egui::TextEdit::singleline(name_buf).desired_width(100.0).hint_text("preset name"));
-        if ui.button("Save preset").clicked() && !name_buf.trim().is_empty() {
-            r.save_as = Some(name_buf.trim().to_string());
-        }
-    });
-    if ui.button("🗑 Remove material").clicked() {
-        r.remove = true;
-    }
 }
 
 // One surface-map slot: a texture picker over an `Option<String>`, showing
@@ -3984,22 +3942,12 @@ impl EditorTabViewer<'_> {
                         .clicked();
                 });
                 ui.small("overrides the model's imported look for JUST this object");
-                let mut save_as = None;
-                if let Some(mat) = self
-                    .world
-                    .get_mut::<floptle_core::ObjectMaterials>(mesh)
-                    .and_then(|om| om.0.get_mut(&bone_name))
-                {
-                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
-                    self.cmd.inspector_changed |= res.changed;
-                    self.cmd.open_shader_graph = res.open_shader.or(self.cmd.open_shader_graph.take());
-                    clear |= res.remove;
-                    if let Some(name) = res.save_as {
-                        save_as =
-                            Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                    }
-                }
-                self.cmd.save_material = save_as.or(self.cmd.save_material.take());
+                self.material_target_chip(
+                    ui,
+                    crate::material_bank::MaterialTarget::Part(mesh, bone_name.clone()),
+                    &bone_name,
+                    false,
+                );
                 if clear {
                     if let Some(om) = self.world.get_mut::<floptle_core::ObjectMaterials>(mesh) {
                         om.0.remove(&bone_name);
@@ -4171,6 +4119,23 @@ impl EditorTabViewer<'_> {
             self.vfx_track_inspector_ui(ui);
             return;
         }
+        // A material view takes the whole panel while it is open and the
+        // Inspector is still on what it opened from. Edits to a node's material
+        // go to the rest of the selection, as they do from the node view.
+        if let Some(view) = self.material_view.as_ref() {
+            if view.still_current(self.selection, *self.bone_selection, self.selected_asset.as_ref()) {
+                let multi = multi_edit::Snapshot::take(self.world, self.selection);
+                let open = self.material_view_ui(ui);
+                if let Some(snap) = multi {
+                    snap.apply(self.world, self.selection);
+                }
+                if open {
+                    return;
+                }
+            } else {
+                *self.material_view = None;
+            }
+        }
         // A selected armature bone (clicked in the Hierarchy, the viewport rig,
         // or the Objects & Rig lists) takes over the Inspector: edit its local
         // transform, auto-keyed into the open animator clip. It yields the
@@ -4252,11 +4217,6 @@ impl EditorTabViewer<'_> {
                     ui.weak("Nothing selected. Click a node in the viewport or the Hierarchy.");
                 }
             }
-        }
-
-        // ---- floating Material Editor window (edits the primary selection) ----
-        if *self.show_material_editor {
-            self.material_editor_window_ui(ui);
         }
 
         // ---- hand the edit to the rest of the selection ---------------------
@@ -5405,75 +5365,31 @@ impl EditorTabViewer<'_> {
         });
     }
 
-    /// The node's own Material, when it has one.
+    /// The node's own Material, when it has one: a chip that opens it in the
+    /// material view (see `material_view.rs`).
     fn node_material_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
-        let cmd = &mut *self.cmd;
-        let world = &mut *self.world;
-        let clip = self.component_clip.as_ref();
-        // ===== Material (only when the node has one) =====
-        if world.get::<Material>(e).is_some() {
-            ui.separator();
-            let (copy, paste, remove) = component_header(
-                ui,
-                "◑ Material",
-                matches!(clip, Some(ComponentClip::Material(_))),
-                true,
-            );
-            if copy
-                && let Some(mat) = world.get::<Material>(e) {
-                    cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
-                }
-            if paste {
-                cmd.paste_component = Some(e);
-            }
-            if remove {
-                cmd.remove_material = Some(e);
-            }
-            ui.indent("material_props", |ui| {
-                // **On a ▫ Sprite the node owns the cell, not the
-                // material.** The picker below edits `Material::cell`,
-                // which a Sprite node's draw does not read — so clicking
-                // a frame in the grid changed a number and nothing on
-                // screen, which is indistinguishable from spritesheets
-                // being broken. Seed the picker from the node before it
-                // is drawn and push any change back after, so the one
-                // control people reach for is the one that draws.
-                let sprite_cell = match world.get::<Matter>(e) {
-                    Some(Matter::Sprite { cell, .. }) => Some(*cell),
-                    _ => None,
-                };
-                if let (Some(c), Some(mat)) = (sprite_cell, world.get_mut::<Material>(e))
-                    && mat.cell != c
-                {
-                    mat.cell = c;
-                }
-                let mut picked_cell = None;
-                if let Some(mat) = world.get_mut::<Material>(e) {
-                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
-                    picked_cell = Some(mat.cell);
-                    cmd.inspector_changed |= res.changed;
-                    cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
-                    if res.remove {
-                        cmd.remove_material = Some(e);
-                    }
-                    if let Some(name) = res.save_as {
-                        cmd.save_material =
-                            Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                    }
-                    if ui.button("⛶ Open in Material Editor").clicked() {
-                        *self.show_material_editor = true;
-                    }
-                }
-                // …and back onto the node, which is what draws.
-                if let (Some(before), Some(after)) = (sprite_cell, picked_cell)
-                    && before != after
-                    && let Some(Matter::Sprite { cell, .. }) = world.get_mut::<Matter>(e)
-                {
-                    *cell = after;
-                    cmd.inspector_changed = true;
-                }
-            });
+        if self.world.get::<Material>(e).is_none() {
+            return;
         }
+        ui.separator();
+        let (copy, paste, remove) = component_header(
+            ui,
+            "◑ Material",
+            matches!(self.component_clip.as_ref(), Some(ComponentClip::Material(_))),
+            true,
+        );
+        if copy && let Some(mat) = self.world.get::<Material>(e) {
+            self.cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
+        }
+        if paste {
+            self.cmd.paste_component = Some(e);
+        }
+        if remove {
+            self.cmd.remove_material = Some(e);
+        }
+        ui.indent("material_props", |ui| {
+            self.material_target_chip(ui, crate::material_bank::MaterialTarget::Node(e), "", false);
+        });
     }
 
     /// A model's own material slots.
@@ -5665,46 +5581,33 @@ impl EditorTabViewer<'_> {
             }
             // One row per sub-object, because that is what an override is
             // keyed by. A flattened prop's object name is its material
-            // name, so the two read the same there.
-            // Which part is selected right now — the object picked in the
-            // viewport or in Objects & Rig. When that changes, this list
-            // follows it: the selected part's editor opens and the rest
-            // shut. A model with a dozen parts otherwise makes you scroll
-            // past eleven open material editors to reach the one you are
-            // looking at, which is the opposite of what clicking it meant.
-            //
-            // Forced only on the frame the selection changes (`open(None)`
-            // every other frame), so opening a second part to compare, or
-            // closing the one you are on, still works and still sticks.
+            // name, so the two read the same there. An overridden part is a
+            // chip that opens its material; the part selected in the viewport
+            // or in Objects & Rig is the one lit up.
             let sel_part: Option<String> = cur_bone
                 .filter(|(m, _)| *m == e)
                 .and_then(|(_, i)| bone_names.get(&e).and_then(|n| n.get(i)))
                 .filter(|n| n.is_object)
                 .map(|n| n.name.clone());
-            let sel_changed = {
-                let id = egui::Id::new(("mat_focus", e));
-                ui.data_mut(|d| {
-                    let prev: Option<Option<String>> = d.get_temp(id);
-                    let moved = prev.as_ref() != Some(&sel_part);
-                    if moved {
-                        d.insert_temp(id, sel_part.clone());
-                    }
-                    // Never on the first frame this node is inspected:
-                    // there is no selection to have moved to yet, and
-                    // slamming every part shut on arrival would look like
-                    // the panel losing its place.
-                    moved && prev.is_some()
-                })
-            };
             let mut dedup: std::collections::BTreeSet<String> = Default::default();
             for (key, mat_name, base_color, textured) in parts {
                 if !dedup.insert(key.clone()) {
                     continue;
                 }
-                let overridden = world
+                let overridden = self
+                    .world
                     .get::<floptle_core::ObjectMaterials>(e)
                     .is_some_and(|om| om.0.contains_key(&key));
-                let mut clear = false;
+                if overridden {
+                    let on = sel_part.as_deref() == Some(key.as_str());
+                    self.material_target_chip(
+                        ui,
+                        crate::material_bank::MaterialTarget::Part(e, key.clone()),
+                        &key,
+                        on,
+                    );
+                    continue;
+                }
                 let mut make = false;
                 ui.horizontal_wrapped(|ui| {
                     let (rect, _) = ui
@@ -5725,17 +5628,10 @@ impl EditorTabViewer<'_> {
                     if textured {
                         ui.small("🖼");
                     }
-                    if overridden {
-                        clear = ui
-                            .small_button("🗑")
-                            .on_hover_text("back to the model's own look")
-                            .clicked();
-                    } else {
-                        make = ui
-                            .small_button("override")
-                            .on_hover_text("give this part its own material")
-                            .clicked();
-                    }
+                    make = ui
+                        .small_button("override")
+                        .on_hover_text("give this part its own material")
+                        .clicked();
                 });
                 if make {
                     // Seeded with what the part already looks like — its
@@ -5745,56 +5641,9 @@ impl EditorTabViewer<'_> {
                     // "override this part" would mean "make this part
                     // blank", and the picture it was wearing lives
                     // inside the `.glb` where nothing can point at it.
-                    cmd.override_object_material =
+                    self.cmd.override_object_material =
                         Some((e, key.clone(), asset_path.clone()));
-                    cmd.inspector_changed = true;
-                }
-                if overridden {
-                    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "edit"))
-                        .id_salt(("model_mat", e, &key))
-                        .open(sel_changed.then(|| sel_part.as_deref() == Some(key.as_str())))
-                        .default_open(crate::responsive::start_open(false))
-                        .show(ui, |ui| {
-                            let mut save_as = None;
-                            if let Some(mat) = world
-                                .get_mut::<floptle_core::ObjectMaterials>(e)
-                                .and_then(|om| om.0.get_mut(&key))
-                            {
-                                let res = material_props_ui(
-                                    ui,
-                                    mat,
-                                    self.materials,
-                                    self.asset_tree,
-                                    self.project_root,
-                                    self.mat_name_buf,
-                                    self.flsl_cache,
-                                    self.sdf_cache,
-                                    self.texture_settings,
-                                );
-                                cmd.inspector_changed |= res.changed;
-                                cmd.open_shader_graph =
-                                    res.open_shader.or(cmd.open_shader_graph.take());
-                                clear |= res.remove;
-                                if let Some(name) = res.save_as {
-                                    save_as = Some((
-                                        name,
-                                        floptle_scene::MaterialDoc::from_material(mat),
-                                    ));
-                                }
-                            }
-                            if save_as.is_some() {
-                                cmd.save_material = save_as;
-                            }
-                        });
-                }
-                if clear
-                    && let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(e)
-                {
-                    om.0.remove(&key);
-                    if om.0.is_empty() {
-                        world.remove::<floptle_core::ObjectMaterials>(e);
-                    }
-                    cmd.inspector_changed = true;
+                    self.cmd.inspector_changed = true;
                 }
             }
         }
@@ -7315,50 +7164,6 @@ impl EditorTabViewer<'_> {
         self.node_add_component_ui(ui, e);
     }
 
-    /// The floating Material Editor window, editing the primary selection.
-    fn material_editor_window_ui(&mut self, ui: &mut egui::Ui) {
-        let cmd = &mut *self.cmd;
-        let world = &mut *self.world;
-        let mut open = true;
-        egui::Window::new("◑ Material Editor")
-            .open(&mut open)
-            .default_width(300.0)
-            .show(ui.ctx(), |ui| match self.selection.last().copied() {
-                Some(e) if world.get::<Matter>(e).is_some() => {
-                    let nm = self
-                        .entity_names
-                        .iter()
-                        .find(|(x, _)| *x == e)
-                        .map(|(_, n)| n.clone())
-                        .unwrap_or_default();
-                    ui.label(format!("editing: {nm}"));
-                    ui.separator();
-                    if let Some(mat) = world.get_mut::<Material>(e) {
-                        let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
-                        cmd.inspector_changed |= res.changed;
-                        cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
-                        if res.remove {
-                            cmd.remove_material = Some(e);
-                        }
-                        if let Some(name) = res.save_as {
-                            cmd.save_material =
-                                Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                        }
-                    } else {
-                        ui.label("This object uses the default look.");
-                        if ui.button("✚ Add material").clicked() {
-                            cmd.add_material = Some(e);
-                        }
-                    }
-                }
-                _ => {
-                    ui.label("Select a node to edit its material.");
-                }
-            });
-        if !open {
-            *self.show_material_editor = false;
-        }
-    }
 }
 
 /// What the 2D lighting inference is allowed to look at, read off the live
@@ -7827,22 +7632,11 @@ mod tests {
         settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
     ) -> String {
         let ctx = crate::icons::test_context();
-        let mut name_buf = String::new();
         let (flsl, sdf) = (crate::shaders::FlslCache::new(), crate::shaders::SdfCache::new());
         let mut painted = String::new();
         for _ in 0..2 {
             let out = ctx.run_ui(crate::icons::test_input(), |ui| {
-                let _ = material_props_ui(
-                    ui,
-                    m,
-                    &[],
-                    &[],
-                    Path::new("/project"),
-                    &mut name_buf,
-                    &flsl,
-                    &sdf,
-                    settings,
-                );
+                let _ = material_core_ui(ui, m, &[], Path::new("/project"), &flsl, &sdf, settings);
             });
             painted = painted_text(&out);
         }
@@ -8156,7 +7950,6 @@ mod tests {
             metallic: 1.0,
             ..Default::default()
         };
-        let mut name_buf = String::new();
         let flsl = crate::shaders::FlslCache::default();
         let sdf = crate::shaders::SdfCache::default();
         // A real sheet, so the cell picker is drawn. Wide rather than square:
@@ -8172,7 +7965,7 @@ mod tests {
         )]);
         let root = std::path::PathBuf::from(".");
         crate::responsive::tests::assert_fits("the material editor", |ui| {
-            material_props_ui(ui, &mut m, &[], &[], &root, &mut name_buf, &flsl, &sdf, &tex);
+            material_core_ui(ui, &mut m, &[], &root, &flsl, &sdf, &tex);
         });
     }
 }

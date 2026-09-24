@@ -226,6 +226,28 @@ impl Editor {
         if cmd.map_detach {
             self.map_detach_selection();
         }
+        if let Some(target) = cmd.open_material.take() {
+            self.material_view = Some(crate::material_view::MaterialView::new(
+                target,
+                &self.selection,
+                self.bone_selection,
+                self.selected_asset.clone(),
+            ));
+            if let Some(dock) = self.dock_state.as_mut() {
+                crate::dock::focus(dock, crate::dock::EditorTab::Inspector);
+            }
+        }
+        if let Some((name, doc)) = cmd.bank_store.take() {
+            let new = !self.materials.iter().any(|(n, _)| *n == name);
+            self.store_bank_material(&name, &doc);
+            // A new project material is a new file: show it in the Assets tab.
+            if new {
+                self.asset_tree = build_assets(&self.project_root);
+            }
+        }
+        if let Some(name) = cmd.map_bank_assign.take() {
+            self.map_assign_bank_material(&name);
+        }
         if cmd.map_extrude_new {
             let d = self.map_extrude_distance();
             self.map_extrude_to_new(d);
@@ -573,13 +595,6 @@ impl Editor {
     /// Materials, textures and the components a node gains or loses, physics included.
     #[cfg(feature = "editor-ui")]
     fn apply_component_commands(&mut self, cmd: &mut EditorCmd) {
-        if let Some((name, doc)) = cmd.save_material.take() {
-            let dir = self.materials_dir();
-            let _ = floptle_scene::save_material(&name, &doc, &dir);
-            self.materials = self.load_materials();
-            self.mat_name_buf.clear();
-            self.asset_tree = build_assets(&self.project_root);
-        }
         if let Some(e) = cmd.add_material.take() {
             self.record();
             for e in self.selected_group(e) {

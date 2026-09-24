@@ -412,6 +412,11 @@ pub struct Material {
     /// Per-slot tiling for the shader's texture slots (absent = plain UVs) —
     /// honored by the stdlib `sample()` / `sampleTriplanar()` ops.
     pub shader_tiling: std::collections::BTreeMap<String, Tiling>,
+    /// The project material this one follows (project-relative path, e.g.
+    /// `materials/Brick.ron`), or `None` for a material of its own. Every
+    /// other field is then a copy of that file, which the editor refreshes
+    /// whenever the file changes — so one edit restyles everything using it.
+    pub source: Option<String>,
 }
 
 impl Default for Material {
@@ -452,6 +457,7 @@ impl Default for Material {
             sheet_cols: 0,
             sheet_rows: 0,
             cell: 0,
+            source: None,
         }
     }
 }

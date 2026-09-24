@@ -643,8 +643,20 @@ impl Editor {
                 // Every entry opens/focuses its window (close them from the
                 // window itself) — one consistent behavior.
                 ui.menu_button("Window", |ui| {
-                    if ui.button("◑ Material Editor").clicked() {
-                        self.show_material_editor = true;
+                    // Materials are edited in the Inspector's material view;
+                    // this opens it on the selected node's material.
+                    let with_material = self
+                        .selection
+                        .last()
+                        .copied()
+                        .filter(|&e| self.world.get::<floptle_core::Material>(e).is_some());
+                    if ui
+                        .add_enabled(with_material.is_some(), egui::Button::new("◑ Material"))
+                        .on_hover_text("edit the selected node's material in the Inspector")
+                        .on_disabled_hover_text("select a node with a Material first")
+                        .clicked()
+                    {
+                        out.cmd.open_material = with_material.map(crate::material_bank::MaterialTarget::Node);
                         ui.close();
                     }
                     if ui.button("◎ Animation Controller").on_hover_text("the state-graph editor: states, transitions, fades, layers").clicked() {
@@ -1516,7 +1528,6 @@ impl Editor {
             hier_scrolled: &mut self.hier_scrolled,
             hier_revealed: &mut self.hier_revealed,
             place_align: &mut self.place_align,
-            show_material_editor: &mut self.show_material_editor,
             asset_tree: &self.asset_tree,
             texture_settings: &self.texture_settings,
             cam_preview,
@@ -1532,6 +1543,7 @@ impl Editor {
             assets_grid: &mut self.assets_grid,
             assets_grid_dir: &mut self.assets_grid_dir,
             asset_thumbs: &mut self.asset_thumbs,
+            material_view: &mut self.material_view,
             project_root,
             selected_asset: &mut self.selected_asset,
             asset_selection: &mut self.asset_selection,

@@ -11,7 +11,6 @@ use crate::assets::{
     reveal_in_explorer, AssetEntry, AssetPayload, FilterMode, WrapMode,
 };
 use crate::hierarchy::NodePayload;
-use crate::inspector::material_props_ui;
 use crate::{anim, anim_ui, EditorTabViewer, PreviewView};
 
 impl<'a> EditorTabViewer<'a> {
@@ -948,21 +947,37 @@ impl<'a> EditorTabViewer<'a> {
         if mpath != path {
             return;
         }
+        let stem = Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // How many things follow it right now, so the reach of an edit is
+        // known before it is made.
+        let link = crate::material_bank::bank_link(&stem);
+        let follows = |m: &floptle_core::Material| m.source.as_deref() == Some(link.as_str());
+        let users = self.world.query::<floptle_core::Material>().filter(|(_, m)| follows(m)).count()
+            + self
+                .world
+                .query::<floptle_core::ObjectMaterials>()
+                .map(|(_, om)| om.0.values().filter(|m| follows(m)).count())
+                .sum::<usize>();
         ui.separator();
-        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
+        ui.colored_label(egui::Color32::from_rgb(245, 160, 80), format!("↔ Project material · {stem}"));
+        ui.small(match users {
+            0 => "Nothing in this scene uses it yet. Changes save to the file as you make them.".to_string(),
+            1 => "Used once in this scene. Changes save to the file and apply as you make them.".to_string(),
+            n => format!("Used {n} times in this scene. Changes save to the file and apply everywhere as you make them."),
+        });
+        ui.separator();
+        let r = crate::inspector::material_core_ui(
+            ui,
+            mat,
+            self.asset_tree,
+            self.project_root,
+            self.flsl_cache,
+            self.sdf_cache,
+            self.texture_settings,
+        );
         self.cmd.open_shader_graph = r.open_shader.or(self.cmd.open_shader_graph.take());
-        if let Some(name) = r.save_as
-            && !name.is_empty() {
-                self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));
-            }
-        if ui.button("Save to this preset").clicked() {
-            let stem = Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !stem.is_empty() {
-                self.cmd.save_material = Some((stem, MaterialDoc::from_material(mat)));
-            }
+        if r.changed && !stem.is_empty() {
+            self.cmd.bank_store = Some((stem, MaterialDoc::from_material(mat)));
         }
     }
 }
