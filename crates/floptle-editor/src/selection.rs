@@ -11,6 +11,25 @@ use floptle_core::math::Vec2;
 use floptle_core::math::Vec3;
 use floptle_core::math::Vec4;
 use floptle_core::transform::Transform;
+
+/// Where a ray struck a node: see [`Editor::raycast_nodes`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SceneHit {
+    pub(crate) e: Entity,
+    /// Distance along the (unit) ray.
+    pub(crate) t: f32,
+    /// The struck point, camera-relative.
+    pub(crate) pos: Vec3,
+    /// The struck surface's unit normal, in world orientation.
+    pub(crate) normal: Vec3,
+}
+
+/// A local-space surface normal carried out through a node's inverse matrix
+/// (the inverse transpose), so non-uniform scale keeps it perpendicular.
+pub(crate) fn local_normal_to_world(m_inv: &Mat4, n: Vec3) -> Vec3 {
+    let w = m_inv.transpose() * n.extend(0.0);
+    w.truncate().normalize_or_zero()
+}
 use crate::gizmo::{SCALE_SENS, TRACKBALL_SENS, Tool, local_axis, ray_aabb, ray_box, ray_sphere};
 use crate::viz::{cursor_ground, project};
 use crate::{Editor, FocusAnim, snap_dvec3};
@@ -353,103 +372,141 @@ impl Editor {
         self.focus_anim = Some(FocusAnim { from: self.camera.position, to: dest, t: 0.0 });
     }
 
-    /// Pick the nearest selectable entity under a viewport cursor (physical px).
-    /// Casts a ray and tests each object's exact primitive in its own local space
-    /// (box for a cube, sphere for a sphere/blob), so picking stays accurate however
-    /// the object is rotated or non-uniformly scaled. `None` = empty space.
-    pub(crate) fn pick(&self, cursor: Vec2) -> Option<Entity> {
+    /// The viewport ray under `cursor` (physical px), camera-relative: origin and
+    /// unit direction. `None` before the GPU exists.
+    pub(crate) fn cursor_ray(&self, cursor: Vec2) -> Option<(Vec3, Vec3)> {
         let gpu = self.gpu.as_ref()?;
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let cam = self.camera.render_camera();
         let inv = cam.view_proj(w / h).inverse();
-        // Camera-relative ray (the world is offset to the camera).
         let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
         let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
         let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
         let ro = near.truncate() / near.w;
         let rd = (far.truncate() / far.w - ro).normalize();
+        ro.is_finite().then_some(())?;
+        rd.is_finite().then_some((ro, rd))
+    }
 
+    /// Pick the nearest selectable entity under a viewport cursor (physical px).
+    /// `None` = empty space. See [`Self::raycast_nodes`].
+    pub(crate) fn pick(&mut self, cursor: Vec2) -> Option<Entity> {
+        let (ro, rd) = self.cursor_ray(cursor)?;
+        self.raycast_nodes(ro, rd, |_| true).map(|h| h.e)
+    }
+
+    /// The nearest node a camera-relative ray strikes, where it strikes it, and
+    /// the surface's facing there. Nodes `keep` refuses are passed through.
+    ///
+    /// Models, primitives and map meshes are tested against their triangles, so
+    /// what is picked is what is drawn under the cursor: a click on a crate
+    /// standing on a large floor model selects the crate, and a click through
+    /// the empty corner of a model's bounds reaches whatever is behind it.
+    /// Everything else is tested against its drawn extent. Every candidate is
+    /// ranked by the distance to its hit, never to the bounds that admitted it.
+    pub(crate) fn raycast_nodes(
+        &mut self,
+        ro: Vec3,
+        rd: Vec3,
+        keep: impl Fn(Entity) -> bool,
+    ) -> Option<SceneHit> {
+        let cam = self.camera.render_camera();
         // Where each node's picture actually is this frame. Clicking has to test
         // against what is on screen: a sprite on a parallax layer is drawn a long
         // way from its own transform, so without this the visible sprite picks
         // nothing and empty space picks it.
         let draws = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
-        let mut best: Option<(Entity, f32)> = None;
+        // Nodes whose triangles decide the hit: a bounds test admits them, then
+        // the exact cast below settles it.
+        let mut exact: Vec<(Entity, Mat4)> = Vec::new();
+        let mut best: Option<SceneHit> = None;
+        let offer = |best: &mut Option<SceneHit>, hit: SceneHit| {
+            if best.as_ref().is_none_or(|b| hit.t < b.t) {
+                *best = Some(hit);
+            }
+        };
+        let flat = |e: Entity, t: f32| SceneHit { e, t, pos: ro + rd * t, normal: -rd };
         for (e, m) in self.world.query::<Matter>() {
+            if !keep(e) {
+                continue;
+            }
             // Ray-test against the node's world placement (so parented nodes pick).
             let mut t = floptle_core::world_transform(&self.world, e);
             t.translation += draws.get(&e).copied().unwrap_or_default();
-            let hit = match m {
+            let model = t.render_matrix(cam.world_position);
+            let m_inv = model.inverse();
+            if !m_inv.is_finite() {
+                continue;
+            }
+            // The ray in the object's local frame. Unnormalized, so the same `t`
+            // is valid in both spaces and hits stay comparable.
+            let ro_l = (m_inv * ro.extend(1.0)).truncate();
+            let rd_l = (m_inv * rd.extend(0.0)).truncate();
+            match m {
                 Matter::Primitive { shape, .. } => {
-                    // Transform the ray into the object's local frame (the same `t`
-                    // parameter is valid in both spaces, so hits stay comparable).
-                    let m_inv = t.render_matrix(cam.world_position).inverse();
-                    if !m_inv.is_finite() {
-                        continue;
-                    }
-                    let ro_l = (m_inv * ro.extend(1.0)).truncate();
-                    let rd_l = (m_inv * rd.extend(0.0)).truncate();
-                    match shape {
-                        // Plane is flat in Z; pick it with the cube AABB so the quad
-                        // stays easy to click rather than a hairline-thin target.
-                        Shape::Cube | Shape::Plane => ray_aabb(ro_l, rd_l, 0.7),
+                    // Bounds that contain every primitive shape; the triangles decide.
+                    let admit = match shape {
                         Shape::Sphere => ray_sphere(ro_l, rd_l, Vec3::ZERO, 0.85),
-                        // capsule(0.5, 0.5): total Y half-extent radius+half = 1.0; a
-                        // bounding sphere of that radius contains it for picking.
-                        Shape::Capsule => ray_sphere(ro_l, rd_l, Vec3::ZERO, 1.0),
+                        _ => ray_aabb(ro_l, rd_l, 1.05),
+                    };
+                    if admit.is_some() {
+                        exact.push((e, model));
                     }
                 }
                 Matter::Blob { scale } => {
                     let center = (t.translation - cam.world_position).as_vec3();
-                    ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x)
+                    if let Some(th) = ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x) {
+                        offer(&mut best, flat(e, th));
+                    }
                 }
                 Matter::FieldShape { radius } => {
                     // Pick by the authored bounding sphere (the shape lives inside it).
                     let center = (t.translation - cam.world_position).as_vec3();
-                    ray_sphere(ro, rd, center, (radius * t.scale.x).max(0.1))
+                    if let Some(th) = ray_sphere(ro, rd, center, (radius * t.scale.x).max(0.1)) {
+                        offer(&mut best, flat(e, th));
+                    }
                 }
                 Matter::Mesh { asset_path } => {
-                    let r = self.mesh_registry.get(asset_path).map(|a| a.size * 0.5).unwrap_or(1.0);
-                    let center = (t.translation - cam.world_position).as_vec3();
-                    ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
+                    // `size` is the longest edge of the model's bounds, centred on
+                    // the origin; a sphere through the bounds' corners contains it.
+                    let half = self.mesh_registry.get(asset_path).map(|a| a.size * 0.5).unwrap_or(1.0);
+                    if ray_sphere(ro_l, rd_l, Vec3::ZERO, half * 1.75).is_some() {
+                        exact.push((e, model));
+                    }
                 }
                 Matter::MapMesh { id } => {
-                    // Exact face raycast (the kernel keeps CPU geometry) — a
-                    // blockout wall should pick where you click, not by a
-                    // bounding sphere. Unnormalized local ray keeps `t` in
-                    // world units, comparable across candidates.
-                    self.maps.meshes.get(id).and_then(|mesh| {
-                        let m_inv = t.render_matrix(cam.world_position).inverse();
-                        if !m_inv.is_finite() {
-                            return None;
-                        }
-                        let ro_l = (m_inv * ro.extend(1.0)).truncate();
-                        let rd_l = (m_inv * rd.extend(0.0)).truncate();
-                        floptle_map::raycast(mesh, ro_l, rd_l, f32::MAX).map(|h| h.t)
-                    })
+                    // Exact face raycast (the kernel keeps CPU geometry).
+                    if let Some(h) = self
+                        .maps
+                        .meshes
+                        .get(id)
+                        .and_then(|mesh| floptle_map::raycast(mesh, ro_l, rd_l, f32::MAX))
+                    {
+                        let normal = local_normal_to_world(&m_inv, h.normal);
+                        offer(&mut best, SceneHit { e, t: h.t, pos: ro + rd * h.t, normal });
+                    }
                 }
                 // A flat grid in the node's XY plane: pick it as a thin box, so
                 // clicking the floor of a 2D room selects the map rather than
                 // requiring the Hierarchy.
                 Matter::Tilemap { cols, rows, tile, .. } => {
-                    let m_inv = t.render_matrix(cam.world_position).inverse();
-                    if !m_inv.is_finite() {
-                        continue;
-                    }
-                    let ro_l = (m_inv * ro.extend(1.0)).truncate();
-                    let rd_l = (m_inv * rd.extend(0.0)).truncate();
                     let half = Vec3::new(
                         (*cols as f32 * tile * 0.5).max(0.01),
                         (*rows as f32 * tile * 0.5).max(0.01),
                         tile * 0.1,
                     );
-                    ray_box(ro_l, rd_l, half)
+                    if let Some(th) = ray_box(ro_l, rd_l, half) {
+                        let normal = local_normal_to_world(&m_inv, Vec3::Z);
+                        offer(&mut best, SceneHit { e, t: th, pos: ro + rd * th, normal });
+                    }
                 }
                 // Its sprites are this frame's, and picking one would select the
                 // batch anyway — so pick the batch's own origin.
                 Matter::SpriteBatch { size } => {
                     let center = (t.translation - cam.world_position).as_vec3();
-                    ray_sphere(ro, rd, center, (size * t.scale.max_element()).max(0.1))
+                    if let Some(th) = ray_sphere(ro, rd, center, (size * t.scale.max_element()).max(0.1)) {
+                        offer(&mut best, flat(e, th));
+                    }
                 }
                 // One sprite is a quad, and clicking it should feel like
                 // clicking the picture — so pick against a sphere around where
@@ -477,7 +534,9 @@ impl Editor {
                             0.0,
                         );
                     let center = (t.translation - cam.world_position).as_vec3() + off;
-                    ray_sphere(ro, rd, center, (w.max(h) * 0.5).max(0.05))
+                    if let Some(th) = ray_sphere(ro, rd, center, (w.max(h) * 0.5).max(0.05)) {
+                        offer(&mut best, flat(e, th));
+                    }
                 }
                 // no mesh — select via the hierarchy.
                 Matter::Empty
@@ -492,14 +551,50 @@ impl Editor {
                 | Matter::NavArea { .. }
                 | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
-                | Matter::PostProcess { .. } => None,
-            };
-            if let Some(th) = hit
-                && best.is_none_or(|(_, bt)| th < bt) {
-                    best = Some((e, th));
-                }
+                | Matter::PostProcess { .. } => {}
+            }
         }
-        best.map(|(e, _)| e)
+        for (e, model) in exact {
+            if let Some(hit) = self.raycast_node_triangles(e, &model, ro, rd) {
+                offer(&mut best, hit);
+            }
+        }
+        best
+    }
+
+    /// The camera-relative ray against one node's own triangles (model or
+    /// primitive), placed by `model`. A rigged model whose triangles miss falls
+    /// back to its tight bounds, because its pose on screen is not the bind pose
+    /// the triangles are stored in.
+    fn raycast_node_triangles(&mut self, e: Entity, model: &Mat4, ro: Vec3, rd: Vec3) -> Option<SceneHit> {
+        let key = self.ensure_paint_mesh_pub(e)?;
+        let m_inv = model.inverse();
+        let ro_l = (m_inv * ro.extend(1.0)).truncate();
+        let rd_l = (m_inv * rd.extend(0.0)).truncate();
+        let len = rd_l.length();
+        if len < 1e-9 {
+            return None;
+        }
+        // The cache walks a grid in local units, so it takes a unit direction;
+        // dividing by `len` turns its distance back into the world ray's.
+        if let Some(h) = self.paint_meshes.raycast(&key, ro_l, rd_l / len, 1e7) {
+            let t = h.t / len;
+            let normal = local_normal_to_world(&m_inv, h.normal);
+            return Some(SceneHit { e, t, pos: ro + rd * t, normal });
+        }
+        let rigged = match self.world.get::<Matter>(e) {
+            Some(Matter::Mesh { asset_path }) => {
+                self.mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some())
+            }
+            _ => false,
+        };
+        if !rigged {
+            return None;
+        }
+        let (min, max) = self.paint_meshes.bounds(&key)?;
+        let (c, half) = ((min + max) * 0.5, (max - min) * 0.5);
+        let t = ray_box(ro_l - c, rd_l, half)?;
+        Some(SceneHit { e, t, pos: ro + rd * t, normal: -rd })
     }
 
     /// Apply a gizmo drag for the grabbed handle, as an absolute transform from the
@@ -1293,5 +1388,81 @@ mod press_tests {
         let mut text = String::new();
         frame(&ctx, &mut text, "", false);
         assert!(!end_typing_on_press(&ctx, true));
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+    use floptle_render::{MeshData, Vertex};
+
+    /// A 100 × 100 floor model: two triangles at y = 0, the kind of ground or
+    /// level piece a scene is built on.
+    fn floor_quad() -> MeshData {
+        let v = |x: f32, z: f32| Vertex { pos: [x, 0.0, z], normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] };
+        MeshData {
+            vertices: vec![v(-50.0, -50.0), v(50.0, -50.0), v(50.0, 50.0), v(-50.0, 50.0)],
+            indices: vec![0, 2, 1, 0, 3, 2],
+            colors: None,
+        }
+    }
+
+    fn put(ed: &mut Editor, m: Matter, at: [f64; 3], scale: f32) -> Entity {
+        let e = ed.world.spawn();
+        ed.world.insert(e, m);
+        ed.world.insert(
+            e,
+            Transform { translation: DVec3::from(at), scale: Vec3::splat(scale), ..Transform::IDENTITY },
+        );
+        e
+    }
+
+    fn cube() -> Matter {
+        Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] }
+    }
+
+    /// **What is picked is what is drawn under the cursor.** Every case here
+    /// picked the wrong node while models were tested against a sphere sized by
+    /// their longest edge and any hit ranked by where its bounds began.
+    #[test]
+    fn a_click_selects_the_surface_under_the_cursor_not_the_biggest_bounds() {
+        let mut ed = Editor::default();
+        ed.mesh_registry.insert(
+            "floor.glb".into(),
+            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 100.0, rig: None },
+        );
+        ed.paint_meshes.get_or_build("floor.glb", || vec![floor_quad()]);
+        let floor = put(&mut ed, Matter::Mesh { asset_path: "floor.glb".into() }, [0.0; 3], 1.0);
+        let crate_ = put(&mut ed, cube(), [10.0, 0.7, 0.0], 1.0);
+        let far = put(&mut ed, cube(), [0.0, 5.0, -80.0], 1.0);
+
+        // A crate standing on the floor, clicked from well outside the floor's
+        // bounding sphere: the crate, and its top face.
+        // Rays are camera-relative, as the viewport casts them.
+        let cam = ed.camera.render_camera().world_position.as_vec3();
+        let eye = Vec3::new(10.0, 60.0, 60.0);
+        let rd = (Vec3::new(10.0, 1.4, 0.0) - eye).normalize();
+        let hit = ed.raycast_nodes(eye - cam, rd, |_| true).expect("the crate is under the cursor");
+        assert_eq!(hit.e, crate_);
+        assert!((hit.pos.y + cam.y - 1.4).abs() < 1e-3 && hit.normal.y > 0.99, "{hit:?}");
+
+        // The floor itself, where nothing stands on it.
+        let rd = (Vec3::new(-20.0, 0.0, 10.0) - eye).normalize();
+        assert_eq!(ed.raycast_nodes(eye - cam, rd, |_| true).map(|h| h.e), Some(floor));
+
+        // Level with the floor, through its bounds but over its surface: the
+        // node behind it.
+        let eye = Vec3::new(0.0, 5.0, 80.0);
+        assert_eq!(ed.raycast_nodes(eye - cam, Vec3::NEG_Z, |_| true).map(|h| h.e), Some(far));
+
+        // Standing inside a room box: the crate in front, not the room.
+        let mut ed = Editor::default();
+        put(&mut ed, cube(), [0.0; 3], 30.0);
+        let near = put(&mut ed, cube(), [0.0, 0.0, -5.0], 1.0);
+        assert_eq!(ed.raycast_nodes(-cam, Vec3::NEG_Z, |_| true).map(|h| h.e), Some(near));
+
+        // And a node `keep` refuses is looked through.
+        let hit = ed.raycast_nodes(-cam, Vec3::NEG_Z, |e| e != near).expect("the room's wall");
+        assert!((hit.t - 21.0).abs() < 1e-3, "{hit:?}");
     }
 }

@@ -45,6 +45,28 @@ pub(crate) fn fold_all_parents(
     }
 }
 
+/// Unfold every ancestor of `e` in the parent⏵children map, so its row is drawn;
+/// with `open_self`, `e`'s own row too (a bone is listed under its model).
+pub(crate) fn reveal_in_tree(
+    children: &HashMap<Entity, Vec<Entity>>,
+    e: Entity,
+    open_self: bool,
+    collapsed: &mut std::collections::HashSet<Entity>,
+) {
+    let parent_of: HashMap<Entity, Entity> =
+        children.iter().flat_map(|(&p, kids)| kids.iter().map(move |&k| (k, p))).collect();
+    if open_self {
+        collapsed.remove(&e);
+    }
+    let mut cur = e;
+    // Bounded by the node count, so a malformed parent cycle cannot hang the panel.
+    for _ in 0..=parent_of.len() {
+        let Some(&p) = parent_of.get(&cur) else { break };
+        collapsed.remove(&p);
+        cur = p;
+    }
+}
+
 // ---- dragging in a tree that is taller than the panel -----------------------
 //
 // Two things stopped a drag from reaching a row that was not already on screen,
@@ -325,6 +347,23 @@ impl<'a> EditorTabViewer<'a> {
         if *self.hier_fold_pending {
             *self.hier_fold_pending = false;
             fold_all_parents(&children, &roots, self.collapsed);
+        }
+
+        // Show what was just selected, wherever it was selected from: unfold the
+        // rows above it (and, for a bone, its model's own row, where the rig
+        // is listed), once per selection. The scroll below then brings it on
+        // screen.
+        let target = match *self.bone_selection {
+            Some((model, _)) => Some((model, true)),
+            None => self.selection.last().map(|&e| (e, false)),
+        };
+        if let Some((e, open_self)) = target
+            && *self.hier_revealed != target
+        {
+            *self.hier_revealed = target;
+            reveal_in_tree(&children, e, open_self, self.collapsed);
+        } else if target.is_none() {
+            *self.hier_revealed = None;
         }
 
         // The flat visible row order (DFS, collapsed subtrees skipped) — the
@@ -831,6 +870,26 @@ mod tests {
     use super::*;
     use floptle_core::World;
     use std::collections::HashSet;
+
+    /// Selecting a node deep in a folded tree unfolds exactly the rows above
+    /// it — its siblings' folders stay as they were — and a bone opens its
+    /// model's own row, where the rig is listed.
+    #[test]
+    fn a_selected_node_is_revealed_by_unfolding_its_ancestors() {
+        let mut w = World::new();
+        let [root, mid, leaf, other] = [w.spawn(), w.spawn(), w.spawn(), w.spawn()];
+        let children: HashMap<Entity, Vec<Entity>> =
+            [(root, vec![mid, other]), (mid, vec![leaf]), (other, vec![w.spawn()])].into();
+        let mut collapsed: HashSet<Entity> = [root, mid, other, leaf].into();
+
+        reveal_in_tree(&children, leaf, false, &mut collapsed);
+        assert!(!collapsed.contains(&root) && !collapsed.contains(&mid));
+        assert!(collapsed.contains(&other), "a sibling folder is not the selection's business");
+        assert!(collapsed.contains(&leaf), "the node itself stays as it was");
+
+        reveal_in_tree(&children, leaf, true, &mut collapsed);
+        assert!(!collapsed.contains(&leaf));
+    }
 
     /// **Nothing may be hidden that cannot be un-hidden.** The fold collapses
     /// every parent on load; a parent that is not expandable has no triangle to

@@ -1514,6 +1514,7 @@ impl Editor {
             sorting_names: &sorting_names,
             tag_edit: &mut self.tag_edit,
             hier_scrolled: &mut self.hier_scrolled,
+            hier_revealed: &mut self.hier_revealed,
             show_material_editor: &mut self.show_material_editor,
             asset_tree: &self.asset_tree,
             texture_settings: &self.texture_settings,

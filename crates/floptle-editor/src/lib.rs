@@ -998,6 +998,8 @@ struct EditorTabViewer<'a> {
     tag_edit: &'a mut String,
     /// See `Editor::hier_scrolled` — scroll-to-selection bookkeeping.
     hier_scrolled: &'a mut Option<Entity>,
+    /// See `Editor::hier_revealed`.
+    hier_revealed: &'a mut Option<(Entity, bool)>,
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
@@ -3093,6 +3095,10 @@ struct Editor {
     /// The last selection primary the Hierarchy auto-scrolled to (so a viewport
     /// pick scrolls the tree exactly once, not every frame).
     hier_scrolled: Option<Entity>,
+    /// The node (a selected node, or the model a selected bone belongs to) the
+    /// Hierarchy last unfolded its parents for — once per selection, so a
+    /// parent folded again afterwards stays folded.
+    hier_revealed: Option<(Entity, bool)>,
     /// Text being typed into Project Settings' "new layer" field.
     layer_new: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.

@@ -489,6 +489,17 @@ impl PaintMeshCache {
         self.parts.clear();
     }
 
+    /// The local bounds of every part of `key`, together.
+    pub(crate) fn bounds(&self, key: &str) -> Option<(Vec3, Vec3)> {
+        let parts = self.parts.get(key)?;
+        parts.iter().filter(|p| p.min.cmple(p.max).all()).fold(None, |acc, p| {
+            Some(match acc {
+                None => (p.min, p.max),
+                Some((lo, hi)) => (lo.min(p.min), hi.max(p.max)),
+            })
+        })
+    }
+
     /// Nearest hit across all of a model's parts.
     pub(crate) fn raycast(&self, key: &str, ro: Vec3, rd: Vec3, max_t: f32) -> Option<MeshHit> {
         let parts = self.parts.get(key)?;
