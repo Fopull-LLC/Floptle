@@ -1531,6 +1531,7 @@ impl Editor {
             terrain_stats,
             assets_grid: &mut self.assets_grid,
             assets_grid_dir: &mut self.assets_grid_dir,
+            asset_thumbs: &mut self.asset_thumbs,
             project_root,
             selected_asset: &mut self.selected_asset,
             asset_selection: &mut self.asset_selection,

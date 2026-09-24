@@ -78,6 +78,10 @@ mod audio;
 #[cfg(feature = "editor-ui")]
 mod assets_ui;
 #[cfg(feature = "editor-ui")]
+mod asset_thumbs;
+#[cfg(all(test, feature = "editor-ui"))]
+mod ui_snapshots;
+#[cfg(feature = "editor-ui")]
 mod check;
 #[cfg(feature = "editor-ui")]
 mod cli;
@@ -1034,6 +1038,8 @@ struct EditorTabViewer<'a> {
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,
+    /// Thumbnails of the project's images (see `asset_thumbs.rs`).
+    asset_thumbs: &'a mut crate::asset_thumbs::AssetThumbs,
     /// The project root — the directory the asset browser is rooted at.
     project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
@@ -3080,6 +3086,9 @@ struct Editor {
     assets_grid: bool,
     /// The folder the icon grid is currently showing (grid view only).
     assets_grid_dir: PathBuf,
+    /// Thumbnails of the project's images, for the Assets tab and swatches.
+    #[cfg(feature = "editor-ui")]
+    asset_thumbs: crate::asset_thumbs::AssetThumbs,
     /// In-flight native "Import files…" dialog: the picked files arrive on the
     /// channel, paired here with the destination folder chosen when it opened.
     /// `Some` while a dialog is open (button disabled). Works on Wayland via the

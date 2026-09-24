@@ -8,7 +8,7 @@ use floptle_scene::MaterialDoc;
 
 use crate::assets::{
     asset_kind_icon, asset_rel_path, is_markdown, is_prefab, is_scene, is_script,
-    reveal_in_explorer, truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
+    reveal_in_explorer, AssetEntry, AssetPayload, FilterMode, WrapMode,
 };
 use crate::hierarchy::NodePayload;
 use crate::inspector::material_props_ui;
@@ -220,8 +220,7 @@ impl<'a> EditorTabViewer<'a> {
                             }
                         }
                         AssetEntry::File { name, path } => {
-                            let (icon, color) = asset_kind_icon(path.as_str());
-                            self.asset_file_tile(ui, icon, color, name.as_str(), path.as_str(), &order);
+                            self.asset_file_tile(ui, name.as_str(), path.as_str(), &order);
                         }
                     }
                 }
@@ -244,7 +243,12 @@ impl<'a> EditorTabViewer<'a> {
     /// dragged asset (or the whole selection) on it to move the files inside,
     /// or a Hierarchy node to save it as a prefab here.
     pub(crate) fn folder_tile(&mut self, ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
-        let resp = self.tile_frame(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name, false);
+        let folder = crate::assets::AssetKind {
+            glyph: "🗀",
+            color: egui::Color32::from_rgb(225, 200, 130),
+            label: "",
+        };
+        let resp = self.tile_frame(ui, folder, TilePicture::Glyph, name, false);
         if resp.dnd_hover_payload::<AssetPayload>().is_some() {
             ui.painter().rect_stroke(
                 resp.rect.shrink(2.0),
@@ -342,11 +346,33 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
+    /// What a tile shows above its name: the texture itself, a material's
+    /// swatch, or the kind's glyph.
+    pub(crate) fn tile_picture(&mut self, ui: &egui::Ui, path: &str) -> TilePicture {
+        if crate::assets::is_texture(path) {
+            return match self.asset_thumbs.get(ui.ctx(), Path::new(path)) {
+                Some(t) => TilePicture::Image(t),
+                None => TilePicture::Glyph,
+            };
+        }
+        if crate::assets::is_material(path) {
+            let stem = Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string());
+            if let Some((_, doc)) = self.materials.iter().find(|(n, _)| Some(n) == stem.as_ref()) {
+                let (color, tex) = (doc.color, doc.texture.clone());
+                let tex = tex.and_then(|t| self.asset_thumbs.get(ui.ctx(), &self.project_root.join(t)));
+                return TilePicture::Swatch { color, tex };
+            }
+        }
+        TilePicture::Glyph
+    }
+
     /// A file tile: select on click (Ctrl/Shift multi-select via `order`), open on
     /// double-click (scripts/markdown), drag a payload, and the shared context menu.
-    pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str, order: &[String]) {
+    pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, name: &str, path: &str, order: &[String]) {
         let selected = self.asset_is_selected(path);
-        let resp = self.tile_frame(ui, icon, color, name, selected);
+        let kind = crate::assets::asset_kind(path);
+        let picture = self.tile_picture(ui, path);
+        let resp = self.tile_frame(ui, kind, picture, name, selected);
         // Every asset is a drag source — drop a model/script/prefab on the scene,
         // or any asset (texture, audio, clip…) onto a matching Inspector picker.
         resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
@@ -582,43 +608,16 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// Paint one tile (a framed icon over a name), returning its click_and_drag
-    /// response. Highlights when `selected`.
+    /// Paint one tile; see [`asset_tile`].
     pub(crate) fn tile_frame(
         &self,
         ui: &mut egui::Ui,
-        icon: &str,
-        color: egui::Color32,
+        kind: crate::assets::AssetKind,
+        picture: TilePicture,
         name: &str,
         selected: bool,
     ) -> egui::Response {
-        let size = egui::vec2(86.0, 84.0);
-        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-        let p = ui.painter_at(rect);
-        let bg = if selected {
-            ui.visuals().selection.bg_fill.gamma_multiply(0.5)
-        } else if resp.hovered() {
-            ui.visuals().widgets.hovered.bg_fill
-        } else {
-            ui.visuals().faint_bg_color
-        };
-        p.rect_filled(rect.shrink(2.0), 5.0, bg);
-        if selected {
-            p.rect_stroke(rect.shrink(2.0), 5.0, egui::Stroke::new(1.5, ui.visuals().selection.stroke.color), egui::StrokeKind::Inside);
-        }
-        // Icon glyph centered in the upper part.
-        let icon_pos = egui::pos2(rect.center().x, rect.top() + 30.0);
-        p.text(icon_pos, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(30.0), color);
-        // Name, truncated to two-ish lines at the bottom.
-        let short = truncate_label(name, 22);
-        p.text(
-            egui::pos2(rect.center().x, rect.bottom() - 16.0),
-            egui::Align2::CENTER_CENTER,
-            short,
-            egui::FontId::proportional(11.0),
-            ui.visuals().text_color(),
-        );
-        resp.on_hover_text(name)
+        asset_tile(ui, kind, picture, name, selected)
     }
 
     /// The shared "New Folder / New Script" submenu, targeting `dir`.
@@ -687,20 +686,26 @@ impl<'a> EditorTabViewer<'a> {
                     // Every asset drags (scene spawn for models/scripts/prefabs;
                     // picker-fill for textures/audio/clips/…).
                     let selected = self.asset_is_selected(path);
-                    let (icon, _) = asset_kind_icon(path);
+                    let (icon, color) = asset_kind_icon(path);
                     let grip = "¦";
-                    let label = format!("{grip} {icon} {name}");
                     // A single widget that senses both click and drag. (The old
                     // dnd_drag_source layered a drag-sense interaction over the label,
                     // and the drag sense swallowed double-clicks — so a script could
                     // only be dragged, never opened.) One click_and_drag widget lets
                     // egui tell a tap from a drag cleanly: tap ⏵ select / double-tap
                     // ⏵ open; press-and-move ⏵ drag a payload onto the scene or a node.
-                    let text = if selected {
-                        egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
+                    // The kind's glyph in the kind's colour, as on the grid's tiles.
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let name_color = if selected {
+                        ui.visuals().selection.stroke.color
                     } else {
-                        egui::RichText::new(label)
+                        ui.visuals().text_color()
                     };
+                    let mut text = egui::text::LayoutJob::default();
+                    let fmt = |color| egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+                    text.append(&format!("{grip} "), 0.0, fmt(ui.visuals().weak_text_color()));
+                    text.append(&format!("{icon} "), 0.0, fmt(color));
+                    text.append(name, 0.0, fmt(name_color));
                     let resp = ui.add(
                         egui::Label::new(text)
                             .selectable(false)
@@ -960,4 +965,111 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
     }
+}
+
+/// What an asset tile shows above its name.
+pub(crate) enum TilePicture {
+    /// The kind's glyph.
+    Glyph,
+    /// The image itself (a texture's thumbnail).
+    Image(egui::TextureHandle),
+    /// A material: its colour, and its texture when it has one.
+    Swatch { color: [f32; 3], tex: Option<egui::TextureHandle> },
+}
+
+/// A material swatch: a disc of the material's colour, or its texture tinted
+/// by it, with a soft highlight so it reads as a surface rather than a dot.
+pub(crate) fn paint_swatch(
+    p: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: [f32; 3],
+    tex: Option<&egui::TextureHandle>,
+) {
+    let tint = egui::Color32::from_rgb(
+        (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+    );
+    p.circle_filled(center, radius + 1.5, egui::Color32::from_black_alpha(120));
+    match tex {
+        Some(t) => {
+            let rect = egui::Rect::from_center_size(center, egui::vec2(radius * 2.0, radius * 2.0));
+            p.add(egui::Shape::Rect(
+                egui::epaint::RectShape::filled(rect, radius, tint).with_texture(
+                    t.id(),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                ),
+            ));
+        }
+        None => {
+            p.circle_filled(center, radius, tint);
+        }
+    }
+    p.circle_filled(center + egui::vec2(-radius * 0.35, -radius * 0.35), radius * 0.28, egui::Color32::from_white_alpha(55));
+}
+
+/// Paint one tile — a picture over the name, in its kind's colour — and
+/// return its click_and_drag response. Highlights when `selected`.
+///
+/// The kind's colour is on the whole tile, faintly, and as a band across
+/// its top, with the kind's name under the file's: a folder of mixed
+/// assets sorts itself by eye.
+pub(crate) fn asset_tile(
+    ui: &mut egui::Ui,
+    kind: crate::assets::AssetKind,
+    picture: TilePicture,
+    name: &str,
+    selected: bool,
+) -> egui::Response {
+    let size = egui::vec2(92.0, 100.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+    let card = rect.shrink(2.0);
+    let base = if resp.hovered() { ui.visuals().widgets.hovered.bg_fill } else { ui.visuals().faint_bg_color };
+    p.rect_filled(card, 6.0, base);
+    p.rect_filled(card, 6.0, kind.color.gamma_multiply(if resp.hovered() { 0.16 } else { 0.09 }));
+    let band = egui::Rect::from_min_size(card.min, egui::vec2(card.width(), 3.0));
+    p.rect_filled(band, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, kind.color);
+    if selected {
+        p.rect_filled(card, 6.0, ui.visuals().selection.bg_fill.gamma_multiply(0.35));
+        p.rect_stroke(card, 6.0, egui::Stroke::new(1.5, ui.visuals().selection.stroke.color), egui::StrokeKind::Inside);
+    }
+
+    // The picture, in the upper part.
+    let art = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 33.0), egui::vec2(60.0, 50.0));
+    match picture {
+        TilePicture::Image(tex) => {
+            let [w, h] = tex.size();
+            let scale = (art.width() / w as f32).min(art.height() / h as f32);
+            let fit = egui::Rect::from_center_size(art.center(), egui::vec2(w as f32, h as f32) * scale);
+            p.rect_filled(fit.expand(1.0), 2.0, egui::Color32::from_black_alpha(90));
+            p.image(tex.id(), fit, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        }
+        TilePicture::Swatch { color, tex } => paint_swatch(&p, art.center(), 22.0, color, tex.as_ref()),
+        TilePicture::Glyph => {
+            p.text(art.center(), egui::Align2::CENTER_CENTER, kind.glyph, egui::FontId::proportional(30.0), kind.color);
+        }
+    }
+
+    // Name — one line, cut with an ellipsis at the tile's own width — then
+    // the kind in its colour.
+    let mut job = egui::text::LayoutJob::single_section(
+        name.to_string(),
+        egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: ui.visuals().text_color(), ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(card.width() - 10.0);
+    job.halign = egui::Align::Center;
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    p.galley(egui::pos2(rect.center().x, rect.bottom() - 34.0), galley, ui.visuals().text_color());
+    if !kind.label.is_empty() {
+        p.text(
+            egui::pos2(rect.center().x, rect.bottom() - 12.0),
+            egui::Align2::CENTER_CENTER,
+            kind.label.to_uppercase(),
+            egui::FontId::proportional(9.0),
+            kind.color,
+        );
+    }
+    resp.on_hover_text(name)
 }

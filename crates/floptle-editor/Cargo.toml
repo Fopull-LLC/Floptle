@@ -213,6 +213,9 @@ tar = "0.4"
 image = { workspace = true }
 # `examples/vfx_shot.rs` writes contact sheets of rendered effects.
 png = "0.18"
+# Renders editor panels to PNGs so a visual change is LOOKED AT (`ui_snapshots.rs`,
+# `#[ignore]`d: they need a GPU adapter).
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 
 # The Windows executable icon (`build.rs`); a no-op build script elsewhere.
 [build-dependencies]

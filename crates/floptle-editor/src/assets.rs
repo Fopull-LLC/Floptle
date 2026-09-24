@@ -127,39 +127,62 @@ pub(crate) fn truncate_label(name: &str, max: usize) -> String {
 /// A small type glyph + tint for an asset file, used in the browser tree + grid.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
+    let k = asset_kind(path);
+    (k.glyph, k.color)
+}
+
+/// What kind of asset a file is, as the browser shows it: a glyph, a colour
+/// of its own, and a word. Every kind has a different colour, so a folder of
+/// mixed assets reads at a glance.
+#[cfg(feature = "editor-ui")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AssetKind {
+    pub(crate) glyph: &'static str,
+    pub(crate) color: egui::Color32,
+    pub(crate) label: &'static str,
+}
+
+/// See [`AssetKind`].
+#[cfg(feature = "editor-ui")]
+pub(crate) fn asset_kind(path: &str) -> AssetKind {
+    let k = |glyph, (r, g, b), label| AssetKind { glyph, color: egui::Color32::from_rgb(r, g, b), label };
     if is_model(path) {
-        ("⬣", egui::Color32::from_rgb(120, 200, 210))
+        k("⬣", (80, 200, 210), "model")
     } else if is_script(path) {
-        ("¶", egui::Color32::from_rgb(130, 170, 240))
+        k("¶", (170, 195, 235), "script")
     } else if crate::image_io::is_image_doc(path) {
         // The layered document (🖼 Image tab), beside the flat .png it exports.
-        ("▨", egui::Color32::from_rgb(130, 200, 255))
+        k("▨", (110, 180, 250), "image")
     } else if is_texture(path) {
-        ("🖼", egui::Color32::from_rgb(140, 210, 140))
+        k("🖼", (120, 210, 120), "texture")
     } else if is_material(path) {
-        ("◑", egui::Color32::from_rgb(240, 180, 110))
+        k("◑", (245, 160, 80), "material")
     } else if anim::is_sprite_anim(path) {
-        ("▦", egui::Color32::from_rgb(235, 200, 110)) // sprite animation (frames)
+        k("🎞", (205, 225, 100), "sprite anim")
     } else if anim::is_anim_clip(path) {
-        ("▶", egui::Color32::from_rgb(235, 200, 110)) // baked animation clip
+        k("▶", (240, 200, 90), "animation")
     } else if anim::is_anim_ctl(path) {
-        ("◎", egui::Color32::from_rgb(180, 160, 250)) // animation controller
+        k("◎", (200, 160, 245), "controller")
     } else if is_vfx(path) {
-        ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
+        k("✨", (250, 130, 200), "effect")
     } else if is_prefab(path) {
-        ("◇", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
+        k("◇", (100, 140, 255), "prefab")
     } else if is_shader(path) {
-        ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader
+        k("◈", (170, 130, 255), "shader")
     } else if is_audio(path) {
-        ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
+        k("♪", (100, 220, 180), "audio")
     } else if is_map_sidecar(path) {
-        ("▦", egui::Color32::from_rgb(150, 205, 170)) // a scene's map geometry
+        k("▦", (150, 190, 140), "map")
+    } else if is_font(path) {
+        k("A", (225, 225, 225), "font")
+    } else if is_scene(path) {
+        k("⌖", (235, 110, 140), "scene")
     } else if path.to_ascii_lowercase().ends_with(".ron") {
-        ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
+        k("{ }", (175, 155, 205), "data")
     } else if is_markdown(path) {
-        ("§", egui::Color32::from_gray(190))
+        k("§", (190, 190, 190), "doc")
     } else {
-        ("▣", egui::Color32::from_gray(170))
+        k("▣", (160, 160, 160), "file")
     }
 }
 
