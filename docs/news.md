@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.97.0-rc1 — "Put It There"** (beta). Level building without the fuss:
+clicks select what is drawn under the cursor, the new **place** tool (key 0)
+drags things onto the surface under the cursor, holding **V** snaps a corner
+of the selection onto another object's corner, Shift+drag on a face grows a
+separate block, and the files under `materials/` are project materials any
+map face or model can follow — edited, like every material now, in the
+Inspector's own material view. The Assets tab gives every kind of asset its
+own colour, with thumbnails for textures and swatches for materials.
+
 **v0.96.1 — "Where You Left It"** (stable). The Hub lists your projects by
 when you last opened them, newest first, and **New project** has an
 **Include example scripts** checkbox: untick it and the project starts with
