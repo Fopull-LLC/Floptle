@@ -80,6 +80,12 @@ impl AnchoredCollider {
         self.shape.normal(p - self.offset)
     }
 
+    /// The normal a ray travelling along unit `rd` reports where it stopped,
+    /// at sim-frame `p` — see [`CollisionShape::ray_normal`].
+    pub fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
+        self.shape.ray_normal(p - self.offset, rd)
+    }
+
     /// The surface label of the face nearest sim-frame `p`, if this collider
     /// carries any — see [`CollisionShape::face_label`]. Costs a closest-point
     /// search, so nothing on the query path calls it.
@@ -282,7 +288,7 @@ pub fn raycast_colliders(
         }
         if dmin < 0.02 {
             let c = &colliders[hit];
-            let n = c.normal(p);
+            let n = c.ray_normal(p, rd);
             return Some(RayHit {
                 point: p.into(),
                 normal: n.into(),
@@ -504,7 +510,7 @@ pub fn spherecast(
         }
         let p = origin + rd * t;
         let mut dmin = f32::MAX;
-        let mut best: Option<(Option<u32>, Vec3)> = None;
+        let mut best: Option<Result<&AnchoredCollider, &BodyHull>> = None;
         for c in colliders {
             if (mask >> c.layer) & 1 == 0 || c.sensor {
                 continue;
@@ -512,7 +518,7 @@ pub fn spherecast(
             let d = c.distance(p) - r;
             if d < dmin {
                 dmin = d;
-                best = Some((c.eid, c.normal(p)));
+                best = Some(Ok(c));
             }
         }
         for h in hulls {
@@ -522,11 +528,19 @@ pub fn spherecast(
             let d = h.distance(p) - r;
             if d < dmin {
                 dmin = d;
-                best = Some((Some(h.eid), h.normal(p)));
+                best = Some(Err(h));
             }
         }
-        let (eid, n) = best?; // nothing testable in range at all
+        let best = best?; // nothing testable in range at all
         if dmin < 0.02 {
+            // A sphere's centre stops a radius off the surface, where the
+            // closest point gives a real direction. A zero radius is a ray,
+            // which stops on the surface.
+            let (eid, n) = match best {
+                Ok(c) if r > 0.0 => (c.eid, c.normal(p)),
+                Ok(c) => (c.eid, c.ray_normal(p, rd)),
+                Err(h) => (Some(h.eid), h.normal(p)),
+            };
             // The contact is on the swept sphere's surface, not its centre.
             return Some(ShapeHit {
                 eid,
@@ -1219,7 +1233,9 @@ impl PhysicsWorld {
             }
             if d <= 2e-3 {
                 let n = match (ci, hi) {
-                    (Some(ci), _) => self.colliders[ci].normal(p),
+                    // A straight march down stops on a flat floor, which is
+                    // a ray's question.
+                    (Some(ci), _) => self.colliders[ci].ray_normal(p, -up),
                     (None, Some(hi)) => self.kin_hulls[hi].normal(p),
                     (None, None) => return None,
                 };
@@ -2780,5 +2796,180 @@ mod feet_default {
         assert!(Body::capsule(Vec3::ZERO, 0.35, 2.4).feet);
         assert!(!Body::sphere(Vec3::ZERO, 0.35).feet);
         assert!(!Body::boxx(Vec3::ZERO, Vec3::ONE).feet);
+    }
+}
+
+#[cfg(test)]
+mod mesh_ray_normal_tests {
+    use super::*;
+    use crate::shapes::TriMeshCollider;
+
+    const C: Vec3 = Vec3::new(3.3, 1.7, -2.9);
+    const H: Vec3 = Vec3::new(0.85, 0.6, 1.3);
+
+    /// A box built from twelve triangles, at coordinates that are not round —
+    /// a march that lands on a face at (0, 5, 0) lands on it exactly, and an
+    /// exactly-zero `p - q` fell back to `+Y` and read as right.
+    fn box_mesh() -> Vec<AnchoredCollider> {
+        let (mut verts, mut indices) = (Vec::new(), Vec::new());
+        for a in 0..3 {
+            for s in [-1.0f32, 1.0] {
+                let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+                let base = verts.len() as u32;
+                for (u, v) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    let mut p = C;
+                    p[a] += s * H[a];
+                    p[b] += u * H[b];
+                    p[c] += v * H[c];
+                    verts.push(p);
+                }
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        vec![AnchoredCollider::world(Box::new(TriMeshCollider::new(&verts, &indices)))]
+    }
+
+    /// Every face of the box: its outward normal and some points on it, none
+    /// of them on an edge.
+    fn faces() -> Vec<(Vec3, Vec3)> {
+        let mut out = Vec::new();
+        for a in 0..3 {
+            for s in [-1.0f32, 1.0] {
+                let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+                let mut n = Vec3::ZERO;
+                n[a] = s;
+                for (u, v) in [(0.0, 0.0), (-0.63, 0.17), (0.41, -0.58), (0.29, 0.71)] {
+                    let mut p = C;
+                    p[a] += s * H[a];
+                    p[b] += u * H[b];
+                    p[c] += v * H[c];
+                    out.push((n, p));
+                }
+            }
+        }
+        out
+    }
+
+    fn cast(cols: &[AnchoredCollider], origin: Vec3, dir: Vec3) -> Vec3 {
+        let h = raycast_colliders(cols, origin, dir, 20.0, !0).expect("the ray hits the box");
+        Vec3::from(h.normal)
+    }
+
+    /// A ray fired straight at a face reports that face, from outside and from
+    /// inside, and faces back at whoever fired it.
+    ///
+    /// A head-on march steps exactly onto the triangle, so the old normal was
+    /// the direction of a vector a few ulps long.
+    #[test]
+    fn a_head_on_ray_reports_the_face_it_struck() {
+        let cols = box_mesh();
+        let mut wrong = Vec::new();
+        for (n, p) in faces() {
+            let outside = cast(&cols, p + n * 2.37, -n);
+            let inside = cast(&cols, p - n * 0.23, n);
+            if outside.dot(n) < 0.99 || inside.dot(-n) < 0.99 {
+                wrong.push((n, p, outside, inside));
+            }
+        }
+        assert!(wrong.is_empty(), "{} of 24 faces read wrong: {wrong:?}", wrong.len());
+    }
+
+    /// The same faces, struck 30° off head-on.
+    #[test]
+    fn an_angled_ray_reports_the_face_it_struck() {
+        let cols = box_mesh();
+        let (s, c) = 30f32.to_radians().sin_cos();
+        for (n, p) in faces() {
+            let side = n.any_orthonormal_vector();
+            let dir = -n * c + side * s;
+            let got = cast(&cols, p - dir * 2.37, dir);
+            assert!(got.dot(n) > 0.99, "face {n:?} at {p:?} read {got:?}");
+        }
+    }
+
+    /// A zero-radius sweep is a ray, and lands on the face exactly as one does.
+    #[test]
+    fn a_zero_radius_spherecast_reports_the_face_it_struck() {
+        let cols = box_mesh();
+        for (n, p) in faces() {
+            let h = spherecast(&cols, &[], p + n * 2.37, -n, 0.0, 20.0, &[], !0)
+                .expect("the sweep hits the box");
+            let got = Vec3::from(h.normal);
+            assert!(got.dot(n) > 0.99, "face {n:?} at {p:?} read {got:?}");
+        }
+    }
+
+    /// Straight down onto the top edge: the side face is parallel to the ray
+    /// and was never struck, so the answer is the top.
+    #[test]
+    fn a_ray_down_onto_an_edge_reports_the_top() {
+        let cols = box_mesh();
+        for (x, z) in [(H.x, 0.37f32), (-H.x, -0.83), (0.29, H.z), (-0.61, -H.z)] {
+            let edge = C + Vec3::new(x, H.y, z);
+            let got = cast(&cols, edge + Vec3::Y * 2.37, -Vec3::Y);
+            assert!(got.y > 0.99, "edge at {edge:?} read {got:?}");
+        }
+    }
+
+    /// At an edge or a corner the ray may be answered by any face it touches,
+    /// but never by one that faces away from it.
+    #[test]
+    fn an_edge_or_corner_hit_faces_the_ray() {
+        let cols = box_mesh();
+        let targets = [
+            (C + Vec3::new(H.x, H.y, 0.37), Vec3::new(-1.0, -1.0, 0.0)),
+            (C + Vec3::new(-H.x, 0.21, H.z), Vec3::new(1.0, 0.0, -1.0)),
+            (C + H, Vec3::new(-1.0, -1.0, -1.0)),
+            (C - H, Vec3::new(1.0, 1.0, 1.0)),
+            (C + Vec3::new(H.x, -H.y, -H.z), Vec3::new(-1.0, 0.8, 1.3)),
+        ];
+        for (at, dir) in targets {
+            let dir = dir.normalize();
+            let got = cast(&cols, at - dir * 2.37, dir);
+            assert!(got.dot(dir) < -0.5, "hit at {at:?} along {dir:?} read {got:?}");
+            assert!(
+                [got.x, got.y, got.z].iter().any(|v| v.abs() > 0.99),
+                "a box face normal is an axis, read {got:?}"
+            );
+        }
+    }
+
+    /// Asked on the face itself, with no ray to say which side it came from,
+    /// the mesh answers the face's axis rather than rounding, and says the
+    /// side is not reliable.
+    #[test]
+    fn a_point_on_a_face_reads_the_faces_axis() {
+        let cols = box_mesh();
+        for (n, p) in faces() {
+            let got = cols[0].normal(p);
+            assert!(got.dot(n).abs() > 0.99, "face {n:?} at {p:?} read {got:?}");
+            assert_eq!(cols[0].normal_reliable(p), None, "face {n:?} at {p:?}");
+        }
+    }
+
+    /// A capsule's feet march straight down onto a mesh floor, and stopped on
+    /// it exactly as a head-on ray does, so a flat floor could read too steep
+    /// to stand on.
+    #[test]
+    fn the_feet_read_a_mesh_floor_as_flat() {
+        let mut bad = Vec::new();
+        for (y, x, z) in [(0.37f32, 0.13f32, -0.71f32), (1.13, 2.9, 3.3), (-2.61, -1.7, 0.47)] {
+            let v = [
+                Vec3::new(x - 5.0, y, z - 5.0),
+                Vec3::new(x + 5.0, y, z - 5.0),
+                Vec3::new(x + 5.0, y, z + 5.0),
+                Vec3::new(x - 5.0, y, z + 5.0),
+            ];
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(TriMeshCollider::new(&v, &[0, 1, 2, 0, 2, 3])));
+            for (dx, dz) in [(0.0f32, 0.0f32), (0.31, -1.07), (-2.23, 1.61)] {
+                let bi = w.add_body(Body::capsule(Vec3::new(x + dx, y + 0.913, z + dz), 0.4, 1.8));
+                match w.foot_probe(bi, &[0], !0) {
+                    Some((_, n, _)) if n.y > 0.99 => {}
+                    other => bad.push((y, dx, dz, other.map(|(_, n, _)| n))),
+                }
+            }
+        }
+        assert!(bad.is_empty(), "the feet did not stand on a flat mesh floor: {bad:?}");
     }
 }

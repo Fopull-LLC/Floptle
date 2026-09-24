@@ -1341,7 +1341,7 @@ end
 
 ### `hit.nx`
 
-Contact normal X (unit, out of the hit surface).
+Contact normal X (unit, out of the hit surface). From `raycast` it is the normal of the face the ray struck, facing back toward where the ray came from, so a map mesh or model hit from either side reads the side you hit.
 
 ### `hit.ny`
 

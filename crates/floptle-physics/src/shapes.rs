@@ -24,6 +24,18 @@ pub trait CollisionShape {
     fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
         Some(self.normal(p))
     }
+    /// The normal a ray reports where it stopped at `p`, travelling along
+    /// unit `rd`.
+    ///
+    /// A ray that meets a face head-on stops on it, and a normal taken from
+    /// the closest point there is the direction of a vector a few ulps long.
+    /// A shape that answers from its closest point overrides this with the
+    /// face the ray crossed. The default is `normal(p)`, which an analytic
+    /// shape answers in closed form wherever it is asked.
+    fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
+        let _ = rd;
+        self.normal(p)
+    }
     /// A bounding sphere in the shape's own frame, if one is worth having.
     ///
     /// `None` means no useful bound: an infinite plane, a terrain field, a
@@ -694,6 +706,32 @@ fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     a + ab * (vb * denom) + ac * (vc * denom)
 }
 
+/// Where a ray from `o` along `rd` crosses triangle `abc`, as a distance
+/// along the ray (Möller–Trumbore, both sides). `None` for a ray parallel to
+/// the triangle's plane or one that passes outside it.
+///
+/// The edges are widened by a hair so that a ray aimed exactly at the seam
+/// between two triangles is caught by one of them rather than slipping
+/// between both.
+fn ray_triangle(o: Vec3, rd: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    const EDGE: f32 = 1e-4;
+    let (e1, e2) = (b - a, c - a);
+    let h = rd.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() <= 1e-6 * e1.length() * e2.length() {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = o - a;
+    let u = s.dot(h) * inv;
+    let q = s.cross(e1);
+    let v = rd.dot(q) * inv;
+    if u < -EDGE || v < -EDGE || u + v > 1.0 + EDGE {
+        return None;
+    }
+    Some(e2.dot(q) * inv)
+}
+
 /// A static triangle-mesh collider — e.g. an imported map model you walk on. World-space
 /// triangles are bucketed into a uniform spatial hash so closest-point queries only test
 /// nearby triangles. Distance is unsigned (an imported map is rarely watertight); the body
@@ -739,6 +777,11 @@ impl TriMeshCollider {
     /// reach (5×5×5 block covers radii up to ~4 — far beyond any normal capsule).
     const CELL: f32 = 2.0;
     const SEARCH: i32 = 2;
+    /// Closer to a face than this, `p - closest` is rounding, not a direction.
+    const ON_SURFACE: f32 = 1e-3;
+    /// How far from where a ray stopped a triangle can be and still be the
+    /// one it met. The marches stop within 0.02 of a surface.
+    const RAY_REACH: f32 = 0.025;
 
     pub fn new(verts: &[Vec3], indices: &[u32]) -> Self {
         Self::labelled(verts, indices, &[], Vec::new())
@@ -885,6 +928,50 @@ impl TriMeshCollider {
     fn nearest(&self, p: Vec3) -> Option<(Vec3, f32)> {
         self.nearest_tri(p).map(|(q, d2, _)| (q, d2))
     }
+
+    /// Triangle `ti`'s unit normal, by its winding. Never zero: the
+    /// constructor keeps no zero-area triangle.
+    fn face_normal(&self, ti: u32) -> Vec3 {
+        let [a, b, c] = self.tris[ti as usize];
+        (b - a).cross(c - a).normalize()
+    }
+
+    /// The triangle a ray along `rd` crosses first at or past `p`, among the
+    /// ones within [`Self::RAY_REACH`] of it.
+    ///
+    /// Only nearby triangles, because the march already decided the ray
+    /// stopped here; a face it would cross a metre on is not the one it hit.
+    /// An exact tie, a ray down the seam of two triangles, goes to the lower
+    /// index, so the answer does not depend on hash order.
+    fn struck_tri(&self, p: Vec3, rd: Vec3) -> Option<u32> {
+        let reach = Vec3::splat(Self::RAY_REACH);
+        let (lo, hi) = (cell_coord(p - reach, self.cell), cell_coord(p + reach, self.cell));
+        let mut best: Option<(f32, u32)> = None;
+        for cz in lo.2..=hi.2 {
+            for cy in lo.1..=hi.1 {
+                for cx in lo.0..=hi.0 {
+                    let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
+                    for &ti in list {
+                        let [a, b, c] = self.tris[ti as usize];
+                        let q = closest_point_on_triangle(p, a, b, c);
+                        if (p - q).length_squared() > Self::RAY_REACH * Self::RAY_REACH {
+                            continue;
+                        }
+                        // A hair behind `p`: a head-on march can stop a
+                        // rounding error past the face it landed on.
+                        let Some(t) = ray_triangle(p, rd, a, b, c) else { continue };
+                        if t < -Self::ON_SURFACE {
+                            continue;
+                        }
+                        if best.is_none_or(|(bt, bi)| t < bt || (t == bt && ti < bi)) {
+                            best = Some((t, ti));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, ti)| ti)
+    }
 }
 
 impl CollisionShape for TriMeshCollider {
@@ -895,11 +982,47 @@ impl CollisionShape for TriMeshCollider {
         // No nearby triangle → far away (no collision). Unsigned, so always ≥ 0.
         self.nearest(p).map(|(_, d2)| d2.sqrt()).unwrap_or(1e6)
     }
+    /// Away from the nearest point on the mesh, which rounds a body over an
+    /// edge rather than catching it on one.
+    ///
+    /// On the surface itself there is no away: `p - closest` is rounding. The
+    /// face's own axis is still exact there, and which side of it is the
+    /// outside is not knowable from a point on the face, so it answers the
+    /// side facing up, the guess the old `+Y` fallback made. A caller that
+    /// knows where it came from asks [`CollisionShape::ray_normal`] instead.
     fn normal(&self, p: Vec3) -> Vec3 {
-        match self.nearest(p) {
-            Some((q, _)) => (p - q).try_normalize().unwrap_or(Vec3::Y),
+        match self.nearest_tri(p) {
+            Some((q, d2, _)) if d2 > Self::ON_SURFACE * Self::ON_SURFACE => (p - q).normalize(),
+            Some((_, _, ti)) => {
+                let n = self.face_normal(ti);
+                if n.y < 0.0 { -n } else { n }
+            }
             None => Vec3::Y,
         }
+    }
+    /// `None` on the surface, where [`Self::normal`]'s side is a guess, so a
+    /// contact there falls back to the body's own motion.
+    fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
+        let (q, d2, _) = self.nearest_tri(p)?;
+        (d2 > Self::ON_SURFACE * Self::ON_SURFACE).then(|| (p - q).normalize())
+    }
+    /// The face the ray crossed, facing back along it.
+    ///
+    /// A ray that stopped short of the mesh without crossing a face within
+    /// reach grazed a silhouette edge; that one answers from its closest
+    /// point, which is off the surface and so a real direction.
+    fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
+        let n = match self.struck_tri(p, rd) {
+            Some(ti) => self.face_normal(ti),
+            None => match self.nearest_tri(p) {
+                Some((q, d2, _)) if d2 > Self::ON_SURFACE * Self::ON_SURFACE => {
+                    return (p - q).normalize();
+                }
+                Some((_, _, ti)) => self.face_normal(ti),
+                None => return -rd,
+            },
+        };
+        if n.dot(rd) > 0.0 { -n } else { n }
     }
     /// The label of the triangle nearest `p`.
     ///

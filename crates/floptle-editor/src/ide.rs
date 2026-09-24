@@ -4704,7 +4704,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "el.tintR", insert: "el.tintR", doc: "Image tint red 0..1." },
     ApiEntry { label: "el.visible", insert: "el.visible", doc: "Shown (1/0; assign true/false)." },
     ApiEntry { label: "el.width", insert: "el.width", doc: "Width in the axis's sizing mode (px value, % fraction, or grow weight). Absent (nil) on a fit axis; writing one makes it fixed px." },
-    ApiEntry { label: "hit.nx", insert: "hit.nx", doc: "Contact normal X (unit, out of the hit surface)." },
+    ApiEntry { label: "hit.nx", insert: "hit.nx", doc: "Contact normal X (unit, out of the hit surface). From `raycast` it is the normal of the face the ray struck, facing back toward where the ray came from, so a map mesh or model hit from either side reads the side you hit." },
     ApiEntry { label: "hit.ny", insert: "hit.ny", doc: "Contact normal Y." },
     ApiEntry { label: "env.ambient2dR", insert: "env.ambient2dR", doc: "The 2D BASE LIGHT, red 0..1 — the whole light a flat scene has before any 2D light is placed. White by default; turn it down for a dark room a torch can carve a circle out of, and read it back first so you can put it where it was." },
     ApiEntry { label: "env.ambient2dG", insert: "env.ambient2dG", doc: "The 2D base light, green 0..1. See ambient2dR." },
